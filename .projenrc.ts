@@ -260,6 +260,11 @@ const cli = new typescript.TypeScriptProject({
   license: 'MIT-0',
   copyrightPeriod: '2026-',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',
+  depsUpgrade: true,
+  depsUpgradeOptions: {
+    workflow: false,
+    target: 'minor',
+  },
   deps: [
     'commander',
     '@aws-sdk/client-cognito-identity-provider',
@@ -337,6 +342,11 @@ const docsSite = new javascript.NodeProject({
   license: 'MIT-0',
   copyrightPeriod: '2026-',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',
+  depsUpgrade: true,
+  depsUpgradeOptions: {
+    workflow: false,
+    target: 'minor',
+  },
   deps: [
     'astro',
     '@astrojs/starlight',
