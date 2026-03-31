@@ -20,6 +20,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { awscdk, javascript, typescript, TextFile } from 'projen';
+import { GithubWorkflow } from 'projen/lib/github/workflows';
+import { JobPermission } from 'projen/lib/github/workflows-model';
 import { TypeScriptProject } from 'projen/lib/typescript';
 const CDK_VERSION: string = '2.238.0';
 
@@ -76,6 +78,11 @@ const project = new awscdk.AwsCdkTypeScriptApp({
       },
     },
   ],
+  buildWorkflowOptions: {
+    env: {
+      GITHUB_TOKEN: '${{ secrets.PROJEN_GITHUB_TOKEN }}',
+    },
+  },
   gitignore: [
     '*.DS_STORE',
     '!.node-version',
@@ -348,7 +355,8 @@ new TextFile(docsSite, 'astro.config.mjs', {
     "import starlight from '@astrojs/starlight';",
     '',
     'export default defineConfig({',
-    "  site: 'https://abca.dev',",
+    "  site: process.env.ASTRO_SITE ?? 'https://aws-samples.github.io',",
+    "  base: process.env.ASTRO_BASE ?? '/sample-autonomous-cloud-coding-agents',",
     '  integrations: [',
     '    starlight({',
     "      title: 'ABCA Docs',",
@@ -738,5 +746,83 @@ const retireCheck = project.addTask('security:retire', {
 
 project.postCompileTask.spawn(agentCheck);
 project.postCompileTask.spawn(retireCheck);
+
+// ---------------------------------------------------------------------------
+// GitHub Actions — build and deploy Starlight docs to GitHub Pages
+// ---------------------------------------------------------------------------
+const gitHub = project.github;
+if (gitHub) {
+  const docsPagesWorkflow = new GithubWorkflow(gitHub, 'Documentation', {
+    fileName: 'docs.yml',
+    limitConcurrency: true,
+    concurrencyOptions: {
+      group: 'pages',
+      cancelInProgress: true,
+    },
+  });
+  docsPagesWorkflow.on({
+    push: {
+      branches: ['main'],
+      paths: [
+        'docs/**',
+        '.github/workflows/docs.yml',
+        '.projenrc.ts',
+        'CONTRIBUTING.md',
+      ],
+    },
+    workflowDispatch: {},
+  });
+  docsPagesWorkflow.addJobs({
+    build: {
+      name: 'Build documentation',
+      runsOn: ['ubuntu-latest'],
+      permissions: {
+        contents: JobPermission.READ,
+        pages: JobPermission.WRITE,
+        idToken: JobPermission.WRITE,
+      },
+      env: {
+        ASTRO_SITE: 'https://${{ github.repository_owner }}.github.io',
+        ASTRO_BASE: '/${{ github.event.repository.name }}',
+      },
+      steps: [
+        {
+          name: 'Checkout repository',
+          uses: 'actions/checkout@v5',
+        },
+        {
+          name: 'Install, build, and upload site',
+          uses: 'withastro/action@v6',
+          with: {
+            'path': 'docs',
+            'node-version': '22',
+            'package-manager': 'yarn',
+            'build-cmd': 'yarn run docs:build',
+          },
+        },
+      ],
+    },
+    deploy: {
+      name: 'Deploy to GitHub Pages',
+      needs: ['build'],
+      runsOn: ['ubuntu-latest'],
+      permissions: {
+        pages: JobPermission.WRITE,
+        idToken: JobPermission.WRITE,
+      },
+      environment: {
+        name: 'github-pages',
+        url: '${{ steps.deployment.outputs.page_url }}',
+      },
+      steps: [
+        {
+          name: 'Deploy to GitHub Pages',
+          id: 'deployment',
+          uses: 'actions/deploy-pages@v5',
+        },
+      ],
+    },
+  });
+}
 
 project.synth();
