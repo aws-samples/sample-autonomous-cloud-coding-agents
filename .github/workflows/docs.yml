@@ -22,9 +22,6 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    env:
-      ASTRO_SITE: https://${{ github.repository_owner }}.github.io
-      ASTRO_BASE: /${{ github.event.repository.name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

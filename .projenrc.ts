@@ -355,8 +355,8 @@ new TextFile(docsSite, 'astro.config.mjs', {
     "import starlight from '@astrojs/starlight';",
     '',
     'export default defineConfig({',
-    "  site: process.env.ASTRO_SITE ?? 'https://aws-samples.github.io',",
-    "  base: process.env.ASTRO_BASE ?? '/sample-autonomous-cloud-coding-agents',",
+    "  site: 'https://aws-samples.github.io',",
+    "  base: '/sample-autonomous-cloud-coding-agents',",
     '  integrations: [',
     '    starlight({',
     "      title: 'ABCA Docs',",
@@ -780,10 +780,6 @@ if (gitHub) {
         contents: JobPermission.READ,
         pages: JobPermission.WRITE,
         idToken: JobPermission.WRITE,
-      },
-      env: {
-        ASTRO_SITE: 'https://${{ github.repository_owner }}.github.io',
-        ASTRO_BASE: '/${{ github.event.repository.name }}',
       },
       steps: [
         {
