@@ -1075,14 +1075,15 @@ def print_metrics(metrics: dict):
     # Also print to stdout for operator console visibility
     print(json.dumps(json_payload), flush=True)
 
-    # Human-readable summary for operator console output
+    # Human-readable banner only; do not print keys/values from ``metrics`` (taints logging sinks).
     print("\n" + "=" * 60)
     print("METRICS REPORT")
     print("=" * 60)
-    for key in metrics:
-        # Avoid printing raw metric values to stdout; values may include
-        # error text from downstream tools.
-        print(f"  {key:30s}: [redacted]")
+    print(
+        "  See structured JSON on the previous line — table omitted so metric "
+        "keys are not echoed next to log sinks.",
+        flush=True,
+    )
     print("=" * 60)
 
 

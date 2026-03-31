@@ -27,7 +27,7 @@ const CDK_VERSION: string = '2.238.0';
 
 const project = new awscdk.AwsCdkTypeScriptApp({
   cdkVersion: CDK_VERSION,
-  projenVersion: '~0.98.26',
+  projenVersion: '~0.99.26',
   constructsVersion: '10.3.0',
   defaultReleaseBranch: 'main',
   name: 'abca',
@@ -311,6 +311,15 @@ new TextFile(cli, 'header.js', {
     ' */',
     '',
   ],
+});
+
+// eslint-plugin-import@2.x uses babel interop default import for minimatch; hoisting
+// minimatch@9 (from glob, etc.) breaks import/no-extraneous-dependencies at load time.
+project.package.addField('resolutions', {
+  'eslint-plugin-import/minimatch': '^3.1.2',
+});
+cli.package.addField('resolutions', {
+  'eslint-plugin-import/minimatch': '^3.1.2',
 });
 
 // Hook CLI build into the root build pipeline so CI covers both projects
