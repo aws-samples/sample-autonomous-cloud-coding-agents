@@ -1037,6 +1037,24 @@ class _TrajectoryWriter:
         )
 
 
+# Values under these keys may contain tool stderr, paths, or incidental secrets.
+_METRICS_REDACT_KEYS = frozenset({"error"})
+
+
+def _metrics_payload_for_logging(metrics: dict) -> dict:
+    """Build metrics dict for stdout / CloudWatch JSON (redacts sensitive fields)."""
+    out: dict = {}
+    for k, v in metrics.items():
+        if k in _METRICS_REDACT_KEYS:
+            out[k] = None if v is None else "[redacted]"
+            continue
+        if isinstance(v, (bool, int, float, type(None))):
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
+
+
 def print_metrics(metrics: dict):
     """Emit a METRICS_REPORT event and print a human-readable summary.
 
@@ -1046,15 +1064,10 @@ def print_metrics(metrics: dict):
 
     Native types (int, float, bool, None) are preserved in the JSON payload.
     None values become JSON ``null`` and are excluded by ``ispresent()``
-    filters in the dashboard queries.
+    filters in the dashboard queries. Raw ``error`` text is never logged verbatim.
     """
-    # Build JSON payload preserving native types
-    json_payload: dict = {"event": "METRICS_REPORT"}
-    for k, v in metrics.items():
-        if isinstance(v, (bool, int, float, type(None))):
-            json_payload[k] = v
-        else:
-            json_payload[k] = str(v)
+    safe = _metrics_payload_for_logging(metrics)
+    json_payload: dict = {"event": "METRICS_REPORT", **safe}
 
     # Write directly to CloudWatch Logs (reliable — doesn't depend on stdout capture)
     _emit_metrics_to_cloudwatch(json_payload)
@@ -1066,10 +1079,9 @@ def print_metrics(metrics: dict):
     print("\n" + "=" * 60)
     print("METRICS REPORT")
     print("=" * 60)
-    for key, value in metrics.items():
+    for key in metrics:
         # Avoid printing raw metric values to stdout; values may include
         # error text from downstream tools.
-        _ = value
         print(f"  {key:30s}: [redacted]")
     print("=" * 60)
 
