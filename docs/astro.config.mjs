@@ -2,8 +2,8 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: process.env.ASTRO_SITE ?? 'https://aws-samples.github.io',
-  base: process.env.ASTRO_BASE ?? '/sample-autonomous-cloud-coding-agents',
+  site: 'https://aws-samples.github.io',
+  base: '/sample-autonomous-cloud-coding-agents',
   integrations: [
     starlight({
       title: 'ABCA Docs',
