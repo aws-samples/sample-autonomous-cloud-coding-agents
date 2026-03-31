@@ -36,7 +36,7 @@ new AgentStack(
   'backgroundagent-dev',
   {
     env: devEnv,
-    description: 'Background Agent Development Stack',
+    description: 'ABCA Development Stack',
   },
 );
 

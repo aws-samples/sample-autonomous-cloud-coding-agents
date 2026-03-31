@@ -9,12 +9,14 @@
     "docs:check": "npx projen docs:check",
     "package": "npx projen package",
     "post-compile": "npx projen post-compile",
+    "post-upgrade": "npx projen post-upgrade",
     "pre-compile": "npx projen pre-compile",
     "preview": "npx projen preview",
     "security:retire": "npx projen security:retire",
     "start": "npx projen start",
     "test": "npx projen test",
     "test:watch": "npx projen test:watch",
+    "upgrade": "npx projen upgrade",
     "projen": "npx projen"
   },
   "devDependencies": {
