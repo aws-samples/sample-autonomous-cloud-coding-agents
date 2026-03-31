@@ -1,0 +1,37 @@
+{
+  "session": {
+    "session_id": "20260331-1834",
+    "invocation_source": "CLI",
+    "start_time": "2026-03-31T18:34:28.487083Z",
+    "end_time": "2026-03-31T18:49:26.591569Z",
+    "duration_seconds": 898.104486
+  },
+  "directories": {
+    "working_directory": "/Users/alkrok/Projects/bgaent",
+    "output_directory": "/Users/alkrok/Projects/bgaent/.threat-composer/20260331-1834"
+  },
+  "system": {
+    "python_version": "3.10.16",
+    "platform": "macOS-26.3-arm64-arm-64bit"
+  },
+  "invocation_arguments": {
+    "directory_path": ".",
+    "verbose": false,
+    "skip_validation": false,
+    "enable_telemetry": false
+  },
+  "configuration_sources": {
+    "aws_model_id": "default",
+    "aws_region": "environment variable",
+    "aws_profile": "environment variable",
+    "verbose": "invocation argument",
+    "enable_telemetry": "invocation argument",
+    "execution_timeout": "default",
+    "node_timeout": "default"
+  },
+  "token_usage": {
+    "input_tokens": 1060156,
+    "output_tokens": 26992,
+    "total_tokens": 1254413
+  }
+}

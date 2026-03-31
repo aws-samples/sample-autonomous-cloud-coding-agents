@@ -1,0 +1,9 @@
+# [CODEOWNERS](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners#about-code-owners)
+
+## Default owners for everything in the repo
+
+*                                   @aws-samples/coding-agents-admin
+
+## File must end with CODEOWNERS file
+
+.github/CODEOWNERS                  @aws-samples/coding-agents-admin

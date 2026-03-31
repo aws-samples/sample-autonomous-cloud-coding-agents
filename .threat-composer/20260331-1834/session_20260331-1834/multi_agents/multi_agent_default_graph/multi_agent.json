@@ -1,0 +1,262 @@
+{
+  "type": "graph",
+  "id": "default_graph",
+  "status": "completed",
+  "completed_nodes": [
+    "threat_model",
+    "application_info",
+    "architecture_diagram",
+    "architecture",
+    "dataflow",
+    "dataflow_diagram",
+    "mitigations",
+    "threats"
+  ],
+  "failed_nodes": [],
+  "interrupted_nodes": [],
+  "node_results": {
+    "application_info": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Analysis complete. Application information and assumptions have been documented in the Threat Composer format."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 134895,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 127382,
+        "outputTokens": 2146,
+        "totalTokens": 157644,
+        "cacheReadInputTokens": 25560,
+        "cacheWriteInputTokens": 2556
+      },
+      "accumulated_metrics": {
+        "latencyMs": 123506
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "architecture": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Analysis complete. Architecture description and assumptions have been documented in the Threat Composer format."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 194886,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 419767,
+        "outputTokens": 3170,
+        "totalTokens": 460765,
+        "cacheReadInputTokens": 33949,
+        "cacheWriteInputTokens": 3879
+      },
+      "accumulated_metrics": {
+        "latencyMs": 185776
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "architecture_diagram": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Architecture diagram successfully generated and saved to the Threat Composer workspace."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 28321,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 23650,
+        "outputTokens": 1105,
+        "totalTokens": 38850,
+        "cacheReadInputTokens": 11276,
+        "cacheWriteInputTokens": 2819
+      },
+      "accumulated_metrics": {
+        "latencyMs": 25968
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "dataflow": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Analysis complete. Dataflow description and assumptions have been documented in the Threat Composer format."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 164207,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 357524,
+        "outputTokens": 3285,
+        "totalTokens": 398497,
+        "cacheReadInputTokens": 35354,
+        "cacheWriteInputTokens": 2334
+      },
+      "accumulated_metrics": {
+        "latencyMs": 154785
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "dataflow_diagram": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Data Flow Diagram successfully generated from the dataflow description with all 10 data flows (F1-F10) mapped to appropriate trust boundaries and system components."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 41667,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 5643,
+        "outputTokens": 991,
+        "totalTokens": 15832,
+        "cacheReadInputTokens": 6132,
+        "cacheWriteInputTokens": 3066
+      },
+      "accumulated_metrics": {
+        "latencyMs": 37415
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "threats": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "STRIDE threat analysis complete. Generated 20 high-quality threats (7 High priority, 13 Medium priority) with 5 supporting assumptions and linked relationships."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 189595,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 48241,
+        "outputTokens": 9183,
+        "totalTokens": 77626,
+        "cacheReadInputTokens": 13468,
+        "cacheWriteInputTokens": 6734
+      },
+      "accumulated_metrics": {
+        "latencyMs": 188516
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "mitigations": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Mitigation analysis complete. Generated 22 high-quality, implementable mitigations targeting all 7 HIGH priority threats and 13 MEDIUM priority threats with defense-in-depth strategies."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 199076,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 76113,
+        "outputTokens": 6603,
+        "totalTokens": 99698,
+        "cacheReadInputTokens": 15920,
+        "cacheWriteInputTokens": 1062
+      },
+      "accumulated_metrics": {
+        "latencyMs": 197834
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "threat_model": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Threat Composer model successfully assembled and validated with 20 threats, 22 mitigations, and 24 assumptions saved to ./.threat-composer/20260331-1834/threatmodel.tc.json"
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 9794,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 1836,
+        "outputTokens": 509,
+        "totalTokens": 5501,
+        "cacheReadInputTokens": 2104,
+        "cacheWriteInputTokens": 1052
+      },
+      "accumulated_metrics": {
+        "latencyMs": 9413
+      },
+      "execution_count": 1,
+      "interrupts": []
+    }
+  },
+  "next_nodes_to_execute": [],
+  "current_task": "Analyze local directory: ./.",
+  "execution_order": [
+    "application_info",
+    "architecture",
+    "architecture_diagram",
+    "dataflow",
+    "dataflow_diagram",
+    "threats",
+    "mitigations",
+    "threat_model"
+  ],
+  "_internal_state": {
+    "interrupt_state": {
+      "interrupts": {},
+      "context": {},
+      "activated": false
+    }
+  }
+}

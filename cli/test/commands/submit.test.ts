@@ -1,0 +1,188 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { ApiClient } from '../../src/api-client';
+import { makeSubmitCommand } from '../../src/commands/submit';
+
+jest.mock('../../src/api-client');
+
+describe('submit command', () => {
+  let consoleSpy: jest.SpiedFunction<typeof console.log>;
+  const mockCreateTask = jest.fn();
+
+  beforeEach(() => {
+    consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+    mockCreateTask.mockReset();
+    (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
+      createTask: mockCreateTask,
+      listTasks: jest.fn(),
+      getTask: jest.fn(),
+      cancelTask: jest.fn(),
+      getTaskEvents: jest.fn(),
+      createWebhook: jest.fn(),
+      listWebhooks: jest.fn(),
+      revokeWebhook: jest.fn(),
+    }) as unknown as ApiClient);
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  test('submits a task with issue number', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'abc',
+      status: 'SUBMITTED',
+      repo: 'owner/repo',
+      issue_number: 42,
+      task_description: null,
+      branch_name: 'bgagent/abc/fix',
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--issue', '42',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', issue_number: 42 },
+      undefined,
+    );
+    expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  test('submits a task with description', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'abc',
+      status: 'SUBMITTED',
+      repo: 'owner/repo',
+      issue_number: null,
+      task_description: 'Fix the bug',
+      branch_name: 'bgagent/abc/fix',
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'Fix the bug',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', task_description: 'Fix the bug' },
+      undefined,
+    );
+  });
+
+  test('outputs JSON when --output json', async () => {
+    const taskData = { task_id: 'abc', status: 'SUBMITTED' };
+    mockCreateTask.mockResolvedValue(taskData);
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'test',
+      '--output', 'json',
+    ]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(taskData, null, 2));
+  });
+
+  test('submits a task with --max-turns', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'abc',
+      status: 'SUBMITTED',
+      repo: 'owner/repo',
+      issue_number: null,
+      task_description: 'Fix the bug',
+      branch_name: 'bgagent/abc/fix',
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: 50,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'Fix the bug',
+      '--max-turns', '50',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50 },
+      undefined,
+    );
+  });
+
+  test('errors for invalid --max-turns value', async () => {
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'Fix it',
+        '--max-turns', '0',
+      ]),
+    ).rejects.toThrow('--max-turns must be an integer between 1 and 500');
+  });
+
+  test('errors when neither --issue nor --task provided', async () => {
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+      ]),
+    ).rejects.toThrow('At least one of --issue or --task is required');
+  });
+});

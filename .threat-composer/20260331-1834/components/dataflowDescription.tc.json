@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {},
+  "dataflow": {
+    "description": "### Human actors\n- Developers using CLI to submit coding tasks\n- Operators monitoring system via dashboard\n- Repository maintainers receiving pull requests\n- GitHub webhook callers triggering tasks\n\n### External entities\n- GitHub API for repository operations and issue data\n- Amazon Bedrock for AI model inference (Claude Sonnet/Haiku)\n- GitHub repositories containing source code to modify\n- External webhook callers (CI/CD systems, issue trackers)\n\n### Processes\n- TaskApi Lambda handlers processing REST requests\n- TaskOrchestrator managing task lifecycle with durable execution\n- AgentCore Runtime executing isolated agent sessions\n- ConcurrencyReconciler maintaining user task limits\n- WebhookAuthorizer validating HMAC signatures\n\n### Data stores\n\n| Store | Type | High-Value (Y/N) |\n|-------|------|------------------|\n| TaskTable | DynamoDB | Y |\n| TaskEventsTable | DynamoDB | Y |\n| UserConcurrencyTable | DynamoDB | N |\n| WebhookTable | DynamoDB | Y |\n| RepoTable | DynamoDB | N |\n| AgentMemory | Bedrock Memory | Y |\n| Secrets Manager | AWS Service | Y |\n\n### Trust boundaries\n\n| Zone | Elements | Trust Level |\n|------|----------|-------------|\n| Public Internet | CLI clients, webhook callers | Untrusted |\n| API Gateway | Cognito auth, WAF protection | Semi-trusted |\n| VPC Private | Agent runtime, Lambda functions | Trusted |\n| AWS Services | DynamoDB, Bedrock, Secrets Manager | Trusted |\n\n### Data flows\n\n| Flow ID | Description | Source | Target | Trust Boundaries Crossed | Assets |\n|---------|-------------|--------|--------|--------------------------|--------|\n| F1 | CLI task submission | Developer CLI | API Gateway | Public to Semi-trusted | Task specs, auth tokens |\n| F2 | Webhook task creation | External webhook | API Gateway | Public to Semi-trusted | Task data, HMAC signature |\n| F3 | Task orchestration | API Gateway | TaskOrchestrator | Semi-trusted to Trusted | Task records, user context |\n| F4 | Agent execution | TaskOrchestrator | AgentCore Runtime | Trusted to Trusted | Code, prompts, GitHub tokens |\n| F5 | GitHub operations | AgentCore Runtime | GitHub API | Trusted to Public | Repository data, pull requests |\n| F6 | AI model inference | AgentCore Runtime | Bedrock | Trusted to Trusted | Prompts, code context |\n| F7 | Memory operations | AgentCore Runtime | AgentMemory | Trusted to Trusted | Task episodes, learnings |\n| F8 | State persistence | Lambda handlers | DynamoDB | Trusted to Trusted | Task state, events, metrics |\n| F9 | Secret retrieval | AgentCore Runtime | Secrets Manager | Trusted to Trusted | GitHub tokens, webhook secrets |\n| F10 | Dashboard queries | Operators | CloudWatch | Trusted to Trusted | Logs, metrics, traces |"
+  },
+  "assumptions": [
+    {
+      "id": "d36eeae7-4b12-4645-b7d7-6710f7cefcc8",
+      "numericId": 1,
+      "content": "AgentCore Runtime provides sufficient isolation between concurrent agent sessions",
+      "tags": ["Security", "Isolation", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Based on VPC isolation and MicroVM architecture described in CDK constructs"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "99ed7990-a601-423d-9a73-1cb2ae27d165",
+      "numericId": 2,
+      "content": "GitHub API rate limits and authentication are handled appropriately by agent runtime",
+      "tags": ["Integration", "Rate Limiting", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Agent performs multiple GitHub operations including cloning, branching, and PR creation"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "fc72ed0b-c9ee-4f7d-94c9-3dea066f5998",
+      "numericId": 3,
+      "content": "DynamoDB provides adequate consistency for concurrent task state management",
+      "tags": ["Database", "Concurrency", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Multiple Lambda functions read/write task state with user concurrency limits enforced"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "f559085d-0d3d-4fb7-9a79-1c834375bd72",
+      "numericId": 4,
+      "content": "Webhook HMAC validation provides sufficient authentication for external task creation",
+      "tags": ["Security", "Authentication", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Webhook authorizer validates signatures using secrets stored in Secrets Manager"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "2fc61ce2-0d36-4a90-b183-ef81bcbe3f9f",
+      "numericId": 5,
+      "content": "Bedrock Guardrails effectively detect and block prompt injection attacks in task descriptions",
+      "tags": ["Security", "AI Safety", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Task creation applies guardrails with HIGH strength for prompt attack detection"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "f9abb8cf-79ed-41b5-a837-6d714444a3de",
+      "numericId": 6,
+      "content": "Agent memory system provides value without leaking sensitive information across tasks",
+      "tags": ["Privacy", "Memory", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "AgentMemory stores cross-task learnings and episodes for improved performance"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "b740c0ea-8ebd-4e22-9054-9a27700571ff",
+      "numericId": 7,
+      "content": "DNS firewall in observation mode provides adequate network egress monitoring",
+      "tags": ["Security", "Network", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "DNS firewall configured in observation mode for initial deployment with domain allowlists"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Dataflow Analysis Agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [],
+  "mitigationLinks": []
+}

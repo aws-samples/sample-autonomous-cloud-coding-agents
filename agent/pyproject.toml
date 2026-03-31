@@ -1,0 +1,66 @@
+[project]
+name = "backgroundagent"
+version = "0.1.0"
+description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3==1.42.54",
+    "claude-agent-sdk==0.1.53",
+    "requests==2.33.0",
+    "fastapi==0.135.2",
+    "uvicorn==0.42.0",
+    "aws-opentelemetry-distro~=0.15.0",
+    "mcp==1.23.0",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = [
+    "B101",  # assert_used — tests use assert, ruff S101 handles per-file
+    "B602",  # subprocess shell=True — needed for shell tool execution
+    "B603",  # subprocess calls — needed for shell tool execution
+    "B607",  # partial executable paths — sh -c pattern is safe
+    "B701",  # jinja2_autoescape_false — templates are LLM prompts, not web HTML
+]
+
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "ty",
+    "pytest",
+    "pygments==2.20.0",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "S",     # flake8-bandit (security)
+    "UP",    # pyupgrade
+    "SIM",   # flake8-simplify
+    "TCH",   # flake8-type-checking
+    "RUF",   # ruff-specific rules
+]
+ignore = [
+    "S603",  # subprocess call — allowed for agent CLI operations
+    "S607",  # partial executable path — agent relies on PATH for git, gh, mise
+]
+
+[tool.ruff.lint.per-file-ignores]
+"system_prompt.py" = ["E501"]  # long prompt strings
+"tests/**" = ["S101", "S106"]  # assert in tests is fine; hardcoded test tokens are not secrets
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ty.environment]
+python-version = "3.13"
