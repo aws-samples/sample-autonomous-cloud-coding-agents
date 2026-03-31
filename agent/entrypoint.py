@@ -16,6 +16,7 @@ Flow:
 
 import asyncio
 import glob
+import hashlib
 import json
 import os
 import re
@@ -222,8 +223,17 @@ def slugify(text: str, max_len: int = 40) -> str:
 
 def redact_secrets(text: str) -> str:
     """Redact tokens and secrets from log output."""
+    # GitHub and generic token-like values.
     text = re.sub(r"(ghp_|github_pat_|gho_|ghs_|ghr_)[A-Za-z0-9_]+", r"\1***", text)
     text = re.sub(r"(x-access-token:)[^\s@]+", r"\1***", text)
+    text = re.sub(r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.I)
+    text = re.sub(
+        r"([?&](?:token|access_token|api_key|apikey|password)=)[^&\s]+",
+        r"\1***",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
     return text
 
 
@@ -1057,7 +1067,8 @@ def print_metrics(metrics: dict):
     print("METRICS REPORT")
     print("=" * 60)
     for key, value in metrics.items():
-        print(f"  {key:30s}: {value}")
+        safe_value = redact_secrets(str(value))
+        print(f"  {key:30s}: {safe_value}")
     print("=" * 60)
 
 
@@ -1069,7 +1080,7 @@ def print_metrics(metrics: dict):
 def log(prefix: str, text: str):
     """Print a timestamped log line."""
     ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {prefix} {text}", flush=True)
+    print(f"[{ts}] {prefix} {redact_secrets(str(text))}", flush=True)
 
 
 def truncate(text: str, max_len: int = 200) -> str:
@@ -1876,11 +1887,8 @@ def run_task(
 def main():
     config = get_config()
 
-    print(f"Task ID:    {config['task_id']}")
-    print(f"Repository: {config['repo_url']}")
-    print(f"Issue:      {config['issue_number'] or '(none)'}")
-    print(f"Model:      {config['anthropic_model']}")
-    print(f"Dry run:    {config['dry_run']}")
+    print("Task configuration loaded.", flush=True)
+    print(f"Dry run:    {config['dry_run']}", flush=True)
     print()
 
     if config["dry_run"]:
@@ -1900,10 +1908,25 @@ def main():
         overrides = config.get("system_prompt_overrides", "")
         if overrides:
             system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
-        print("\n--- SYSTEM PROMPT ---")
-        print(system_prompt)
-        print("\n--- USER PROMPT ---")
-        print(prompt)
+        system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
+        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+        print("\n--- SYSTEM PROMPT (REDACTED) ---")
+        print(
+            f"length={len(system_prompt)} chars sha256={system_prompt_hash} "
+            "(set DEBUG_DRY_RUN_PROMPTS=1 to print full text)",
+            flush=True,
+        )
+        print("\n--- USER PROMPT (REDACTED) ---")
+        print(
+            f"length={len(prompt)} chars sha256={prompt_hash} "
+            "(set DEBUG_DRY_RUN_PROMPTS=1 to print full text)",
+            flush=True,
+        )
+        if os.environ.get("DEBUG_DRY_RUN_PROMPTS") == "1":
+            print("\n--- SYSTEM PROMPT (DEBUG) ---")
+            print(redact_secrets(system_prompt), flush=True)
+            print("\n--- USER PROMPT (DEBUG) ---")
+            print(redact_secrets(prompt), flush=True)
         print("\n--- DRY RUN COMPLETE ---")
         return
 

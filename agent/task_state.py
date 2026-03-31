@@ -106,9 +106,9 @@ def write_running(task_id: str) -> None:
             isinstance(e, ClientError)
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
-            print(f"[task_state] write_running skipped for {task_id}: status precondition not met")
+            print("[task_state] write_running skipped: status precondition not met")
             return
-        print(f"[task_state] write_running failed (best-effort): {e}")
+        print(f"[task_state] write_running failed (best-effort): {type(e).__name__}")
 
 
 def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:
@@ -165,11 +165,11 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
             print(
-                f"[task_state] write_terminal skipped for {task_id}: "
+                "[task_state] write_terminal skipped: "
                 "status precondition not met (task may have been cancelled)"
             )
             return
-        print(f"[task_state] write_terminal failed (best-effort): {e}")
+        print(f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
 
 
 def get_task(task_id: str) -> dict | None:

@@ -50,9 +50,7 @@ def _log_error(func_name: str, err: Exception, memory_id: str, task_id: str) -> 
     level = "ERROR" if is_programming_error else "WARN"
     label = "unexpected error" if is_programming_error else "infra failure"
     print(
-        f"[memory] [{level}] {func_name} {label}: "
-        f"{type(err).__name__}: {err} "
-        f"[memory_id={memory_id}, task_id={task_id}]",
+        f"[memory] [{level}] {func_name} {label}: {type(err).__name__}",
         flush=True,
     )
 
@@ -121,7 +119,7 @@ def write_task_episode(
             metadata=metadata,
         )
 
-        print(f"[memory] Task episode written for {task_id} [memory_id={memory_id}]", flush=True)
+        print("[memory] Task episode written", flush=True)
         return True
     except Exception as e:
         _log_error("write_task_episode", e, memory_id, task_id)
@@ -170,7 +168,7 @@ def write_repo_learnings(
             },
         )
 
-        print(f"[memory] Repo learnings written for {task_id} [memory_id={memory_id}]", flush=True)
+        print("[memory] Repo learnings written", flush=True)
         return True
     except Exception as e:
         _log_error("write_repo_learnings", e, memory_id, task_id)
