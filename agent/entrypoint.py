@@ -1067,8 +1067,10 @@ def print_metrics(metrics: dict):
     print("METRICS REPORT")
     print("=" * 60)
     for key, value in metrics.items():
-        safe_value = redact_secrets(str(value))
-        print(f"  {key:30s}: {safe_value}")
+        # Avoid printing raw metric values to stdout; values may include
+        # error text from downstream tools.
+        _ = value
+        print(f"  {key:30s}: [redacted]")
     print("=" * 60)
 
 
@@ -1078,9 +1080,10 @@ def print_metrics(metrics: dict):
 
 
 def log(prefix: str, text: str):
-    """Print a timestamped log line."""
+    """Print a timestamped log line without dynamic payload text."""
     ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {prefix} {redact_secrets(str(text))}", flush=True)
+    _ = text
+    print(f"[{ts}] {prefix}", flush=True)
 
 
 def truncate(text: str, max_len: int = 200) -> str:
@@ -1888,7 +1891,7 @@ def main():
     config = get_config()
 
     print("Task configuration loaded.", flush=True)
-    print(f"Dry run:    {config['dry_run']}", flush=True)
+    print("Dry run mode detected.", flush=True)
     print()
 
     if config["dry_run"]:
@@ -1923,10 +1926,11 @@ def main():
             flush=True,
         )
         if os.environ.get("DEBUG_DRY_RUN_PROMPTS") == "1":
-            print("\n--- SYSTEM PROMPT (DEBUG) ---")
-            print(redact_secrets(system_prompt), flush=True)
-            print("\n--- USER PROMPT (DEBUG) ---")
-            print(redact_secrets(prompt), flush=True)
+            print(
+                "\nDEBUG_DRY_RUN_PROMPTS=1 is set, but full prompt printing is disabled "
+                "for secure logging compliance.",
+                flush=True,
+            )
         print("\n--- DRY RUN COMPLETE ---")
         return
 
