@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "applicationInfo": {
+    "name": "ABCA - Autonomous Background Coding Agents on AWS",
+    "description": "### Summary\nSelf-hosted platform for autonomous coding agents that work in isolated cloud environments, cloning repos, writing code, running tests, and creating pull requests without human interaction during execution.\n\n### Key objectives\n- Provide autonomous background coding agents running on AWS infrastructure\n- Execute coding tasks in isolated, ephemeral environments with no human interaction\n- Generate pull requests for code review and integration\n- Learn and improve from past task interactions through tiered memory system\n- Maintain security through VPC isolation and least-privilege access controls\n\n### Use-cases\n- Submit coding tasks via CLI, webhooks, or REST API for autonomous execution\n- Repository onboarding with per-repo configuration and GitHub App integration\n- Background code generation, bug fixes, and feature implementation\n- Automated testing and validation of generated code changes\n- Pull request creation with artifacts and proof of functionality\n\n### Features\n- AgentCore Runtime with MicroVM isolation for secure agent execution\n- Durable orchestrator using Lambda functions for task lifecycle management\n- Multi-modal input support (text, images) for task descriptions\n- Tiered memory system with AgentCore Memory for cross-task learning\n- REST API with Cognito authentication and webhook integration\n- CDK-based infrastructure with modular construct architecture\n- Cost optimization through configurable compute strategies and model selection"
+  },
+  "architecture": {},
+  "dataflow": {},
+  "assumptions": [
+    {
+      "id": "e89ed356-b754-4937-81cc-891e4fb31c33",
+      "numericId": 1,
+      "content": "Code analysis based on current repository state represents complete and accurate system architecture",
+      "tags": ["Code Analysis", "Architecture", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Analysis performed on static code repository without runtime verification of deployed infrastructure"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Application Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "86df8c4e-6ebd-4990-8a04-b29a573802f9",
+      "numericId": 2,
+      "content": "AWS CDK TypeScript application with Python agent runtime represents production-ready deployment model",
+      "tags": ["Technology Stack", "Deployment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Based on CDK constructs, TypeScript handlers, Python agent code, and AWS service integrations"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Application Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "03dc1347-a0ad-4159-9b6b-fcabccc64c5f",
+      "numericId": 3,
+      "content": "System operates in experimental/development status with iterative feature delivery as documented in roadmap",
+      "tags": ["Status", "Development", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "README indicates experimental status with active development across multiple iterations"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Application Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "e0a7a441-f01c-436b-b811-ef900f48cdef",
+      "numericId": 4,
+      "content": "AgentCore Runtime and Bedrock services provide secure isolation and AI model access for agent execution",
+      "tags": ["Security", "AWS Services", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Based on AgentCore MicroVM isolation, VPC networking, and Bedrock model integration in stack definition"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Application Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "d738b8f5-8a33-4330-b3d5-57799aee9967",
+      "numericId": 5,
+      "content": "Multi-component architecture with CLI, agent runtime, orchestrator, and API components work together cohesively",
+      "tags": ["Architecture", "Integration", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Assumption based on separate component directories and integration patterns in source code"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Application Analysis Agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [],
+  "mitigationLinks": []
+}

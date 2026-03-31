@@ -1,3 +1,7 @@
+---
+title: Contributing
+---
+
 # Contributing Guidelines
 
 Thank you for your interest in contributing to our project. Whether it's a bug report, new feature, correction, or additional
@@ -44,7 +48,7 @@ If there isn't one already, open an issue describing what you intend to contribu
 
 ### Step 2: Design
 
-If you are proposing modifications to the bgagent repo, the best way to do this is to create the full `README.md` document for the change in advance (defining all interfaces, the minimal deployment scenario, the architecture diagram, and so on). This gives us all the information we need to provide feedback, and the document can live on as documentation. You will want to follow our [roadmap](./ROADMAP.md).
+If you are proposing modifications to the bgagent repo, the best way to do this is to create the full `README.md` document for the change in advance (defining all interfaces, the minimal deployment scenario, the architecture diagram, and so on). This gives us all the information we need to provide feedback, and the document can live on as documentation. You will want to follow our [roadmap](/roadmap/roadmap).
 
 Once the design is finalized, you can re-purpose this PR for the implementation, or open a new PR to that end.
 

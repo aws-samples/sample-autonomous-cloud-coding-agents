@@ -1,0 +1,744 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {},
+  "dataflow": {},
+  "threats": [
+    {
+      "id": "4852c049-198a-4638-8d12-8f536e29920d",
+      "numericId": 1,
+      "threatSource": "malicious actor",
+      "prerequisites": "with access to compromised developer credentials",
+      "threatAction": "submit malicious coding tasks containing prompt injection attacks",
+      "threatImpact": "unauthorized code execution and potential data exfiltration from target repositories",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["github repositories", "source code", "secrets"],
+      "statement": "A malicious actor with access to compromised developer credentials can submit malicious coding tasks containing prompt injection attacks, which leads to unauthorized code execution and potential data exfiltration from target repositories, resulting in reduced confidentiality of github repositories, source code, secrets",
+      "status": "threatIdentified",
+      "tags": ["F1", "F3", "TaskApi", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "T", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Despite Bedrock Guardrails, sophisticated prompt injection could bypass detection and manipulate agent behavior to execute unintended actions"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "9e5cd3f0-18c7-4619-9bd6-c72ecec67025",
+      "numericId": 2,
+      "threatSource": "external attacker",
+      "prerequisites": "with network access to API Gateway",
+      "threatAction": "perform credential stuffing attacks against Cognito authentication",
+      "threatImpact": "unauthorized access to user accounts and ability to submit malicious tasks",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["user accounts", "task data", "authentication tokens"],
+      "statement": "An external attacker with network access to API Gateway can perform credential stuffing attacks against Cognito authentication, which leads to unauthorized access to user accounts and ability to submit malicious tasks, resulting in reduced confidentiality of user accounts, task data, authentication tokens",
+      "status": "threatIdentified",
+      "tags": ["F1", "API Gateway", "Cognito", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "WAF rate limiting may not be sufficient against distributed credential stuffing attacks using valid username/password combinations from breaches"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "072cac3c-0465-4ba9-865a-37177a39f6c8",
+      "numericId": 3,
+      "threatSource": "malicious webhook caller",
+      "prerequisites": "with knowledge of webhook endpoint and valid HMAC signature",
+      "threatAction": "flood the system with high-volume task creation requests",
+      "threatImpact": "service denial and resource exhaustion affecting legitimate users",
+      "impactedGoal": ["availability"],
+      "impactedAssets": ["task orchestrator", "lambda functions", "dynamodb tables"],
+      "statement": "A malicious webhook caller with knowledge of webhook endpoint and valid HMAC signature can flood the system with high-volume task creation requests, which leads to service denial and resource exhaustion affecting legitimate users, resulting in reduced availability of task orchestrator, lambda functions, dynamodb tables",
+      "status": "threatIdentified",
+      "tags": ["F2", "WebhookAuthorizer", "TaskOrchestrator", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["D"]
+        },
+        {
+          "key": "Comments",
+          "value": "HMAC validation alone doesn't prevent abuse if webhook secrets are compromised or shared with untrusted systems"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "f6c70fe7-2340-41e2-868f-d19d68fad8a1",
+      "numericId": 4,
+      "threatSource": "compromised agent runtime",
+      "prerequisites": "with escape from MicroVM isolation",
+      "threatAction": "access other agent sessions or underlying infrastructure",
+      "threatImpact": "cross-tenant data exposure and potential infrastructure compromise",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["agent sessions", "github tokens", "task data"],
+      "statement": "A compromised agent runtime with escape from MicroVM isolation can access other agent sessions or underlying infrastructure, which leads to cross-tenant data exposure and potential infrastructure compromise, resulting in reduced confidentiality of agent sessions, github tokens, task data",
+      "status": "threatIdentified",
+      "tags": ["F4", "AgentCore Runtime", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "T", "I", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "MicroVM isolation is critical security boundary - any escape could compromise entire system due to shared infrastructure"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "fa0815df-bffa-4f83-8b0c-26c74e54488f",
+      "numericId": 5,
+      "threatSource": "malicious actor",
+      "prerequisites": "with ability to manipulate GitHub repository content",
+      "threatAction": "inject malicious code or dependencies that get executed during agent analysis",
+      "threatImpact": "agent runtime compromise and potential lateral movement",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["agent runtime", "github tokens", "other repositories"],
+      "statement": "A malicious actor with ability to manipulate GitHub repository content can inject malicious code or dependencies that get executed during agent analysis, which leads to agent runtime compromise and potential lateral movement, resulting in reduced integrity of agent runtime, github tokens, other repositories",
+      "status": "threatIdentified",
+      "tags": ["F5", "GitHub API", "AgentCore Runtime", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Agent analyzes and executes code from repositories - malicious dependencies or build scripts could compromise the agent environment"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "302c5ae1-c0d6-47c2-88a6-78a325e2a97b",
+      "numericId": 6,
+      "threatSource": "insider threat",
+      "prerequisites": "with access to AWS console or CDK deployment",
+      "threatAction": "modify infrastructure configuration to bypass security controls",
+      "threatImpact": "complete system compromise and data exfiltration",
+      "impactedGoal": ["confidentiality", "integrity", "availability"],
+      "impactedAssets": ["entire system", "user data", "github tokens"],
+      "statement": "An insider threat with access to AWS console or CDK deployment can modify infrastructure configuration to bypass security controls, which leads to complete system compromise and data exfiltration, resulting in reduced confidentiality of entire system, user data, github tokens",
+      "status": "threatIdentified",
+      "tags": ["CDK", "AWS Infrastructure", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "T", "R", "I", "D", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "CDK-based deployment means infrastructure changes can bypass application-level security controls"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "3fd01efa-84cb-4674-a933-d908798746bf",
+      "numericId": 7,
+      "threatSource": "attacker",
+      "prerequisites": "with access to compromised GitHub tokens",
+      "threatAction": "access private repositories and exfiltrate sensitive source code",
+      "threatImpact": "intellectual property theft and exposure of proprietary algorithms",
+      "impactedGoal": ["confidentiality"],
+      "impactedAssets": ["private repositories", "source code", "intellectual property"],
+      "statement": "An attacker with access to compromised GitHub tokens can access private repositories and exfiltrate sensitive source code, which leads to intellectual property theft and exposure of proprietary algorithms, resulting in reduced confidentiality of private repositories, source code, intellectual property",
+      "status": "threatIdentified",
+      "tags": ["F9", "Secrets Manager", "GitHub API", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "GitHub tokens stored in Secrets Manager provide broad repository access - compromise could expose multiple private repositories"
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "0af944d8-1a0e-4955-9a4d-f2160b0b83cd",
+      "numericId": 8,
+      "threatSource": "malicious user",
+      "prerequisites": "with valid authentication",
+      "threatAction": "submit resource-intensive tasks to exhaust compute quotas",
+      "threatImpact": "service degradation and increased operational costs",
+      "impactedGoal": ["availability"],
+      "impactedAssets": ["agentcore runtime", "lambda functions", "bedrock quotas"],
+      "statement": "A malicious user with valid authentication can submit resource-intensive tasks to exhaust compute quotas, which leads to service degradation and increased operational costs, resulting in reduced availability of agentcore runtime, lambda functions, bedrock quotas",
+      "status": "threatIdentified",
+      "tags": ["F1", "F4", "ConcurrencyReconciler", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["D"]
+        },
+        {
+          "key": "Comments",
+          "value": "User concurrency limits may not prevent resource exhaustion through complex or long-running tasks"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "ee58cd32-0ece-448f-be88-20761a0d146b",
+      "numericId": 9,
+      "threatSource": "attacker",
+      "prerequisites": "with ability to intercept network traffic",
+      "threatAction": "perform man-in-the-middle attacks on GitHub API communications",
+      "threatImpact": "data tampering and credential theft during repository operations",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["github communications", "repository data", "authentication tokens"],
+      "statement": "An attacker with ability to intercept network traffic can perform man-in-the-middle attacks on GitHub API communications, which leads to data tampering and credential theft during repository operations, resulting in reduced confidentiality of github communications, repository data, authentication tokens",
+      "status": "threatIdentified",
+      "tags": ["F5", "GitHub API", "Network", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "T", "I"]
+        },
+        {
+          "key": "Comments",
+          "value": "Agent runtime communicates with GitHub API over internet - TLS validation and certificate pinning critical"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "086275ec-c908-472b-9a68-20bcc09ffc28",
+      "numericId": 10,
+      "threatSource": "malicious actor",
+      "prerequisites": "with access to task creation interface",
+      "threatAction": "inject malicious prompts designed to extract sensitive information from AI models",
+      "threatImpact": "exposure of training data or other users' information through model responses",
+      "impactedGoal": ["confidentiality"],
+      "impactedAssets": ["ai model responses", "training data", "user information"],
+      "statement": "A malicious actor with access to task creation interface can inject malicious prompts designed to extract sensitive information from AI models, which leads to exposure of training data or other users' information through model responses, resulting in reduced confidentiality of ai model responses, training data, user information",
+      "status": "threatIdentified",
+      "tags": ["F6", "Bedrock", "AI Models", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Bedrock Guardrails may not catch all sophisticated prompt injection techniques designed to extract model information"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "35751b12-c306-4d46-82bf-15ade66302a7",
+      "numericId": 11,
+      "threatSource": "attacker",
+      "prerequisites": "with access to DynamoDB tables",
+      "threatAction": "modify task state or event records to hide malicious activity",
+      "threatImpact": "audit trail tampering and inability to detect security incidents",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["task records", "event logs", "audit trails"],
+      "statement": "An attacker with access to DynamoDB tables can modify task state or event records to hide malicious activity, which leads to audit trail tampering and inability to detect security incidents, resulting in reduced integrity of task records, event logs, audit trails",
+      "status": "threatIdentified",
+      "tags": ["F8", "DynamoDB", "TaskTable", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "R"]
+        },
+        {
+          "key": "Comments",
+          "value": "DynamoDB access through IAM roles - compromise of Lambda execution role could allow data tampering"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "fa737e68-6c39-495c-939c-da7a96ced6a3",
+      "numericId": 12,
+      "threatSource": "malicious user",
+      "prerequisites": "with legitimate access to the system",
+      "threatAction": "poison the agent memory system with false or malicious learnings",
+      "threatImpact": "degraded agent performance and potential security bypass in future tasks",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["agent memory", "cross-task learnings", "future task execution"],
+      "statement": "A malicious user with legitimate access to the system can poison the agent memory system with false or malicious learnings, which leads to degraded agent performance and potential security bypass in future tasks, resulting in reduced integrity of agent memory, cross-task learnings, future task execution",
+      "status": "threatIdentified",
+      "tags": ["F7", "AgentMemory", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "I"]
+        },
+        {
+          "key": "Comments",
+          "value": "Agent memory stores cross-task learnings - malicious tasks could inject false information affecting future agent behavior"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "2eb55863-b046-46f4-94ba-0bb098907a46",
+      "numericId": 13,
+      "threatSource": "external attacker",
+      "prerequisites": "with knowledge of system architecture",
+      "threatAction": "perform reconnaissance to identify vulnerable endpoints and services",
+      "threatImpact": "information gathering for targeted attacks against system components",
+      "impactedGoal": ["confidentiality"],
+      "impactedAssets": ["system architecture", "endpoint information", "service configuration"],
+      "statement": "An external attacker with knowledge of system architecture can perform reconnaissance to identify vulnerable endpoints and services, which leads to information gathering for targeted attacks against system components, resulting in reduced confidentiality of system architecture, endpoint information, service configuration",
+      "status": "threatIdentified",
+      "tags": ["API Gateway", "Network", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I"]
+        },
+        {
+          "key": "Comments",
+          "value": "API Gateway endpoints and error responses could leak information about internal architecture and services"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "5c228bbe-51f8-41ce-a032-739830ded902",
+      "numericId": 14,
+      "threatSource": "compromised lambda function",
+      "prerequisites": "with elevated IAM permissions",
+      "threatAction": "access resources beyond intended scope including other AWS services",
+      "threatImpact": "lateral movement and potential access to sensitive data in other services",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["aws services", "sensitive data", "iam roles"],
+      "statement": "A compromised lambda function with elevated IAM permissions can access resources beyond intended scope including other AWS services, which leads to lateral movement and potential access to sensitive data in other services, resulting in reduced confidentiality of aws services, sensitive data, iam roles",
+      "status": "threatIdentified",
+      "tags": ["Lambda", "IAM", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Lambda functions require various AWS service permissions - overly broad IAM policies could enable lateral movement"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "3cee7c3f-730e-4390-90f8-6a11e888bf21",
+      "numericId": 15,
+      "threatSource": "attacker",
+      "prerequisites": "with access to webhook secrets",
+      "threatAction": "replay valid webhook requests to trigger unauthorized task creation",
+      "threatImpact": "resource consumption and potential execution of unintended tasks",
+      "impactedGoal": ["integrity", "availability"],
+      "impactedAssets": ["task queue", "compute resources", "webhook system"],
+      "statement": "An attacker with access to webhook secrets can replay valid webhook requests to trigger unauthorized task creation, which leads to resource consumption and potential execution of unintended tasks, resulting in reduced integrity of task queue, compute resources, webhook system",
+      "status": "threatIdentified",
+      "tags": ["F2", "WebhookAuthorizer", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "R"]
+        },
+        {
+          "key": "Comments",
+          "value": "HMAC validation doesn't prevent replay attacks - timestamp validation or nonce mechanisms needed"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "0bb867ef-7626-404f-8c46-377e84a33113",
+      "numericId": 16,
+      "threatSource": "malicious repository maintainer",
+      "prerequisites": "with access to target repository",
+      "threatAction": "reject legitimate pull requests or accept malicious ones to disrupt development workflow",
+      "threatImpact": "development process disruption and potential introduction of vulnerabilities",
+      "impactedGoal": ["integrity", "availability"],
+      "impactedAssets": ["development workflow", "code quality", "pull requests"],
+      "statement": "A malicious repository maintainer with access to target repository can reject legitimate pull requests or accept malicious ones to disrupt development workflow, which leads to development process disruption and potential introduction of vulnerabilities, resulting in reduced integrity of development workflow, code quality, pull requests",
+      "status": "threatIdentified",
+      "tags": ["F5", "GitHub API", "Human Actors", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "D"]
+        },
+        {
+          "key": "Comments",
+          "value": "System relies on human review of generated pull requests - malicious maintainers could subvert the process"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "9b0501ad-3c79-4f8e-80f5-869544ab0cfd",
+      "numericId": 17,
+      "threatSource": "attacker",
+      "prerequisites": "with ability to manipulate DNS responses",
+      "threatAction": "redirect agent network requests to malicious servers",
+      "threatImpact": "data exfiltration and potential agent compromise through malicious responses",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["network communications", "agent data", "external api responses"],
+      "statement": "An attacker with ability to manipulate DNS responses can redirect agent network requests to malicious servers, which leads to data exfiltration and potential agent compromise through malicious responses, resulting in reduced confidentiality of network communications, agent data, external api responses",
+      "status": "threatIdentified",
+      "tags": ["DNS Firewall", "Network", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "T", "I"]
+        },
+        {
+          "key": "Comments",
+          "value": "DNS firewall in observation mode may not prevent malicious DNS responses - enforcement mode needed for protection"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "41ef2f5c-62a7-4cb9-818d-8974be510b7c",
+      "numericId": 18,
+      "threatSource": "system administrator",
+      "prerequisites": "with CloudWatch access",
+      "threatAction": "access sensitive information in logs including tokens or user data",
+      "threatImpact": "unauthorized access to confidential information through log analysis",
+      "impactedGoal": ["confidentiality"],
+      "impactedAssets": ["log data", "user information", "authentication tokens"],
+      "statement": "A system administrator with CloudWatch access can access sensitive information in logs including tokens or user data, which leads to unauthorized access to confidential information through log analysis, resulting in reduced confidentiality of log data, user information, authentication tokens",
+      "status": "threatIdentified",
+      "tags": ["F10", "CloudWatch", "Logging", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Lambda functions and agent runtime may inadvertently log sensitive data - log sanitization critical"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "1df69920-dde2-4868-8a54-c89ec8ec09f9",
+      "numericId": 19,
+      "threatSource": "attacker",
+      "prerequisites": "with access to task orchestrator",
+      "threatAction": "manipulate durable execution state to cause task failures or infinite loops",
+      "threatImpact": "service disruption and resource exhaustion through orchestration manipulation",
+      "impactedGoal": ["availability"],
+      "impactedAssets": ["task orchestrator", "durable execution", "system resources"],
+      "statement": "An attacker with access to task orchestrator can manipulate durable execution state to cause task failures or infinite loops, which leads to service disruption and resource exhaustion through orchestration manipulation, resulting in reduced availability of task orchestrator, durable execution, system resources",
+      "status": "threatIdentified",
+      "tags": ["F3", "TaskOrchestrator", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "D"]
+        },
+        {
+          "key": "Comments",
+          "value": "Durable execution with 9-hour timeout could be manipulated to create resource-intensive loops"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "30b38afc-9930-4602-8637-56ddb166d2a5",
+      "numericId": 20,
+      "threatSource": "malicious developer",
+      "prerequisites": "with CLI access",
+      "threatAction": "submit tasks targeting repositories they don't have legitimate access to",
+      "threatImpact": "unauthorized repository access and potential data exposure",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["unauthorized repositories", "repository data", "access controls"],
+      "statement": "A malicious developer with CLI access can submit tasks targeting repositories they don't have legitimate access to, which leads to unauthorized repository access and potential data exposure, resulting in reduced confidentiality of unauthorized repositories, repository data, access controls",
+      "status": "threatIdentified",
+      "tags": ["F1", "CLI", "GitHub API", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["E"]
+        },
+        {
+          "key": "Comments",
+          "value": "System may not validate user permissions against target repositories before task execution"
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "f4764dca-bf12-42d6-a81a-46560bef6c38",
+      "numericId": 1,
+      "content": "MicroVM isolation in AgentCore Runtime provides sufficient security boundary for untrusted code execution",
+      "tags": ["Security", "Isolation", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Threat analysis assumes MicroVM technology provides adequate isolation between agent sessions and from underlying infrastructure. Any escape from this boundary would significantly impact system security."
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "e7189c80-3a74-49c8-8c7f-c333622e76b0",
+      "numericId": 2,
+      "content": "Bedrock Guardrails effectively detect and block sophisticated prompt injection attacks",
+      "tags": ["AI Safety", "Security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Analysis assumes HIGH strength guardrails can prevent malicious prompt manipulation. Advanced prompt injection techniques may still bypass detection mechanisms."
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "91b4fbb7-90df-444a-a89a-66dd7d6d21b7",
+      "numericId": 3,
+      "content": "GitHub API rate limits and authentication mechanisms prevent abuse of repository operations",
+      "tags": ["Integration", "Rate Limiting", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Assumes GitHub's built-in protections are sufficient for autonomous agent operations. High-frequency operations may trigger rate limiting or account suspension."
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "540465b6-1a21-4693-bd9b-a6f4b07107af",
+      "numericId": 4,
+      "content": "WAF and API Gateway rate limiting provide adequate protection against volumetric attacks",
+      "tags": ["Security", "DDoS Protection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Analysis assumes standard AWS WAF rules and rate limiting are sufficient. Sophisticated distributed attacks may still overwhelm these protections."
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "a033eb2e-ad50-4e10-a228-f0d77e0c1dda",
+      "numericId": 5,
+      "content": "DNS firewall in observation mode provides sufficient visibility without blocking legitimate traffic",
+      "tags": ["Network Security", "Monitoring", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Current observation mode allows all traffic while logging. Enforcement mode would be needed for active threat prevention but may impact legitimate operations."
+        },
+        {
+          "key": "custom:agent",
+          "value": "STRIDE Analysis Agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [
+    {
+      "type": "Threat",
+      "assumptionId": "f4764dca-bf12-42d6-a81a-46560bef6c38",
+      "linkedId": "f6c70fe7-2340-41e2-868f-d19d68fad8a1"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "e7189c80-3a74-49c8-8c7f-c333622e76b0",
+      "linkedId": "4852c049-198a-4638-8d12-8f536e29920d"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "e7189c80-3a74-49c8-8c7f-c333622e76b0",
+      "linkedId": "086275ec-c908-472b-9a68-20bcc09ffc28"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "91b4fbb7-90df-444a-a89a-66dd7d6d21b7",
+      "linkedId": "fa0815df-bffa-4f83-8b0c-26c74e54488f"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "540465b6-1a21-4693-bd9b-a6f4b07107af",
+      "linkedId": "072cac3c-0465-4ba9-865a-37177a39f6c8"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "a033eb2e-ad50-4e10-a228-f0d77e0c1dda",
+      "linkedId": "9b0501ad-3c79-4f8e-80f5-869544ab0cfd"
+    }
+  ],
+  "mitigations": [],
+  "mitigationLinks": []
+}

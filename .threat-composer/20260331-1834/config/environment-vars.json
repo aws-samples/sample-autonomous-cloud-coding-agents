@@ -1,0 +1,17 @@
+{
+  "safe_aws_vars": {
+    "AWS_REGION": null,
+    "AWS_DEFAULT_REGION": "us-east-1",
+    "AWS_PROFILE": "alkrok-Admin"
+  },
+  "threat_composer_vars": {
+    "THREAT_COMPOSER_OUTPUT_DIR": null,
+    "THREAT_COMPOSER_VERBOSE": null,
+    "THREAT_COMPOSER_ENABLE_TELEMETRY": null,
+    "THREAT_COMPOSER_EXECUTION_TIMEOUT": null,
+    "THREAT_COMPOSER_NODE_TIMEOUT": null,
+    "THREAT_COMPOSER_AWS_MODEL_ID": null,
+    "THREAT_COMPOSER_AI_GENERATED_TAG": null
+  },
+  "note": "Only non-sensitive environment variables are logged. Credentials and secrets are never exported."
+}

@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "aws": {
+    "model_id": "global.anthropic.claude-sonnet-4-20250514-v1:0",
+    "region": "us-east-1",
+    "profile": "alkrok-Admin"
+  },
+  "runtime": {
+    "execution_timeout_seconds": 2400.0,
+    "node_timeout_seconds": 1200.0
+  },
+  "logging": {
+    "verbose": false,
+    "enable_telemetry": false
+  },
+  "features": {
+    "show_assistant_messages": true,
+    "show_tool_use": true,
+    "agent_auto_context": true
+  }
+}

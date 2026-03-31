@@ -1,0 +1,6 @@
+*.md
+*.png
+.claude/
+.git/
+__pycache__/
+*.pyc

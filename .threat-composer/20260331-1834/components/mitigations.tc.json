@@ -1,0 +1,453 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {},
+  "dataflow": {},
+  "assumptions": [],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [
+    {
+      "id": "14fd6f46-26d7-44f3-b4d8-f6e4faba25c0",
+      "numericId": 1,
+      "content": "Implement multi-layered prompt injection detection using custom validation rules before Bedrock Guardrails, including pattern matching for common injection techniques, input sanitization, and task description length limits.",
+      "tags": ["Preventative", "AI Safety", "Input Validation", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Combines pre-processing validation with Bedrock Guardrails for defense-in-depth against sophisticated prompt injection attacks. Includes rate limiting per user and task complexity analysis."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "a279a06d-fcdc-4356-b536-6364a39c5311",
+      "numericId": 2,
+      "content": "Deploy behavioral monitoring for agent execution patterns to detect anomalous activities like excessive GitHub API calls, unusual repository access patterns, or attempts to access unauthorized resources.",
+      "tags": ["Detective", "Behavioral Analysis", "Monitoring", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "CloudWatch-based monitoring with custom metrics and alarms for agent behavior patterns. Includes automated task termination for suspicious activities and alerting to security teams."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "5b998b9f-dc14-477e-a337-e6ebe543ae3a",
+      "numericId": 3,
+      "content": "Implement task sandboxing with read-only filesystem snapshots and network egress filtering to prevent malicious tasks from persisting changes or exfiltrating data outside approved channels.",
+      "tags": ["Preventative", "Sandboxing", "Network Security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Enhances MicroVM isolation with additional filesystem and network controls. Includes allowlist-based egress filtering and immutable base images for agent execution environments."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "72d65605-9bbf-45ba-9016-ac69e67bb8b0",
+      "numericId": 4,
+      "content": "Enable Cognito advanced security features including adaptive authentication, compromised credentials detection, and implement account lockout policies with progressive delays for failed login attempts.",
+      "tags": ["Preventative", "Authentication", "Account Protection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Leverages Cognito's built-in security features to detect credential stuffing and brute force attacks. Includes integration with AWS WAF for additional IP-based blocking."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "aa2c6b03-45cd-4311-b35b-c8ed7f8e3507",
+      "numericId": 5,
+      "content": "Deploy distributed rate limiting using DynamoDB-backed counters with sliding window algorithms to track and limit webhook requests per source IP, HMAC signature, and time period.",
+      "tags": ["Preventative", "Rate Limiting", "DDoS Protection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Implements sophisticated rate limiting beyond basic WAF rules. Includes webhook source reputation scoring and automatic temporary blocking of abusive sources."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "4f311f5f-c892-48c3-afd6-a3a0baa33e2b",
+      "numericId": 6,
+      "content": "Implement runtime attestation and integrity monitoring for AgentCore Runtime using AWS Nitro Enclaves or similar technology to detect MicroVM escape attempts and unauthorized access.",
+      "tags": ["Detective", "Runtime Security", "Integrity Monitoring", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Provides continuous verification of agent runtime integrity and isolation boundaries. Includes automated incident response for detected compromise attempts."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "3f71da3e-a066-4487-9ac8-02fff70f3a53",
+      "numericId": 7,
+      "content": "Deploy static code analysis and dependency scanning within the agent runtime before executing any repository code, with automatic quarantine of repositories containing suspicious patterns.",
+      "tags": ["Preventative", "Code Analysis", "Malware Detection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Integrates security scanning tools like CodeQL or Semgrep within the agent execution environment. Includes signature-based detection for known malicious patterns in dependencies."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "6ec005d8-09ec-4835-9989-4f83f71419f0",
+      "numericId": 8,
+      "content": "Implement infrastructure-as-code security controls with mandatory code review, automated security scanning of CDK templates, and deployment approval workflows with multi-person authorization.",
+      "tags": ["Preventative", "Infrastructure Security", "Access Control", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents unauthorized infrastructure changes through policy enforcement and review processes. Includes integration with AWS Config for continuous compliance monitoring."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "6dfb1aa1-6fa2-4c73-a5da-bc0cb998aae5",
+      "numericId": 9,
+      "content": "Deploy GitHub token rotation and scoping mechanisms with just-in-time access provisioning, limiting token permissions to specific repositories and operations required for each task.",
+      "tags": ["Preventative", "Token Management", "Least Privilege", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Reduces blast radius of token compromise through dynamic scoping and automatic rotation. Includes audit logging of all token usage and anomaly detection for unusual access patterns."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "fe8ae5d6-0bd4-40df-85e6-4a8ff1771e7e",
+      "numericId": 10,
+      "content": "Implement resource quotas and cost controls with per-user spending limits, task complexity scoring, and automatic termination of runaway processes exceeding defined thresholds.",
+      "tags": ["Preventative", "Resource Management", "Cost Control", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents resource exhaustion attacks through proactive monitoring and enforcement. Includes predictive analysis to identify potentially expensive tasks before execution."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "5669fb34-65fd-47a2-9a94-f91210fdda0d",
+      "numericId": 11,
+      "content": "Deploy certificate pinning and TLS inspection for GitHub API communications with fallback mechanisms and automated certificate validation to prevent man-in-the-middle attacks.",
+      "tags": ["Preventative", "Network Security", "TLS Protection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Enhances transport security beyond standard TLS with pinning validation and inspection capabilities. Includes monitoring for certificate anomalies and automatic failover."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "df1d2dd6-91fb-4905-80ac-19b2c3b08c06",
+      "numericId": 12,
+      "content": "Implement AI model response filtering and sanitization to detect and remove potentially sensitive information before returning responses to users, with pattern matching for common data types.",
+      "tags": ["Preventative", "Data Protection", "Response Filtering", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Provides additional layer of protection against information leakage through AI model responses. Includes regex patterns for PII, credentials, and other sensitive data types."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "dd9a370c-2ce6-42d1-aea5-151b95d3367f",
+      "numericId": 13,
+      "content": "Deploy DynamoDB point-in-time recovery and cross-region backup with immutable audit logs stored in S3 with object lock to prevent tampering of critical task and event data.",
+      "tags": ["Corrective", "Data Protection", "Audit Trail", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Ensures audit trail integrity through immutable storage and enables recovery from data tampering incidents. Includes automated integrity checking and alerting for unauthorized changes."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "a78aec57-caa5-4634-b3ae-418543193f34",
+      "numericId": 14,
+      "content": "Implement agent memory validation and sanitization with content filtering to prevent injection of malicious learnings, including semantic analysis and anomaly detection for memory entries.",
+      "tags": ["Preventative", "Memory Protection", "Content Filtering", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Protects cross-task learning system from poisoning attacks through validation and filtering of memory entries. Includes rollback capabilities for detected malicious content."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "2b5e3110-69a1-47a5-98a1-289c4cca73b5",
+      "numericId": 15,
+      "content": "Deploy API Gateway request/response logging with sensitive data masking and implement security information and event management (SIEM) integration for threat detection and response.",
+      "tags": ["Detective", "Logging", "SIEM Integration", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Provides comprehensive visibility into API usage patterns while protecting sensitive data. Includes automated threat detection rules and incident response playbooks."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "c995aebd-be12-487c-95c3-ac607285940e",
+      "numericId": 16,
+      "content": "Implement least-privilege IAM policies with resource-level permissions and regular access reviews, using IAM conditions to restrict Lambda function access to only required AWS services and resources.",
+      "tags": ["Preventative", "Access Control", "Least Privilege", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Reduces lateral movement risk through granular permission management and continuous access validation. Includes automated policy analysis and recommendations for further restriction."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "de2a9a1f-e729-484b-812d-ad52d24bae04",
+      "numericId": 17,
+      "content": "Deploy webhook request timestamping and nonce validation to prevent replay attacks, with configurable time windows and request deduplication using DynamoDB-based tracking.",
+      "tags": ["Preventative", "Replay Protection", "Request Validation", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents webhook replay attacks through temporal validation and request uniqueness enforcement. Includes configurable tolerance windows for network latency considerations."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "0cbeb3eb-299f-44ff-b12d-d3fe5cf33ce8",
+      "numericId": 18,
+      "content": "Implement pull request validation and approval workflows with automated security scanning, requiring maintainer review for all agent-generated code changes before merge.",
+      "tags": ["Preventative", "Code Review", "Workflow Security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Ensures human oversight of all agent-generated code changes through mandatory review processes. Includes integration with security scanning tools and approval requirements."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "c0bf1679-4906-4eae-a547-f8701dcd6e39",
+      "numericId": 19,
+      "content": "Enable DNS firewall enforcement mode with curated allowlists for approved domains and implement DNS over HTTPS (DoH) with trusted resolvers to prevent DNS manipulation attacks.",
+      "tags": ["Preventative", "DNS Security", "Network Protection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Transitions from observation to active protection mode with carefully managed domain allowlists. Includes monitoring for DNS anomalies and automated response capabilities."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "4a7dd3be-177d-4caf-a899-8379ac62f725",
+      "numericId": 20,
+      "content": "Deploy comprehensive log sanitization with automated PII detection and redaction, implementing structured logging with security-focused log analysis and retention policies.",
+      "tags": ["Preventative", "Data Protection", "Log Security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents sensitive data exposure through logs while maintaining operational visibility. Includes automated scanning for credentials, tokens, and PII with configurable redaction rules."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "986da545-5853-49ed-8696-b75cdf881ac4",
+      "numericId": 21,
+      "content": "Implement durable execution state validation and checkpointing with integrity verification to detect tampering attempts and prevent orchestration manipulation attacks.",
+      "tags": ["Detective", "State Protection", "Integrity Monitoring", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Protects task orchestration from manipulation through cryptographic state validation and secure checkpointing. Includes automated recovery from detected tampering attempts."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    },
+    {
+      "id": "63d500b6-7f54-421d-90c8-41f5134c74e5",
+      "numericId": 22,
+      "content": "Deploy repository access validation with GitHub permissions checking before task execution, ensuring users can only target repositories they have legitimate access to through GitHub API verification.",
+      "tags": ["Preventative", "Authorization", "Access Validation", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Validates user permissions against target repositories before allowing task execution. Includes caching of permission checks and integration with GitHub's permission model."
+        },
+        {
+          "key": "custom:agent",
+          "value": "Defender Persona Agent"
+        }
+      ]
+    }
+  ],
+  "mitigationLinks": [
+    {
+      "mitigationId": "14fd6f46-26d7-44f3-b4d8-f6e4faba25c0",
+      "linkedId": "4852c049-198a-4638-8d12-8f536e29920d"
+    },
+    {
+      "mitigationId": "a279a06d-fcdc-4356-b536-6364a39c5311",
+      "linkedId": "4852c049-198a-4638-8d12-8f536e29920d"
+    },
+    {
+      "mitigationId": "5b998b9f-dc14-477e-a337-e6ebe543ae3a",
+      "linkedId": "4852c049-198a-4638-8d12-8f536e29920d"
+    },
+    {
+      "mitigationId": "72d65605-9bbf-45ba-9016-ac69e67bb8b0",
+      "linkedId": "9e5cd3f0-18c7-4619-9bd6-c72ecec67025"
+    },
+    {
+      "mitigationId": "aa2c6b03-45cd-4311-b35b-c8ed7f8e3507",
+      "linkedId": "072cac3c-0465-4ba9-865a-37177a39f6c8"
+    },
+    {
+      "mitigationId": "4f311f5f-c892-48c3-afd6-a3a0baa33e2b",
+      "linkedId": "f6c70fe7-2340-41e2-868f-d19d68fad8a1"
+    },
+    {
+      "mitigationId": "3f71da3e-a066-4487-9ac8-02fff70f3a53",
+      "linkedId": "fa0815df-bffa-4f83-8b0c-26c74e54488f"
+    },
+    {
+      "mitigationId": "6ec005d8-09ec-4835-9989-4f83f71419f0",
+      "linkedId": "302c5ae1-c0d6-47c2-88a6-78a325e2a97b"
+    },
+    {
+      "mitigationId": "6dfb1aa1-6fa2-4c73-a5da-bc0cb998aae5",
+      "linkedId": "3fd01efa-84cb-4674-a933-d908798746bf"
+    },
+    {
+      "mitigationId": "fe8ae5d6-0bd4-40df-85e6-4a8ff1771e7e",
+      "linkedId": "0af944d8-1a0e-4955-9a4d-f2160b0b83cd"
+    },
+    {
+      "mitigationId": "5669fb34-65fd-47a2-9a94-f91210fdda0d",
+      "linkedId": "ee58cd32-0ece-448f-be88-20761a0d146b"
+    },
+    {
+      "mitigationId": "df1d2dd6-91fb-4905-80ac-19b2c3b08c06",
+      "linkedId": "086275ec-c908-472b-9a68-20bcc09ffc28"
+    },
+    {
+      "mitigationId": "dd9a370c-2ce6-42d1-aea5-151b95d3367f",
+      "linkedId": "35751b12-c306-4d46-82bf-15ade66302a7"
+    },
+    {
+      "mitigationId": "a78aec57-caa5-4634-b3ae-418543193f34",
+      "linkedId": "fa737e68-6c39-495c-939c-da7a96ced6a3"
+    },
+    {
+      "mitigationId": "2b5e3110-69a1-47a5-98a1-289c4cca73b5",
+      "linkedId": "2eb55863-b046-46f4-94ba-0bb098907a46"
+    },
+    {
+      "mitigationId": "c995aebd-be12-487c-95c3-ac607285940e",
+      "linkedId": "5c228bbe-51f8-41ce-a032-739830ded902"
+    },
+    {
+      "mitigationId": "de2a9a1f-e729-484b-812d-ad52d24bae04",
+      "linkedId": "3cee7c3f-730e-4390-90f8-6a11e888bf21"
+    },
+    {
+      "mitigationId": "0cbeb3eb-299f-44ff-b12d-d3fe5cf33ce8",
+      "linkedId": "0bb867ef-7626-404f-8c46-377e84a33113"
+    },
+    {
+      "mitigationId": "c0bf1679-4906-4eae-a547-f8701dcd6e39",
+      "linkedId": "9b0501ad-3c79-4f8e-80f5-869544ab0cfd"
+    },
+    {
+      "mitigationId": "4a7dd3be-177d-4caf-a899-8379ac62f725",
+      "linkedId": "41ef2f5c-62a7-4cb9-818d-8974be510b7c"
+    },
+    {
+      "mitigationId": "986da545-5853-49ed-8696-b75cdf881ac4",
+      "linkedId": "1df69920-dde2-4868-8a54-c89ec8ec09f9"
+    },
+    {
+      "mitigationId": "63d500b6-7f54-421d-90c8-41f5134c74e5",
+      "linkedId": "30b38afc-9930-4602-8637-56ddb166d2a5"
+    }
+  ]
+}

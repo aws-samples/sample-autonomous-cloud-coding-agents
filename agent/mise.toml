@@ -1,0 +1,101 @@
+min_version = "2026.2.6"
+
+[tools]
+gitleaks = "latest"
+python = "3.13"
+semgrep = "latest"
+uv = "latest"
+"grype" = "0.109.0"
+osv-scanner = "latest"
+"aqua:aquasecurity/trivy" = "0.69.2"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+PROJECT_NAME = "{{ config_root | basename }}"
+
+[tasks]
+install = "uv sync --all-groups"
+
+[tasks.info]
+description = "Print project information"
+run = '''
+echo "Project: $PROJECT_NAME"
+'''
+
+
+# QUALITY
+
+[tasks.lint]
+description = "Lint with ruff"
+run = "uvx ruff check"
+
+[tasks."lint:fix"]
+description = "Lint and auto-fix"
+run = "uvx ruff check --fix"
+
+[tasks.format]
+description = "Format with ruff"
+run = "uvx ruff format"
+
+[tasks."format:check"]
+description = "Check formatting"
+run = "uvx ruff format --check"
+
+[tasks.typecheck]
+description = "Type check with ty"
+run = "uvx ty check"
+
+[tasks.test]
+description = "Run tests with pytest"
+run = "uv run pytest"
+
+# SECURITY
+
+[tasks."security:secrets"]
+description = "Scan for secrets with gitleaks"
+run = "gitleaks detect --source . --no-banner"
+
+[tasks."security:sast"]
+description = "SAST scan with semgrep (auto + OWASP top 10)"
+run = "semgrep scan --config auto --config p/owasp-top-ten --error --quiet ."
+
+[tasks."security:deps"]
+description = "Audit dependencies for known vulnerabilities (osv-scanner)"
+run = "osv-scanner scan --lockfile uv.lock"
+
+[tasks."security:bandit"]
+description = "Run Bandit"
+run = "uvx bandit[toml] -c pyproject.toml -r . --severity-level=high"
+
+[tasks."security:grype"]
+description = "Run Grype"
+run = [
+  "grype ."
+]
+
+[tasks."security:image"]
+description = "Scan container image with trivy"
+run = [
+  "docker image inspect bgagent-local:latest >/dev/null 2>&1 || (ARCH=\"$(uname -m)\"; PLATFORM=\"linux/arm64\"; if [ \"$ARCH\" = \"x86_64\" ]; then PLATFORM=\"linux/amd64\"; fi; docker build --build-arg TARGETPLATFORM=\"$PLATFORM\" --build-arg CACHE_BUST=\"$(date +%s)\" -t bgagent-local:latest .)",
+  "trivy image --scanners vuln --ignore-unfixed --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 bgagent-local:latest",
+]
+
+[tasks.quality]
+description = "Run quality checks"
+run = [
+    { task = "lint:fix" },
+    { task = "format" },
+    { task = "typecheck" },
+    { task = "test" },
+]
+
+[tasks.security]
+description = "Run security scans"
+run = [
+    { task = "security:secrets" },
+    { task = "security:bandit" },
+    { task = "security:sast" },
+    { task = "security:grype" },
+    { task = "security:deps" },
+    { task = "security:image" },
+]

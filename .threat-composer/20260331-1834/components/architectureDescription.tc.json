@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {
+    "description": "### High Level Architecture\n\n#### Application type\nCloud-native autonomous coding agent platform - serverless web application with CLI and API interfaces\n\n#### Layers\n- Presentation: CLI client, REST API, webhooks, web dashboard\n- Orchestration: Lambda-based task orchestrator with durable execution\n- Compute: AgentCore Runtime with MicroVM isolation for agent execution\n- Data: DynamoDB tables for state, AgentCore Memory for cross-task learning\n- Security: Cognito authentication, VPC isolation, Bedrock Guardrails\n\n#### Boundaries\n- External: GitHub repositories, Bedrock AI models, user CLI/API clients\n- Internal: VPC-isolated agent runtime, DynamoDB state persistence\n- Trust: Cognito user pools, HMAC webhook authentication, IAM roles\n\n#### Technology components\n- AWS CDK with TypeScript for infrastructure as code\n- Python agent runtime with Claude Agent SDK\n- Node.js Lambda functions for API handlers and orchestration\n- AWS AgentCore Runtime for secure agent execution\n- Amazon Bedrock for AI model access (Claude Sonnet/Haiku)\n- DynamoDB for task state and event persistence\n- Amazon Cognito for user authentication\n\n#### Deployment architecture\n- Single AWS region deployment via CDK stack\n- VPC with private subnets and NAT gateway for agent isolation\n- API Gateway with WAF protection and Cognito authorization\n- Lambda functions with ARM64 architecture\n\n#### APIs\n\n| Endpoint | Method | Purpose |\n|----------|--------|----------|\n| /tasks | POST | Create new coding task |\n| /tasks | GET | List user tasks |\n| /tasks/{id} | GET | Get task details |\n| /tasks/{id} | DELETE | Cancel running task |\n| /tasks/{id}/events | GET | Get task event history |\n| /webhooks | POST | Create webhook integration |\n| /webhooks/{id} | DELETE | Revoke webhook |\n\n#### Security relevant components\n- VPC isolation with DNS firewall for agent network restrictions\n- Bedrock Guardrails for prompt injection detection\n- Secrets Manager for GitHub tokens and webhook secrets\n- IAM least-privilege roles with resource-level permissions\n- WAF with managed rule sets and rate limiting\n\n### Low Level Architecture\n- AgentStack CDK construct orchestrating all AWS resources\n- TaskOrchestrator Lambda with durable execution for task lifecycle\n- TaskApi construct with Cognito authentication and Lambda integrations\n- AgentVpc construct providing network isolation for agent runtime\n- Blueprint construct for repository onboarding configuration\n- TaskTable, TaskEventsTable for state persistence with TTL\n- AgentMemory construct for cross-task learning and knowledge retention\n- DnsFirewall for domain-level egress filtering\n- ConcurrencyReconciler for user task limit enforcement\n- TaskDashboard for operational monitoring and observability"
+  },
+  "dataflow": {},
+  "assumptions": [
+    {
+      "id": "61d58ecd-67f5-4438-8281-7af7b5751aab",
+      "numericId": 1,
+      "content": "AgentCore Runtime provides secure MicroVM isolation sufficient for untrusted code execution",
+      "tags": ["Security", "Compute", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Based on AgentCore construct usage and VPC isolation patterns in stack definition"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "bfb82934-37ba-488c-a5b0-43ca8c9d1dcf",
+      "numericId": 2,
+      "content": "Durable Lambda execution provides reliable task orchestration with checkpoint recovery",
+      "tags": ["Reliability", "Orchestration", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "TaskOrchestrator uses durableConfig with 9-hour timeout and 14-day retention for long-running tasks"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "f9464ee2-ee31-4c5e-81bf-e725c24883c3",
+      "numericId": 3,
+      "content": "GitHub API integration provides sufficient context for autonomous task execution",
+      "tags": ["Integration", "Context", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Agent fetches issues, creates branches, commits code, and generates pull requests via GitHub API"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "898ba053-de9e-4212-8343-23a7cb29e6ad",
+      "numericId": 4,
+      "content": "Bedrock Claude models provide adequate reasoning capability for coding tasks",
+      "tags": ["AI Models", "Capability", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "System uses Claude Sonnet 4.6 and Haiku 4.5 with cross-region inference profiles for availability"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "0a4408c2-eef0-4ffe-a9b1-bdbce1ebb6b2",
+      "numericId": 5,
+      "content": "DynamoDB provides sufficient performance and consistency for task state management",
+      "tags": ["Database", "Performance", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Multiple tables handle tasks, events, concurrency tracking, and webhook management with TTL"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "4bc492d4-d248-4391-8dd5-affae22beb36",
+      "numericId": 6,
+      "content": "CDK-based infrastructure deployment provides adequate operational control and repeatability",
+      "tags": ["Infrastructure", "Deployment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Single CDK stack with TypeScript constructs manages all AWS resources and configuration"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    },
+    {
+      "id": "db5fd18c-af6f-43af-9d3c-5d93e04cbc8d",
+      "numericId": 7,
+      "content": "VPC network isolation with DNS firewall provides sufficient security boundary for agent execution",
+      "tags": ["Security", "Network", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "AgentVpc construct with private subnets, NAT gateway, and DNS firewall for domain filtering"
+        },
+        {
+          "key": "custom:agent",
+          "value": "Architecture Analysis Agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [],
+  "mitigationLinks": []
+}
