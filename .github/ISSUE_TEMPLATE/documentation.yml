@@ -1,0 +1,33 @@
+---
+name: "📕 Documentation Issue"
+description: Report an issue in the docs (guides, design, README)
+title: "Docs: (short issue description)"
+labels: [documentation, needs-triage]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the documentation. Relevant docs live in `docs/guides/`, `docs/design/`, and the repo README.
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the issue
+      description: What is wrong or missing? (e.g. outdated step, unclear explanation, dead link.)
+    validations:
+      required: true
+  - type: textarea
+    id: links
+    attributes:
+      label: Affected docs
+      description: |
+        Links or paths to the affected page(s), e.g. `docs/guides/DEVELOPER_GUIDE.md`, `docs/design/ARCHITECTURE.md`, README.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested change
+      description: If you have a concrete fix or addition, describe it here.
+    validations:
+      required: false

@@ -1,0 +1,110 @@
+---
+name: "🐛 Bug Report"
+description: Report a bug in ABCA (CDK, agent, or CLI)
+title: "(component): (short issue description)"
+labels: [bug, needs-triage]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve ABCA. Please check [open](https://github.com/krokoko/bgagent/issues) and [recently closed](https://github.com/krokoko/bgagent/issues?q=is%3Aissue+is%3Aclosed) issues first.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where does the bug occur?
+      options:
+        - CDK / infrastructure
+        - Agent (Python runtime)
+        - CLI (bgagent)
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: |
+        What actually happened? Include errors, stack traces, and relevant logs (e.g. CloudWatch, script output).
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: |
+        Steps to reproduce (e.g. deploy stack, run `bgagent submit` with X, run `npx projen build`). For CDK/agent issues, include the minimal scenario (repo state, task description, or stack config) that triggers the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Possible solution
+      description: Suggest a fix or cause if you have an idea.
+    validations:
+      required: false
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: For CDK/CLI (e.g. 20.x, 22.x). Run `node -v` if unsure.
+    validations:
+      required: false
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: For agent-related issues (e.g. 3.9, 3.12). Run `python3 --version` if unsure.
+    validations:
+      required: false
+  - type: input
+    id: mise-version
+    attributes:
+      label: mise version
+      description: For agent setup/install issues. Run `mise --version` if unsure.
+    validations:
+      required: false
+  - type: input
+    id: region
+    attributes:
+      label: AWS region
+      description: e.g. us-east-1
+    validations:
+      required: false
+  - type: textarea
+    id: modified
+    attributes:
+      label: Local modifications
+      description: Did you change the code from the version in this repo? If yes, are the changes available (e.g. branch, patch)?
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help (related issues, PRs, environment details).
+    validations:
+      required: false
+  - type: checkboxes
+    attributes:
+      label: AWS quotas
+      description: For deployment or runtime issues, have you checked [AWS service quotas](https://docs.aws.amazon.com/general/latest/gr/aws_service_limits.html) for the services in use?
+      options:
+        - label: I have reviewed the relevant service quotas (or N/A)
+          required: false

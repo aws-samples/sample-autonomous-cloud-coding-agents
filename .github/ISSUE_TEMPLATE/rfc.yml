@@ -1,0 +1,75 @@
+---
+name: "🚧 Request for Comments (RFC)"
+description: Feature design and detailed proposals for ABCA
+title: "RFC: (short title)"
+labels: ["RFC-proposal", "needs-triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for significant feature or design proposals. Please add as much detail as possible. See the [ROADMAP](https://github.com/krokoko/bgagent/blob/main/docs/guides/ROADMAP.md) and [design docs](https://github.com/krokoko/bgagent/tree/main/docs/design) for existing direction; your RFC should align or explain divergence.
+  - type: input
+    id: relation
+    attributes:
+      label: Related issue or feature request
+      description: Link to an existing issue, if applicable.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Overview in one or two paragraphs.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Use case and motivation
+      description: What problem does this solve? Who is it for?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Explain the design in enough detail that someone familiar with the project could implement it. Include user experience before and after.
+      placeholder: What does the user/operator experience look like before and after?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Out of scope
+      description: What is explicitly not part of this proposal?
+    validations:
+      required: true
+  - type: textarea
+    id: challenges
+    attributes:
+      label: Potential challenges
+      description: Edge cases, risks, unresolved areas, and how you might mitigate them.
+    validations:
+      required: true
+  - type: textarea
+    id: integrations
+    attributes:
+      label: Dependencies and integrations
+      description: Additional dependencies (AWS services, libs) and how this fits with existing components (CDK stacks, agent, API, scripts).
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative solutions
+      description: Other approaches you considered and why you prefer this one.
+      render: markdown
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **Note:** Non-triaged RFCs may not get timely review. PRs on non-triaged issues might not be accepted.
+        * RFC PR:
+        * Approved by:
+        * Reviewed by:
