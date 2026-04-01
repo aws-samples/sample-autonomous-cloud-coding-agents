@@ -6,7 +6,7 @@ title: Developer guide introduction
 
 This project is built in TypeScript using Projen ([projen.io](http://projen.io/)). This supports project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
 
-![ABCA architecture](/imgs/abca-arch.png)
+![ABCA architecture](/sample-autonomous-cloud-coding-agents/imgs/abca-arch.png)
 
 The repository is organized around four main pieces:
 

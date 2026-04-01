@@ -32,7 +32,7 @@ No other permissions are needed.
 
 The agent uses Amazon Bedrock for Claude inference. You need credentials with `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` permissions.
 
-Two options for passing credentials to the container:
+Common ways to pass credentials into the container (when using `run.sh`):
 
 **Option A** — Environment variables:
 ```bash
@@ -42,7 +42,9 @@ export AWS_SESSION_TOKEN="..."   # if using temporary credentials
 export AWS_REGION="us-east-1"
 ```
 
-**Option B** — AWS profile (mounts `~/.aws` read-only):
+**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when the AWS CLI is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`.
+
+**Option C** — Mount `~/.aws` read-only (static access keys in files; SSO often does not work inside the container):
 ```bash
 export AWS_PROFILE="my-profile"
 export AWS_REGION="us-east-1"
@@ -53,6 +55,7 @@ export AWS_REGION="us-east-1"
 ```bash
 export GITHUB_TOKEN="ghp_..."
 export AWS_REGION="us-east-1"
+# Either export keys, or run `aws sso login` (and optionally AWS_PROFILE) and let run.sh resolve credentials
 export AWS_ACCESS_KEY_ID="..."
 export AWS_SECRET_ACCESS_KEY="..."
 
@@ -86,19 +89,19 @@ The `run.sh` script overrides the container's default CMD to run `python /app/en
 |----------|----------|---------|-------------|
 | `GITHUB_TOKEN` | Yes | | Fine-grained PAT (see permissions above) |
 | `AWS_REGION` | Yes | | AWS region for Bedrock (e.g., `us-east-1`) |
-| `AWS_ACCESS_KEY_ID` | Yes* | | AWS credentials |
-| `AWS_SECRET_ACCESS_KEY` | Yes* | | AWS credentials |
+| `AWS_ACCESS_KEY_ID` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
+| `AWS_SECRET_ACCESS_KEY` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
 | `AWS_SESSION_TOKEN` | No | | For temporary credentials |
-| `AWS_PROFILE` | Yes* | | Alternative to explicit keys (mounts `~/.aws`) |
+| `AWS_PROFILE` | No | | Profile for `aws configure export-credentials` in `run.sh`, or default profile when using the `~/.aws` mount fallback |
 | `ANTHROPIC_MODEL` | No | `us.anthropic.claude-sonnet-4-6` | Bedrock model ID |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
-| `MAX_BUDGET_USD` | No | | Max cost budget in USD (0.01–100). Agent stops when budget is reached. |
+| `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
 | `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model ID for the pre-flight safety check (see below) |
 
 **Pre-flight check model**: Claude Code runs a quick safety verification using a small Haiku model before executing each tool command. On Bedrock, the default Haiku model ID may not be enabled in your account, causing the check to time out with *"Pre-flight check is taking longer than expected"* warnings. The agent sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a known-available Bedrock Haiku model ID to avoid this. If you see pre-flight timeout warnings, verify that this model is enabled in your Bedrock model access settings.
 
-\* Provide either `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or `AWS_PROFILE`.
+† You need valid Bedrock credentials in the container: export keys (Option A), let `run.sh` inject keys from the AWS CLI after `aws sso login` or similar (Option B), or mount `~/.aws` (Option C). `run.sh` also sets `CLAUDE_CODE_USE_BEDROCK=1` so Claude Code uses Bedrock.
 
 ### Examples
 
@@ -111,6 +114,9 @@ ANTHROPIC_MODEL="us.anthropic.claude-sonnet-4-6" ./agent/run.sh "owner/repo" 42
 
 # Limit agent to 50 turns
 MAX_TURNS=50 ./agent/run.sh "owner/repo" "Add unit tests for the auth module"
+
+# Local batch only — cap cost (production tasks use API max_budget_usd instead)
+MAX_BUDGET_USD=5 ./agent/run.sh "owner/repo" "Small refactor"
 ```
 
 ## AgentCore Runtime Mode
@@ -131,46 +137,50 @@ To be safe, the agent isolates each task into its own workspace directory:
 
 **`GET /ping`** — Health check. Returns `{"status": "healthy"}`. Stays responsive while the agent runs.
 
-**`POST /invocations`** — Run the agent. Blocks until complete.
+**`POST /invocations`** — Accept a task and start the agent in a **background thread**. The handler returns **immediately** with an acceptance payload; it does not wait for the agent to finish. While the task runs, progress and the final outcome are written to **DynamoDB** when `TASK_TABLE_NAME` is set (see `task_state.py`); the deployed platform polls that table via the orchestrator. For ad-hoc local testing without DynamoDB, follow **`docker logs -f bgagent-run`** (or your container name).
 
-Request payload:
+Request payload (representative fields — the API orchestrator sends a fuller object including hydrated GitHub/issue context):
+
 ```json
 {
   "input": {
-    "prompt": "update the rfc issue template to add a codeowners field",
+    "task_id": "9e285dba622d",
     "repo_url": "owner/repo",
+    "prompt": "update the rfc issue template to add a codeowners field",
     "issue_number": "",
     "max_turns": 100,
     "max_budget_usd": 5.0,
-    "anthropic_model": "us.anthropic.claude-sonnet-4-6",
+    "model_id": "us.anthropic.claude-sonnet-4-6",
     "aws_region": "us-east-1"
   }
 }
 ```
 
-All fields in `input` fall back to container environment variables if omitted. Secrets like `GITHUB_TOKEN` should be set as runtime environment variables via the CDK stack — not sent in the payload, since AgentCore logs the full request payload in plain text.
+- `task_id` — Correlates with DynamoDB and logs; if omitted for local experiments, the agent generates a short id.
+- `model_id` — Preferred key from the orchestrator; `anthropic_model` is also accepted.
+- Optional platform fields (when using the full stack) include `hydrated_context`, `system_prompt_overrides`, `prompt_version`, and `memory_id`.
 
-Response:
+All fields in `input` fall back to container environment variables when omitted. Secrets like `GITHUB_TOKEN` should be set as runtime environment variables via the CDK stack — not sent in the payload, since AgentCore logs the full request payload in plain text.
+
+Immediate response (acceptance):
+
 ```json
 {
   "output": {
     "message": {
       "role": "assistant",
-      "content": [{"text": "PR created: https://github.com/owner/repo/pull/3"}]
+      "content": [{"text": "Task accepted: 9e285dba622d"}]
     },
     "result": {
-      "status": "success",
-      "pr_url": "https://github.com/owner/repo/pull/3",
-      "build_passed": true,
-      "cost_usd": 0.3598,
-      "turns": 18,
-      "duration_s": 126.3,
+      "status": "accepted",
       "task_id": "9e285dba622d"
     },
     "timestamp": "2026-02-20T01:00:00.000000+00:00"
   }
 }
 ```
+
+Final metrics (PR URL, cost, turns, build status, etc.) appear in **container logs**, in **DynamoDB** when configured, and in the **REST API** for deployed tasks (`GET /v1/tasks/{task_id}` via the `bgagent` CLI or HTTP client).
 
 ### Testing Server Mode Locally
 
@@ -218,7 +228,7 @@ bgagent submit --repo owner/repo --issue 42
 bgagent submit --repo owner/repo --issue 42 --wait
 ```
 
-For the full CLI reference, see the [User guide](docs/guides/USER_GUIDE.md).
+For the full CLI reference, see the [User guide](../docs/guides/USER_GUIDE.md).
 
 ## Monitoring a Running Agent
 
@@ -247,13 +257,13 @@ The agent pipeline (shared by both modes):
 1. **Config validation** — checks required parameters
 2. **Context hydration** — fetches the GitHub issue (title, body, comments) if an issue number is provided
 3. **Prompt assembly** — combines the system prompt (behavioral contract) with the issue context and task description
-4. **Deterministic pre-hooks** — clones repo, creates branch, configures git auth, runs `mise trust`, `mise install`, and `mise run build`
+4. **Deterministic pre-hooks** — clones repo, creates branch, configures git auth, runs `mise trust`, `mise install`, `mise run build`, and `mise run lint`
 5. **Agent execution** — invokes the Claude Agent SDK via the `ClaudeSDKClient` class (connect/query/receive_response pattern) in unattended mode. The agent:
    - Understands the codebase
    - Makes changes, runs tests and linters
    - Commits and pushes after each unit of work
    - Creates a pull request with summary, testing notes, and decisions
-6. **Deterministic post-hooks** — verifies build (`mise run build`), ensures PR exists (creates one if the agent didn't)
+6. **Deterministic post-hooks** — verifies `mise run build` and `mise run lint`, ensures a PR exists (creates one if the agent did not)
 7. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
 
 ## Metrics
@@ -302,13 +312,21 @@ docker images bgagent-local --format "{{.Size}}"
 
 ```
 agent/
-├── Dockerfile          Python 3.12 + Node.js 20 + Claude Code CLI + git + gh + mise (ARM64)
+├── Dockerfile           Python 3.13 + Node.js 20 + Claude Code CLI + git + gh + mise (default platform linux/arm64)
 ├── .dockerignore
-├── pyproject.toml      Dependencies: claude-agent-sdk, requests, fastapi, uvicorn (no uvloop)
-├── entrypoint.py       Config, context hydration, agent invocation via ClaudeSDKClient, metrics, run_task() entry point
-├── server.py           FastAPI app — /invocations and /ping for AgentCore Runtime
-├── system_prompt.py    Behavioral contract (PRD Section 11)
-├── run.sh              Build + run helper for local/server mode with AgentCore constraints
-├── test_sdk_smoke.py   Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
+├── pyproject.toml       App dependencies (claude-agent-sdk, FastAPI, boto3, OpenTelemetry distro, MCP, …)
+├── uv.lock              Locked deps for reproducible `uv sync` in the image
+├── mise.toml            Tool versions / tasks used when the target repo relies on mise
+├── entrypoint.py        Config, context hydration, ClaudeSDKClient pipeline, metrics, run_task()
+├── server.py            FastAPI — async /invocations (background thread) and /ping; OTEL session correlation
+├── task_state.py        Best-effort DynamoDB task status (no-op if TASK_TABLE_NAME unset)
+├── observability.py     OpenTelemetry helpers (e.g. AgentCore session id)
+├── memory.py            Optional memory / episode integration for the agent
+├── system_prompt.py     Behavioral contract (PRD Section 11)
+├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
+├── run.sh               Build + run helper for local/server mode with AgentCore constraints
+├── test_sdk_smoke.py    Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
 └── test_subprocess_threading.py  Diagnostic: subprocess-in-background-thread verification
 ```
+
+The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.

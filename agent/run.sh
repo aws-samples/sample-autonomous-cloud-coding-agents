@@ -28,7 +28,7 @@ Environment variables (required):
 Environment variables (optional):
   ANTHROPIC_MODEL   Model to use (default: us.anthropic.claude-sonnet-4-6)
   DRY_RUN           Set to 1 to validate config and print prompt without running the agent
-  MAX_TURNS         Max agent turns (default: 200)
+  MAX_TURNS         Max agent turns (default: 100)
 
 AWS credentials — pick one method:
   Option A: Export AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
@@ -154,6 +154,7 @@ DOCKER_ARGS=(
 [[ -n "${TASK_DESCRIPTION}" ]] && DOCKER_ARGS+=(-e "TASK_DESCRIPTION=${TASK_DESCRIPTION}")
 [[ -n "${DRY_RUN:-}" ]] && DOCKER_ARGS+=(-e "DRY_RUN=${DRY_RUN}")
 [[ -n "${MAX_TURNS:-}" ]] && DOCKER_ARGS+=(-e "MAX_TURNS=${MAX_TURNS}")
+[[ -n "${MAX_BUDGET_USD:-}" ]] && DOCKER_ARGS+=(-e "MAX_BUDGET_USD=${MAX_BUDGET_USD}")
 
 # Server mode: expose port 8080
 if [[ "$MODE" == "server" ]]; then

@@ -6,7 +6,7 @@ title: Architecture
 
 This document outlines the overall architecture of the project. You can refer to the specific documents in the current folder for deep dive on each block.
 
-![](/imgs/abca-arch.png)
+![](/sample-autonomous-cloud-coding-agents/imgs/abca-arch.png)
 
 ## Design Principles
 
@@ -77,7 +77,7 @@ It's a one shot mode -> user sends a task, and an agent works on it.
 
 ## Overview
 
-![](/imgs/blueprint.png)
+![](/sample-autonomous-cloud-coding-agents/imgs/blueprint.png)
 
 A **blueprint** is the definition of how a task runs: a **hybrid workflow** that mixes **deterministic steps** (no LLM, predictable, cheap) with **one or more agentic steps** (LLM-driven, flexible, expensive). In our architecture, **each user task is executed according to a blueprint**.
 

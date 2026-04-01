@@ -333,6 +333,9 @@ project.postCompileTask.exec('cd cli && npx projen build');
 // ---------------------------------------------------------------------------
 // Docs site subproject (Astro + Starlight)
 // ---------------------------------------------------------------------------
+/** GitHub Pages project segment; must match Astro `base` and public asset URLs in mirrored markdown. */
+const DOCS_ASTRO_BASE = '/sample-autonomous-cloud-coding-agents';
+
 const docsSite = new javascript.NodeProject({
   parent: project,
   outdir: 'docs',
@@ -375,7 +378,7 @@ new TextFile(docsSite, 'astro.config.mjs', {
     '',
     'export default defineConfig({',
     "  site: 'https://aws-samples.github.io',",
-    "  base: '/sample-autonomous-cloud-coding-agents',",
+    `  base: '${DOCS_ASTRO_BASE}',`,
     '  integrations: [',
     '    starlight({',
     "      title: 'ABCA Docs',",
@@ -513,8 +516,8 @@ new TextFile(docsSite, 'src/content/docs/index.md', {
  */
 function ensureFrontmatter(content: string, title: string): string {
   const normalizedContent = content
-    .replaceAll('../imgs/', '/imgs/')
-    .replaceAll('../diagrams/', '/diagrams/')
+    .replaceAll('../imgs/', `${DOCS_ASTRO_BASE}/imgs/`)
+    .replaceAll('../diagrams/', `${DOCS_ASTRO_BASE}/diagrams/`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match: string, label: string, target: string) => {
       const rewritten = rewriteDocsLinkTarget(target);
       return rewritten ? `[${label}](${rewritten})` : match;

@@ -115,6 +115,19 @@ curl -X POST "$API_URL/tasks" \
   }'
 ```
 
+**Example response** right after submit (`status` is `SUBMITTED`; `branch_name` is reserved up front; `session_id`, `pr_url`, cost, and timing stay `null` until the orchestrator and agent progress):
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "krokoko/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
+```
+
+```json
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"SUBMITTED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:30.011Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
+```
+
 To create a task from a GitHub issue:
 
 ```bash
@@ -174,6 +187,16 @@ curl "$API_URL/tasks/01KJDSS94G3VA55CW1M534EC7Q" -H "Authorization: $TOKEN"
 
 Returns the full task record including status, timestamps, PR URL, cost, and error details.
 
+**Example** (after a successful run — `status` is `COMPLETED`, `pr_url` populated):
+
+```bash
+curl "$API_URL/tasks/01KN36YGQV6BEPDD7CVMKP1PF3" -H "Authorization: $TOKEN"
+```
+
+```json
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/krokoko/agent-plugins/pull/59","error_message":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":"125.9","cost_usd":"0.15938219999999997","build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
+```
+
 ### Cancel a task
 
 ```bash
@@ -194,34 +217,51 @@ Returns the chronological event log for a task (e.g., `task_created`, `session_s
 
 The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.
 
+**This repository** builds the CLI under `cli/`; after compile, run the entrypoint as `node lib/bin/bgagent.js` from the `cli` directory (the path `package.json` exposes as `bin`). If you install a published package or link `bgagent` onto your `PATH`, you can call `bgagent` directly — the subcommands are the same.
+
 ### Setup
 
 ```bash
-# Build the CLI
-cd cli && npx projen build && cd ..
+cd cli
+npx projen build
 
-# Configure with your stack outputs
-bgagent configure \
+# Configure with your stack outputs (run from cli/)
+node lib/bin/bgagent.js configure \
   --api-url $API_URL \
   --region us-east-1 \
   --user-pool-id $USER_POOL_ID \
   --client-id $APP_CLIENT_ID
 
 # Log in
-bgagent login --username user@example.com
+node lib/bin/bgagent.js login --username user@example.com
 ```
 
 ### Submitting a task
 
 ```bash
-# From a GitHub issue
-bgagent submit --repo owner/repo --issue 42
+# From cli/ — from a GitHub issue
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42
 
 # From a text description
-bgagent submit --repo owner/repo --task "Add input validation to the /users POST endpoint"
+node lib/bin/bgagent.js submit --repo owner/repo --task "Add input validation to the /users POST endpoint"
 
 # Submit and wait for completion
-bgagent submit --repo owner/repo --issue 42 --wait
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
+```
+
+**Example** (default `text` output immediately after a successful submit — task is `SUBMITTED`, branch name reserved):
+
+```bash
+node lib/bin/bgagent.js submit --repo krokoko/agent-plugins --task "add codeowners field to RFC issue template"
+```
+
+```text
+Task:        01KN37PZ77P1W19D71DTZ15X6X
+Status:      SUBMITTED
+Repo:        krokoko/agent-plugins
+Description: add codeowners field to RFC issue template
+Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
+Created:     2026-04-01T00:39:51.271Z
 ```
 
 **Options:**
@@ -241,34 +281,57 @@ At least one of `--issue` or `--task` is required.
 
 ### Checking task status
 
+Run these from the `cli/` directory (same as in **Setup**).
+
 #### Single task
 
 ```bash
-bgagent status <TASK_ID>
+node lib/bin/bgagent.js status <TASK_ID>
 
 # Poll until completion
-bgagent status <TASK_ID> --wait
+node lib/bin/bgagent.js status <TASK_ID> --wait
+```
+
+**Example** (default `text` output once the task has finished — `COMPLETED`, with session id, PR link, duration, and cost):
+
+```bash
+node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X
+```
+
+```text
+Task:        01KN37PZ77P1W19D71DTZ15X6X
+Status:      COMPLETED
+Repo:        krokoko/agent-plugins
+Description: add codeowners field to RFC issue template
+Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
+Session:     9891af91-bfc6-488f-bfe6-ce8f8c9a63cf
+PR:          https://github.com/krokoko/agent-plugins/pull/60
+Created:     2026-04-01T00:39:51.271Z
+Started:     2026-04-01T00:39:56.647Z
+Completed:   2026-04-01T00:43:49Z
+Duration:    148.6s
+Cost:        $0.1751
 ```
 
 #### All tasks
 
 ```bash
-bgagent list
-bgagent list --status RUNNING,SUBMITTED
-bgagent list --repo owner/repo --limit 10
+node lib/bin/bgagent.js list
+node lib/bin/bgagent.js list --status RUNNING,SUBMITTED
+node lib/bin/bgagent.js list --repo owner/repo --limit 10
 ```
 
 ### Viewing task events
 
 ```bash
-bgagent events <TASK_ID>
-bgagent events <TASK_ID> --limit 20
+node lib/bin/bgagent.js events <TASK_ID>
+node lib/bin/bgagent.js events <TASK_ID> --limit 20
 ```
 
 ### Cancelling a task
 
 ```bash
-bgagent cancel <TASK_ID>
+node lib/bin/bgagent.js cancel <TASK_ID>
 ```
 
 ## Webhook integration
@@ -345,6 +408,12 @@ curl -X POST "$API_URL/webhooks/tasks" \
 ```
 
 The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported.
+
+**Example response** (same shape as a successful `POST /tasks` — `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
+
+```json
+{"data":{"task_id":"01KN38AB1SE79QA4MBNAHFBQAN","status":"SUBMITTED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN38AB1SE79QA4MBNAHFBQAN/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"created_at":"2026-04-01T00:50:25.977Z","updated_at":"2026-04-01T00:50:25.977Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
+```
 
 **Required headers:**
 
