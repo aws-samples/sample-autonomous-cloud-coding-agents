@@ -80,7 +80,7 @@ Then, follow the [User Guide](./docs/guides/USER_GUIDE.md) to learn how to use t
 
 ## Documentation
 
-A documentation site is available containing all design documents, roadmap and guides to deploy and use the platform.
+A documentation site is available containing all design documents, roadmap and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
 
 ## Disclaimer
 
