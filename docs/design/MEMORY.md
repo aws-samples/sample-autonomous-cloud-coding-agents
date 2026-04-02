@@ -399,6 +399,103 @@ Add user preference tracking and enable episodic reflection for cross-task patte
 
 Only if Tiers 1–3 show value but semantic search proves insufficient for specific query patterns (e.g. "which files are always modified together?" or "what's the dependency impact of changing module X?"). At this point, consider Neptune Serverless or similar for relational queries. **Only build this if there is evidence that semantic retrieval fails on identifiable query patterns.**
 
+## Memory security analysis
+
+OWASP classifies memory and context poisoning as **ASI06** in the [2026 Top 10 for Agentic Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/), recognizing it as a first-class risk distinct from standard prompt injection. Unlike single-session prompt injection, memory poisoning creates **persistent corruption** that influences every subsequent interaction — a single poisoned entry can affect all future tasks on a repository.
+
+### Threat model
+
+The memory system faces two categories of corruption:
+
+**Intentional corruption (adversarial)**
+
+| Vector | Description | Severity |
+|---|---|---|
+| **Query-based memory injection (MINJA)** | Attacker crafts task descriptions or issue content that, when processed by the agent, gets stored as legitimate repository knowledge. Subsequent tasks retrieve and act on the poisoned memory. Research shows 95%+ injection success rates against undefended systems. | Critical |
+| **Indirect injection via tool outputs** | Poisoned data from external sources (GitHub issues, PR comments, linked documentation) flows through context hydration into the agent's context, and from there into memory via the post-task extraction prompt. The agent trusts its own tool outputs as ground truth. | Critical |
+| **Experience grafting** | Adversary manipulates the agent's experiential memory (task episodes) to induce behavioral drift — e.g., injecting a fake episode that claims "tests always fail on this repo, skip them" to suppress quality checks. | High |
+| **Poisoned RAG retrieval** | Adversarial content engineered to rank highly for specific semantic queries, ensuring it is retrieved and incorporated into the agent's context during memory load. AgentPoison achieves 80%+ attack success across multiple agent domains. | High |
+| **Review comment injection** | Malicious PR review comments containing embedded instructions that get extracted as persistent rules by the review feedback pipeline. See [SECURITY.md](./SECURITY.md) for existing mitigations. | High |
+
+**Emergent corruption (non-adversarial)**
+
+| Pattern | Description | Severity |
+|---|---|---|
+| **Hallucination crystallization** | Agent hallucinates a fact during a task and writes it as a repository learning. Future tasks retrieve the false memory and reinforce it through repeated use, converting an ephemeral error into a durable false belief. | High |
+| **Error compounding feedback loops** | When an agent makes an error, the erroneous output enters the task episode. If similar tasks retrieve that episode, they may repeat the error, write another bad episode, and amplify the mistake across sessions. | High |
+| **Stale context accumulation** | Without temporal decay, memories from 6 months ago carry the same retrieval weight as memories from yesterday. The agent operates on increasingly outdated context — referencing approaches, conventions, or patterns the team has since abandoned. | Medium |
+| **Contradictory memory accumulation** | Over many tasks, the memory store accumulates contradictory records (see Memory consolidation section above). Without effective resolution, the agent receives conflicting guidance that degrades decision quality. | Medium |
+
+### Current gaps
+
+Analysis of the current implementation identified 9 specific memory security gaps:
+
+| # | Gap | Affected files | Severity |
+|---|---|---|---|
+| 1 | No memory content validation — retrieved records are injected into agent context without sanitization | `memory.ts:loadMemoryContext()` | Critical |
+| 2 | No source provenance tracking — cannot distinguish agent-written memory from externally-influenced content | `memory.ts`, `agent/memory.py` | Critical |
+| 3 | GitHub issue content (attacker-controlled) injected without trust differentiation | `context-hydration.ts` | Critical |
+| 4 | No trust scoring at retrieval — all memories treated equally regardless of age, source, or consistency | `memory.ts:loadMemoryContext()` | High |
+| 5 | No memory integrity checking — no hashing or signatures to detect modification | `memory.ts`, `agent/memory.py` | High |
+| 6 | No anomaly detection on memory write/retrieval patterns | (no implementation) | High |
+| 7 | No memory rollback — 365-day expiration is the only cleanup mechanism | (no implementation) | High |
+| 8 | No write-ahead validation (guardian pattern) for memory commits | (no implementation) | Medium |
+| 9 | No circuit breaker for memory-influenced behavioral anomalies | `orchestrator.ts` | Medium |
+
+### Defense architecture
+
+The target defense architecture follows a six-layer model (see [ROADMAP.md Iteration 3e](../guides/ROADMAP.md) for the implementation plan):
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 1: Input Moderation + Trust Scoring               │
+│  Content sanitization, injection pattern detection,      │
+│  source classification (trusted/untrusted)               │
+├─────────────────────────────────────────────────────────┤
+│  Layer 2: Memory Sanitization + Provenance Tagging       │
+│  Source metadata on every write, content hashing,        │
+│  schema versioning                                       │
+├─────────────────────────────────────────────────────────┤
+│  Layer 3: Storage Isolation + Access Controls            │
+│  Per-repo namespace isolation, expiration limits,        │
+│  size caps per memory store                              │
+├─────────────────────────────────────────────────────────┤
+│  Layer 4: Trust-Scored Retrieval                         │
+│  Temporal decay, source reliability weighting,           │
+│  pattern consistency checking, threshold filtering       │
+├─────────────────────────────────────────────────────────┤
+│  Layer 5: Write-Ahead Validation (Guardian Pattern)      │
+│  Separate model evaluates proposed memory updates        │
+│  before commit                                           │
+├─────────────────────────────────────────────────────────┤
+│  Layer 6: Continuous Monitoring + Circuit Breakers        │
+│  Anomaly detection, behavioral drift detection,          │
+│  automatic halt on suspicious patterns                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+No single layer is sufficient. Research demonstrates that even sophisticated input filtering can be bypassed — defense-in-depth is mandatory.
+
+### Existing mitigations
+
+The current architecture already provides partial coverage for some layers:
+
+- **Layer 3 (partial):** Per-repo namespace isolation via `/{actorId}/knowledge/` and `/{actorId}/episodes/{sessionId}/` prevents cross-repo contamination within the same memory resource. Token budget (2,000 tokens) limits blast radius. `schema_version` metadata enables migration tracking.
+- **Fail-open design:** Memory failures never block task execution — this limits the impact of denial-of-service attacks against the memory system.
+- **Repo format validation:** `_validate_repo()` prevents namespace confusion from malformed repo identifiers.
+- **Model invocation logging:** Bedrock logs provide audit trail for what the model receives and generates, enabling post-hoc investigation of memory-influenced behavior.
+
+### References
+
+- OWASP ASI06 — Memory & Context Poisoning (2026 Top 10 for Agentic Applications)
+- Dong et al. (2025), "MINJA: Memory Injection Attack on LLM Agents" — 95%+ injection success rates
+- Sunil et al. (2026), "Memory Poisoning Attack and Defense on Memory Based LLM-Agents" — trust scoring defenses
+- Schneider, C. (2026), "Memory Poisoning in AI Agents: Exploits That Wait" — six-layer defense architecture
+- MemTrust (2026), "A Zero-Trust Architecture for Unified AI Memory System" — TEE-based memory protection
+- Zuccolotto et al. (2026), "Memory Poisoning and Secure Multi-Agent Systems" — provenance and integrity measures
+
+---
+
 ## Requirements
 
 The platform has the following requirements for memory:
