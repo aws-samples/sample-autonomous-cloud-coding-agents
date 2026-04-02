@@ -15,7 +15,7 @@ npx projen build
 # Configure with your stack outputs (run from cli/)
 node lib/bin/bgagent.js configure \
   --api-url $API_URL \
-  --region us-east-1 \
+  --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --client-id $APP_CLIENT_ID
 

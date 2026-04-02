@@ -25,14 +25,19 @@ The Task API uses Amazon Cognito for authentication. Self-signup is disabled; an
 
 ### Get stack outputs
 
-After deployment, retrieve the API URL and Cognito identifiers:
+After deployment, retrieve the API URL and Cognito identifiers. Set `REGION` to the AWS region where you deployed the stack (for example `us-east-1`). Use the same value for all `aws` and `bgagent configure` commands below — a mismatch often surfaces as a confusing Cognito “app client does not exist” error.
 
 ```bash
+REGION=<your-deployment-region>
+
 API_URL=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
+  --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' --output text)
 USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
+  --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
 APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
+  --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`AppClientId`].OutputValue' --output text)
 ```
 
@@ -40,11 +45,13 @@ APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-
 
 ```bash
 aws cognito-idp admin-create-user \
+  --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username user@example.com \
   --temporary-password 'TempPass123!@'
 
 aws cognito-idp admin-set-user-password \
+  --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username user@example.com \
   --password 'YourPerm@nent1Pass!' \
@@ -57,6 +64,7 @@ Password requirements: minimum 12 characters, uppercase, lowercase, digits, and 
 
 ```bash
 TOKEN=$(aws cognito-idp initiate-auth \
+  --region "$REGION" \
   --client-id $APP_CLIENT_ID \
   --auth-flow USER_PASSWORD_AUTH \
   --auth-parameters USERNAME=user@example.com,PASSWORD='YourPerm@nent1Pass!' \
@@ -228,7 +236,7 @@ npx projen build
 # Configure with your stack outputs (run from cli/)
 node lib/bin/bgagent.js configure \
   --api-url $API_URL \
-  --region us-east-1 \
+  --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --client-id $APP_CLIENT_ID
 
