@@ -100,6 +100,33 @@ The `functionArn` in `CustomStepConfig` should be validated at CDK synth time to
 
 ## Memory-specific threats
 
+### OWASP ASI06 — Memory and context poisoning
+
+OWASP classifies memory and context poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications. This classification recognizes that persistent memory attacks are fundamentally different from single-session prompt injection (LLM01): poisoned memory entries influence every subsequent interaction, creating "sleeper agent" scenarios where compromise is dormant until activated by triggering conditions. ASI06 maps to LLM01 (prompt injection), LLM04 (data poisoning), and LLM08 (excessive agency) but with new characteristics unique to agents with persistent memory.
+
+The platform's memory system (see [MEMORY.md](./MEMORY.md)) faces threats from both intentional attacks and emergent corruption. The full threat taxonomy and gap analysis is documented in the [Memory security analysis](./MEMORY.md#memory-security-analysis) section of MEMORY.md. The implementation plan is in [ROADMAP.md Iteration 3e](../guides/ROADMAP.md).
+
+### Attack vectors beyond PR review comments
+
+In addition to the PR review comment injection vector detailed below, the memory system is exposed to:
+
+- **Query-based memory injection (MINJA)** — Attacker-crafted task descriptions that embed poisoned content the agent stores as legitimate memory. Research demonstrates 95%+ injection success rates against undefended systems via query-only interactions requiring no direct memory access.
+- **Indirect injection via GitHub issues** — Issue bodies and comments are fetched during context hydration (`context-hydration.ts`) and injected into the agent's context. An adversary can craft issue content containing memory-poisoning payloads that the agent stores as "learned" repository knowledge via the post-task extraction prompt. The system currently does not differentiate between trusted (system) and untrusted (user-submitted) content in the hydration pipeline.
+- **Experience grafting** — Manipulation of the agent's episodic memory to induce behavioral drift (e.g., injecting a fake episode claiming certain tests always fail, causing the agent to skip them).
+- **Poisoned RAG retrieval** — Adversarial content engineered to rank highly for specific semantic queries during `RetrieveMemoryRecordsCommand`, ensuring it is retrieved and incorporated into the agent's context.
+- **Emergent self-corruption** — The agent poisons itself through hallucination crystallization (false memories from hallucinated facts), error compounding feedback loops (bad episodes retrieved by similar tasks), and stale context accumulation (outdated memories weighted equally with current ones). These lack an external attacker signature and are harder to detect.
+
+### Required mitigations (all vectors)
+
+The defense architecture requires six layers (see [MEMORY.md](./MEMORY.md#defense-architecture) for the full model):
+
+1. **Input moderation with trust scoring** — Content sanitization and injection pattern detection before memory write. Composite trust scores (not binary allow/block) based on source provenance, content analysis, and behavioral consistency.
+2. **Memory sanitization with provenance tagging** — Every memory entry carries source metadata (`agent_episode`, `orchestrator_fallback`, `github_issue`, `review_feedback`), content hash (SHA-256), and schema version.
+3. **Storage isolation** — Per-repo namespace isolation (already partially implemented), expiration limits, and size caps.
+4. **Trust-scored retrieval** — At retrieval time, memories are weighted by temporal freshness, source reliability, and pattern consistency. Entries below a trust threshold are excluded from the context budget.
+5. **Write-ahead validation (guardian pattern)** — A separate model evaluates proposed memory updates before commit.
+6. **Continuous monitoring and circuit breakers** — Anomaly detection on memory write patterns, behavioral drift detection, and automatic halt when anomalies are detected.
+
 ### Prompt injection via PR review comments
 
 The review feedback memory loop (see [MEMORY.md](./MEMORY.md)) is the most novel memory component — and the most dangerous from a security perspective. PR review comments are **attacker-controlled input** that gets processed by an LLM and stored as persistent memory influencing future agent behavior.
@@ -169,6 +196,10 @@ AgentCore Memory has **no native backup mechanism**. This is a significant gap f
 
 - **Single GitHub OAuth token** — one token may be shared for all users and repos the platform can access. Any authenticated user can trigger agent work against any repo that token can access. There is no per-user repo scoping.
 - **Guardrails are input-only** — the `PROMPT_ATTACK` filter screens task descriptions at submission. No guardrails are applied to model output during agent execution or to review feedback entering the memory system.
+- **No memory content validation** — retrieved memory records are injected into the agent's context without sanitization, injection pattern scanning, or trust scoring. This is the most critical memory security gap (OWASP ASI06). See [MEMORY.md](./MEMORY.md#memory-security-analysis) for the full gap analysis and [ROADMAP.md Iteration 3e](../guides/ROADMAP.md) for the remediation plan.
+- **No memory provenance or integrity checking** — memory entries carry no source attribution, content hashing, or trust metadata. The system cannot distinguish agent-generated memory from externally-influenced content.
+- **GitHub issue content as untrusted input** — issue bodies and comments (attacker-controlled) are injected into the agent's context during hydration without trust differentiation.
+- **No memory rollback or quarantine** — the 365-day AgentCore Memory expiration is the only cleanup mechanism. There is no snapshot, rollback, or quarantine capability for suspected poisoned entries.
 - **No MFA** — Cognito MFA is disabled (CLI-based auth flow). Should be enabled for production deployments.
 - **No customer-managed KMS** — all encryption at rest uses AWS-managed keys. Customer-managed KMS can be added if required by compliance policy.
 - **CORS is fully open** — `ALL_ORIGINS` is configured for CLI consumption. Restrict origins when exposing browser clients.

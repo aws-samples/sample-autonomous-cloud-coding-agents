@@ -178,6 +178,51 @@ These practices apply continuously across iterations and are not treated as one-
 
 ---
 
+## Iteration 3e — Memory security and integrity
+
+**Goal:** Harden the memory system against both adversarial corruption (prompt injection into memory, poisoned tool outputs, experience grafting) and emergent corruption (hallucination crystallization, feedback loops, stale context accumulation). OWASP classifies this as **ASI06 — Memory & Context Poisoning** in the [2026 Top 10 for Agentic Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/).
+
+### Background
+
+Deep research identified **9 memory-layer security gaps** in the current architecture (see the [Memory Security Analysis](#memory-security-analysis) section in [MEMORY.md](../design/MEMORY.md)). The platform has strong network-layer security (VPC isolation, DNS Firewall, HTTPS-only egress) but lacks memory content validation, provenance tracking, trust scoring, anomaly detection, and rollback capabilities. Research shows that MINJA-style attacks achieve 95%+ injection success rates against undefended agent memory systems, and that emergent self-corruption (hallucination crystallization, error compounding feedback loops) is equally dangerous because it lacks an external attacker signature.
+
+### Phase 1 — Input hardening
+
+- [ ] **Memory content sanitization** — Add content validation in `loadMemoryContext()` (`src/handlers/shared/memory.ts`). Scan retrieved memory records for injection patterns (embedded instructions, system prompt overrides, command injection payloads) before including them in the agent's context. Implement a `sanitizeMemoryContent()` function that strips or flags suspicious patterns while preserving legitimate repository knowledge.
+- [ ] **GitHub issue input sanitization** — Add trust-boundary-aware sanitization in `context-hydration.ts` for GitHub issue bodies and comments. These are attacker-controlled inputs that currently flow into the agent's context without differentiation. Strip control characters, embedded instruction patterns, and known injection payloads. Tag the content source as `untrusted-external` in the hydrated context.
+- [ ] **Source provenance on memory writes** — Tag all memory writes with source provenance metadata. In `memory.ts` (`writeMinimalEpisode`) and `agent/memory.py` (`write_task_episode`, `write_repo_learnings`), add a `source_type` field to event metadata: `agent_episode`, `agent_learning`, `orchestrator_fallback`, `github_issue`, or `review_feedback`. This enables trust-differentiated retrieval in Phase 2.
+- [ ] **Content integrity hashing** — Add SHA-256 content hashing on all memory writes. Store the hash in event metadata. At read time, verify that content has not been modified between write and read. Implementation: compute hash before `CreateEventCommand`, store as `content_hash` metadata, verify on `RetrieveMemoryRecordsCommand` results.
+
+### Phase 2 — Trust-aware retrieval
+
+- [ ] **Trust scoring at retrieval** — Modify `loadMemoryContext()` to weight retrieved memories by temporal freshness, source type reliability, and pattern consistency with other memories. Memories from `orchestrator_fallback` and `agent_episode` sources receive higher trust than memories derived from external inputs. Entries below a configurable trust threshold are deprioritized or excluded from the 2,000-token budget.
+- [ ] **Configurable temporal decay** — Implement per-entry TTL with configurable decay rates. Unverified or externally-sourced memory entries decay faster (e.g., 30-day default) than agent-generated or human-confirmed entries (e.g., 365-day default). Add `trust_tier` and `decay_rate` to the memory metadata schema.
+- [ ] **Memory validation Lambda** — Add a lightweight validation function triggered on `CreateEventCommand` (via EventBridge rule on AgentCore events or as a post-write hook). The validator runs a classifier that checks whether new memory content looks like legitimate repository knowledge or could influence future agent behavior in unintended ways (the "guardian pattern"). Flag suspicious entries for operator review.
+
+### Phase 3 — Detection and response
+
+- [ ] **Memory write anomaly detection** — Instrument memory write operations with CloudWatch custom metrics: write frequency per repo, average content length, source type distribution. Add CloudWatch Alarms for anomalous patterns (e.g., burst of writes from a single task, unusually long content, writes with `untrusted-external` source type exceeding a threshold).
+- [ ] **Circuit breaker in orchestrator** — Add circuit breaker logic in `orchestrator.ts`: if the agent's tool invocation patterns or memory write patterns deviate from a baseline (e.g., sudden increase in memory writes, writes containing instruction-like patterns), pause the task and emit an alert. The circuit breaker transitions the task to a new `MEMORY_REVIEW` state that requires operator intervention.
+- [ ] **Memory quarantine API** — Expose an operator API endpoint (`POST /v1/memory/quarantine`, `GET /v1/memory/quarantine`) for flagging and isolating suspicious memory entries. Quarantined entries are excluded from retrieval but preserved for forensic analysis.
+- [ ] **Memory rollback capability** — Implement point-in-time memory snapshots. Before each task starts, snapshot the current memory state for the target repo (via the existing `loadMemoryContext` path, persisted to S3). If poisoning is detected post-task, operators can restore the repo's memory to the pre-task snapshot. Add `POST /v1/memory/rollback` endpoint.
+
+### Phase 4 — Advanced protections
+
+- [ ] **Write-ahead validation (guardian model)** — Route proposed memory writes through a smaller, cheaper model (e.g., Haiku) that evaluates whether the content is legitimate learned context or could be adversarial. Adds latency (~100-500ms per write) but catches sophisticated attacks that evade pattern-based sanitization. Configurable per-repo via Blueprint.
+- [ ] **Cross-task behavioral drift detection** — Compare agent reasoning patterns and tool invocation sequences across tasks for the same repo. Detect drift from established baselines that could indicate memory-influenced behavioral manipulation. Implemented as a post-task analysis step in the evaluation pipeline.
+- [ ] **Cryptographic provenance chain** — Implement Merkle tree-based provenance for memory entry chains per repo. Each new entry includes a hash of the previous entry, creating an append-only, tamper-evident chain. Enables cryptographic verification that no entries have been inserted, modified, or deleted between known-good checkpoints.
+- [ ] **Red team validation** — Red team the memory system using published attack methodologies: MINJA (query-based memory injection), AgentPoison (RAG retrieval poisoning), and experience grafting. Document results and adjust defenses. Add automated red team tests to the evaluation pipeline using the DeepTeam framework (OWASP ASI06 attack categories).
+
+### Non-backward-compatible changes
+
+- Memory metadata schema changes (`source_type`, `content_hash`, `trust_tier`, `decay_rate`) require `schema_version: "3"` and are not readable by v2 code paths without migration.
+- The `MEMORY_REVIEW` task state is a new addition to the state machine (requires orchestrator, API contract, and observability updates).
+- Trust-scored retrieval changes the memory context budget allocation, which may affect prompt version hashing.
+
+**Builds on Iteration 3d:** Review feedback memory and PR outcome tracking are in place; this iteration hardens the memory system that those components write to. The 4-phase approach allows incremental deployment with measurable security improvement at each phase.
+
+---
+
 ## Iteration 4 — Integrations, visual proof, and control panel
 
 **Goal:** Additional git providers; agent can run the app and attach visual proof; Slack integration; web dashboard for operators and users; real-time streaming.
@@ -244,6 +289,7 @@ These practices apply continuously across iterations and are not treated as one-
 - **Iteration 3b** ✅ — Memory Tier 1 (repo knowledge, task episodes), insights, agent self-feedback, prompt versioning, per-prompt commit attribution. CDK L2 construct with named semantic + episodic strategies using namespace templates (`/{actorId}/knowledge/`, `/{actorId}/episodes/{sessionId}/`), fail-open memory load/write, orchestrator fallback episode, SHA-256 prompt hashing, git trailer attribution.
 - **Iteration 3c** — Per-repo GitHub App credentials, orchestrator pre-flight checks (fail-closed before session start), pre-execution task risk classification (model/limits/approval policy selection), tiered validation pipeline (tool validation, code quality analysis, post-execution risk/blast radius analysis), PR risk level, PR review task type, multi-modal input.
 - **Iteration 3d** — Review feedback memory loop (Tier 2), PR outcome tracking, evaluation pipeline (basic).
+- **Iteration 3e** — Memory security and integrity: input hardening (content sanitization, provenance tagging, integrity hashing), trust-aware retrieval (trust scoring, temporal decay, guardian validation), detection and response (anomaly detection, circuit breaker, quarantine, rollback), advanced protections (write-ahead validation, behavioral drift detection, cryptographic provenance, red teaming). Addresses OWASP ASI06 (Memory & Context Poisoning).
 - **Iteration 3bis** (hardening) — Orchestrator IAM grant for Memory (was silently AccessDenied), memory schema versioning (`schema_version: "2"`), Python repo format validation, severity-aware error logging in Python memory, narrowed entrypoint try-catch, orchestrator fallback episode observability, conditional writes in agent task_state.py (ConditionExpression guards), orchestrator Lambda error alarm (CloudWatch, retryAttempts: 0), concurrency counter reconciliation (scheduled Lambda, drift correction), multi-AZ NAT documentation (already configurable), Python unit tests (pytest), entrypoint decomposition (4 extracted subfunctions), dual prompt assembly deprecation docstring, graceful thread drain in server.py (shutdown hook + atexit), dead QUEUED state removal (8 states, 4 active).
 - **Iteration 4** — Additional git providers, visual proof (screenshots/videos), Slack channel, skills pipeline, user preference memory (Tier 3), control panel (restrict CORS to dashboard origin), real-time event streaming (WebSocket), live session replay and mid-task nudge, browser extension client, MFA for production.
 - **Iteration 5** — Snapshot-on-schedule pre-warming, multi-user/team, memory isolation for multi-tenancy, full cost management, adaptive model router with cost-aware cascade, advanced evaluation (optional adaptive-teaching / trajectory-driven prompt patterns), formal orchestrator verification with TLA+/TLC, full Bedrock Guardrails (PII, denied topics, output filters), capability-based security model, alternate runtime, advanced customization with tiered tool access (MCP/plugins via AgentCore Gateway), full dashboard, AI-specific WAF rules.
