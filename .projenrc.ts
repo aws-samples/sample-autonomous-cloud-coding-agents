@@ -65,6 +65,25 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   workflowNodeVersion: '22.x', // 'ACTIVE'
   release: false,
   github: true,
+  githubOptions: {
+    pullRequestLintOptions: {
+      semanticTitleOptions: {
+        types: [
+          'build',
+          'chore',
+          'ci',
+          'docs',
+          'feat',
+          'fix',
+          'perf',
+          'refactor',
+          'revert',
+          'style',
+          'test',
+        ],
+      },
+    },
+  },
   licensed: true,
   license: 'MIT-0',
   copyrightPeriod: '2026-',
