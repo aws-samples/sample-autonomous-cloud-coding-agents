@@ -20,6 +20,7 @@
 import { App, Aspects } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { AgentStack } from './stacks/agent';
+import { FargateAgentStack } from './stacks/fargate-agent';
 
 // for development, use account/region from cdk cli
 const devEnv = {
@@ -31,7 +32,7 @@ const app = new App();
 
 Aspects.of(app).add(new AwsSolutionsChecks());
 
-new AgentStack(
+const agentStack = new AgentStack(
   app,
   'backgroundagent-dev',
   {
@@ -39,5 +40,18 @@ new AgentStack(
     description: 'ABCA Development Stack',
   },
 );
+
+new FargateAgentStack(app, 'backgroundagent-fargate-dev', {
+  env: devEnv,
+  description: 'ABCA Fargate Development Stack',
+  vpc: agentStack.agentVpc.vpc,
+  runtimeSecurityGroup: agentStack.agentVpc.runtimeSecurityGroup,
+  taskTable: agentStack.taskTable.table,
+  taskEventsTable: agentStack.taskEventsTable.table,
+  userConcurrencyTable: agentStack.userConcurrencyTable.table,
+  repoTable: agentStack.repoTable.table,
+  githubTokenSecret: agentStack.githubTokenSecret,
+  memoryId: agentStack.agentMemory?.memory.memoryId,
+});
 
 app.synth();

@@ -80,7 +80,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   ],
   buildWorkflowOptions: {
     env: {
-      GITHUB_TOKEN: '${{ secrets.PROJEN_GITHUB_TOKEN }}',
+      GITHUB_TOKEN: '${{ secrets.PROJEN_GITHUB_TOKEN || github.token }}',
     },
   },
   gitignore: [

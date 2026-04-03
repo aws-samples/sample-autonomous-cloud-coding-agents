@@ -44,6 +44,15 @@ import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
 
 export class AgentStack extends Stack {
+  public readonly taskTable: TaskTable;
+  public readonly taskEventsTable: TaskEventsTable;
+  public readonly userConcurrencyTable: UserConcurrencyTable;
+  public readonly repoTable: RepoTable;
+  public readonly webhookTable: WebhookTable;
+  public readonly agentVpc: AgentVpc;
+  public readonly githubTokenSecret: secretsmanager.Secret;
+  public readonly agentMemory: AgentMemory;
+
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
 
@@ -52,16 +61,16 @@ export class AgentStack extends Stack {
     const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 
     // Task state persistence
-    const taskTable = new TaskTable(this, 'TaskTable');
-    const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
-    const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
-    const webhookTable = new WebhookTable(this, 'WebhookTable');
-    const repoTable = new RepoTable(this, 'RepoTable');
+    this.taskTable = new TaskTable(this, 'TaskTable');
+    this.taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
+    this.userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
+    this.webhookTable = new WebhookTable(this, 'WebhookTable');
+    this.repoTable = new RepoTable(this, 'RepoTable');
 
     // --- Repository onboarding ---
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
       repo: 'krokoko/agent-plugins',
-      repoTable: repoTable.table,
+      repoTable: this.repoTable.table,
     });
 
     const blueprints = [agentPluginsBlueprint];
@@ -97,12 +106,12 @@ export class AgentStack extends Stack {
     });
 
     // GitHub token stored in Secrets Manager — agent fetches at startup via ARN
-    const githubTokenSecret = new secretsmanager.Secret(this, 'GitHubTokenSecret', {
+    this.githubTokenSecret = new secretsmanager.Secret(this, 'GitHubTokenSecret', {
       description: 'GitHub personal access token for the background agent',
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    NagSuppressions.addResourceSuppressions(githubTokenSecret, [
+    NagSuppressions.addResourceSuppressions(this.githubTokenSecret, [
       {
         id: 'AwsSolutions-SMG4',
         reason: 'GitHub PAT is managed externally — automatic rotation is not applicable',
@@ -110,49 +119,49 @@ export class AgentStack extends Stack {
     ]);
 
     // Network isolation — VPC with restricted egress
-    const agentVpc = new AgentVpc(this, 'AgentVpc');
+    this.agentVpc = new AgentVpc(this, 'AgentVpc');
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
     const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];
     new DnsFirewall(this, 'DnsFirewall', {
-      vpc: agentVpc.vpc,
+      vpc: this.agentVpc.vpc,
       additionalAllowedDomains: additionalDomains,
       observationMode: true,
     });
 
     // --- AgentCore Memory (cross-task learning) ---
-    const agentMemory = new AgentMemory(this, 'AgentMemory');
+    this.agentMemory = new AgentMemory(this, 'AgentMemory');
 
     const runtime = new agentcore.Runtime(this, 'Runtime', {
       runtimeName,
       agentRuntimeArtifact: artifact,
       networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
-        vpc: agentVpc.vpc,
+        vpc: this.agentVpc.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        securityGroups: [agentVpc.runtimeSecurityGroup],
+        securityGroups: [this.agentVpc.runtimeSecurityGroup],
       }),
       environmentVariables: {
-        GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
+        GITHUB_TOKEN_SECRET_ARN: this.githubTokenSecret.secretArn,
         AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
         CLAUDE_CODE_USE_BEDROCK: '1',
         ANTHROPIC_LOG: 'debug',
         ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
-        TASK_TABLE_NAME: taskTable.table.tableName,
-        TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
-        USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
+        TASK_TABLE_NAME: this.taskTable.table.tableName,
+        TASK_EVENTS_TABLE_NAME: this.taskEventsTable.table.tableName,
+        USER_CONCURRENCY_TABLE_NAME: this.userConcurrencyTable.table.tableName,
         LOG_GROUP_NAME: applicationLogGroup.logGroupName,
-        MEMORY_ID: agentMemory.memory.memoryId,
+        MEMORY_ID: this.agentMemory.memory.memoryId,
         MAX_TURNS: '100',
         // ENABLE_CLI_TELEMETRY: '1',
       },
     });
 
-    taskTable.table.grantReadWriteData(runtime);
-    taskEventsTable.table.grantReadWriteData(runtime);
-    userConcurrencyTable.table.grantReadWriteData(runtime);
-    githubTokenSecret.grantRead(runtime);
+    this.taskTable.table.grantReadWriteData(runtime);
+    this.taskEventsTable.table.grantReadWriteData(runtime);
+    this.userConcurrencyTable.table.grantReadWriteData(runtime);
+    this.githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
-    agentMemory.grantReadWrite(runtime);
+    this.agentMemory.grantReadWrite(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -188,7 +197,9 @@ export class AgentStack extends Stack {
 
     // Runtime logs and traces
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+    // X-Ray trace delivery requires UpdateTraceSegmentDestination pre-configuration at the account level.
+    // Disabled until the aws/spans log group and X-Ray resource policy are set up.
+    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
 
     NagSuppressions.addResourceSuppressions(runtime, [
@@ -204,32 +215,32 @@ export class AgentStack extends Stack {
     });
 
     new CfnOutput(this, 'TaskTableName', {
-      value: taskTable.table.tableName,
+      value: this.taskTable.table.tableName,
       description: 'Name of the DynamoDB task state table',
     });
 
     new CfnOutput(this, 'TaskEventsTableName', {
-      value: taskEventsTable.table.tableName,
+      value: this.taskEventsTable.table.tableName,
       description: 'Name of the DynamoDB task events audit table',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {
-      value: userConcurrencyTable.table.tableName,
+      value: this.userConcurrencyTable.table.tableName,
       description: 'Name of the DynamoDB user concurrency table',
     });
 
     new CfnOutput(this, 'WebhookTableName', {
-      value: webhookTable.table.tableName,
+      value: this.webhookTable.table.tableName,
       description: 'Name of the DynamoDB webhook table',
     });
 
     new CfnOutput(this, 'RepoTableName', {
-      value: repoTable.table.tableName,
+      value: this.repoTable.table.tableName,
       description: 'Name of the DynamoDB repo config table',
     });
 
     new CfnOutput(this, 'GitHubTokenSecretArn', {
-      value: githubTokenSecret.secretArn,
+      value: this.githubTokenSecret.secretArn,
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
@@ -250,31 +261,31 @@ export class AgentStack extends Stack {
 
     // --- Task Orchestrator (durable Lambda function) ---
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
-      taskTable: taskTable.table,
-      taskEventsTable: taskEventsTable.table,
-      userConcurrencyTable: userConcurrencyTable.table,
-      repoTable: repoTable.table,
+      taskTable: this.taskTable.table,
+      taskEventsTable: this.taskEventsTable.table,
+      userConcurrencyTable: this.userConcurrencyTable.table,
+      repoTable: this.repoTable.table,
       runtimeArn: runtime.agentRuntimeArn,
-      githubTokenSecretArn: githubTokenSecret.secretArn,
-      memoryId: agentMemory.memory.memoryId,
+      githubTokenSecretArn: this.githubTokenSecret.secretArn,
+      memoryId: this.agentMemory.memory.memoryId,
     });
 
     // Grant the orchestrator Lambda read+write access to memory
     // (reads during context hydration, writes for fallback episodes)
-    agentMemory.grantReadWrite(orchestrator.fn);
+    this.agentMemory.grantReadWrite(orchestrator.fn);
 
     // --- Concurrency counter reconciler (drift correction) ---
     new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
-      taskTable: taskTable.table,
-      userConcurrencyTable: userConcurrencyTable.table,
+      taskTable: this.taskTable.table,
+      userConcurrencyTable: this.userConcurrencyTable.table,
     });
 
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = new TaskApi(this, 'TaskApi', {
-      taskTable: taskTable.table,
-      taskEventsTable: taskEventsTable.table,
-      repoTable: repoTable.table,
-      webhookTable: webhookTable.table,
+      taskTable: this.taskTable.table,
+      taskEventsTable: this.taskEventsTable.table,
+      repoTable: this.repoTable.table,
+      webhookTable: this.webhookTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,

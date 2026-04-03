@@ -134,6 +134,10 @@ export class AgentVpc extends Construct {
       { id: 'BedrockRuntimeEndpoint', service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME },
       { id: 'StsEndpoint', service: ec2.InterfaceVpcEndpointAwsService.STS },
       { id: 'XRayEndpoint', service: ec2.InterfaceVpcEndpointAwsService.XRAY },
+      { id: 'EcsEndpoint', service: ec2.InterfaceVpcEndpointAwsService.ECS },
+      { id: 'EcsAgentEndpoint', service: ec2.InterfaceVpcEndpointAwsService.ECS_AGENT },
+      { id: 'EcsTelemetryEndpoint', service: ec2.InterfaceVpcEndpointAwsService.ECS_TELEMETRY },
+      { id: 'StepFunctionsEndpoint', service: ec2.InterfaceVpcEndpointAwsService.STEP_FUNCTIONS },
     ];
 
     for (const ep of interfaceEndpoints) {

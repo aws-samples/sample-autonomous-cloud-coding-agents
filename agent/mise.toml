@@ -7,7 +7,6 @@ semgrep = "latest"
 uv = "latest"
 "grype" = "0.109.0"
 osv-scanner = "latest"
-"aqua:aquasecurity/trivy" = "0.69.2"
 
 [env]
 _.python.venv = { path = ".venv", create = true }
@@ -75,10 +74,15 @@ run = [
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
-run = [
-  "docker image inspect bgagent-local:latest >/dev/null 2>&1 || (ARCH=\"$(uname -m)\"; PLATFORM=\"linux/arm64\"; if [ \"$ARCH\" = \"x86_64\" ]; then PLATFORM=\"linux/amd64\"; fi; docker build --build-arg TARGETPLATFORM=\"$PLATFORM\" --build-arg CACHE_BUST=\"$(date +%s)\" -t bgagent-local:latest .)",
-  "trivy image --scanners vuln --ignore-unfixed --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 bgagent-local:latest",
-]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+TRIVY_VERSION=v0.69.2
+export PATH="$HOME/.local/bin:$PATH"
+command -v trivy >/dev/null 2>&1 || (mkdir -p "$HOME/.local/bin" && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$HOME/.local/bin" "$TRIVY_VERSION")
+docker image inspect bgagent-local:latest >/dev/null 2>&1 || (ARCH="$(uname -m)"; PLATFORM="linux/arm64"; if [ "$ARCH" = "x86_64" ]; then PLATFORM="linux/amd64"; fi; docker build --build-arg TARGETPLATFORM="$PLATFORM" --build-arg CACHE_BUST="$(date +%s)" -t bgagent-local:latest .)
+trivy image --scanners vuln --ignore-unfixed --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 bgagent-local:latest
+'''
 
 [tasks.quality]
 description = "Run quality checks"
