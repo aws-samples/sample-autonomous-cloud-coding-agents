@@ -13,7 +13,7 @@ jobs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
     env:
       CI: "true"
-      GITHUB_TOKEN: ${{ secrets.PROJEN_GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.PROJEN_GITHUB_TOKEN || github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5

@@ -16,6 +16,7 @@
     "src/content/docs/design/Control-panel.md",
     "src/content/docs/design/Cost-model.md",
     "src/content/docs/design/Evaluation.md",
+    "src/content/docs/design/Fargate-stack.md",
     "src/content/docs/design/Input-gateway.md",
     "src/content/docs/design/Memory.md",
     "src/content/docs/design/Network-architecture.md",

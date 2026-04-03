@@ -106,14 +106,42 @@ describe('AgentVpc', () => {
     });
   });
 
-  test('creates 7 interface endpoints with private DNS', () => {
+  test('creates 11 interface endpoints with private DNS', () => {
     const endpoints = template.findResources('AWS::EC2::VPCEndpoint', {
       Properties: {
         VpcEndpointType: 'Interface',
         PrivateDnsEnabled: true,
       },
     });
-    expect(Object.keys(endpoints).length).toBe(7);
+    expect(Object.keys(endpoints).length).toBe(11);
+  });
+
+  test('creates ECS interface endpoint', () => {
+    template.hasResourceProperties('AWS::EC2::VPCEndpoint', {
+      ServiceName: Match.stringLikeRegexp('com\\.amazonaws\\..*\\.ecs$'),
+      VpcEndpointType: 'Interface',
+    });
+  });
+
+  test('creates ECS Agent interface endpoint', () => {
+    template.hasResourceProperties('AWS::EC2::VPCEndpoint', {
+      ServiceName: Match.stringLikeRegexp('com\\.amazonaws\\..*\\.ecs-agent'),
+      VpcEndpointType: 'Interface',
+    });
+  });
+
+  test('creates ECS Telemetry interface endpoint', () => {
+    template.hasResourceProperties('AWS::EC2::VPCEndpoint', {
+      ServiceName: Match.stringLikeRegexp('com\\.amazonaws\\..*\\.ecs-telemetry'),
+      VpcEndpointType: 'Interface',
+    });
+  });
+
+  test('creates Step Functions interface endpoint', () => {
+    template.hasResourceProperties('AWS::EC2::VPCEndpoint', {
+      ServiceName: Match.stringLikeRegexp('com\\.amazonaws\\..*\\.states'),
+      VpcEndpointType: 'Interface',
+    });
   });
 
   test('creates 2 gateway endpoints', () => {
