@@ -15,11 +15,6 @@
     <img alt="Stability" src="https://img.shields.io/badge/stability-Experimental-important.svg?style=for-the-badge" />
   </p>
   <br />
-  <a href="https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/actions/workflows/build.yml">
-    <img alt="CI Status" src="https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/actions/workflows/build.yml/badge.svg" />
-  </a>
-  <br />
-  <br />
 </div>
 
 ## What is ABCA
