@@ -84,7 +84,7 @@ A documentation site is available containing all design documents, roadmap and g
 
 ## Disclaimer
 
-The example provided in this repository is for experimental and educational purposes only. It demonstrates concepts and techniques but are not intended for direct use in production environments.
+The example provided in this repository is for experimental and educational purposes only. It demonstrates concepts and techniques but is not intended for direct use in production environments.
 
 ## License
 

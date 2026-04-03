@@ -7,6 +7,16 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'ABCA Docs',
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents',
+        },
+      ],
+      components: {
+        Search: './src/components/Search.astro',
+      },
       head: [
         {
           tag: 'script',
