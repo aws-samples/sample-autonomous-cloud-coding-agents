@@ -16,6 +16,8 @@ export default defineConfig({
       ],
       components: {
         Search: './src/components/Search.astro',
+        SiteTitle: './src/components/SiteTitle.astro',
+        Sidebar: './src/components/Sidebar.astro',
       },
       head: [
         {
