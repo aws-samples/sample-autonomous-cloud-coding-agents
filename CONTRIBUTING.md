@@ -36,7 +36,17 @@ When filing an issue, please check [existing open](https://github.com/aws-sample
 
 ---
 
-Projen is opinionated and mandates that all project configuration be done through the `.projenrc.ts` file. For instance, if you directly change `package.json`, Projen will detect that during the release phase and fail the release attempt. It is a good idea to run `npx projen` from the repository root before pushing code so generated files stay in sync.
+## mise (monorepo)
+
+This repository uses [mise](https://mise.jdx.dev/) for tool versions and tasks. The root **`mise.toml`** enables [monorepo tasks](https://mise.jdx.dev/tasks/monorepo.html) with **`[monorepo].config_roots`** for **`cdk`**, **`agent`**, **`cli`**, and **`docs`**.
+
+- After cloning, run **`mise trust`** in the repository root (and in **`agent/`** if you use tasks there in isolation) so mise will load **`mise.toml`** files. See [mise trust](https://mise.jdx.dev/cli/trust.html).
+- Set **`export MISE_EXPERIMENTAL=1`** in your shell (or add it to your environment) when using **namespaced tasks** such as **`mise //cdk:build`** or **`mise run //agent:install`**. Root tasks like **`mise run install`** and **`mise run build`** work without cross-package references and are enough for most workflows.
+- From the repo root: **`mise run install`** runs **`yarn install`** and **`mise run install`** in **`agent/`**. **`mise run build`** runs **`//agent:quality`** first (the CDK stack bundles the agent image), then **`//cdk:build`**, **`//cli:build`**, and **`//docs:build`** in order.
+
+---
+
+Project configuration is hand-owned in this repository. Prefer `mise` tasks from the repo root (`mise run install`, `mise run build`) or package-level tasks (`mise //cdk:build`, `mise //cli:build`, `mise //docs:build`).
 
 ### Step 1: Open Issue
 
@@ -122,8 +132,8 @@ BREAKING CHANGE: Description of what broke and how to achieve this behavior now
 
 #### Build steps
 
-- The Build workflow - controlled by the buildWorkflow field. On a ‘pull_request’ or ‘workflow_dispatch’ the library will be built and checked for anti-tamper (ensure no manual changes to generated files).
-- The Release workflow - controlled by the releaseWorkflow field. On a push to main (overridden at props.defaultReleaseBranch) the library is built, anti-tampered, version bumped with a commit, pushed back to git, and then published to the configured artifact repositories (e.g. npm, pypi).
+- The Build workflow runs on `pull_request` and `workflow_dispatch`, runs **`mise run install`** (Yarn workspaces + agent Python), then **`mise run build`**.
+- Release/versioning is currently managed through conventional commits and repository automation (not Projen self-mutation).
 
 Every commit to the default (main) branch marked as feat or fix will trigger a new version release (trunk-based development). This includes the following steps:
 
@@ -133,22 +143,21 @@ Every commit to the default (main) branch marked as feat or fix will trigger a n
 Packages are published to all target package managers.
 
 > **Warning**
-> Projen synthesizes files that are part of your source repository. This means that when you change your `.projenrc.ts` file and execute `npx projen`, other files in your repo may change as a result.
-> Make sure to push those modified files as well. Otherwise, the self-mutation step of the build will fail. This ensures that a pull request branch always represents the final state of the repository.
+> Some docs files are synchronized from source guides/design files. When changing docs sources, run the docs sync/build tasks so generated docs content is up to date in your branch.
 
 ### Step 6: Merge
 
 * Once approved and tested, a maintainer will squash-merge to main and will use your PR title/description as the
   commit message.
 
-Projen automatically performs semantic versioning based on [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+The project uses semantic versioning based on [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 
 For example:
 
 - fix: bump PATCH version (v0.0.1)
 - feat: bump MINOR version (v0.1.0)
 
-MAJOR version must be explicitly bumped by adding majorVersion: x to .projenrc.ts to protect users from critical changes.
+MAJOR version bumps should be done explicitly through your release process configuration to protect users from critical changes.
 
 GitHub provides additional documentation on [forking a repository](https://help.github.com/articles/fork-a-repo/) and
 [creating a pull request](https://help.github.com/articles/creating-a-pull-request/).

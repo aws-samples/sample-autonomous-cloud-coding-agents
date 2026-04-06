@@ -47,7 +47,7 @@ export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
 
-    const runnerPath = path.join(__dirname, '..', '..', 'agent');
+    const runnerPath = path.join(__dirname, '..', '..', '..', 'agent');
 
     const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 

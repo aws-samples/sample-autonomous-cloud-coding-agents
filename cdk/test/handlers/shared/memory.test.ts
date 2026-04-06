@@ -42,7 +42,7 @@ describe('loadMemoryContext', () => {
         // Semantic search result
         memoryRecordSummaries: [
           { content: { text: 'This repo uses Jest for testing' } },
-          { content: { text: 'Build system is projen + CDK' } },
+          { content: { text: 'Build system is mise + CDK' } },
         ],
       })
       .mockResolvedValueOnce({

@@ -1,0 +1,101 @@
+# Root mise config: monorepo task discovery + shared tools.
+# See https://mise.jdx.dev/tasks/monorepo.html
+min_version = "2026.2.6"
+
+experimental_monorepo_root = true
+
+[settings]
+experimental = true
+
+[tools]
+node = "22"
+gitleaks = "latest"
+semgrep = "latest"
+osv-scanner = "latest"
+"grype" = "0.110.0"
+
+[monorepo]
+config_roots = ["cdk", "agent", "cli", "docs"]
+
+##################
+###### CORE ######
+##################
+
+# One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`).
+# `//cdk:install`, `//cli:install`, and `//docs:install` are thin wrappers around the same command.
+[tasks.install]
+description = "Yarn workspaces (cdk, cli, docs) + agent Python (uv)"
+run = [
+  "yarn install --check-files",
+  "cd agent && mise run install",
+]
+
+##################
+###### QUALITY ###
+##################
+
+[tasks.quality]
+description = "Monorepo quality checks (agent quality, then cdk, cli, docs)"
+depends = ["//agent:quality"]
+run = [
+  "MISE_EXPERIMENTAL=1 mise //cdk:eslint",
+  "MISE_EXPERIMENTAL=1 mise //cli:eslint",
+  "MISE_EXPERIMENTAL=1 mise //docs:check",
+]
+
+##################
+#### SECURITY ####
+##################
+
+[tasks."security:secrets"]
+description = "Scan for secrets with gitleaks"
+run = "gitleaks detect --source . --no-banner"
+
+[tasks."security:sast"]
+description = "SAST scan with semgrep (auto + OWASP top 10)"
+run = "semgrep scan --config auto --config p/python --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+
+[tasks."security:deps"]
+description = "Audit dependencies for known vulnerabilities (osv-scanner)"
+# Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
+run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock"
+
+[tasks."security:grype"]
+description = "Run Grype"
+run = [
+  "grype . --fail-on high"
+]
+
+[tasks."security:retire"]
+description = "Retire.js (CDK, CLI, docs)"
+run = "npx retire --path cdk --severity high --ignore \"node_modules/**,cdk.out/**,cdk/cdk.out/**\" && cd cli && npm run security:retire && cd ../docs && npm run security:retire"
+
+[tasks.security]
+description = "Run security scans"
+run = [
+    { task = "security:secrets" },
+    { task = "security:deps" },
+    { task = "security:sast" },
+    { task = "security:grype" },
+    { task = "security:retire" },
+    { task = "mise //agent:security"} # additional agent specific security scans
+]
+
+##################
+##### BUILD #####
+##################
+
+# Agent code is packaged by CDK (Docker asset); validate Python before heavy JS/CDK work.
+# Multiple `depends` run in parallel, so agent is a sole prerequisite, then packages run in order.
+[tasks.build]
+description = "Monorepo build (agent quality, then cdk, cli, docs)"
+depends = ["//agent:quality"]
+run = [
+  "MISE_EXPERIMENTAL=1 mise //cdk:build",
+  "MISE_EXPERIMENTAL=1 mise //cli:build",
+  "MISE_EXPERIMENTAL=1 mise //docs:build",
+]
+
+[tasks.default]
+description = "Install + build"
+depends = [":install", ":build"]

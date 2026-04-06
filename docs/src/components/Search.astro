@@ -61,9 +61,8 @@ if (project.trailingSlash === 'never') dataAttributes['data-strip-trailing-slash
 
 {
 	/**
-	 * This is intentionally inlined to avoid briefly showing an invalid shortcut.
-	 * Purposely using the deprecated `navigator.platform` property to detect Apple devices, as the
-	 * user agent is spoofed by some browsers when opening the devtools.
+	 * Inlined so we never flash the wrong modifier. Prefer `userAgentData.platform`, then fall back to
+	 * `userAgent` (not `navigator.platform`, which is deprecated).
 	 */
 }
 <script is:inline>
@@ -72,7 +71,11 @@ if (project.trailingSlash === 'never') dataAttributes['data-strip-trailing-slash
 		const shortcut = openBtn?.querySelector('kbd');
 		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
 		const platformKey = shortcut.querySelector('kbd');
-		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+		const uad = navigator.userAgentData;
+		const fromClientHints =
+			typeof uad?.platform === 'string' && /mac|iphone|ipad|ipod/i.test(uad.platform);
+		const fromUA = /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
+		if (platformKey && (fromClientHints || fromUA)) {
 			platformKey.textContent = '⌘';
 			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
 		}

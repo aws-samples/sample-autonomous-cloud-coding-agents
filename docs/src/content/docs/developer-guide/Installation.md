@@ -25,7 +25,6 @@ Default output format [None]: json
 - [Node](https://nodejs.org/en) >= v22.0.0
 - [AWS CDK](https://github.com/aws/aws-cdk/releases/tag/v2.233.0) >= 2.233.0
 - [Python](https://www.python.org/downloads/) >=3.9
-- [Projen](https://github.com/projen/projen/releases/tag/v0.98.26) >= 0.98.26
 - [Yarn](https://classic.yarnpkg.com/lang/en/docs/cli/install/) >= 1.22.19
 - [mise](https://mise.jdx.dev/getting-started.html) (required for local agent Python tasks and checks)
 - [Docker](https://docs.docker.com/engine/install/)
@@ -44,17 +43,17 @@ Without this, `cdk deploy` will fail with: *"X-Ray Delivery Destination is suppo
 Install [mise](https://mise.jdx.dev/getting-started.html) using the official guide; it is not installed via npm. For the Node-based CLIs, run:
 
 ```bash
-npm install -g npm aws-cdk yarn projen
+npm install -g npm aws-cdk
 ```
 
 Install repository dependencies and run an initial build before making changes:
 
 ```bash
-npx projen install
-npx projen build
+mise run install
+mise run build
 ```
 
-`npx projen install` installs Node/TypeScript dependencies for the repository (including projen subprojects) and runs `mise run install` in `agent/` to install Python dependencies as well.
+`mise run install` runs `yarn install` for the workspaces and `mise run install` in `agent/` for Python dependencies.
 
 ### Suggested development flow
 
@@ -65,7 +64,7 @@ Use this order to iterate quickly and catch issues early:
 ```bash
 cd agent
 # Re-run install only when Python dependencies change
-# (npx projen install already runs this once at repo root)
+# (mise run install at repo root already runs agent install once)
 # mise run install
 mise run quality
 cd ..
@@ -150,18 +149,18 @@ For the full list of environment variables and GitHub PAT permissions, see `agen
 
 ### Deployment
 
-Once your agent works locally, you can deploy it on AWS. A **full** `npx projen deploy` of this stack has been observed at **~572 seconds (~9.5 minutes)** total (CDK-reported *Total time*); expect variation by Region, account state, and whether container layers are already cached.
+Once your agent works locally, you can deploy it on AWS. A **full** `cd cdk && npx cdk deploy` of this stack has been observed at **~572 seconds (~9.5 minutes)** total (CDK-reported *Total time*); expect variation by Region, account state, and whether container layers are already cached.
 
-1. Generate project files (dependencies, etc.) from the configuration file and install them.
+1. Install dependencies (from the repository root).
 
 ```bash
-npx projen install
+mise run install
 ```
 
 2. Run a full build
 
 ```bash
-npx projen build
+MISE_EXPERIMENTAL=1 mise run build
 ```
 
 3. Bootstrap your account
@@ -170,15 +169,15 @@ npx projen build
 cdk bootstrap
 ```
 
-4. Run AWS CDK Toolkit to deploy the stack with the runtime resources.
+4. Deploy the stack with the runtime resources.
 
 ```bash
-npx projen deploy
+cd cdk && npx cdk deploy
 ```
 
 ### Post-deployment setup
 
-After `npx projen deploy` completes, the stack emits the following outputs:
+After `cd cdk && npx cdk deploy` completes, the stack emits the following outputs:
 
 | Output | Description |
 |---|---|
@@ -200,7 +199,7 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Use the **same AWS Region** (and profile) as `npx projen deploy`. If you omit `--region`, the CLI uses your default from `aws configure`; when the stack lives in another Region, `describe-stacks` fails, **stderr** shows the error, and capturing stdout into a shell variable (for example `SECRET_ARN=$(...)`) yields **empty** with no obvious hint—run the `aws` command without `$(...)` to see the message. Add `--region your-region` to every command below if needed.
+Use the **same AWS Region** (and profile) as `cd cdk && npx cdk deploy`. If you omit `--region`, the CLI uses your default from `aws configure`; when the stack lives in another Region, `describe-stacks` fails, **stderr** shows the error, and capturing stdout into a shell variable (for example `SECRET_ARN=$(...)`) yields **empty** with no obvious hint—run the `aws` command without `$(...)` to see the message. Add `--region your-region` to every command below if needed.
 
 If `put-secret-value` returns **`Invalid endpoint: https://secretsmanager..amazonaws.com`** (note the **double dot**), the effective Region string is **empty**—for example `REGION=` was never set, `export REGION` is blank, or `--region "$REGION"` expands to nothing. Set `REGION` to a real value (e.g. `us-east-1`) or run `aws configure set region your-region` so the default is non-empty.
 
@@ -231,7 +230,7 @@ See `agent/README.md` for the required PAT permissions.
 
 #### Onboard repositories
 
-Repositories must be onboarded before tasks can target them. Each repository is registered as a `Blueprint` construct in the CDK stack (`src/stacks/agent.ts`). A `Blueprint` writes a `RepoConfig` record to the shared `RepoTable` DynamoDB table via a CloudFormation custom resource.
+Repositories must be onboarded before tasks can target them. Each repository is registered as a `Blueprint` construct in the CDK stack (`cdk/src/stacks/agent.ts`). A `Blueprint` writes a `RepoConfig` record to the shared `RepoTable` DynamoDB table via a CloudFormation custom resource.
 
 To onboard a repository, add a `Blueprint` instance to the CDK stack:
 
@@ -261,7 +260,7 @@ new Blueprint(this, 'CustomRepoBlueprint', {
 });
 ```
 
-Then redeploy: `npx projen deploy`.
+Then redeploy: `cd cdk && npx cdk deploy`.
 
 When a Blueprint is destroyed (removed from CDK code and redeployed), the record is soft-deleted (`status: 'removed'` with a 30-day TTL). Tasks for removed repos are rejected with `REPO_NOT_ONBOARDED`.
 
