@@ -2,17 +2,38 @@ name: build
 on:
   pull_request: {}
   workflow_dispatch: {}
+permissions:
+  actions: none
+  attestations: none
+  checks: none
+  contents: none
+  deployments: none
+  discussions: none
+  id-token: none
+  issues: none
+  models: none
+  packages: none
+  pages: none
+  pull-requests: none
+  repository-projects: none
+  security-events: none
+  statuses: none
 jobs:
   build:
-    runs-on: ubuntu-latest
     permissions:
+      actions: write # upload-artifact when self-mutation is detected
       contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
     env:
       CI: "true"
       MISE_EXPERIMENTAL: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 1  # shallow clone
       - name: Install mise
         uses: jdx/mise-action@v3.6.2
         with:
@@ -25,3 +46,25 @@ jobs:
         run: mise run install
       - name: build
         run: mise run build
+      - name: Find mutations
+        id: self_mutation
+        run: |-
+          git add .
+          git diff --staged --patch --exit-code > repo.patch || echo "self_mutation_happened=true" >> $GITHUB_OUTPUT
+        shell: bash
+        working-directory: ./
+
+      - name: Upload patch
+        if: steps.self_mutation.outputs.self_mutation_happened
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v4.4.0
+        with:
+          name: repo.patch
+          path: repo.patch
+          overwrite: true
+
+      - name: Fail build on mutation
+        if: steps.self_mutation.outputs.self_mutation_happened
+        run: |-
+          echo "::error::Files were changed during build (see build log). Please run the build locally and commit the changes."
+          cat repo.patch
+          exit 1
