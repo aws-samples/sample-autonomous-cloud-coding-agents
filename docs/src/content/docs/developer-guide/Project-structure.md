@@ -6,21 +6,20 @@ Top-level layout:
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | CDK app (`main.ts`, `stacks/`, `constructs/`, `handlers/`) |
-| `cli/` | `@backgroundagent/cli` — `bgagent` CLI (Projen `TypeScriptProject` subproject) |
+| `cdk/src/` | CDK app (`main.ts`, `stacks/`, `constructs/`, `handlers/`) |
+| `cli/` | `@backgroundagent/cli` — `bgagent` CLI |
 | `agent/` | Python agent — Docker image, server, prompts |
-| `test/` | Jest tests for the CDK app (mirrors `src/`) |
+| `cdk/test/` | Jest tests for the CDK app (mirrors `cdk/src/`) |
 | `docs/guides/` | Source Markdown: developer, user, roadmap, prompt guides |
 | `docs/design/` | Architecture and design documents (source Markdown) |
 | `docs/imgs/`, `docs/diagrams/` | Documentation assets |
-| `docs/` (Starlight) | Docs site: `astro.config.mjs`, `package.json`; `src/content/docs/` is **generated** from `.projenrc.ts` on `npx projen` |
+| `docs/` (Starlight) | Docs site: `astro.config.mjs`, `package.json`; `src/content/docs/` is **synced** from `docs/guides/` and `docs/design/` via `docs/scripts/sync-starlight.mjs` (`mise //docs:sync`) |
 | `CONTRIBUTING.md` | Contribution guidelines (**repo root**) |
-| `.projenrc.ts` | Root + `cli/` + `docs/` site definition; run `npx projen` after edits |
 
 CDK source tree:
 
 ```
-src/
+cdk/src/
 ├── main.ts                          # CDK app entry point
 ├── stacks/
 │   └── agent.ts                     # Main CDK stack
@@ -59,7 +58,7 @@ src/
 ```
 
 ```
-test/
+cdk/test/
 ├── stacks/
 │   └── agent.test.ts
 ├── constructs/

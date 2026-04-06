@@ -10,7 +10,7 @@ The `bgagent` CLI is the recommended way to interact with the platform. It authe
 
 ```bash
 cd cli
-npx projen build
+mise run build
 
 # Configure with your stack outputs (run from cli/)
 node lib/bin/bgagent.js configure \

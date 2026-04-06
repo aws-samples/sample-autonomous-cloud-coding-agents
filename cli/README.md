@@ -16,7 +16,7 @@ node cli/lib/bin/bgagent.js
 
 ## Quick start
 
-After deploying the stack (`npx projen deploy`), extract the outputs and configure the CLI:
+After deploying the stack (`cd cdk && npx cdk deploy`), extract the outputs and configure the CLI:
 
 ```bash
 # 1. Extract stack outputs into environment variables

@@ -1,0 +1,53 @@
+min_version = "2026.2.6"
+
+[tools]
+node = "22"
+
+[tasks.install]
+description = "Install dependencies from repo root (Yarn workspaces)"
+run = "cd .. && yarn install --check-files"
+
+[tasks.compile]
+description = "TypeScript compile"
+run = "yarn compile"
+
+[tasks.eslint]
+description = "ESLint"
+run = "yarn eslint"
+
+[tasks.test]
+description = "Jest tests"
+run = "yarn test"
+
+[tasks.synth]
+description = "cdk synth"
+run = "yarn synth"
+
+[tasks."synth:quiet"]
+description = "cdk synth (quiet)"
+run = "yarn synth:quiet"
+
+[tasks.deploy]
+description = "cdk deploy (pass args after --)"
+run = "npx cdk deploy"
+
+[tasks.bootstrap]
+description = "Bootstrap CDK in the current AWS account/region (one-time)"
+depends = [":install"]
+run = "npx cdk bootstrap"
+
+[tasks.destroy]
+description = "cdk destroy"
+run = "npx cdk destroy"
+
+[tasks.diff]
+description = "cdk diff"
+run = "npx cdk diff"
+
+[tasks.bundle]
+description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"
+run = "node -e \"process.exit(0)\""
+
+[tasks.build]
+description = "compile, test, eslint, synth (quiet)"
+depends = [":compile", ":test", ":eslint", ":synth:quiet"]
