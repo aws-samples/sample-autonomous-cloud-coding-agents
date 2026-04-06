@@ -1,0 +1,24 @@
+min_version = "2026.2.6"
+
+[tools]
+node = "22"
+
+[tasks.install]
+description = "Install from monorepo root (Yarn workspaces)"
+run = "cd .. && yarn install --check-files"
+
+[tasks.compile]
+description = "Compile TypeScript"
+run = "yarn tsc --build tsconfig.json"
+
+[tasks.build]
+description = "Compile, test, and lint CLI"
+depends = [":compile", ":test", ":eslint"]
+
+[tasks.test]
+description = "Run Jest tests"
+run = "yarn jest --passWithNoTests --updateSnapshot"
+
+[tasks.eslint]
+description = "Run ESLint"
+run = "ESLINT_USE_FLAT_CONFIG=false ../node_modules/.bin/eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test build-tools"

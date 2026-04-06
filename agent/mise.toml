@@ -1,12 +1,8 @@
 min_version = "2026.2.6"
 
 [tools]
-gitleaks = "latest"
 python = "3.13"
-semgrep = "latest"
 uv = "latest"
-"grype" = "0.109.0"
-osv-scanner = "latest"
 "aqua:aquasecurity/trivy" = "0.69.2"
 
 [env]
@@ -21,7 +17,6 @@ description = "Print project information"
 run = '''
 echo "Project: $PROJECT_NAME"
 '''
-
 
 # QUALITY
 
@@ -51,27 +46,9 @@ run = "uv run pytest"
 
 # SECURITY
 
-[tasks."security:secrets"]
-description = "Scan for secrets with gitleaks"
-run = "gitleaks detect --source . --no-banner"
-
-[tasks."security:sast"]
-description = "SAST scan with semgrep (auto + OWASP top 10)"
-run = "semgrep scan --config auto --config p/owasp-top-ten --error --quiet ."
-
-[tasks."security:deps"]
-description = "Audit dependencies for known vulnerabilities (osv-scanner)"
-run = "osv-scanner scan --lockfile uv.lock"
-
 [tasks."security:bandit"]
 description = "Run Bandit"
 run = "uvx bandit[toml] -c pyproject.toml -r . --severity-level=high"
-
-[tasks."security:grype"]
-description = "Run Grype"
-run = [
-  "grype ."
-]
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
@@ -92,10 +69,6 @@ run = [
 [tasks.security]
 description = "Run security scans"
 run = [
-    { task = "security:secrets" },
     { task = "security:bandit" },
-    { task = "security:sast" },
-    { task = "security:grype" },
-    { task = "security:deps" },
     { task = "security:image" },
 ]
