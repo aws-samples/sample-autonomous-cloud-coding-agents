@@ -78,7 +78,7 @@ run = [
     { task = "security:sast" },
     { task = "security:grype" },
     { task = "security:retire" },
-    { task = "mise //agent:security"} # additional agent specific security scans
+    "MISE_EXPERIMENTAL=1 mise //agent:security",
 ]
 
 ##################
