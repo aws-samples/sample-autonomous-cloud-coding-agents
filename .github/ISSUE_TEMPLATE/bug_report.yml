@@ -49,7 +49,7 @@ body:
     attributes:
       label: Reproduction steps
       description: |
-        Steps to reproduce (e.g. deploy stack, run `bgagent submit` with X, run `npx projen build`). For CDK/agent issues, include the minimal scenario (repo state, task description, or stack config) that triggers the bug.
+        Steps to reproduce (e.g. deploy stack, run `bgagent submit` with X, run `mise run build`). For CDK/agent issues, include the minimal scenario (repo state, task description, or stack config) that triggers the bug.
     validations:
       required: true
   - type: textarea

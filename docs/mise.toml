@@ -1,0 +1,26 @@
+min_version = "2026.2.6"
+
+[tools]
+node = "22"
+
+[tasks.install]
+description = "Install from monorepo root (Yarn workspaces)"
+run = "cd .. && yarn install --check-files"
+
+[tasks.sync]
+description = "Sync docs content from guides/design/CONTRIBUTING"
+run = "node scripts/sync-starlight.mjs"
+
+[tasks.build]
+description = "Starlight docs site build"
+depends = [":sync"]
+run = "./node_modules/.bin/astro build"
+
+[tasks.dev]
+description = "Starlight dev server"
+run = "./node_modules/.bin/astro dev"
+
+[tasks.check]
+description = "astro check"
+depends = [":sync"]
+run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"

@@ -1,19 +1,19 @@
 # Developer guide
 
-This project is built in TypeScript using Projen ([projen.io](http://projen.io/)). This supports project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
+This project is built in TypeScript with [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/), [mise](https://mise.jdx.dev/) for tasks and tool versions, and AWS CDK for infrastructure. There is project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
 
 ![ABCA architecture](../imgs/abca-arch.png)
 
 The repository is organized around four main pieces:
 
 - **Agent runtime code** in Python under `agent/` — runtime entrypoint, task execution loop, memory writes, observability hooks, and local container tooling.
-- **Infrastructure as code** in AWS CDK under `src/` — stacks, constructs, and handlers that define and deploy the platform on AWS.
+- **Infrastructure as code** in AWS CDK under `cdk/src/` — stacks, constructs, and handlers that define and deploy the platform on AWS.
 - **Documentation site** under `docs/` — source guides/design docs plus the generated Astro/Starlight documentation site.
 - **CLI package** under `cli/` — the `bgagent` command-line client used to authenticate, submit tasks, and inspect task status/events.
 
 ## Repository preparation
 
-The CDK stack ships with a **sample onboarded repository** (`krokoko/agent-plugins` in `src/stacks/agent.ts`) so the project deploys and CDK tests run cleanly out of the box. That value is for **default wiring only**: a real agent run **pushes branches and opens pull requests** with your GitHub PAT, so the onboarded repo must be one your token can **clone, push to, and open PRs on**. Most people do **not** have that access to the upstream repo.
+The CDK stack ships with a **sample onboarded repository** (`krokoko/agent-plugins` in `cdk/src/stacks/agent.ts`) so the project deploys and CDK tests run cleanly out of the box. That value is for **default wiring only**: a real agent run **pushes branches and opens pull requests** with your GitHub PAT, so the onboarded repo must be one your token can **clone, push to, and open PRs on**. Most people do **not** have that access to the upstream repo.
 
 **Recommended first setup:** fork [`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins) on GitHub, set the `Blueprint` **`repo`** to **`your-github-username/agent-plugins`** (match your fork’s owner and repo name), and create a **fine-grained PAT** with access **only to that fork** (clone, push, PRs—see `agent/README.md` for scopes). Use that token for **`GITHUB_TOKEN`** when running `./agent/run.sh` locally and store the same value in Secrets Manager after deploy. For use on your own codebases, point the Blueprint at those repos instead and scope the PAT to match.
 
@@ -21,15 +21,15 @@ Register every repo you want tasks to target and align tools and permissions (st
 
 ### 1. Register repositories with `Blueprint` (required)
 
-The Task API only accepts tasks for repositories that are **onboarded** — each one is a `Blueprint` construct in `src/stacks/agent.ts` that writes a `RepoConfig` row to DynamoDB.
+The Task API only accepts tasks for repositories that are **onboarded** — each one is a `Blueprint` construct in `cdk/src/stacks/agent.ts` that writes a `RepoConfig` row to DynamoDB.
 
-1. Open **`src/stacks/agent.ts`** and locate the `Blueprint` block (for example `AgentPluginsBlueprint`).
+1. Open **`cdk/src/stacks/agent.ts`** and locate the `Blueprint` block (for example `AgentPluginsBlueprint`).
 2. Set **`repo`** to your repository in **`owner/repo`** form. For a quick end-to-end test, use your **fork** of the sample plugin repo (e.g. `jane-doe/agent-plugins` after forking `awslabs/agent-plugins`). For your own services, use something like `acme/my-service`. This must match the `repo` field users pass in the CLI or API.
 3. **Multiple repositories:** add another `new Blueprint(this, 'YourBlueprintId', { repo: 'owner/other-repo', repoTable: repoTable.table, ... })` and append it to the **`blueprints`** array. That array is used to aggregate per-repo **DNS egress** allowlists; skipping it can block the agent from reaching domains your Blueprint declares.
 
 Optional per-repo overrides (same file / `Blueprint` props) include a different AgentCore **`runtimeArn`**, **`modelId`**, **`maxTurns`**, **`systemPromptOverrides`**, or a **`githubTokenSecretArn`** for a dedicated PAT. If you use a custom `runtimeArn` or secret per repo, you must also pass the corresponding ARNs into **`TaskOrchestrator`** via **`additionalRuntimeArns`** and **`additionalSecretArns`** so the orchestrator Lambda’s IAM policy allows them (see [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model).
 
-After changing Blueprints, redeploy: `npx projen deploy`.
+After changing Blueprints, redeploy: `cd cdk && npx cdk deploy` (or `MISE_EXPERIMENTAL=1 mise //cdk:deploy`).
 
 ### 2. GitHub personal access token
 
@@ -37,11 +37,11 @@ The agent clones, pushes, and opens pull requests using a **GitHub PAT** stored 
 
 ### 3. Agent image (`agent/Dockerfile`)
 
-The default image installs Python, Node 20, `git`, `gh`, Claude Code CLI, and **`mise`** for polyglot builds. If your repositories need extra runtimes (Java, Go, specific CLIs, native libs), **extend `agent/Dockerfile`** (and optionally `agent/` tooling) so `mise run build` and your stack’s workflows succeed inside the container. Rebuild the runtime asset when you change the Dockerfile (a normal `npx projen deploy` / CDK asset build does this).
+The default image installs Python, Node 20, `git`, `gh`, Claude Code CLI, and **`mise`** for polyglot builds. If your repositories need extra runtimes (Java, Go, specific CLIs, native libs), **extend `agent/Dockerfile`** (and optionally `agent/` tooling) so `mise run build` and your stack’s workflows succeed inside the container. Rebuild the runtime asset when you change the Dockerfile (a normal `cd cdk && npx cdk deploy` / CDK asset build does this).
 
 ### 4. Stack name (optional)
 
-The development stack id is set in **`src/main.ts`** (default **`backgroundagent-dev`**). If you rename it, update every place that passes **`--stack-name`** to the AWS CLI (including examples in this guide and any scripts you keep locally).
+The development stack id is set in **`cdk/src/main.ts`** (default **`backgroundagent-dev`**). If you rename it, update every place that passes **`--stack-name`** to the AWS CLI (including examples in this guide and any scripts you keep locally).
 
 ### 5. Fork-specific metadata (optional)
 
@@ -76,7 +76,6 @@ Default output format [None]: json
 - [Node](https://nodejs.org/en) >= v22.0.0
 - [AWS CDK](https://github.com/aws/aws-cdk/releases/tag/v2.233.0) >= 2.233.0
 - [Python](https://www.python.org/downloads/) >=3.9
-- [Projen](https://github.com/projen/projen/releases/tag/v0.98.26) >= 0.98.26
 - [Yarn](https://classic.yarnpkg.com/lang/en/docs/cli/install/) >= 1.22.19
 - [mise](https://mise.jdx.dev/getting-started.html) (required for local agent Python tasks and checks)
 - [Docker](https://docs.docker.com/engine/install/)
@@ -95,17 +94,17 @@ Without this, `cdk deploy` will fail with: *"X-Ray Delivery Destination is suppo
 Install [mise](https://mise.jdx.dev/getting-started.html) using the official guide; it is not installed via npm. For the Node-based CLIs, run:
 
 ```bash
-npm install -g npm aws-cdk yarn projen
+npm install -g npm aws-cdk
 ```
 
 Install repository dependencies and run an initial build before making changes:
 
 ```bash
-npx projen install
-npx projen build
+mise run install
+mise run build
 ```
 
-`npx projen install` installs Node/TypeScript dependencies for the repository (including projen subprojects) and runs `mise run install` in `agent/` to install Python dependencies as well.
+`mise run install` runs `yarn install` for the workspaces and `mise run install` in `agent/` for Python dependencies.
 
 ### Suggested development flow
 
@@ -116,7 +115,7 @@ Use this order to iterate quickly and catch issues early:
 ```bash
 cd agent
 # Re-run install only when Python dependencies change
-# (npx projen install already runs this once at repo root)
+# (mise run install at repo root already runs agent install once)
 # mise run install
 mise run quality
 cd ..
@@ -201,35 +200,35 @@ For the full list of environment variables and GitHub PAT permissions, see `agen
 
 ### Deployment
 
-Once your agent works locally, you can deploy it on AWS. A **full** `npx projen deploy` of this stack has been observed at **~572 seconds (~9.5 minutes)** total (CDK-reported *Total time*); expect variation by Region, account state, and whether container layers are already cached.
+Once your agent works locally, you can deploy it on AWS. A **full** `mise run //cdk:deploy` of this stack has been observed at **~572 seconds (~9.5 minutes)** total (CDK-reported *Total time*); expect variation by Region, account state, and whether container layers are already cached.
 
-1. Generate project files (dependencies, etc.) from the configuration file and install them.
+1. Install dependencies (from the repository root).
 
 ```bash
-npx projen install
+mise run install
 ```
 
 2. Run a full build
 
 ```bash
-npx projen build
+mise run build
 ```
 
-3. Bootstrap your account
+3. Bootstrap your account if needed
 
 ```bash
-cdk bootstrap
+mise run //cdk:bootstrap
 ```
 
-4. Run AWS CDK Toolkit to deploy the stack with the runtime resources.
+4. Deploy the stack with the runtime resources. Approve the changes when asked.
 
 ```bash
-npx projen deploy
+mise run //cdk:deploy
 ```
 
 ### Post-deployment setup
 
-After `npx projen deploy` completes, the stack emits the following outputs:
+After `mise run //cdk:deploy` completes, the stack emits the following outputs:
 
 | Output | Description |
 |---|---|
@@ -251,7 +250,7 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Use the **same AWS Region** (and profile) as `npx projen deploy`. If you omit `--region`, the CLI uses your default from `aws configure`; when the stack lives in another Region, `describe-stacks` fails, **stderr** shows the error, and capturing stdout into a shell variable (for example `SECRET_ARN=$(...)`) yields **empty** with no obvious hint—run the `aws` command without `$(...)` to see the message. Add `--region your-region` to every command below if needed.
+Use the **same AWS Region** (and profile) as `mise run //cdk:deploy`. If you omit `--region`, the CLI uses your default from `aws configure`; when the stack lives in another Region, `describe-stacks` fails, **stderr** shows the error, and capturing stdout into a shell variable (for example `SECRET_ARN=$(...)`) yields **empty** with no obvious hint—run the `aws` command without `$(...)` to see the message. Add `--region your-region` to every command below if needed.
 
 If `put-secret-value` returns **`Invalid endpoint: https://secretsmanager..amazonaws.com`** (note the **double dot**), the effective Region string is **empty**—for example `REGION=` was never set, `export REGION` is blank, or `--region "$REGION"` expands to nothing. Set `REGION` to a real value (e.g. `us-east-1`) or run `aws configure set region your-region` so the default is non-empty.
 
@@ -282,7 +281,7 @@ See `agent/README.md` for the required PAT permissions.
 
 #### Onboard repositories
 
-Repositories must be onboarded before tasks can target them. Each repository is registered as a `Blueprint` construct in the CDK stack (`src/stacks/agent.ts`). A `Blueprint` writes a `RepoConfig` record to the shared `RepoTable` DynamoDB table via a CloudFormation custom resource.
+Repositories must be onboarded before tasks can target them. Each repository is registered as a `Blueprint` construct in the CDK stack (`cdk/src/stacks/agent.ts`). A `Blueprint` writes a `RepoConfig` record to the shared `RepoTable` DynamoDB table via a CloudFormation custom resource.
 
 To onboard a repository, add a `Blueprint` instance to the CDK stack:
 
@@ -312,7 +311,7 @@ new Blueprint(this, 'CustomRepoBlueprint', {
 });
 ```
 
-Then redeploy: `npx projen deploy`.
+Then redeploy: `cd cdk && npx cdk deploy`.
 
 When a Blueprint is destroyed (removed from CDK code and redeployed), the record is soft-deleted (`status: 'removed'` with a 30-day TTL). Tasks for removed repos are rejected with `REPO_NOT_ONBOARDED`.
 
@@ -374,21 +373,20 @@ Top-level layout:
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | CDK app (`main.ts`, `stacks/`, `constructs/`, `handlers/`) |
-| `cli/` | `@backgroundagent/cli` — `bgagent` CLI (Projen `TypeScriptProject` subproject) |
+| `cdk/src/` | CDK app (`main.ts`, `stacks/`, `constructs/`, `handlers/`) |
+| `cli/` | `@backgroundagent/cli` — `bgagent` CLI |
 | `agent/` | Python agent — Docker image, server, prompts |
-| `test/` | Jest tests for the CDK app (mirrors `src/`) |
+| `cdk/test/` | Jest tests for the CDK app (mirrors `cdk/src/`) |
 | `docs/guides/` | Source Markdown: developer, user, roadmap, prompt guides |
 | `docs/design/` | Architecture and design documents (source Markdown) |
 | `docs/imgs/`, `docs/diagrams/` | Documentation assets |
-| `docs/` (Starlight) | Docs site: `astro.config.mjs`, `package.json`; `src/content/docs/` is **generated** from `.projenrc.ts` on `npx projen` |
+| `docs/` (Starlight) | Docs site: `astro.config.mjs`, `package.json`; `src/content/docs/` is **synced** from `docs/guides/` and `docs/design/` via `docs/scripts/sync-starlight.mjs` (`mise //docs:sync`) |
 | `CONTRIBUTING.md` | Contribution guidelines (**repo root**) |
-| `.projenrc.ts` | Root + `cli/` + `docs/` site definition; run `npx projen` after edits |
 
 CDK source tree:
 
 ```
-src/
+cdk/src/
 ├── main.ts                          # CDK app entry point
 ├── stacks/
 │   └── agent.ts                     # Main CDK stack
@@ -427,7 +425,7 @@ src/
 ```
 
 ```
-test/
+cdk/test/
 ├── stacks/
 │   └── agent.test.ts
 ├── constructs/
