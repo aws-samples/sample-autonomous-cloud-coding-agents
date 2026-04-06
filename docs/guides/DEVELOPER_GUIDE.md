@@ -200,7 +200,7 @@ For the full list of environment variables and GitHub PAT permissions, see `agen
 
 ### Deployment
 
-Once your agent works locally, you can deploy it on AWS. A **full** `cd cdk && npx cdk deploy` of this stack has been observed at **~572 seconds (~9.5 minutes)** total (CDK-reported *Total time*); expect variation by Region, account state, and whether container layers are already cached.
+Once your agent works locally, you can deploy it on AWS. A **full** `mise run //cdk:deploy` of this stack has been observed at **~572 seconds (~9.5 minutes)** total (CDK-reported *Total time*); expect variation by Region, account state, and whether container layers are already cached.
 
 1. Install dependencies (from the repository root).
 
@@ -211,24 +211,24 @@ mise run install
 2. Run a full build
 
 ```bash
-MISE_EXPERIMENTAL=1 mise run build
+mise run build
 ```
 
-3. Bootstrap your account
+3. Bootstrap your account if needed
 
 ```bash
-cdk bootstrap
+mise run //cdk:bootstrap
 ```
 
-4. Deploy the stack with the runtime resources.
+4. Deploy the stack with the runtime resources. Approve the changes when asked.
 
 ```bash
-cd cdk && npx cdk deploy
+mise run //cdk:deploy
 ```
 
 ### Post-deployment setup
 
-After `cd cdk && npx cdk deploy` completes, the stack emits the following outputs:
+After `mise run //cdk:deploy` completes, the stack emits the following outputs:
 
 | Output | Description |
 |---|---|
@@ -250,7 +250,7 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Use the **same AWS Region** (and profile) as `cd cdk && npx cdk deploy`. If you omit `--region`, the CLI uses your default from `aws configure`; when the stack lives in another Region, `describe-stacks` fails, **stderr** shows the error, and capturing stdout into a shell variable (for example `SECRET_ARN=$(...)`) yields **empty** with no obvious hint—run the `aws` command without `$(...)` to see the message. Add `--region your-region` to every command below if needed.
+Use the **same AWS Region** (and profile) as `mise run //cdk:deploy`. If you omit `--region`, the CLI uses your default from `aws configure`; when the stack lives in another Region, `describe-stacks` fails, **stderr** shows the error, and capturing stdout into a shell variable (for example `SECRET_ARN=$(...)`) yields **empty** with no obvious hint—run the `aws` command without `$(...)` to see the message. Add `--region your-region` to every command below if needed.
 
 If `put-secret-value` returns **`Invalid endpoint: https://secretsmanager..amazonaws.com`** (note the **double dot**), the effective Region string is **empty**—for example `REGION=` was never set, `export REGION` is blank, or `--region "$REGION"` expands to nothing. Set `REGION` to a real value (e.g. `us-east-1`) or run `aws configure set region your-region` so the default is non-empty.
 
