@@ -169,7 +169,7 @@ mise run build
 mise run //cdk:bootstrap
 ```
 
-4. Deploy the stack with the runtime resources.
+4. Deploy the stack with the runtime resources. Approve the changes when asked.
 
 ```bash
 mise run //cdk:deploy
