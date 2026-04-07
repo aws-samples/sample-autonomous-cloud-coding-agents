@@ -17,6 +17,32 @@ from entrypoint import (
 )
 
 # ---------------------------------------------------------------------------
+# AGENT_WORKSPACE
+# ---------------------------------------------------------------------------
+
+
+class TestAgentWorkspace:
+    def test_defaults_to_workspace(self, monkeypatch):
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        # Re-import to pick up the env change
+        import importlib
+
+        import entrypoint
+
+        importlib.reload(entrypoint)
+        assert entrypoint.AGENT_WORKSPACE == "/workspace"
+
+    def test_reads_env_var(self, monkeypatch):
+        monkeypatch.setenv("AGENT_WORKSPACE", "/mnt/workspace")
+        import importlib
+
+        import entrypoint
+
+        importlib.reload(entrypoint)
+        assert entrypoint.AGENT_WORKSPACE == "/mnt/workspace"
+
+
+# ---------------------------------------------------------------------------
 # slugify
 # ---------------------------------------------------------------------------
 

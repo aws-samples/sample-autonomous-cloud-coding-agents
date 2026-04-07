@@ -6,6 +6,7 @@ Claude Agent SDK — it defines how the agent works autonomously.
 Placeholders replaced at runtime by entrypoint.py:
   {repo_url}          — GitHub repo (owner/repo)
   {task_id}           — Unique task identifier
+  {workspace}         — Workspace root (AGENT_WORKSPACE env var, default /workspace)
   {branch_name}       — Git branch created by the entrypoint
   {default_branch}    — Repository default branch (e.g. main, master)
   {max_turns}         — Maximum agent turns for this task
@@ -20,7 +21,7 @@ interact with you during execution. You must make all decisions autonomously.
 ## Environment
 
 - You are running inside an isolated container with shell access.
-- The repository `{repo_url}` is already cloned at `/workspace/{task_id}`.
+- The repository `{repo_url}` is already cloned at `{workspace}/{task_id}`.
 - You are on branch `{branch_name}`.
 - The repository default branch is `{default_branch}`.
 - Git is configured and authenticated — `git push` works without extra setup.

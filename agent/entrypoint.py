@@ -37,6 +37,8 @@ from system_prompt import SYSTEM_PROMPT
 # Configuration
 # ---------------------------------------------------------------------------
 
+AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
+
 
 def resolve_github_token() -> str:
     """Resolve GitHub token from Secrets Manager or environment variable.
@@ -298,7 +300,7 @@ def setup_repo(config: dict) -> dict:
     Returns a dict with keys: repo_dir, branch, notes, build_before,
     lint_before, and default_branch.
     """
-    repo_dir = f"/workspace/{config['task_id']}"
+    repo_dir = f"{AGENT_WORKSPACE}/{config['task_id']}"
     setup: dict[str, str | list[str] | bool] = {"repo_dir": repo_dir, "notes": []}
 
     # Derive branch slug from issue title or task description
@@ -310,6 +312,14 @@ def setup_repo(config: dict) -> dict:
     slug = slugify(title)
     branch = f"bgagent/{config['task_id']}/{slug}"
     setup["branch"] = branch
+
+    # Mark the repo directory as safe for git.  On persistent session storage
+    # the mount may be owned by a different UID than the container user,
+    # triggering git's "dubious ownership" check on clone/resume.
+    run_cmd(
+        ["git", "config", "--global", "--add", "safe.directory", repo_dir],
+        label="safe-directory",
+    )
 
     # Clone
     log("SETUP", f"Cloning {config['repo_url']}...")
@@ -794,7 +804,7 @@ def _extract_agent_notes(repo_dir: str, branch: str, config: dict) -> str | None
 # ---------------------------------------------------------------------------
 
 
-def get_disk_usage(path: str = "/workspace") -> float:
+def get_disk_usage(path: str = AGENT_WORKSPACE) -> float:
     """Return disk usage in bytes for the given path."""
     try:
         result = subprocess.run(
@@ -1225,7 +1235,9 @@ def _setup_agent_env(config: dict) -> tuple[str | None, str | None]:
     return otlp_endpoint, otlp_protocol
 
 
-async def run_agent(prompt: str, system_prompt: str, config: dict, cwd: str = "/workspace") -> dict:
+async def run_agent(
+    prompt: str, system_prompt: str, config: dict, cwd: str = AGENT_WORKSPACE
+) -> dict:
     """Invoke the Claude Agent SDK and stream output."""
     from claude_agent_sdk import (
         AssistantMessage,
@@ -1472,6 +1484,7 @@ def _build_system_prompt(
     """Assemble the system prompt with task-specific values and memory context."""
     system_prompt = SYSTEM_PROMPT.replace("{repo_url}", config["repo_url"])
     system_prompt = system_prompt.replace("{task_id}", config["task_id"])
+    system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
     system_prompt = system_prompt.replace("{branch_name}", setup["branch"])
     default_branch = setup.get("default_branch", "main")
     system_prompt = system_prompt.replace("{default_branch}", default_branch)
@@ -1719,7 +1732,7 @@ def run_task(
                 log("TASK", "No repo-level project configuration found")
 
             # Run agent
-            disk_before = get_disk_usage("/workspace")
+            disk_before = get_disk_usage(AGENT_WORKSPACE)
             start_time = time.time()
 
             log("TASK", "Starting agent...")
@@ -1781,7 +1794,7 @@ def run_task(
 
             # Metrics
             duration = time.time() - start_time
-            disk_after = get_disk_usage("/workspace")
+            disk_after = get_disk_usage(AGENT_WORKSPACE)
 
             # Determine overall status:
             #   - "success" if the agent reported success/end_turn and the build passes
@@ -1916,6 +1929,7 @@ def main():
         prompt = assemble_prompt(config)
         system_prompt = SYSTEM_PROMPT.replace("{repo_url}", config["repo_url"])
         system_prompt = system_prompt.replace("{task_id}", config["task_id"])
+        system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
         system_prompt = system_prompt.replace("{branch_name}", "bgagent/{task_id}/dry-run")
         system_prompt = system_prompt.replace("{default_branch}", "main")
         system_prompt = system_prompt.replace("{max_turns}", str(config.get("max_turns", 100)))
