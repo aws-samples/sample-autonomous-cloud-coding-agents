@@ -19,6 +19,7 @@
 
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
+import { resolveComputeStrategy } from './shared/compute-strategy';
 import {
   admissionControl,
   emitTaskEvent,
@@ -28,7 +29,7 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
-  startSession,
+  transitionTask,
   type PollState,
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
@@ -116,10 +117,22 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
   });
 
-  // Step 4: Start agent session — invoke runtime and transition to RUNNING
+  // Step 4: Start agent session — resolve compute strategy, invoke runtime, transition to RUNNING
   await context.step('start-session', async () => {
     try {
-      return await startSession(task, payload, blueprintConfig);
+      const strategy = resolveComputeStrategy(blueprintConfig);
+      const handle = await strategy.startSession({ taskId, payload, blueprintConfig });
+
+      await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
+        session_id: handle.sessionId,
+        started_at: new Date().toISOString(),
+      });
+      await emitTaskEvent(taskId, 'session_started', {
+        session_id: handle.sessionId,
+        strategy_type: handle.strategyType,
+      });
+
+      return handle.sessionId;
     } catch (err) {
       await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, task.user_id, true);
       throw err;

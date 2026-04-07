@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// Task lifecycle engine: state transitions, runtime invoke, finalization. Design: docs/design/ORCHESTRATOR.md
-// Tests: cdk/test/handlers/orchestrate-task.test.ts, cdk/test/constructs/task-orchestrator.test.ts
-
-import { randomUUID } from 'crypto';
-import { InvokeAgentRuntimeCommand, BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
@@ -35,7 +30,6 @@ import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const agentCoreClient = new BedrockAgentCoreClient({});
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -348,43 +342,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(hydratedContext.fallback_error && { fallback_error: hydratedContext.fallback_error }),
   });
   return payload;
-}
-
-/**
- * Start an AgentCore runtime session and transition task to RUNNING.
- * @param task - the task record.
- * @param payload - the hydrated invocation payload.
- * @param blueprintConfig - optional per-repo blueprint config for runtime ARN override.
- * @returns the session ID.
- */
-export async function startSession(
-  task: TaskRecord,
-  payload: Record<string, unknown>,
-  blueprintConfig?: BlueprintConfig,
-): Promise<string> {
-  // AgentCore requires runtimeSessionId >= 33 chars; UUID v4 is 36 chars.
-  const sessionId = randomUUID();
-  const runtimeArn = blueprintConfig?.runtime_arn ?? RUNTIME_ARN;
-
-  const command = new InvokeAgentRuntimeCommand({
-    agentRuntimeArn: runtimeArn,
-    runtimeSessionId: sessionId,
-    contentType: 'application/json',
-    accept: 'application/json',
-    payload: new TextEncoder().encode(JSON.stringify({ input: payload })),
-  });
-
-  await agentCoreClient.send(command);
-
-  await transitionTask(task.task_id, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
-    session_id: sessionId,
-    started_at: new Date().toISOString(),
-  });
-  await emitTaskEvent(task.task_id, 'session_started', { session_id: sessionId });
-
-  logger.info('Session started', { task_id: task.task_id, session_id: sessionId });
-
-  return sessionId;
 }
 
 /**

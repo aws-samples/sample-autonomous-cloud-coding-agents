@@ -27,10 +27,10 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
-const mockAgentCoreSend = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
-  BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
+  BedrockAgentCoreClient: jest.fn(() => ({ send: jest.fn() })),
   InvokeAgentRuntimeCommand: jest.fn((input: unknown) => ({ _type: 'InvokeAgentRuntime', input })),
+  StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
 }));
 
 const mockHydrateContext = jest.fn();
@@ -75,7 +75,6 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
-  startSession,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
 
@@ -232,18 +231,6 @@ describe('hydrateAndTransition', () => {
     expect(metadata.sources).toEqual(['task_description']);
     expect(metadata.token_estimate).toBe(20);
     expect(metadata.truncated).toBe(false);
-  });
-});
-
-describe('startSession', () => {
-  test('invokes agent runtime and transitions to RUNNING', async () => {
-    mockAgentCoreSend.mockResolvedValueOnce({}); // InvokeAgentRuntime
-    mockDdbSend.mockResolvedValue({}); // transitionTask + emitTaskEvent
-
-    const sessionId = await startSession(baseTask as any, { repo_url: 'org/repo', task_id: 'TASK001' });
-    // Session ID is a UUID v4 (36 chars), not a ULID
-    expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -425,21 +412,6 @@ describe('hydrateAndTransition with blueprint config', () => {
       expect.anything(),
       expect.objectContaining({ githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:per-repo-token' }),
     );
-  });
-});
-
-describe('startSession with blueprint config', () => {
-  test('uses blueprint runtime ARN override', async () => {
-    mockAgentCoreSend.mockResolvedValueOnce({});
-    mockDdbSend.mockResolvedValue({});
-
-    await startSession(baseTask as any, { repo_url: 'org/repo', task_id: 'TASK001' }, {
-      compute_type: 'agentcore',
-      runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
-    });
-
-    const invokeCall = mockAgentCoreSend.mock.calls[0][0];
-    expect(invokeCall.input.agentRuntimeArn).toBe('arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom');
   });
 });
 
