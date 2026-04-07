@@ -217,7 +217,7 @@ This metadata enables queries like: “What did we do on this repo or this PR?�
 
 ## Audit and history
 
-- **TaskEvents table** — append-only audit log of task events (task_created, agent_started, pr_created, task_completed, task_failed, task_cancelled, task_timed_out, etc.). Used for "what happened with my task" and for compliance/evaluation. Event records carry a DynamoDB TTL (`ttl` attribute) set at creation time and are automatically deleted after the retention period (default 90 days, configurable via `taskRetentionDays`).
+- **TaskEvents table** — append-only audit log of task events (task_created, admission_rejected, preflight_failed, agent_started, pr_created, task_completed, task_failed, task_cancelled, task_timed_out, etc.). Used for "what happened with my task" and for compliance/evaluation. Event records carry a DynamoDB TTL (`ttl` attribute) set at creation time and are automatically deleted after the retention period (default 90 days, configurable via `taskRetentionDays`).
 - **Task record** — each task has status, timestamps, repo, branch, PR URL, error message, and other metadata so users and operators can reconstruct the outcome. Task records carry a DynamoDB TTL stamped when the task reaches a terminal state and are automatically deleted after the retention period (default 90 days). Records without a `ttl` attribute (e.g. pre-existing data or active tasks) are retained indefinitely.
 
 ## Integration with runtime observability

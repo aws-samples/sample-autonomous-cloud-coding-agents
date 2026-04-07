@@ -31,6 +31,7 @@ import {
   startSession,
   type PollState,
 } from './shared/orchestrator';
+import { runPreflightChecks } from './shared/preflight';
 
 interface OrchestrateTaskEvent {
   readonly task_id: string;
@@ -73,6 +74,34 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!admitted) {
+    return;
+  }
+
+  // Step 2b: Pre-flight checks — verify external dependencies before consuming AgentCore runtime
+  const preflightPassed = await context.step('pre-flight', async () => {
+    try {
+      const current = await loadTask(taskId);
+      if (TERMINAL_STATUSES.includes(current.status)) {
+        return false;
+      }
+      const result = await runPreflightChecks(task.repo, blueprintConfig);
+      if (!result.passed) {
+        const errorMessage = `Pre-flight check failed: ${result.failureReason}${result.failureDetail ? ' — ' + result.failureDetail : ''}`;
+        await failTask(taskId, current.status, errorMessage, task.user_id, true);
+        await emitTaskEvent(taskId, 'preflight_failed', {
+          reason: result.failureReason,
+          detail: result.failureDetail,
+          checks: result.checks,
+        });
+      }
+      return result.passed;
+    } catch (err) {
+      await failTask(taskId, task.status, `Pre-flight failed: ${String(err)}`, task.user_id, true);
+      throw err;
+    }
+  });
+
+  if (!preflightPassed) {
     return;
   }
 

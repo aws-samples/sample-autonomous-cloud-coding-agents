@@ -387,7 +387,7 @@ GET /v1/tasks/{task_id}/events
 
 **Event types** (see [OBSERVABILITY.md](./OBSERVABILITY.md) for the full list):
 
-**Fixed event types:** `task_created`, `admission_passed`, `admission_rejected`, `hydration_started`, `hydration_complete`, `session_started`, `session_ended`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
+**Fixed event types:** `task_created`, `admission_passed`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `session_ended`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
 
 **Step-level event types** (from the blueprint framework): The orchestrator emits events for each pipeline step following the pattern `{step_name}_{started|completed|failed}`. For built-in steps these overlap with the fixed types above (e.g. `hydration_started`). For custom Lambda steps (see [REPO_ONBOARDING.md](./REPO_ONBOARDING.md)), the step name is user-defined (e.g. `sast-scan_started`, `sast-scan_completed`, `prepare-environment_failed`). Step event `metadata` includes `StepOutput.metadata` from the step execution.
 

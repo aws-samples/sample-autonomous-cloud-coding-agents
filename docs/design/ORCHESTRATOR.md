@@ -832,7 +832,7 @@ Append-only audit log. See [OBSERVABILITY.md](./OBSERVABILITY.md) for the event 
 |---|---|---|
 | `task_id` (PK) | String | Task identifier. |
 | `event_id` (SK) | String (ULID) | Unique, sortable event ID. |
-| `event_type` | String | E.g. `task_created`, `admission_passed`, `hydration_complete`, `session_started`, `session_ended`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. |
+| `event_type` | String | E.g. `task_created`, `admission_passed`, `preflight_failed`, `hydration_complete`, `session_started`, `session_ended`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. |
 | `timestamp` | String (ISO 8601) | When the event occurred. |
 | `metadata` | Map (optional) | Event-specific data (e.g. error message, PR URL, session ID). |
 | `ttl` | Number | DynamoDB TTL epoch (seconds). Set at event creation time. DynamoDB automatically deletes the record after this timestamp. Configurable via `taskRetentionDays` (default 90 days). |
