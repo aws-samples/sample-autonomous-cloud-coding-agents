@@ -3,7 +3,7 @@ min_version = "2026.2.6"
 [tools]
 python = "3.13"
 uv = "latest"
-"aqua:aquasecurity/trivy" = "0.69.2"
+"aqua:aquasecurity/trivy" = "v0.69.3"
 
 [env]
 _.python.venv = { path = ".venv", create = true }
