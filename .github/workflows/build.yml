@@ -30,6 +30,7 @@ jobs:
       CI: "true"
       MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -39,6 +40,8 @@ jobs:
         uses: jdx/mise-action@v3.6.2
         with:
           cache: true
+        env:
+          GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
