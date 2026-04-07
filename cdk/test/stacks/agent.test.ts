@@ -172,6 +172,31 @@ describe('AgentStack', () => {
     expect(loggingConfigs.length).toBe(1);
   });
 
+  test('enables session storage with persistent filesystem', () => {
+    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+      FilesystemConfigurations: [
+        {
+          SessionStorage: {
+            MountPath: '/mnt/workspace',
+          },
+        },
+      ],
+    });
+  });
+
+  test('sets cache env vars on runtime (persistent mount + local for flock)', () => {
+    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+      EnvironmentVariables: Match.objectLike({
+        // Local disk — tools use flock()
+        MISE_DATA_DIR: '/tmp/mise-data',
+        UV_CACHE_DIR: '/tmp/uv-cache',
+        // Persistent mount — no flock()
+        CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
+        npm_config_cache: '/mnt/workspace/.npm-cache',
+      }),
+    });
+  });
+
   test('creates AgentCore Memory resource', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
   });

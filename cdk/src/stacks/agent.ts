@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -143,9 +143,34 @@ export class AgentStack extends Stack {
         LOG_GROUP_NAME: applicationLogGroup.logGroupName,
         MEMORY_ID: agentMemory.memory.memoryId,
         MAX_TURNS: '100',
+        // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
+        // support flock(). Only caches whose tools never call flock() go there.
+        // Everything else stays on local ephemeral disk.
+        //
+        // Local disk (tools use flock):
+        //   AGENT_WORKSPACE — omitted, defaults to /workspace
+        //   MISE_DATA_DIR — mise's pipx backend sets UV_TOOL_DIR inside installs/,
+        //     and uv flocks that directory → must be local.
+        MISE_DATA_DIR: '/tmp/mise-data',
+        UV_CACHE_DIR: '/tmp/uv-cache',
+        // Persistent mount (no flock):
+        CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
+        npm_config_cache: '/mnt/workspace/.npm-cache',
         // ENABLE_CLI_TELEMETRY: '1',
       },
     });
+
+    // --- Session storage (preview) ---
+    // The L2 construct does not yet expose filesystemConfigurations.
+    // Use a CFN escape hatch until the L2 adds native support.
+    const cfnRuntime = runtime.node.defaultChild as CfnResource;
+    cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
+      {
+        SessionStorage: {
+          MountPath: '/mnt/workspace',
+        },
+      },
+    ]);
 
     taskTable.table.grantReadWriteData(runtime);
     taskEventsTable.table.grantReadWriteData(runtime);
