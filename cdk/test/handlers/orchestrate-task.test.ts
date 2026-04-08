@@ -27,12 +27,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
-jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
-  BedrockAgentCoreClient: jest.fn(() => ({ send: jest.fn() })),
-  InvokeAgentRuntimeCommand: jest.fn((input: unknown) => ({ _type: 'InvokeAgentRuntime', input })),
-  StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
-}));
-
 const mockHydrateContext = jest.fn();
 jest.mock('../../src/handlers/shared/context-hydration', () => ({
   hydrateContext: mockHydrateContext,

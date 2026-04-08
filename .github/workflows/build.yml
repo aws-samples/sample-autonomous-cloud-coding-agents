@@ -32,7 +32,9 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep,osv-scanner,gitleaks"
+      # Security-only tools not needed for build/test/synth; disable to avoid
+      # GitHub API rate limits when mise downloads them on every PR.
+      MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
