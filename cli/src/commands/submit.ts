@@ -32,12 +32,16 @@ export function makeSubmitCommand(): Command {
     .option('--task <description>', 'Task description')
     .option('--max-turns <number>', 'Maximum agent turns (1-500)', parseInt)
     .option('--max-budget <dollars>', 'Maximum budget in USD (0.01-100)', parseFloat)
+    .option('--pr <number>', 'PR number to iterate on (sets task_type to pr_iteration)', parseInt)
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
-      if (opts.issue === undefined && !opts.task) {
-        throw new CliError('At least one of --issue or --task is required.');
+      if (opts.pr !== undefined && isNaN(opts.pr)) {
+        throw new CliError('--pr must be a valid number.');
+      }
+      if (opts.pr === undefined && opts.issue === undefined && !opts.task) {
+        throw new CliError('At least one of --issue, --task, or --pr is required.');
       }
       if (opts.issue !== undefined && isNaN(opts.issue)) {
         throw new CliError('--issue must be a valid number.');
@@ -60,6 +64,7 @@ export function makeSubmitCommand(): Command {
         ...(opts.task && { task_description: opts.task }),
         ...(opts.maxTurns !== undefined && { max_turns: opts.maxTurns }),
         ...(opts.maxBudget !== undefined && { max_budget_usd: opts.maxBudget }),
+        ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
       };
 
       const task = await client.createTask(body, opts.idempotencyKey);

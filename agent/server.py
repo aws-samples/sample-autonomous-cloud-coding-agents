@@ -103,6 +103,9 @@ def _run_task_background(
     system_prompt_overrides: str = "",
     prompt_version: str = "",
     memory_id: str = "",
+    task_type: str = "new_task",
+    branch_name: str = "",
+    pr_number: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     try:
@@ -125,6 +128,9 @@ def _run_task_background(
             system_prompt_overrides=system_prompt_overrides,
             prompt_version=prompt_version,
             memory_id=memory_id,
+            task_type=task_type,
+            branch_name=branch_name,
+            pr_number=pr_number,
         )
     except Exception as e:
         print(f"Background task {task_id} failed: {type(e).__name__}: {e}")
@@ -161,6 +167,9 @@ def invoke_agent(request: Request, body: InvocationRequest):
     hydrated_context = inp.get("hydrated_context")
     prompt_version = inp.get("prompt_version", "")
     memory_id = inp.get("memory_id") or os.environ.get("MEMORY_ID", "")
+    task_type = inp.get("task_type", "new_task")
+    branch_name = inp.get("branch_name", "")
+    pr_number = str(inp.get("pr_number", ""))
 
     # Extract AgentCore session ID from request headers for OTEL correlation
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
@@ -182,6 +191,9 @@ def invoke_agent(request: Request, body: InvocationRequest):
             system_prompt_overrides,
             prompt_version,
             memory_id,
+            task_type,
+            branch_name,
+            pr_number,
         ),
     )
     # Track the thread for graceful shutdown BEFORE starting it so

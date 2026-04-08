@@ -51,6 +51,8 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: 42,
+      task_type: 'new_task',
+      pr_number: null,
       task_description: null,
       branch_name: 'bgagent/abc/fix',
       session_id: null,
@@ -64,6 +66,7 @@ describe('submit command', () => {
       cost_usd: null,
       build_passed: null,
       max_turns: null,
+      max_budget_usd: null,
     });
 
     const cmd = makeSubmitCommand();
@@ -86,6 +89,8 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
+      task_type: 'new_task',
+      pr_number: null,
       task_description: 'Fix the bug',
       branch_name: 'bgagent/abc/fix',
       session_id: null,
@@ -99,6 +104,7 @@ describe('submit command', () => {
       cost_usd: null,
       build_passed: null,
       max_turns: null,
+      max_budget_usd: null,
     });
 
     const cmd = makeSubmitCommand();
@@ -135,6 +141,8 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
+      task_type: 'new_task',
+      pr_number: null,
       task_description: 'Fix the bug',
       branch_name: 'bgagent/abc/fix',
       session_id: null,
@@ -148,6 +156,7 @@ describe('submit command', () => {
       cost_usd: null,
       build_passed: null,
       max_turns: 50,
+      max_budget_usd: null,
     });
 
     const cmd = makeSubmitCommand();
@@ -176,13 +185,94 @@ describe('submit command', () => {
     ).rejects.toThrow('--max-turns must be an integer between 1 and 500');
   });
 
-  test('errors when neither --issue nor --task provided', async () => {
+  test('errors when neither --issue nor --task nor --pr provided', async () => {
     const cmd = makeSubmitCommand();
     await expect(
       cmd.parseAsync([
         'node', 'test',
         '--repo', 'owner/repo',
       ]),
-    ).rejects.toThrow('At least one of --issue or --task is required');
+    ).rejects.toThrow('At least one of --issue, --task, or --pr is required');
+  });
+
+  test('submits a pr_iteration task with --pr', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'pr-abc',
+      status: 'SUBMITTED',
+      repo: 'owner/repo',
+      issue_number: null,
+      task_type: 'pr_iteration',
+      pr_number: 42,
+      task_description: null,
+      branch_name: 'pending:pr_resolution',
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+      max_budget_usd: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--pr', '42',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', task_type: 'pr_iteration', pr_number: 42 },
+      undefined,
+    );
+    expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  test('submits a pr_iteration task with --pr and --task', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'pr-abc',
+      status: 'SUBMITTED',
+      repo: 'owner/repo',
+      issue_number: null,
+      task_type: 'pr_iteration',
+      pr_number: 42,
+      task_description: 'Fix the null check',
+      branch_name: 'pending:pr_resolution',
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+      max_budget_usd: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--pr', '42',
+      '--task', 'Fix the null check',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      {
+        repo: 'owner/repo',
+        task_description: 'Fix the null check',
+        task_type: 'pr_iteration',
+        pr_number: 42,
+      },
+      undefined,
+    );
   });
 });

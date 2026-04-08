@@ -29,6 +29,7 @@ export const PreflightFailureReason = {
   GITHUB_UNREACHABLE: 'GITHUB_UNREACHABLE',
   REPO_NOT_FOUND_OR_NO_ACCESS: 'REPO_NOT_FOUND_OR_NO_ACCESS',
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
+  PR_NOT_FOUND_OR_CLOSED: 'PR_NOT_FOUND_OR_CLOSED',
 } as const;
 
 export type PreflightFailureReasonType = typeof PreflightFailureReason[keyof typeof PreflightFailureReason];
@@ -139,6 +140,51 @@ async function checkRepoAccess(repo: string, token: string): Promise<PreflightCh
   }
 }
 
+async function checkPrAccessible(repo: string, prNumber: number, token: string): Promise<PreflightCheckResult> {
+  const start = Date.now();
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, {
+      headers: {
+        Authorization: `token ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+      },
+      signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+    });
+    const durationMs = Date.now() - start;
+    if (!resp.ok) {
+      return {
+        check: 'pr_accessible',
+        passed: false,
+        reason: PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED,
+        detail: `GitHub API returned HTTP ${resp.status} for PR #${prNumber} in ${repo}`,
+        httpStatus: resp.status,
+        durationMs,
+      };
+    }
+    const pr = await resp.json() as Record<string, unknown>;
+    if (pr.state !== 'open') {
+      return {
+        check: 'pr_accessible',
+        passed: false,
+        reason: PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED,
+        detail: `PR #${prNumber} in ${repo} is ${pr.state}, not open`,
+        durationMs,
+      };
+    }
+    return { check: 'pr_accessible', passed: true, durationMs };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    logger.warn('PR accessibility check failed', { repo, pr_number: prNumber, error: detail });
+    return {
+      check: 'pr_accessible',
+      passed: false,
+      reason: PreflightFailureReason.GITHUB_UNREACHABLE,
+      detail,
+      durationMs: Date.now() - start,
+    };
+  }
+}
+
 async function checkRuntimeAvailability(): Promise<PreflightCheckResult> {
   const start = Date.now();
   return { check: 'runtime_availability', passed: true, durationMs: Date.now() - start };
@@ -148,7 +194,7 @@ async function checkRuntimeAvailability(): Promise<PreflightCheckResult> {
 // Main pre-flight check runner
 // ---------------------------------------------------------------------------
 
-export async function runPreflightChecks(repo: string, blueprintConfig: BlueprintConfig): Promise<PreflightResult> {
+export async function runPreflightChecks(repo: string, blueprintConfig: BlueprintConfig, prNumber?: number): Promise<PreflightResult> {
   const checks: PreflightCheckResult[] = [];
 
   if (blueprintConfig.github_token_secret_arn) {
@@ -180,6 +226,7 @@ export async function runPreflightChecks(repo: string, blueprintConfig: Blueprin
     const results = await Promise.allSettled([
       checkGitHubReachability(token),
       checkRepoAccess(repo, token),
+      ...(prNumber !== undefined ? [checkPrAccessible(repo, prNumber, token)] : []),
     ]);
 
     for (const result of results) {

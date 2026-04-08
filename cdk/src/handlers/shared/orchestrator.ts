@@ -249,6 +249,25 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     memoryId: MEMORY_ID,
   });
 
+  // For PR iteration: resolve actual branch name from PR head_ref
+  if (hydratedContext.resolved_branch_name) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { task_id: task.task_id },
+        UpdateExpression: 'SET #bn = :bn, #ua = :now',
+        ExpressionAttributeNames: { '#bn': 'branch_name', '#ua': 'updated_at' },
+        ExpressionAttributeValues: { ':bn': hydratedContext.resolved_branch_name, ':now': new Date().toISOString() },
+      }));
+    } catch (err) {
+      logger.error('Failed to update branch_name from PR head_ref — task record will show stale placeholder', {
+        task_id: task.task_id,
+        resolved_branch: hydratedContext.resolved_branch_name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // Compute prompt version from the system prompt template + overrides
   // (deterministic parts only — excludes memory context which varies per invocation)
   const promptVersionInput = blueprintConfig?.system_prompt_overrides ?? '';
@@ -275,8 +294,11 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
-    branch_name: task.branch_name,
+    branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
+    task_type: task.task_type ?? 'new_task',
+    ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
+    ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
