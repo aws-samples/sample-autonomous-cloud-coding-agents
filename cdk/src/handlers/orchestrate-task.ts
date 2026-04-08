@@ -20,6 +20,7 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
+import { logger } from './shared/logger';
 import {
   admissionControl,
   emitTaskEvent,
@@ -128,6 +129,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         started_at: new Date().toISOString(),
       });
       await emitTaskEvent(taskId, 'session_started', {
+        session_id: handle.sessionId,
+        strategy_type: handle.strategyType,
+      });
+
+      logger.info('Session started', {
+        task_id: taskId,
         session_id: handle.sessionId,
         strategy_type: handle.strategyType,
       });

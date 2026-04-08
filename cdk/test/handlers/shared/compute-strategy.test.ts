@@ -36,12 +36,12 @@ describe('resolveComputeStrategy', () => {
     expect(strategy.type).toBe('agentcore');
   });
 
-  test('throws for unknown compute_type', () => {
+  test("throws 'not yet implemented' for compute_type ecs", () => {
     expect(() =>
       resolveComputeStrategy({
-        compute_type: 'unknown',
+        compute_type: 'ecs',
         runtime_arn: 'arn:test',
       }),
-    ).toThrow("Unknown compute_type: 'unknown'");
+    ).toThrow("compute_type 'ecs' is not yet implemented");
   });
 });

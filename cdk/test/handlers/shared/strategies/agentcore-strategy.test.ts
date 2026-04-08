@@ -34,14 +34,14 @@ beforeEach(() => {
 
 describe('AgentCoreComputeStrategy', () => {
   test('type is agentcore', () => {
-    const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
+    const strategy = new AgentCoreComputeStrategy();
     expect(strategy.type).toBe('agentcore');
   });
 
   describe('startSession', () => {
     test('invokes agent runtime and returns SessionHandle', async () => {
       mockSend.mockResolvedValueOnce({});
-      const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
+      const strategy = new AgentCoreComputeStrategy();
 
       const handle = await strategy.startSession({
         taskId: 'TASK001',
@@ -55,39 +55,67 @@ describe('AgentCoreComputeStrategy', () => {
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
-    test('uses blueprint runtime_arn override', async () => {
+    test('uses runtime_arn from blueprintConfig (single source of truth)', async () => {
       mockSend.mockResolvedValueOnce({});
-      const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
-      const overrideArn = 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom';
+      const strategy = new AgentCoreComputeStrategy();
+      const runtimeArn = 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom';
 
       const handle = await strategy.startSession({
         taskId: 'TASK001',
         payload: { repo_url: 'org/repo', task_id: 'TASK001' },
-        blueprintConfig: { compute_type: 'agentcore', runtime_arn: overrideArn },
+        blueprintConfig: { compute_type: 'agentcore', runtime_arn: runtimeArn },
       });
 
-      expect(handle.metadata.runtimeArn).toBe(overrideArn);
+      expect(handle.metadata.runtimeArn).toBe(runtimeArn);
       const invokeCall = mockSend.mock.calls[0][0];
-      expect(invokeCall.input.agentRuntimeArn).toBe(overrideArn);
+      expect(invokeCall.input.agentRuntimeArn).toBe(runtimeArn);
+    });
+
+    test('reuses shared BedrockAgentCoreClient across instances', async () => {
+      const { BedrockAgentCoreClient } = require('@aws-sdk/client-bedrock-agentcore');
+      // The lazy singleton may already be initialized from prior tests.
+      // Record the current call count, then verify no additional constructor calls happen.
+      const callsBefore = BedrockAgentCoreClient.mock.calls.length;
+
+      mockSend.mockResolvedValue({});
+      const strategy1 = new AgentCoreComputeStrategy();
+      const strategy2 = new AgentCoreComputeStrategy();
+
+      await strategy1.startSession({
+        taskId: 'T1',
+        payload: {},
+        blueprintConfig: { compute_type: 'agentcore', runtime_arn: defaultRuntimeArn },
+      });
+      await strategy2.startSession({
+        taskId: 'T2',
+        payload: {},
+        blueprintConfig: { compute_type: 'agentcore', runtime_arn: defaultRuntimeArn },
+      });
+
+      // Lazy singleton: at most one constructor call total across all strategy instances
+      const callsAfter = BedrockAgentCoreClient.mock.calls.length;
+      expect(callsAfter - callsBefore).toBeLessThanOrEqual(1);
+      expect(mockSend).toHaveBeenCalledTimes(2);
     });
   });
 
   describe('pollSession', () => {
-    test('returns running status', async () => {
-      const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
-      const result = await strategy.pollSession({
-        sessionId: 'test-session',
-        strategyType: 'agentcore',
-        metadata: { runtimeArn: defaultRuntimeArn },
-      });
-      expect(result.status).toBe('running');
+    test('throws because AgentCore polling is done at orchestrator level', async () => {
+      const strategy = new AgentCoreComputeStrategy();
+      await expect(
+        strategy.pollSession({
+          sessionId: 'test-session',
+          strategyType: 'agentcore',
+          metadata: { runtimeArn: defaultRuntimeArn },
+        }),
+      ).rejects.toThrow('pollSession is not implemented for AgentCore');
     });
   });
 
   describe('stopSession', () => {
     test('sends StopRuntimeSessionCommand', async () => {
       mockSend.mockResolvedValueOnce({});
-      const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
+      const strategy = new AgentCoreComputeStrategy();
 
       await strategy.stopSession({
         sessionId: 'test-session',
@@ -101,9 +129,54 @@ describe('AgentCoreComputeStrategy', () => {
       expect(call.input.runtimeSessionId).toBe('test-session');
     });
 
-    test('does not throw when stop fails', async () => {
-      mockSend.mockRejectedValueOnce(new Error('Access denied'));
-      const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
+    test('logs info for ResourceNotFoundException (session already gone)', async () => {
+      const err = new Error('Not found');
+      err.name = 'ResourceNotFoundException';
+      mockSend.mockRejectedValueOnce(err);
+      const strategy = new AgentCoreComputeStrategy();
+
+      await expect(
+        strategy.stopSession({
+          sessionId: 'test-session',
+          strategyType: 'agentcore',
+          metadata: { runtimeArn: defaultRuntimeArn },
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    test('logs error for ThrottlingException', async () => {
+      const err = new Error('Rate exceeded');
+      err.name = 'ThrottlingException';
+      mockSend.mockRejectedValueOnce(err);
+      const strategy = new AgentCoreComputeStrategy();
+
+      await expect(
+        strategy.stopSession({
+          sessionId: 'test-session',
+          strategyType: 'agentcore',
+          metadata: { runtimeArn: defaultRuntimeArn },
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    test('logs error for AccessDeniedException', async () => {
+      const err = new Error('Access denied');
+      err.name = 'AccessDeniedException';
+      mockSend.mockRejectedValueOnce(err);
+      const strategy = new AgentCoreComputeStrategy();
+
+      await expect(
+        strategy.stopSession({
+          sessionId: 'test-session',
+          strategyType: 'agentcore',
+          metadata: { runtimeArn: defaultRuntimeArn },
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    test('logs warn for unknown errors (best-effort)', async () => {
+      mockSend.mockRejectedValueOnce(new Error('Network error'));
+      const strategy = new AgentCoreComputeStrategy();
 
       await expect(
         strategy.stopSession({
@@ -115,7 +188,7 @@ describe('AgentCoreComputeStrategy', () => {
     });
 
     test('skips stop when no runtimeArn in metadata', async () => {
-      const strategy = new AgentCoreComputeStrategy({ runtimeArn: defaultRuntimeArn });
+      const strategy = new AgentCoreComputeStrategy();
 
       await strategy.stopSession({
         sessionId: 'test-session',

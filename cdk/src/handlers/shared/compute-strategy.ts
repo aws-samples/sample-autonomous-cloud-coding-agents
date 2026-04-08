@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import type { BlueprintConfig } from './repo-config';
+import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
 
 export interface SessionHandle {
@@ -43,11 +43,15 @@ export interface ComputeStrategy {
 }
 
 export function resolveComputeStrategy(blueprintConfig: BlueprintConfig): ComputeStrategy {
-  const computeType = blueprintConfig.compute_type;
+  const computeType: ComputeType = blueprintConfig.compute_type;
   switch (computeType) {
     case 'agentcore':
-      return new AgentCoreComputeStrategy({ runtimeArn: blueprintConfig.runtime_arn });
-    default:
-      throw new Error(`Unknown compute_type: '${computeType}'`);
+      return new AgentCoreComputeStrategy();
+    case 'ecs':
+      throw new Error("compute_type 'ecs' is not yet implemented");
+    default: {
+      const _exhaustive: never = computeType;
+      throw new Error(`Unknown compute_type: '${_exhaustive}'`);
+    }
   }
 }

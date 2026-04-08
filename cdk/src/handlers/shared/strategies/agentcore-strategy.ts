@@ -23,15 +23,16 @@ import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-s
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
 
+let sharedClient: BedrockAgentCoreClient | undefined;
+function getClient(): BedrockAgentCoreClient {
+  if (!sharedClient) {
+    sharedClient = new BedrockAgentCoreClient({});
+  }
+  return sharedClient;
+}
+
 export class AgentCoreComputeStrategy implements ComputeStrategy {
   readonly type = 'agentcore';
-  private readonly client: BedrockAgentCoreClient;
-  private readonly runtimeArn: string;
-
-  constructor(options: { runtimeArn: string }) {
-    this.runtimeArn = options.runtimeArn;
-    this.client = new BedrockAgentCoreClient({});
-  }
 
   async startSession(input: {
     taskId: string;
@@ -40,7 +41,7 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
   }): Promise<SessionHandle> {
     // AgentCore requires runtimeSessionId >= 33 chars; UUID v4 is 36 chars.
     const sessionId = randomUUID();
-    const runtimeArn = input.blueprintConfig.runtime_arn ?? this.runtimeArn;
+    const runtimeArn = input.blueprintConfig.runtime_arn;
 
     const command = new InvokeAgentRuntimeCommand({
       agentRuntimeArn: runtimeArn,
@@ -50,7 +51,7 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
       payload: new TextEncoder().encode(JSON.stringify({ input: input.payload })),
     });
 
-    await this.client.send(command);
+    await getClient().send(command);
 
     logger.info('AgentCore session invoked', { task_id: input.taskId, session_id: sessionId, runtime_arn: runtimeArn });
 
@@ -61,10 +62,12 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     };
   }
 
+  /**
+   * Not implemented for AgentCore — polling is done at the orchestrator level via DDB reads.
+   * Future strategies (e.g. ECS/Fargate) will implement compute-level polling here.
+   */
   async pollSession(_handle: SessionHandle): Promise<SessionStatus> {
-    // Polling is currently done at the orchestrator level via DDB reads.
-    // This method exists for PR 2 where different strategies may poll differently.
-    return { status: 'running' };
+    throw new Error('pollSession is not implemented for AgentCore — use orchestrator-level DDB polling');
   }
 
   async stopSession(handle: SessionHandle): Promise<void> {
@@ -75,16 +78,27 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     }
 
     try {
-      await this.client.send(new StopRuntimeSessionCommand({
+      await getClient().send(new StopRuntimeSessionCommand({
         agentRuntimeArn: runtimeArn,
         runtimeSessionId: handle.sessionId,
       }));
       logger.info('AgentCore session stopped', { session_id: handle.sessionId });
     } catch (err) {
-      logger.warn('Failed to stop AgentCore session (best-effort)', {
-        session_id: handle.sessionId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const errName = err instanceof Error ? (err as Error & { name?: string }).name : undefined;
+      if (errName === 'ResourceNotFoundException') {
+        logger.info('AgentCore session already gone', { session_id: handle.sessionId });
+      } else if (errName === 'ThrottlingException' || errName === 'AccessDeniedException') {
+        logger.error('Failed to stop AgentCore session', {
+          session_id: handle.sessionId,
+          error_type: errName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } else {
+        logger.warn('Failed to stop AgentCore session (best-effort)', {
+          session_id: handle.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 }
