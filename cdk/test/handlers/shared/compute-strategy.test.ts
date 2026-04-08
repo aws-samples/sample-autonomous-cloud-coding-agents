@@ -23,8 +23,16 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   StopRuntimeSessionCommand: jest.fn(),
 }));
 
+jest.mock('@aws-sdk/client-ecs', () => ({
+  ECSClient: jest.fn(() => ({ send: jest.fn() })),
+  RunTaskCommand: jest.fn(),
+  DescribeTasksCommand: jest.fn(),
+  StopTaskCommand: jest.fn(),
+}));
+
 import { resolveComputeStrategy } from '../../../src/handlers/shared/compute-strategy';
 import { AgentCoreComputeStrategy } from '../../../src/handlers/shared/strategies/agentcore-strategy';
+import { EcsComputeStrategy } from '../../../src/handlers/shared/strategies/ecs-strategy';
 
 describe('resolveComputeStrategy', () => {
   test('returns AgentCoreComputeStrategy for compute_type agentcore', () => {
@@ -36,12 +44,12 @@ describe('resolveComputeStrategy', () => {
     expect(strategy.type).toBe('agentcore');
   });
 
-  test("throws 'not yet implemented' for compute_type ecs", () => {
-    expect(() =>
-      resolveComputeStrategy({
-        compute_type: 'ecs',
-        runtime_arn: 'arn:test',
-      }),
-    ).toThrow("compute_type 'ecs' is not yet implemented");
+  test('returns EcsComputeStrategy for compute_type ecs', () => {
+    const strategy = resolveComputeStrategy({
+      compute_type: 'ecs',
+      runtime_arn: 'arn:test',
+    });
+    expect(strategy).toBeInstanceOf(EcsComputeStrategy);
+    expect(strategy.type).toBe('ecs');
   });
 });

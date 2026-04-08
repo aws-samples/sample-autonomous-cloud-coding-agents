@@ -19,10 +19,11 @@
 
 import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
+import { EcsComputeStrategy } from './strategies/ecs-strategy';
 
 export interface SessionHandle {
   readonly sessionId: string;
-  readonly strategyType: string;
+  readonly strategyType: ComputeType;
   readonly metadata: Record<string, unknown>;
 }
 
@@ -32,7 +33,7 @@ export type SessionStatus =
   | { readonly status: 'failed'; readonly error: string };
 
 export interface ComputeStrategy {
-  readonly type: string;
+  readonly type: ComputeType;
   startSession(input: {
     taskId: string;
     payload: Record<string, unknown>;
@@ -48,7 +49,7 @@ export function resolveComputeStrategy(blueprintConfig: BlueprintConfig): Comput
     case 'agentcore':
       return new AgentCoreComputeStrategy();
     case 'ecs':
-      throw new Error("compute_type 'ecs' is not yet implemented");
+      return new EcsComputeStrategy();
     default: {
       const _exhaustive: never = computeType;
       throw new Error(`Unknown compute_type: '${_exhaustive}'`);

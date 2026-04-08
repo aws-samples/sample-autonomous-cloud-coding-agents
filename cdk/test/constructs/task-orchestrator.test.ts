@@ -32,6 +32,13 @@ interface StackOverrides {
   memoryId?: string;
   guardrailId?: string;
   guardrailVersion?: string;
+  ecsClusterArn?: string;
+  ecsTaskDefinitionArn?: string;
+  ecsSubnets?: string;
+  ecsSecurityGroup?: string;
+  ecsContainerName?: string;
+  ecsTaskRoleArn?: string;
+  ecsExecutionRoleArn?: string;
 }
 
 function createStack(overrides?: StackOverrides): { stack: Stack; template: Template } {
@@ -57,7 +64,22 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     })
     : undefined;
 
-  const { includeRepoTable: _, additionalRuntimeArns, additionalSecretArns, memoryId, guardrailId, guardrailVersion, ...rest } = overrides ?? {};
+  const {
+    includeRepoTable: _,
+    additionalRuntimeArns,
+    additionalSecretArns,
+    memoryId,
+    guardrailId,
+    guardrailVersion,
+    ecsClusterArn,
+    ecsTaskDefinitionArn,
+    ecsSubnets,
+    ecsSecurityGroup,
+    ecsContainerName,
+    ecsTaskRoleArn,
+    ecsExecutionRoleArn,
+    ...rest
+  } = overrides ?? {};
 
   new TaskOrchestrator(stack, 'TaskOrchestrator', {
     taskTable,
@@ -70,6 +92,13 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     ...(memoryId && { memoryId }),
     ...(guardrailId && { guardrailId }),
     ...(guardrailVersion && { guardrailVersion }),
+    ...(ecsClusterArn && { ecsClusterArn }),
+    ...(ecsTaskDefinitionArn && { ecsTaskDefinitionArn }),
+    ...(ecsSubnets && { ecsSubnets }),
+    ...(ecsSecurityGroup && { ecsSecurityGroup }),
+    ...(ecsContainerName && { ecsContainerName }),
+    ...(ecsTaskRoleArn && { ecsTaskRoleArn }),
+    ...(ecsExecutionRoleArn && { ecsExecutionRoleArn }),
     ...rest,
   });
 
@@ -414,5 +443,108 @@ describe('TaskOrchestrator construct', () => {
     expect(() => createStack({ guardrailVersion: '1' })).toThrow(
       'guardrailId is required when guardrailVersion is provided',
     );
+  });
+
+  describe('ECS compute strategy', () => {
+    const ecsOverrides = {
+      ecsClusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+      ecsTaskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
+      ecsSubnets: 'subnet-aaa,subnet-bbb',
+      ecsSecurityGroup: 'sg-12345',
+      ecsContainerName: 'AgentContainer',
+      ecsTaskRoleArn: 'arn:aws:iam::123456789012:role/TaskRole',
+      ecsExecutionRoleArn: 'arn:aws:iam::123456789012:role/ExecutionRole',
+    };
+
+    test('includes ECS env vars when ECS props are provided', () => {
+      const { template } = createStack(ecsOverrides);
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Environment: {
+          Variables: Match.objectLike({
+            ECS_CLUSTER_ARN: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+            ECS_TASK_DEFINITION_ARN: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
+            ECS_SUBNETS: 'subnet-aaa,subnet-bbb',
+            ECS_SECURITY_GROUP: 'sg-12345',
+            ECS_CONTAINER_NAME: 'AgentContainer',
+          }),
+        },
+      });
+    });
+
+    test('does not include ECS env vars when ECS props are omitted', () => {
+      const { template } = createStack();
+      const functions = template.findResources('AWS::Lambda::Function');
+      for (const [, fn] of Object.entries(functions)) {
+        const envVars = (fn as any).Properties.Environment?.Variables ?? {};
+        expect(envVars).not.toHaveProperty('ECS_CLUSTER_ARN');
+        expect(envVars).not.toHaveProperty('ECS_TASK_DEFINITION_ARN');
+      }
+    });
+
+    test('grants ECS RunTask/DescribeTasks/StopTask permissions when ECS props are provided', () => {
+      const { template } = createStack(ecsOverrides);
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: [
+                'ecs:RunTask',
+                'ecs:DescribeTasks',
+                'ecs:StopTask',
+              ],
+              Effect: 'Allow',
+              Resource: '*',
+              Condition: {
+                ArnEquals: {
+                  'ecs:cluster': 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+                },
+              },
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('grants iam:PassRole scoped to task/execution role ARNs', () => {
+      const { template } = createStack(ecsOverrides);
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'iam:PassRole',
+              Effect: 'Allow',
+              Resource: Match.arrayWith([
+                'arn:aws:iam::123456789012:role/TaskRole',
+                'arn:aws:iam::123456789012:role/ExecutionRole',
+              ]),
+              Condition: {
+                StringEquals: {
+                  'iam:PassedToService': 'ecs-tasks.amazonaws.com',
+                },
+              },
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('throws when only some ECS props are provided', () => {
+      expect(() => createStack({
+        ecsClusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+      })).toThrow('ECS compute strategy requires all of');
+    });
+
+    test('does not grant ECS permissions when ECS props are omitted', () => {
+      const { template } = createStack();
+      const policies = template.findResources('AWS::IAM::Policy');
+      for (const [, policy] of Object.entries(policies)) {
+        const statements = (policy as any).Properties.PolicyDocument.Statement;
+        for (const stmt of statements) {
+          if (Array.isArray(stmt.Action)) {
+            expect(stmt.Action).not.toContain('ecs:RunTask');
+          }
+        }
+      }
+    });
   });
 });

@@ -119,7 +119,8 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   // Step 4: Start agent session — resolve compute strategy, invoke runtime, transition to RUNNING
-  await context.step('start-session', async () => {
+  // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
+  const sessionHandle = await context.step('start-session', async () => {
     try {
       const strategy = resolveComputeStrategy(blueprintConfig);
       const handle = await strategy.startSession({ taskId, payload, blueprintConfig });
@@ -128,6 +129,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         session_id: handle.sessionId,
         started_at: new Date().toISOString(),
       });
+      // Note: strategy_type is an additive field (not present in pre-strategy events)
       await emitTaskEvent(taskId, 'session_started', {
         session_id: handle.sessionId,
         strategy_type: handle.strategyType,
@@ -139,7 +141,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         strategy_type: handle.strategyType,
       });
 
-      return handle.sessionId;
+      return handle;
     } catch (err) {
       await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, task.user_id, true);
       throw err;
@@ -147,16 +149,41 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   // Step 5: Wait for agent to finish
-  // NOTE: Polls DynamoDB every 30s rather than re-invoking the AgentCore session.
-  // The agent writes terminal status directly to DDB. If the agent crashes without
-  // writing a terminal status, we detect it via the HYDRATING early-exit check
-  // (MAX_NON_RUNNING_POLLS ~5min); otherwise the loop runs up to MAX_POLL_ATTEMPTS
-  // (~8.5h). A future improvement could add AgentCore session status checks for
-  // faster crash detection.
+  // Polls DynamoDB every 30s. For ECS compute, also polls the ECS task to detect
+  // container crashes that don't write terminal status to DDB. For AgentCore,
+  // crash detection relies on the HYDRATING early-exit (MAX_NON_RUNNING_POLLS ~5min).
   const finalPollState = await context.waitForCondition<PollState>(
     'await-agent-completion',
     async (state) => {
-      return pollTaskStatus(taskId, state);
+      const ddbState = await pollTaskStatus(taskId, state);
+
+      // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
+      if (
+        ddbState.lastStatus &&
+        !TERMINAL_STATUSES.includes(ddbState.lastStatus) &&
+        blueprintConfig.compute_type === 'ecs'
+      ) {
+        try {
+          const strategy = resolveComputeStrategy(blueprintConfig);
+          const ecsStatus = await strategy.pollSession(sessionHandle);
+          if (ecsStatus.status === 'failed') {
+            const errorMsg = 'error' in ecsStatus ? ecsStatus.error : 'ECS task failed';
+            logger.warn('ECS task failed before DDB terminal write', {
+              task_id: taskId,
+              error: errorMsg,
+            });
+            await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, true);
+            return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
+          }
+        } catch (err) {
+          logger.warn('ECS pollSession check failed (non-fatal)', {
+            task_id: taskId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      return ddbState;
     },
     {
       initialState: { attempts: 0 },

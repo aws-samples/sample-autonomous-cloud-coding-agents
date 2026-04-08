@@ -23,6 +23,7 @@ import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -34,6 +35,7 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
+import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { RepoTable } from '../constructs/repo-table';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
@@ -273,6 +275,29 @@ export class AgentStack extends Stack {
 
     inputGuardrail.createVersion('Initial version');
 
+    // --- ECS Fargate compute backend (conditional) ---
+    // ECS infrastructure is opt-in via the ABCA_ENABLE_ECS env flag.
+    // Repos can then use compute_type: 'ecs' in their blueprint config.
+    const needsEcs = process.env.ABCA_ENABLE_ECS === 'true';
+
+    let ecsCluster: EcsAgentCluster | undefined;
+    if (needsEcs) {
+      const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
+        directory: runnerPath,
+        platform: ecr_assets.Platform.LINUX_ARM64,
+      });
+
+      ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
+        vpc: agentVpc.vpc,
+        agentImageAsset,
+        taskTable: taskTable.table,
+        taskEventsTable: taskEventsTable.table,
+        userConcurrencyTable: userConcurrencyTable.table,
+        githubTokenSecret,
+        memoryId: agentMemory.memory.memoryId,
+      });
+    }
+
     // --- Task Orchestrator (durable Lambda function) ---
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
@@ -284,6 +309,15 @@ export class AgentStack extends Stack {
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      ...(ecsCluster && {
+        ecsClusterArn: ecsCluster.cluster.clusterArn,
+        ecsTaskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+        ecsSubnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
+        ecsSecurityGroup: ecsCluster.securityGroup.securityGroupId,
+        ecsContainerName: ecsCluster.containerName,
+        ecsTaskRoleArn: ecsCluster.taskRoleArn,
+        ecsExecutionRoleArn: ecsCluster.executionRoleArn,
+      }),
     });
 
     // Grant the orchestrator Lambda read+write access to memory
