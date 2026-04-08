@@ -42,8 +42,9 @@ Each task follows a **blueprint** — a hybrid workflow that mixes deterministic
 
 1. **Admission** — the orchestrator validates the request, checks concurrency limits, and queues the task if needed.
 2. **Context hydration** — the platform gathers context: task description, GitHub issue body, repo-intrinsic knowledge (CLAUDE.md, README), and memory from past tasks on the same repo.
-3. **Agent execution** — the agent runs in an isolated MicroVM: clones the repo, creates a branch, edits code, commits, runs tests and lint. The orchestrator polls for completion without blocking compute.
-4. **Finalization** — the orchestrator infers the result (PR created or not), runs optional validation (lint, tests), extracts learnings into memory, and updates task status.
+3. **Pre-flight** — fail-closed readiness checks verify GitHub API reachability and repository access before consuming compute. Doomed tasks fail fast with a clear reason (`GITHUB_UNREACHABLE`, `REPO_NOT_FOUND_OR_NO_ACCESS`) instead of burning runtime.
+4. **Agent execution** — the agent runs in an isolated MicroVM with persistent session storage for select caches: clones the repo, creates a branch, edits code, commits, runs tests and lint. The orchestrator polls for completion without blocking compute.
+5. **Finalization** — the orchestrator infers the result (PR created or not), runs optional validation (lint, tests), extracts learnings into memory, and updates task status.
 
 For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
@@ -58,7 +59,7 @@ ABCA is under active development. The platform ships iteratively — each iterat
 | **3a** | Done | Repo onboarding, per-repo GitHub App credentials, turn caps, prompt guide |
 | **3b** | Done | Memory Tier 1, insights, agent self-feedback, prompt versioning, commit attribution |
 | **3bis** | Done | Hardening — reconciler error tracking, error serialization, test coverage gaps |
-| **3c** | WIP | Deterministic validation, PR review task type, multi-modal input |
+| **3c** | WIP | Pre-flight checks, persistent session storage, deterministic validation, PR review task type, multi-modal input |
 | **3d** | Planned | Review feedback loop, PR outcome tracking, evaluation pipeline |
 | **4** | Planned | GitLab, visual proof, Slack, control panel, WebSocket streaming |
 | **5** | Planned | Pre-warming, multi-user/team, cost management, guardrails, alternate runtime |
