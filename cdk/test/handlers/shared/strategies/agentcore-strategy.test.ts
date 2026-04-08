@@ -24,8 +24,10 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
 }));
 
+import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { AgentCoreComputeStrategy } from '../../../../src/handlers/shared/strategies/agentcore-strategy';
 
+const MockedClient = jest.mocked(BedrockAgentCoreClient);
 const defaultRuntimeArn = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/default';
 
 beforeEach(() => {
@@ -72,10 +74,9 @@ describe('AgentCoreComputeStrategy', () => {
     });
 
     test('reuses shared BedrockAgentCoreClient across instances', async () => {
-      const { BedrockAgentCoreClient } = require('@aws-sdk/client-bedrock-agentcore');
       // The lazy singleton may already be initialized from prior tests.
       // Record the current call count, then verify no additional constructor calls happen.
-      const callsBefore = BedrockAgentCoreClient.mock.calls.length;
+      const callsBefore = MockedClient.mock.calls.length;
 
       mockSend.mockResolvedValue({});
       const strategy1 = new AgentCoreComputeStrategy();
@@ -93,7 +94,7 @@ describe('AgentCoreComputeStrategy', () => {
       });
 
       // Lazy singleton: at most one constructor call total across all strategy instances
-      const callsAfter = BedrockAgentCoreClient.mock.calls.length;
+      const callsAfter = MockedClient.mock.calls.length;
       expect(callsAfter - callsBefore).toBeLessThanOrEqual(1);
       expect(mockSend).toHaveBeenCalledTimes(2);
     });

@@ -67,9 +67,9 @@ process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runt
 process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.TASK_RETENTION_DAYS = '90';
 
+import { TaskStatus } from '../../src/constructs/task-status';
 import { resolveComputeStrategy } from '../../src/handlers/shared/compute-strategy';
 import { transitionTask, emitTaskEvent, failTask } from '../../src/handlers/shared/orchestrator';
-import { TaskStatus } from '../../src/constructs/task-status';
 import type { BlueprintConfig } from '../../src/handlers/shared/repo-config';
 
 beforeEach(() => {
