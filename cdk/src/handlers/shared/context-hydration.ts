@@ -30,6 +30,7 @@ import type { TaskRecord } from './types';
  * A single comment on a GitHub issue.
  */
 export interface IssueComment {
+  readonly id: number;
   readonly author: string;
   readonly body: string;
 }
@@ -48,6 +49,8 @@ export interface GitHubIssueContext {
  * A review comment on a GitHub pull request.
  */
 export interface PullRequestReviewComment {
+  readonly id: number;
+  readonly in_reply_to_id?: number;
   readonly author: string;
   readonly body: string;
   readonly path?: string;
@@ -56,7 +59,7 @@ export interface PullRequestReviewComment {
 }
 
 /**
- * GitHub pull request context fetched from the REST API.
+ * GitHub pull request context fetched from the GitHub API.
  */
 export interface GitHubPullRequestContext {
   readonly number: number;
@@ -178,9 +181,21 @@ export async function fetchGitHubIssue(
       if (commentsResp.ok) {
         const raw = await commentsResp.json() as Array<Record<string, unknown>>;
         for (const c of raw) {
+          if (typeof c.id !== 'number') {
+            logger.warn('Skipping issue comment with missing or non-numeric id', {
+              repo, issue_number: issueNumber, raw_id: String(c.id),
+            });
+            continue;
+          }
           comments.push({
-            author: (c.user as Record<string, unknown>)?.login as string ?? 'unknown',
+            id: c.id,
+            author: (c.user as Record<string, unknown>)?.login as string || 'unknown',
             body: c.body as string ?? '',
+          });
+        }
+        if (raw.length > 0 && comments.length === 0) {
+          logger.error('All issue comments skipped due to invalid IDs — possible API response format change', {
+            repo, issue_number: issueNumber, total_raw: raw.length,
           });
         }
       } else {
@@ -205,11 +220,150 @@ export async function fetchGitHubIssue(
 }
 
 // ---------------------------------------------------------------------------
+// GraphQL review threads (filters resolved threads at fetch time)
+// ---------------------------------------------------------------------------
+
+const REVIEW_THREADS_QUERY = `
+query($owner: String!, $repo: String!, $prNumber: Int!, $threadCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      reviewThreads(first: 100, after: $threadCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          comments(first: 100) {
+            nodes {
+              databaseId
+              author { login }
+              body
+              path
+              line
+              diffHunk
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+async function fetchReviewCommentsGraphQL(
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<PullRequestReviewComment[]> {
+  const [owner, repoName] = repo.split('/');
+  const comments: PullRequestReviewComment[] = [];
+  let cursor: string | null = null;
+
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const resp = await fetch('https://api.github.com/graphql', {
+        method: 'POST',
+        headers: {
+          'Authorization': `bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: REVIEW_THREADS_QUERY,
+          variables: { owner, repo: repoName, prNumber, threadCursor: cursor },
+        }),
+        signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+      });
+
+      if (!resp.ok) {
+        logger.warn('GitHub GraphQL review threads fetch failed', {
+          repo, pr_number: prNumber, status: resp.status,
+        });
+        return [];
+      }
+
+      const json = await resp.json() as Record<string, unknown>;
+
+      if (json.errors) {
+        logger.warn('GitHub GraphQL review threads returned errors', {
+          repo, pr_number: prNumber, errors: JSON.stringify(json.errors),
+        });
+        return [];
+      }
+
+      const data = json.data as Record<string, unknown> | undefined;
+      const repository = (data?.repository ?? null) as Record<string, unknown> | null;
+      const pullRequest = (repository?.pullRequest ?? null) as Record<string, unknown> | null;
+      const reviewThreads = (pullRequest?.reviewThreads ?? null) as Record<string, unknown> | null;
+      if (!reviewThreads) {
+        logger.warn('GitHub GraphQL response missing expected review threads structure', {
+          repo, pr_number: prNumber,
+        });
+        return [];
+      }
+      const pageInfo = reviewThreads.pageInfo as { hasNextPage: boolean; endCursor: string };
+      const nodes = reviewThreads.nodes as Array<Record<string, unknown>>;
+
+      for (const thread of nodes) {
+        if (thread.isResolved === true) {
+          continue;
+        }
+
+        const threadComments = thread.comments as Record<string, unknown>;
+        const commentNodes = threadComments.nodes as Array<Record<string, unknown>>;
+
+        if (commentNodes.length >= 100) {
+          logger.warn('Review thread has 100+ comments — inner pagination not implemented', {
+            repo, pr_number: prNumber,
+          });
+        }
+
+        let rootId: number | undefined;
+        for (const c of commentNodes) {
+          const databaseId = c.databaseId;
+          if (typeof databaseId !== 'number') {
+            logger.warn('Skipping review comment with missing or non-numeric databaseId', {
+              repo, pr_number: prNumber, raw_id: String(databaseId),
+            });
+            continue;
+          }
+
+          if (rootId === undefined) {
+            rootId = databaseId;
+          }
+
+          const author = c.author as Record<string, unknown> | null | undefined;
+          comments.push({
+            id: databaseId,
+            in_reply_to_id: databaseId === rootId ? undefined : rootId,
+            author: (author?.login as string) || 'unknown',
+            body: (c.body as string) ?? '',
+            path: c.path as string | undefined,
+            line: c.line as number | undefined,
+            diff_hunk: c.diffHunk as string | undefined,
+          });
+        }
+      }
+
+      if (!pageInfo.hasNextPage) {
+        break;
+      }
+      cursor = pageInfo.endCursor;
+    }
+  } catch (err) {
+    logger.warn('GitHub GraphQL review threads fetch error', {
+      repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+
+  return comments;
+}
+
+// ---------------------------------------------------------------------------
 // GitHub pull request fetching
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch a GitHub pull request's metadata, review comments, issue comments, and diff summary.
+ * Fetch a GitHub pull request's metadata (REST), review comments (GraphQL, filters
+ * resolved threads), issue comments (REST), and diff summary (REST).
  * Returns null on any error (logged).
  * @param repo - the "owner/repo" string.
  * @param prNumber - the PR number.
@@ -227,15 +381,13 @@ export async function fetchGitHubPullRequest(
   };
 
   try {
-    // Fetch PR metadata, review comments, issue comments, and files in parallel
+    // Fetch PR metadata (REST), review comments (GraphQL), issue comments (REST), and files (REST) in parallel
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
-    const [prResp, reviewResp, issueResp, filesResp] = await Promise.all([
+    const [prResp, reviewComments, issueResp, filesResp] = await Promise.all([
       fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, {
         headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
       }),
-      fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/comments?per_page=100`, {
-        headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
-      }),
+      fetchReviewCommentsGraphQL(repo, prNumber, token),
       fetch(`https://api.github.com/repos/${repo}/issues/${prNumber}/comments?per_page=100`, {
         headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
       }),
@@ -251,33 +403,26 @@ export async function fetchGitHubPullRequest(
 
     const pr = await prResp.json() as Record<string, unknown>;
 
-    // Parse review comments
-    const reviewComments: PullRequestReviewComment[] = [];
-    if (reviewResp.ok) {
-      const raw = await reviewResp.json() as Array<Record<string, unknown>>;
-      for (const c of raw) {
-        reviewComments.push({
-          author: (c.user as Record<string, unknown>)?.login as string ?? 'unknown',
-          body: c.body as string ?? '',
-          path: c.path as string | undefined,
-          line: c.line as number | undefined,
-          diff_hunk: c.diff_hunk as string | undefined,
-        });
-      }
-    } else {
-      logger.warn('GitHub PR review comments fetch failed', {
-        repo, pr_number: prNumber, status: reviewResp.status,
-      });
-    }
-
     // Parse issue/conversation comments
     const issueComments: IssueComment[] = [];
     if (issueResp.ok) {
       const raw = await issueResp.json() as Array<Record<string, unknown>>;
       for (const c of raw) {
+        if (typeof c.id !== 'number') {
+          logger.warn('Skipping conversation comment with missing or non-numeric id', {
+            repo, pr_number: prNumber, raw_id: String(c.id),
+          });
+          continue;
+        }
         issueComments.push({
-          author: (c.user as Record<string, unknown>)?.login as string ?? 'unknown',
+          id: c.id,
+          author: (c.user as Record<string, unknown>)?.login as string || 'unknown',
           body: c.body as string ?? '',
+        });
+      }
+      if (raw.length > 0 && issueComments.length === 0) {
+        logger.error('All conversation comments skipped due to invalid IDs — possible API response format change', {
+          repo, pr_number: prNumber, total_raw: raw.length,
         });
       }
     } else {
@@ -472,11 +617,61 @@ export function assemblePrIterationPrompt(
 
   if (pr.review_comments.length > 0) {
     parts.push('\n### Review Comments\n');
+
+    // Group review comments into threads using in_reply_to_id
+    const rootComments = new Map<number, PullRequestReviewComment>();
+    const replies = new Map<number, PullRequestReviewComment[]>();
+
     for (const c of pr.review_comments) {
-      const location = c.path ? ` (${c.path}${c.line ? `:${c.line}` : ''})` : '';
-      parts.push(`**@${c.author}**${location}: ${c.body}\n`);
-      if (c.diff_hunk) {
-        parts.push(`\`\`\`diff\n${c.diff_hunk}\n\`\`\`\n`);
+      if (c.in_reply_to_id === undefined) {
+        // Top-level comment (thread root)
+        if (rootComments.has(c.id)) {
+          logger.warn('Duplicate root comment id detected — keeping first occurrence', {
+            comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
+          });
+          continue;
+        }
+        rootComments.set(c.id, c);
+        if (!replies.has(c.id)) {
+          replies.set(c.id, []);
+        }
+      } else {
+        // Reply to an existing thread
+        const rootId = c.in_reply_to_id;
+        if (!replies.has(rootId)) {
+          replies.set(rootId, []);
+        }
+        replies.get(rootId)!.push(c);
+      }
+    }
+
+    // Render threads rooted by known top-level comments
+    for (const [rootId, root] of rootComments) {
+      const location = root.path ? `\`${root.path}${root.line ? `:${root.line}` : ''}\`` : 'general';
+      parts.push(`**Thread on ${location}** (reply with comment_id: ${rootId})`);
+      parts.push(`> **@${root.author}**: ${root.body}`);
+      if (root.diff_hunk) {
+        parts.push(`> \`\`\`diff\n> ${root.diff_hunk}\n> \`\`\``);
+      }
+      const threadReplies = replies.get(rootId) ?? [];
+      for (const r of threadReplies) {
+        parts.push(`\n  - **@${r.author}**: ${r.body}`);
+      }
+      parts.push('');
+    }
+
+    // Render orphan replies (in_reply_to_id points to a root not in our fetched set)
+    for (const [rootId, orphanReplies] of replies) {
+      if (rootComments.has(rootId)) continue;
+      for (const r of orphanReplies) {
+        const location = r.path ? `\`${r.path}${r.line ? `:${r.line}` : ''}\`` : 'general';
+        const replyTarget = r.in_reply_to_id ?? r.id;
+        parts.push(`**Comment on ${location}** (reply with comment_id: ${replyTarget})`);
+        parts.push(`> **@${r.author}**: ${r.body}`);
+        if (r.diff_hunk) {
+          parts.push(`> \`\`\`diff\n> ${r.diff_hunk}\n> \`\`\``);
+        }
+        parts.push('');
       }
     }
   }
@@ -484,7 +679,7 @@ export function assemblePrIterationPrompt(
   if (pr.issue_comments.length > 0) {
     parts.push('\n### Conversation Comments\n');
     for (const c of pr.issue_comments) {
-      parts.push(`**@${c.author}**: ${c.body}\n`);
+      parts.push(`**@${c.author}** (comment_id: ${c.id}): ${c.body}\n`);
     }
   }
 
@@ -626,9 +821,26 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         logger.warn('PR iteration prompt exceeds token budget — trimming review comments', {
           task_id: task.task_id, estimate: promptEstimate, budget: USER_PROMPT_TOKEN_BUDGET,
         });
-        // Trim oldest review comments until under budget
-        const trimmedReviewComments = [...prResult.review_comments];
+        // Build thread-grouped list so we can trim whole threads at a time
+        const threads: PullRequestReviewComment[][] = [];
+        const threadMap = new Map<number, number>(); // root id -> index in threads[]
+        for (const c of prResult.review_comments) {
+          if (c.in_reply_to_id === undefined) {
+            threadMap.set(c.id, threads.length);
+            threads.push([c]);
+          } else {
+            const idx = threadMap.get(c.in_reply_to_id);
+            if (idx !== undefined) {
+              threads[idx].push(c);
+            } else {
+              // Orphan reply — treat as its own "thread"
+              threads.push([c]);
+            }
+          }
+        }
+
         const trimmedIssueComments = [...prResult.issue_comments];
+        let trimmedReviewComments = prResult.review_comments;
         let trimmedPr = {
           ...prResult,
           review_comments: trimmedReviewComments,
@@ -638,15 +850,34 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
           estimateTokens(assemblePrIterationPrompt(
             task.task_id, task.repo, trimmedPr, budgetResult.taskDescription,
           ));
+
+        // Trim oldest issue comments first
         while (trimmedIssueComments.length > 0 && estimateTrimmed() > USER_PROMPT_TOKEN_BUDGET) {
           trimmedIssueComments.shift();
           trimmedPr = { ...trimmedPr, issue_comments: trimmedIssueComments };
         }
-        while (trimmedReviewComments.length > 0 && estimateTrimmed() > USER_PROMPT_TOKEN_BUDGET) {
-          trimmedReviewComments.shift();
+
+        // Trim oldest review comment threads (root + all replies as a unit)
+        while (threads.length > 0 && estimateTrimmed() > USER_PROMPT_TOKEN_BUDGET) {
+          const removed = threads.shift()!;
+          logger.warn('Trimmed review comment thread to fit token budget', {
+            task_id: task.task_id,
+            removed_root_id: removed[0].id,
+            removed_count: removed.length,
+          });
+          trimmedReviewComments = threads.flat();
           trimmedPr = { ...trimmedPr, review_comments: trimmedReviewComments };
         }
+
         userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, trimmedPr, budgetResult.taskDescription);
+        const finalEstimate = estimateTokens(userPrompt);
+        if (finalEstimate > USER_PROMPT_TOKEN_BUDGET) {
+          logger.warn('Token budget still exceeded after trimming all comments — non-comment content too large', {
+            task_id: task.task_id,
+            final_estimate: finalEstimate,
+            budget: USER_PROMPT_TOKEN_BUDGET,
+          });
+        }
         truncated = true;
       }
 

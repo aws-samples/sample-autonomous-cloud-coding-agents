@@ -15,7 +15,7 @@ This guide covers how to write effective task descriptions, common anti-patterns
 When you submit a task, the platform does not pass your input directly to the agent. Instead, it goes through a **context hydration** step — a distinct phase in the task lifecycle (you'll see the task status change to `HYDRATING`) where the platform fetches external data and assembles the full prompt on your behalf. During hydration:
 
 - If you provided `--issue`, the platform calls the GitHub API to fetch the issue title, body, and comments.
-- If you provided `--pr`, the platform fetches the PR metadata, inline review comments, conversation comments, and changed files (diff summary) — four parallel API calls.
+- If you provided `--pr`, the platform fetches the PR metadata, conversation comments, and changed files via the REST API, and inline review comments via the GraphQL API — four parallel calls. Resolved review threads are filtered out at fetch time so the agent only sees unresolved feedback.
 - Your task description, the issue/PR content, and task metadata are combined into a single **user prompt**.
 - If the assembled prompt exceeds the token budget, older comments are trimmed to fit.
 
