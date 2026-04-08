@@ -32,6 +32,12 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42
 # From a text description
 node lib/bin/bgagent.js submit --repo owner/repo --task "Add input validation to the /users POST endpoint"
 
+# Iterate on an existing pull request (address review feedback)
+node lib/bin/bgagent.js submit --repo owner/repo --pr 42
+
+# Iterate on a PR with additional instructions
+node lib/bin/bgagent.js submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged"
+
 # Submit and wait for completion
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
@@ -58,13 +64,14 @@ Created:     2026-04-01T00:39:51.271Z
 | `--repo` | GitHub repository (`owner/repo`). Required. |
 | `--issue` | GitHub issue number. |
 | `--task` | Task description text. |
+| `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
-At least one of `--issue` or `--task` is required.
+At least one of `--issue`, `--task`, or `--pr` is required.
 
 ### Checking task status
 

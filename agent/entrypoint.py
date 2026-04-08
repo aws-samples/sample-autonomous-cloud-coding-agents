@@ -31,6 +31,7 @@ import requests
 import memory as agent_memory
 import task_state
 from observability import task_span
+from prompts import get_system_prompt
 from system_prompt import SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,9 @@ def build_config(
     dry_run: bool = False,
     task_id: str = "",
     system_prompt_overrides: str = "",
+    task_type: str = "new_task",
+    branch_name: str = "",
+    pr_number: str = "",
 ) -> dict:
     """Build and validate configuration from explicit parameters.
 
@@ -94,6 +98,9 @@ def build_config(
         "max_turns": max_turns,
         "max_budget_usd": max_budget_usd,
         "system_prompt_overrides": system_prompt_overrides,
+        "task_type": task_type,
+        "branch_name": branch_name,
+        "pr_number": pr_number,
     }
 
     errors = []
@@ -103,7 +110,10 @@ def build_config(
         errors.append("github_token is required")
     if not config["aws_region"]:
         errors.append("aws_region is required for Bedrock")
-    if not config["issue_number"] and not config["task_description"]:
+    if config["task_type"] == "pr_iteration":
+        if not config["pr_number"]:
+            errors.append("pr_number is required for pr_iteration task type")
+    elif not config["issue_number"] and not config["task_description"]:
         errors.append("Either issue_number or task_description is required")
 
     if errors:
@@ -303,15 +313,19 @@ def setup_repo(config: dict) -> dict:
     repo_dir = f"{AGENT_WORKSPACE}/{config['task_id']}"
     setup: dict[str, str | list[str] | bool] = {"repo_dir": repo_dir, "notes": []}
 
-    # Derive branch slug from issue title or task description
-    title = ""
-    if config.get("issue"):
-        title = config["issue"]["title"]
-    if not title:
-        title = config["task_description"]
-    slug = slugify(title)
-    branch = f"bgagent/{config['task_id']}/{slug}"
-    setup["branch"] = branch
+    if config.get("task_type") == "pr_iteration" and config.get("branch_name"):
+        branch = config["branch_name"]
+        setup["branch"] = branch
+    else:
+        # Derive branch slug from issue title or task description
+        title = ""
+        if config.get("issue"):
+            title = config["issue"]["title"]
+        if not title:
+            title = config["task_description"]
+        slug = slugify(title)
+        branch = f"bgagent/{config['task_id']}/{slug}"
+        setup["branch"] = branch
 
     # Mark the repo directory as safe for git.  On persistent session storage
     # the mount may be owned by a different UID than the container user,
@@ -343,9 +357,22 @@ def setup_repo(config: dict) -> dict:
         cwd=repo_dir,
     )
 
-    # Create branch
-    log("SETUP", f"Creating branch: {branch}")
-    run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
+    # Branch setup
+    if config.get("task_type") == "pr_iteration" and config.get("branch_name"):
+        log("SETUP", f"Checking out existing PR branch: {branch}")
+        run_cmd(
+            ["git", "fetch", "origin", branch],
+            label="fetch-pr-branch",
+            cwd=repo_dir,
+        )
+        run_cmd(
+            ["git", "checkout", "-b", branch, f"origin/{branch}"],
+            label="checkout-pr-branch",
+            cwd=repo_dir,
+        )
+    else:
+        log("SETUP", f"Creating branch: {branch}")
+        run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
 
     # Trust mise config files in the cloned repo (required before mise install)
     run_cmd(
@@ -402,7 +429,11 @@ def setup_repo(config: dict) -> dict:
         setup["lint_before"] = True
 
     # Detect default branch
-    setup["default_branch"] = detect_default_branch(config["repo_url"], repo_dir)
+    # For PR iteration: use base_branch from orchestrator if available
+    if config.get("task_type") == "pr_iteration" and config.get("base_branch"):
+        setup["default_branch"] = config["base_branch"]
+    else:
+        setup["default_branch"] = detect_default_branch(config["repo_url"], repo_dir)
 
     # Install prepare-commit-msg hook for code attribution
     _install_commit_hook(repo_dir)
@@ -627,6 +658,37 @@ def ensure_pr(
     repo_dir = setup["repo_dir"]
     branch = setup["branch"]
     default_branch = setup.get("default_branch", "main")
+
+    # PR iteration: skip PR creation — just push and return existing PR URL
+    if config.get("task_type") == "pr_iteration":
+        if not ensure_pushed(repo_dir, branch):
+            log("WARN", "Failed to push commits before resolving PR URL")
+        log("POST", "PR iteration — returning existing PR URL")
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                branch,
+                "--repo",
+                config["repo_url"],
+                "--json",
+                "url",
+                "-q",
+                ".url",
+            ],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pr_url = result.stdout.strip()
+            log("POST", f"Existing PR: {pr_url}")
+            return pr_url
+        stderr_msg = result.stderr.strip() if result.stderr else "(no stderr)"
+        log("WARN", f"Could not resolve existing PR URL (rc={result.returncode}): {stderr_msg}")
+        return None
 
     # Check if the agent already created a PR for this branch
     log("POST", "Checking for existing PR...")
@@ -1482,7 +1544,13 @@ def _build_system_prompt(
     overrides: str,
 ) -> str:
     """Assemble the system prompt with task-specific values and memory context."""
-    system_prompt = SYSTEM_PROMPT.replace("{repo_url}", config["repo_url"])
+    task_type = config.get("task_type", "new_task")
+    try:
+        system_prompt = get_system_prompt(task_type)
+    except ValueError:
+        log("ERROR", f"Unknown task_type {task_type!r} — falling back to default system prompt")
+        system_prompt = SYSTEM_PROMPT
+    system_prompt = system_prompt.replace("{repo_url}", config["repo_url"])
     system_prompt = system_prompt.replace("{task_id}", config["task_id"])
     system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
     system_prompt = system_prompt.replace("{branch_name}", setup["branch"])
@@ -1512,6 +1580,14 @@ def _build_system_prompt(
         if mc_parts:
             memory_context_text = "\n".join(mc_parts)
     system_prompt = system_prompt.replace("{memory_context}", memory_context_text)
+
+    # Substitute PR-specific placeholders
+    pr_number_val = config.get("pr_number", "")
+    if pr_number_val:
+        system_prompt = system_prompt.replace("{pr_number}", str(pr_number_val))
+    elif "{pr_number}" in system_prompt:
+        log("WARN", "System prompt contains {pr_number} placeholder but no pr_number in config")
+        system_prompt = system_prompt.replace("{pr_number}", "(unknown)")
 
     # Append Blueprint system_prompt_overrides after all placeholder
     # substitutions (avoids double-substitution if overrides contain
@@ -1628,6 +1704,9 @@ def run_task(
     system_prompt_overrides: str = "",
     prompt_version: str = "",
     memory_id: str = "",
+    task_type: str = "new_task",
+    branch_name: str = "",
+    pr_number: str = "",
 ) -> dict:
     """Run the full agent pipeline and return a result dict.
 
@@ -1652,6 +1731,9 @@ def run_task(
         aws_region=aws_region,
         task_id=task_id,
         system_prompt_overrides=system_prompt_overrides,
+        task_type=task_type,
+        branch_name=branch_name,
+        pr_number=pr_number,
     )
 
     log("TASK", f"Task ID: {config['task_id']}")
@@ -1678,6 +1760,8 @@ def run_task(
                     prompt = hydrated_context["user_prompt"]
                     if hydrated_context.get("issue"):
                         config["issue"] = hydrated_context["issue"]
+                    if hydrated_context.get("resolved_base_branch"):
+                        config["base_branch"] = hydrated_context["resolved_base_branch"]
                     if hydrated_context.get("truncated"):
                         log("WARN", "Context was truncated by orchestrator token budget")
                 else:

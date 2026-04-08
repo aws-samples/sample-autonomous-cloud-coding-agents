@@ -290,6 +290,47 @@ describe('runPreflightChecks', () => {
     expect(failedChecks.length).toBeGreaterThanOrEqual(1);
   });
 
+  test('passes when prNumber is provided and PR is open', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 }) // reachability
+      .mockResolvedValueOnce({ ok: true, status: 200 }) // repo access
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) }); // PR
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(true);
+    expect(result.checks).toHaveLength(3);
+    expect(result.checks[2].check).toBe('pr_accessible');
+    expect(result.checks[2].passed).toBe(true);
+  });
+
+  test('fails when PR returns 404', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: false, status: 404 });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
+  });
+
+  test('fails when PR is closed', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'closed' }) });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
+  });
+
   test('uses per-repo github_token_secret_arn from blueprint config', async () => {
     const perRepoArn = 'arn:aws:secretsmanager:us-east-1:123:secret:per-repo-token';
     const config: BlueprintConfig = {

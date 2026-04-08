@@ -329,3 +329,78 @@ class TestBuildSystemPrompt:
         result = _build_system_prompt(config, setup, None, "Always use tabs")
         assert "Always use tabs" in result
         assert "Additional instructions" in result
+
+
+# ---------------------------------------------------------------------------
+# build_config — task_type handling
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfigTaskType:
+    def test_pr_iteration_with_pr_number(self):
+        config = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            task_type="pr_iteration",
+            pr_number="42",
+        )
+        assert config["task_type"] == "pr_iteration"
+        assert config["pr_number"] == "42"
+
+    def test_pr_iteration_without_pr_number_raises(self):
+        with pytest.raises(ValueError, match="pr_number is required"):
+            build_config(
+                repo_url="owner/repo",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_type="pr_iteration",
+            )
+
+    def test_new_task_default(self):
+        config = build_config(
+            repo_url="owner/repo",
+            task_description="Fix it",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config["task_type"] == "new_task"
+
+
+# ---------------------------------------------------------------------------
+# _build_system_prompt — task_type handling
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPromptTaskType:
+    def test_selects_new_task_prompt(self):
+        config = {
+            "repo_url": "owner/repo",
+            "task_id": "test-123",
+            "max_turns": 100,
+            "task_type": "new_task",
+        }
+        setup = {
+            "branch": "bgagent/test-123/fix",
+            "default_branch": "main",
+            "notes": ["All OK"],
+        }
+        prompt = _build_system_prompt(config, setup, None, "")
+        assert "Create a Pull Request" in prompt
+
+    def test_selects_pr_iteration_prompt(self):
+        config = {
+            "repo_url": "owner/repo",
+            "task_id": "test-123",
+            "max_turns": 100,
+            "task_type": "pr_iteration",
+            "pr_number": "42",
+        }
+        setup = {
+            "branch": "feature/fix",
+            "default_branch": "main",
+            "notes": ["All OK"],
+        }
+        prompt = _build_system_prompt(config, setup, None, "")
+        assert "Update the PR" in prompt
+        assert "42" in prompt

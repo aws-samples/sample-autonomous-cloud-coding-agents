@@ -19,10 +19,11 @@ This guide covers how to write effective task descriptions, common anti-patterns
 When you submit a task, the platform does not pass your input directly to the agent. Instead, it goes through a **context hydration** step — a distinct phase in the task lifecycle (you'll see the task status change to `HYDRATING`) where the platform fetches external data and assembles the full prompt on your behalf. During hydration:
 
 - If you provided `--issue`, the platform calls the GitHub API to fetch the issue title, body, and comments.
-- Your task description, the issue content, and task metadata are combined into a single **user prompt**.
-- If the assembled prompt exceeds the token budget, older issue comments are trimmed to fit.
+- If you provided `--pr`, the platform fetches the PR metadata, inline review comments, conversation comments, and changed files (diff summary) — four parallel API calls.
+- Your task description, the issue/PR content, and task metadata are combined into a single **user prompt**.
+- If the assembled prompt exceeds the token budget, older comments are trimmed to fit.
 
-The hydrated prompt is then passed to the agent alongside a fixed **system prompt**. Understanding this assembly helps you write better descriptions — you control what goes in, but the platform decides the final shape.
+The hydrated prompt is then passed to the agent alongside a **system prompt** selected by task type. For `new_task`, the system prompt instructs the agent to create a branch, implement changes, and open a new PR. For `pr_iteration`, it instructs the agent to read review feedback, address it, push to the existing branch, and comment on the PR. Understanding this assembly helps you write better descriptions — you control what goes in, but the platform decides the final shape.
 
 ### What the agent receives
 
@@ -47,9 +48,31 @@ Repository: owner/repo
 [your task description, if provided]
 ```
 
+For `pr_iteration` tasks (when using `--pr`), the user prompt has a different structure:
+
+```
+Task ID: bgagent-01HYX...
+Repository: owner/repo
+
+## Pull Request #42: Fix login timeout on slow connections
+[PR body]
+
+### Changed Files
+- src/auth.ts (+12, -3)
+- src/middleware.ts (+5, -1)
+
+### Review Comments
+**@alice** (src/auth.ts:88): The timeout should be configurable...
+**@bob** (general): Consider adding a retry mechanism...
+
+## Additional Instructions
+[your task description, if provided]
+```
+
 The user prompt includes:
 - **Task ID** and **Repository** — always present.
-- **GitHub Issue** (title, body, and comments) — included when you use `--issue`.
+- **GitHub Issue** (title, body, and comments) — included when you use `--issue` (`new_task`).
+- **Pull Request context** (title, body, diff, review comments) — included when you use `--pr` (`pr_iteration`).
 - **Task description** — included when you use `--task`.
 
 ### Token budget
@@ -128,15 +151,19 @@ Both are active simultaneously. Blueprint overrides are part of the system promp
 
 ## Choosing the right input mode
 
-You must provide at least one of `--issue` or `--task` (or both).
+You must provide at least one of `--issue`, `--task`, or `--pr`.
 
 | Mode | When to use | Example |
 |---|---|---|
 | `--issue` only | The GitHub issue is well-written with clear requirements, reproduction steps, and acceptance criteria. | `bgagent submit --repo owner/repo --issue 42` |
 | `--task` only | Ad-hoc task not tied to an issue, or the issue doesn't exist yet. | `bgagent submit --repo owner/repo --task "Add rate limiting to the /search endpoint"` |
 | `--issue` + `--task` | The issue exists but needs clarification, scope narrowing, or additional instructions. | `bgagent submit --repo owner/repo --issue 42 --task "Focus only on the timeout in the OAuth flow. Don't change the retry logic."` |
+| `--pr` only | A PR has review feedback that needs addressing. The agent reads the diff, review comments, and pushes fixes. | `bgagent submit --repo owner/repo --pr 42` |
+| `--pr` + `--task` | A PR has review feedback, and you want to provide additional instructions or scope the work. | `bgagent submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged in the auth module"` |
 
 **When to combine both:** Use `--issue` + `--task` when you want the agent to see the full issue context (including comments from other contributors) but need to override or narrow the scope. Your `--task` text appears after the issue content, so it acts as the final instruction.
+
+**PR iteration:** Use `--pr` when a reviewer has left feedback on an existing PR. The agent checks out the PR's branch, reads all review comments and the current diff, makes targeted changes to address the feedback, and pushes back to the same branch. The `--task` flag is optional but useful for narrowing scope (e.g., "Only address the security concern, not the style nits").
 
 ## Writing effective task descriptions
 
@@ -249,6 +276,7 @@ The `--max-turns` flag (API field: `max_turns`) controls how many agent turns (m
 | Bug fix with clear reproduction | 50–100 | The agent needs to understand the issue, find the root cause, implement the fix, add tests, and verify. |
 | New feature (single module) | 100–200 | More exploration, implementation, and testing. Default of 100 is usually sufficient. |
 | Large refactoring or multi-file feature | 200–500 | Extensive codebase exploration and many file changes. Consider whether the task should be split instead. |
+| PR iteration (address review feedback) | 30–100 | The agent reads the existing diff and review comments, makes targeted changes, and pushes. Typically fewer turns than a new task since the scope is narrower. |
 
 If a task consistently times out or uses all turns without finishing, consider whether the task description is too broad. Splitting into smaller, focused tasks is usually more effective than increasing the turn limit.
 
@@ -342,5 +370,24 @@ that will be a separate task.
 
 The fix should target screen widths below 768px. Use the existing
 breakpoint variables in src/styles/variables.css.
+"
+```
+
+### PR iteration (address review feedback)
+
+```bash
+bgagent submit --repo acme/api-server --pr 95
+```
+
+When the review feedback is broad and you want the agent to focus:
+
+```bash
+bgagent submit --repo acme/api-server --pr 95 --task "
+Address only the security concerns flagged by @alice:
+- The SQL injection risk in the search query
+- The missing CSRF token on the form submission
+
+Ignore the style suggestions for now — those will be addressed
+in a follow-up.
 "
 ```

@@ -17,12 +17,17 @@
  *  SOFTWARE.
  */
 
+/** Valid task types for task creation. */
+export type TaskType = 'new_task' | 'pr_iteration';
+
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;
   readonly status: string;
   readonly repo: string;
   readonly issue_number: number | null;
+  readonly task_type: TaskType;
+  readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly session_id: string | null;
@@ -45,6 +50,8 @@ export interface TaskSummary {
   readonly status: string;
   readonly repo: string;
   readonly issue_number: number | null;
+  readonly task_type: TaskType;
+  readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly pr_url: string | null;
@@ -67,6 +74,8 @@ export interface CreateTaskRequest {
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  readonly task_type?: TaskType;
+  readonly pr_number?: number;
 }
 
 /** Cancel task response from DELETE /v1/tasks/{task_id}. */

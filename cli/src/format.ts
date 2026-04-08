@@ -26,6 +26,12 @@ export function formatTaskDetail(task: TaskDetail): string {
     `Status:      ${task.status}`,
     `Repo:        ${task.repo}`,
   ];
+  if (task.task_type && task.task_type !== 'new_task') {
+    lines.push(`Type:        ${task.task_type}`);
+  }
+  if (task.pr_number !== null) {
+    lines.push(`PR #:        ${task.pr_number}`);
+  }
   if (task.issue_number !== null) {
     lines.push(`Issue:       #${task.issue_number}`);
   }
@@ -74,13 +80,19 @@ export function formatTaskList(tasks: TaskSummary[]): string {
   }
 
   const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'DESCRIPTION'];
-  const rows = tasks.map(t => [
-    t.task_id,
-    t.status,
-    t.repo,
-    t.created_at,
-    truncate(t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-'), 40),
-  ]);
+  const rows = tasks.map(t => {
+    let desc = t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-');
+    if (t.task_type === 'pr_iteration' && t.pr_number !== null) {
+      desc = `PR #${t.pr_number}` + (t.task_description ? `: ${t.task_description}` : '');
+    }
+    return [
+      t.task_id,
+      t.status,
+      t.repo,
+      t.created_at,
+      truncate(desc, 40),
+    ];
+  });
 
   return formatTable(headers, rows);
 }

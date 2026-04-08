@@ -19,6 +19,9 @@
 
 import type { TaskStatusType } from '../../constructs/task-status';
 
+/** Valid task types for task creation. */
+export type TaskType = 'new_task' | 'pr_iteration';
+
 /**
  * Full task record as stored in DynamoDB.
  */
@@ -28,6 +31,8 @@ export interface TaskRecord {
   readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number?: number;
+  readonly task_type: TaskType;
+  readonly pr_number?: number;
   readonly task_description?: string;
   readonly branch_name: string;
   readonly session_id?: string;
@@ -61,6 +66,8 @@ export interface TaskDetail {
   readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
+  readonly task_type: TaskType;
+  readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly session_id: string | null;
@@ -86,6 +93,8 @@ export interface TaskSummary {
   readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
+  readonly task_type: TaskType;
+  readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly pr_url: string | null;
@@ -114,6 +123,8 @@ export interface CreateTaskRequest {
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  readonly task_type?: TaskType;
+  readonly pr_number?: number;
   readonly attachments?: Attachment[];
 }
 
@@ -139,6 +150,8 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     status: record.status,
     repo: record.repo,
     issue_number: record.issue_number ?? null,
+    task_type: record.task_type ?? 'new_task',
+    pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
     session_id: record.session_id ?? null,
@@ -227,6 +240,8 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     status: record.status,
     repo: record.repo,
     issue_number: record.issue_number ?? null,
+    task_type: record.task_type ?? 'new_task',
+    pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
     pr_url: record.pr_url ?? null,

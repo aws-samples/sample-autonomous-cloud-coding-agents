@@ -34,11 +34,13 @@ process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:12345678
 process.env.USER_PROMPT_TOKEN_BUDGET = '100000';
 
 import {
+  assemblePrIterationPrompt,
   assembleUserPrompt,
   clearTokenCache,
   enforceTokenBudget,
   estimateTokens,
   fetchGitHubIssue,
+  fetchGitHubPullRequest,
   hydrateContext,
   resolveGitHubToken,
   type GitHubIssueContext,
@@ -468,5 +470,67 @@ describe('hydrateContext', () => {
     expect(result.memory_context).toBeUndefined();
     expect(result.sources).toContain('task_description');
     expect(result.version).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchGitHubPullRequest
+// ---------------------------------------------------------------------------
+
+describe('fetchGitHubPullRequest', () => {
+  test('returns PR context on success', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 42, title: 'Fix bug', body: 'desc', head: { ref: 'feature' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([{ user: { login: 'alice' }, body: 'LGTM', path: 'src/a.ts', line: 10, diff_hunk: '@@ -1,3 +1,4 @@' }]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([{ user: { login: 'bob' }, body: 'Nice work' }]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([{ filename: 'src/a.ts', status: 'modified', additions: 5, deletions: 2, patch: '+added\n-removed' }]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 42, 'ghp_test');
+
+    expect(result).not.toBeNull();
+    expect(result!.number).toBe(42);
+    expect(result!.head_ref).toBe('feature');
+    expect(result!.base_ref).toBe('main');
+    expect(result!.review_comments).toHaveLength(1);
+    expect(result!.issue_comments).toHaveLength(1);
+    expect(result!.diff_summary).toContain('src/a.ts');
+  });
+
+  test('returns null when PR fetch fails with 404', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 999, 'ghp_test');
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assemblePrIterationPrompt
+// ---------------------------------------------------------------------------
+
+describe('assemblePrIterationPrompt', () => {
+  test('formats PR context into a user prompt', () => {
+    const pr = {
+      number: 42,
+      title: 'Fix null check',
+      body: 'Fixes a null pointer',
+      head_ref: 'fix/null-check',
+      base_ref: 'main',
+      state: 'open',
+      diff_summary: '### src/a.ts (modified, +5/-2)',
+      review_comments: [{ author: 'alice', body: 'Please add a test', path: 'src/a.ts', line: 10 }],
+      issue_comments: [{ author: 'bob', body: 'Looks good overall' }],
+    };
+
+    const result = assemblePrIterationPrompt('task-1', 'owner/repo', pr, 'Fix the null check Alice flagged');
+
+    expect(result).toContain('Pull Request #42');
+    expect(result).toContain('Fix null check');
+    expect(result).toContain('alice');
+    expect(result).toContain('Please add a test');
+    expect(result).toContain('bob');
+    expect(result).toContain('Fix the null check Alice flagged');
+    expect(result).toContain('src/a.ts');
   });
 });

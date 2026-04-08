@@ -67,6 +67,9 @@ export function isValidRepo(repo: string): boolean {
  * @returns true if issue_number or task_description is provided.
  */
 export function hasTaskSpec(req: CreateTaskRequest): boolean {
+  if (req.task_type === 'pr_iteration' && req.pr_number !== undefined && req.pr_number !== null) {
+    return true;
+  }
   return (req.issue_number !== undefined && req.issue_number !== null) ||
     (req.task_description !== undefined && req.task_description !== null && req.task_description.trim().length > 0);
 }
@@ -187,4 +190,31 @@ export function isValidTaskDescriptionLength(description: string): boolean {
  */
 export function computeTtlEpoch(retentionDays: number): number {
   return Math.floor(Date.now() / 1000) + retentionDays * 86400;
+}
+
+/** Valid task type values. */
+export const VALID_TASK_TYPES = new Set<string>(['new_task', 'pr_iteration']);
+
+/**
+ * Validate a task_type value from a request body.
+ * @param value - the raw value from the request.
+ * @returns true if the value is a valid task type or undefined/null (defaults to 'new_task').
+ */
+export function isValidTaskType(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== 'string') return false;
+  return VALID_TASK_TYPES.has(value);
+}
+
+/**
+ * Validate a pr_number value from a request body.
+ * @param value - the raw value from the request.
+ * @returns the valid number, null if invalid (caller should return 400), or undefined if absent.
+ */
+export function validatePrNumber(value: unknown): number | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number') return null;
+  if (!Number.isInteger(value)) return null;
+  if (value < 1) return null;
+  return value;
 }

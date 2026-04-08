@@ -56,6 +56,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "system_prompt.py" = ["E501"]  # long prompt strings
+"prompts/*.py" = ["E501"]  # long prompt strings
 "tests/**" = ["S101", "S106"]  # assert in tests is fine; hardcoded test tokens are not secrets
 
 [tool.pytest.ini_options]

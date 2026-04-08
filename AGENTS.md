@@ -24,7 +24,7 @@ To get started and understand the developer flow, follow the [Developer guide](.
 - **`scripts/`** (root) — Optional cross-package helpers; **`scripts/ci-build.sh`** runs the full monorepo build (same as CI).
 - **`cdk/`** — CDK app package (`@abca/cdk`): `cdk/src/`, `cdk/test/`, `cdk/cdk.json`, `cdk/tsconfig.json`, `cdk/tsconfig.dev.json`, and `cdk/.eslintrc.json`.
 - **`cli/`** — `@backgroundagent/cli` — CLI tool for interacting with the deployed REST API (see below).
-- **`agent/`** — Python code that runs inside the agent compute environment (entrypoint, server, system prompt, Dockerfile, requirements).
+- **`agent/`** — Python code that runs inside the agent compute environment (entrypoint, server, system prompt, Dockerfile, requirements). The system prompt is refactored into `agent/prompts/` with a shared base template and per-task-type workflow variants (`new_task`, `pr_iteration`).
 - **`docs/`** — Authoritative Markdown in `guides/` (developer, user, roadmap, prompt) and `design/`; assets in `diagrams/`, `imgs/`. The Starlight docs site lives here (`astro.config.mjs`, `package.json`); `src/content/docs/` is refreshed via `docs/scripts/sync-starlight.mjs`.
 - **`CONTRIBUTING.md`** — Contribution guidelines at the repository root.
 - **`package.json`** (root), **`yarn.lock`** — Yarn workspace root (minimal manifest); dependencies live in **`cdk/`**, **`cli/`**, and **`docs/`** package manifests.
@@ -40,7 +40,7 @@ The `@backgroundagent/cli` package provides the `bgagent` executable for submitt
 - `src/api-client.ts` — HTTP client wrapping `fetch` with auth header injection
 - `src/auth.ts` — Cognito login, token caching (`~/.bgagent/credentials.json`), auto-refresh
 - `src/config.ts` — Read/write `~/.bgagent/config.json`
-- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`)
+- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`), including `TaskType` (`new_task` | `pr_iteration`)
 - `src/format.ts` — Output formatting (table, detail view, JSON)
 - `src/debug.ts` — Verbose/debug logging (`--verbose` flag)
 - `src/errors.ts` — `CliError` and `ApiError` classes

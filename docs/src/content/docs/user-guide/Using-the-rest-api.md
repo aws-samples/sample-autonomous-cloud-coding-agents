@@ -4,6 +4,15 @@ title: Using the REST API
 
 The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack output.
 
+### Task types
+
+The platform supports two task types:
+
+| Type | Description | Outcome |
+|---|---|---|
+| `new_task` (default) | Create a new branch, implement changes, and open a new PR. | New pull request |
+| `pr_iteration` | Check out an existing PR's branch, read review feedback, address it, and push updates. | Updated pull request |
+
 ### Create a task
 
 ```bash
@@ -38,6 +47,24 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "issue_number": 42}'
 ```
 
+To iterate on an existing pull request (address review feedback):
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42}'
+```
+
+You can optionally include `task_description` with `pr_iteration` to provide additional instructions alongside the review feedback:
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
+```
+
 **Request body fields:**
 
 | Field | Type | Required | Description |
@@ -45,6 +72,8 @@ curl -X POST "$API_URL/tasks" \
 | `repo` | string | Yes | GitHub repository in `owner/repo` format |
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
+| `pr_number` | number | | PR number to iterate on (sets `task_type` to `pr_iteration`) |
+| `task_type` | string | No | `new_task` (default) or `pr_iteration`. Auto-set when `pr_number` is provided. |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
