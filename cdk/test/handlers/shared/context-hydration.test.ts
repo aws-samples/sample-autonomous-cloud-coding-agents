@@ -44,6 +44,7 @@ import {
   hydrateContext,
   resolveGitHubToken,
   type GitHubIssueContext,
+  type IssueComment,
 } from '../../../src/handlers/shared/context-hydration';
 
 // Mock global fetch
@@ -54,6 +55,37 @@ beforeEach(() => {
   jest.clearAllMocks();
   clearTokenCache();
 });
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+function makeGraphQLThreadsResponse(
+  threads: Array<{ isResolved?: boolean; comments: Array<Record<string, unknown>> }>,
+  hasNextPage = false,
+  endCursor?: string,
+): { ok: boolean; json: () => Promise<Record<string, unknown>> } {
+  return {
+    ok: true,
+    json: async () => ({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage, endCursor: endCursor ?? null },
+              nodes: threads.map(t => ({
+                isResolved: t.isResolved ?? false,
+                comments: {
+                  nodes: t.comments,
+                },
+              })),
+            },
+          },
+        },
+      },
+    }),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // resolveGitHubToken
@@ -107,8 +139,8 @@ describe('fetchGitHubIssue', () => {
     comments: 2,
   };
   const commentsResponse = [
-    { user: { login: 'alice' }, body: 'I can reproduce this.' },
-    { user: { login: 'bob' }, body: 'Me too.' },
+    { id: 101, user: { login: 'alice' }, body: 'I can reproduce this.' },
+    { id: 102, user: { login: 'bob' }, body: 'Me too.' },
   ];
 
   test('fetches issue with comments', async () => {
@@ -122,8 +154,8 @@ describe('fetchGitHubIssue', () => {
       title: 'Fix the bug',
       body: 'The bug is in login.ts',
       comments: [
-        { author: 'alice', body: 'I can reproduce this.' },
-        { author: 'bob', body: 'Me too.' },
+        { id: 101, author: 'alice', body: 'I can reproduce this.' },
+        { id: 102, author: 'bob', body: 'Me too.' },
       ],
     });
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -161,6 +193,36 @@ describe('fetchGitHubIssue', () => {
     mockFetch.mockRejectedValueOnce(new Error('Network error'));
     const result = await fetchGitHubIssue('owner/repo', 42, 'ghp_token');
     expect(result).toBeNull();
+  });
+
+  test('skips issue comments with non-numeric id', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...issueResponse, comments: 2 }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ([
+          { id: undefined, user: { login: 'alice' }, body: 'Bad' },
+          { id: 101, user: { login: 'bob' }, body: 'Good' },
+        ]),
+      });
+
+    const result = await fetchGitHubIssue('owner/repo', 42, 'ghp_token');
+    expect(result!.comments).toHaveLength(1);
+    expect(result!.comments[0].id).toBe(101);
+  });
+
+  test('falls back to unknown for empty string author on issue comments', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...issueResponse, comments: 1 }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ([
+          { id: 101, user: { login: '' }, body: 'Empty login' },
+        ]),
+      });
+
+    const result = await fetchGitHubIssue('owner/repo', 42, 'ghp_token');
+    expect(result!.comments[0].author).toBe('unknown');
   });
 
   test('handles null issue body gracefully', async () => {
@@ -202,6 +264,7 @@ describe('enforceTokenBudget', () => {
     title: 'Test',
     body: 'Body text',
     comments: Array.from({ length: commentCount }, (_, i) => ({
+      id: 1000 + i,
       author: `user${i}`,
       body: 'x'.repeat(400), // ~100 tokens per comment
     })),
@@ -246,7 +309,7 @@ describe('assembleUserPrompt', () => {
       number: 42,
       title: 'Fix login bug',
       body: 'The login form crashes.',
-      comments: [{ author: 'alice', body: 'Confirmed.' }],
+      comments: [{ id: 201, author: 'alice', body: 'Confirmed.' }],
     };
     const result = assembleUserPrompt('TASK001', 'org/repo', issue, 'Fix the login crash');
 
@@ -265,7 +328,7 @@ describe('assembleUserPrompt', () => {
       number: 10,
       title: 'Add feature',
       body: 'Please add dark mode.',
-      comments: [],
+      comments: [] as IssueComment[],
     };
     const result = assembleUserPrompt('TASK002', 'org/repo', issue);
 
@@ -287,7 +350,7 @@ describe('assembleUserPrompt', () => {
       number: 5,
       title: 'Empty issue',
       body: '',
-      comments: [],
+      comments: [] as IssueComment[],
     };
     const result = assembleUserPrompt('TASK004', 'org/repo', issue);
     expect(result).toContain('(no description)');
@@ -299,7 +362,7 @@ describe('assembleUserPrompt', () => {
       number: 1,
       title: 'Test issue',
       body: 'Issue body here',
-      comments: [{ author: 'dev', body: 'A comment' }],
+      comments: [{ id: 301, author: 'dev', body: 'A comment' }],
     };
     const result = assembleUserPrompt('T1', 'o/r', issue, 'Do the thing');
 
@@ -307,6 +370,145 @@ describe('assembleUserPrompt', () => {
     const lines = result.split('\n');
     expect(lines[0]).toBe('Task ID: T1');
     expect(lines[1]).toBe('Repository: o/r');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchGitHubPullRequest — id fields
+// ---------------------------------------------------------------------------
+
+describe('fetchGitHubPullRequest — id fields', () => {
+  test('returns id and in_reply_to_id on review comments', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([{
+        isResolved: false,
+        comments: [
+          { databaseId: 100, author: { login: 'alice' }, body: 'Fix this', path: 'a.ts', line: 1, diffHunk: undefined },
+          { databaseId: 200, author: { login: 'bob' }, body: 'Agreed', path: undefined, line: undefined, diffHunk: undefined },
+        ],
+      }]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments[0].id).toBe(100);
+    expect(result!.review_comments[0].in_reply_to_id).toBeUndefined();
+    expect(result!.review_comments[1].id).toBe(200);
+    expect(result!.review_comments[1].in_reply_to_id).toBe(100);
+  });
+
+  test('sets in_reply_to_id to undefined for thread root comments', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([{
+        isResolved: false,
+        comments: [
+          { databaseId: 100, author: { login: 'alice' }, body: 'Fix this', path: 'a.ts', line: 1, diffHunk: undefined },
+        ],
+      }]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments[0].id).toBe(100);
+    expect(result!.review_comments[0].in_reply_to_id).toBeUndefined();
+  });
+
+  test('skips review comments with non-numeric databaseId', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([{
+        isResolved: false,
+        comments: [
+          { databaseId: 'not-a-number', author: { login: 'alice' }, body: 'Bad id' },
+          { databaseId: undefined, author: { login: 'bob' }, body: 'Missing id' },
+          { databaseId: 100, author: { login: 'carol' }, body: 'Valid' },
+        ],
+      }]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    // Only the valid comment should be included
+    expect(result!.review_comments).toHaveLength(1);
+    expect(result!.review_comments[0].id).toBe(100);
+    // First valid comment becomes root — no in_reply_to_id
+    expect(result!.review_comments[0].in_reply_to_id).toBeUndefined();
+  });
+
+  test('promotes first valid comment to root when earlier comments have invalid databaseId', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([{
+        isResolved: false,
+        comments: [
+          { databaseId: 'bad', author: { login: 'alice' }, body: 'Invalid root' },
+          { databaseId: 100, author: { login: 'bob' }, body: 'Becomes root' },
+          { databaseId: 200, author: { login: 'carol' }, body: 'Reply' },
+        ],
+      }]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments).toHaveLength(2);
+    // Comment 100 becomes root since the first comment was invalid
+    expect(result!.review_comments[0].id).toBe(100);
+    expect(result!.review_comments[0].in_reply_to_id).toBeUndefined();
+    // Comment 200 is a reply to the promoted root
+    expect(result!.review_comments[1].id).toBe(200);
+    expect(result!.review_comments[1].in_reply_to_id).toBe(100);
+  });
+
+  test('skips issue comments with non-numeric id', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ([
+          { id: null, user: { login: 'alice' }, body: 'Null id' },
+          { id: 300, user: { login: 'bob' }, body: 'Valid' },
+        ]),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.issue_comments).toHaveLength(1);
+    expect(result!.issue_comments[0].id).toBe(300);
+  });
+
+  test('falls back to unknown for empty string author', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([{
+        isResolved: false,
+        comments: [
+          { databaseId: 100, author: { login: '' }, body: 'Empty login' },
+        ],
+      }]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments[0].author).toBe('unknown');
+  });
+
+  test('returns id on issue comments', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ([
+          { id: 300, user: { login: 'carol' }, body: 'Looks good' },
+        ]),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.issue_comments[0].id).toBe(300);
   });
 });
 
@@ -471,6 +673,54 @@ describe('hydrateContext', () => {
     expect(result.sources).toContain('task_description');
     expect(result.version).toBe(1);
   });
+
+  test('pr_iteration prompt: removing a thread root also removes its replies from prompt', () => {
+    // Thread 1: root (id 100) + reply (id 200)
+    // Thread 2: root (id 300)
+    // Simulate what the trimming code does: remove thread 1 entirely, keep thread 2.
+    const fullPr = {
+      number: 5,
+      title: 'Test',
+      body: '',
+      head_ref: 'feat',
+      base_ref: 'main',
+      state: 'open',
+      diff_summary: '',
+      review_comments: [
+        { id: 100, author: 'alice', body: 'Fix this', path: 'a.ts', line: 1 },
+        { id: 200, in_reply_to_id: 100, author: 'bob', body: 'Agreed' },
+        { id: 300, author: 'carol', body: 'Rename this', path: 'b.ts', line: 5 },
+      ],
+      issue_comments: [],
+    };
+
+    // Full prompt has both threads
+    const fullResult = assemblePrIterationPrompt('task-1', 'owner/repo', fullPr);
+    expect(fullResult).toContain('comment_id: 100');
+    expect(fullResult).toContain('@bob');
+    expect(fullResult).toContain('comment_id: 300');
+
+    // After trimming thread 1 (root 100 + reply 200), only thread 2 remains
+    const trimmedPr = {
+      ...fullPr,
+      review_comments: [
+        { id: 300, author: 'carol', body: 'Rename this', path: 'b.ts', line: 5 },
+      ],
+    };
+    const trimmedResult = assemblePrIterationPrompt('task-1', 'owner/repo', trimmedPr);
+
+    // Thread 1 root and reply are both gone
+    expect(trimmedResult).not.toContain('comment_id: 100');
+    expect(trimmedResult).not.toContain('@alice');
+    expect(trimmedResult).not.toContain('@bob');
+
+    // Thread 2 is still present
+    expect(trimmedResult).toContain('comment_id: 300');
+    expect(trimmedResult).toContain('@carol');
+
+    // Critically: reply 200 does NOT appear as an orphan
+    expect(trimmedResult).not.toContain('Comment on');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -482,8 +732,11 @@ describe('fetchGitHubPullRequest', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 42, title: 'Fix bug', body: 'desc', head: { ref: 'feature' }, base: { ref: 'main' }, state: 'open' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ([{ user: { login: 'alice' }, body: 'LGTM', path: 'src/a.ts', line: 10, diff_hunk: '@@ -1,3 +1,4 @@' }]) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ([{ user: { login: 'bob' }, body: 'Nice work' }]) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([{
+        isResolved: false,
+        comments: [{ databaseId: 501, author: { login: 'alice' }, body: 'LGTM', path: 'src/a.ts', line: 10, diffHunk: '@@ -1,3 +1,4 @@' }],
+      }]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([{ id: 601, user: { login: 'bob' }, body: 'Nice work' }]) })
       .mockResolvedValueOnce({ ok: true, json: async () => ([{ filename: 'src/a.ts', status: 'modified', additions: 5, deletions: 2, patch: '+added\n-removed' }]) });
 
     const result = await fetchGitHubPullRequest('owner/repo', 42, 'ghp_test');
@@ -503,6 +756,96 @@ describe('fetchGitHubPullRequest', () => {
     const result = await fetchGitHubPullRequest('owner/repo', 999, 'ghp_test');
     expect(result).toBeNull();
   });
+
+  test('filters out resolved review threads', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([
+        {
+          isResolved: true,
+          comments: [{ databaseId: 100, author: { login: 'alice' }, body: 'Resolved comment', path: 'a.ts', line: 1, diffHunk: '@@ -1 +1 @@' }],
+        },
+        {
+          isResolved: false,
+          comments: [{ databaseId: 200, author: { login: 'bob' }, body: 'Open comment', path: 'b.ts', line: 5, diffHunk: '@@ -5 +5 @@' }],
+        },
+      ]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments).toHaveLength(1);
+    expect(result!.review_comments[0].id).toBe(200);
+    expect(result!.review_comments[0].body).toBe('Open comment');
+  });
+
+  test('returns empty review comments when GraphQL returns errors', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          errors: [{ message: 'Something went wrong' }],
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments).toEqual([]);
+  });
+
+  test('paginates through review threads', async () => {
+    mockFetch
+      // #1: PR metadata
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      // #2: GraphQL page 1
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse(
+        [{ isResolved: false, comments: [{ databaseId: 100, author: { login: 'alice' }, body: 'Page 1', path: 'a.ts', line: 1, diffHunk: undefined }] }],
+        true,
+        'cursor-1',
+      ))
+      // #3: Issue comments
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      // #4: Files
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      // #5: GraphQL page 2
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse(
+        [{ isResolved: false, comments: [{ databaseId: 200, author: { login: 'bob' }, body: 'Page 2', path: 'b.ts', line: 5, diffHunk: undefined }] }],
+      ));
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments).toHaveLength(2);
+    expect(result!.review_comments[0].id).toBe(100);
+    expect(result!.review_comments[1].id).toBe(200);
+  });
+
+  test('returns empty review comments when GraphQL response has unexpected structure', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: { repository: { pullRequest: null } },
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments).toEqual([]);
+  });
+
+  test('returns empty review comments when GraphQL fetch fails', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
+      .mockResolvedValueOnce({ ok: false, status: 502 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
+    expect(result!.review_comments).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -519,8 +862,8 @@ describe('assemblePrIterationPrompt', () => {
       base_ref: 'main',
       state: 'open',
       diff_summary: '### src/a.ts (modified, +5/-2)',
-      review_comments: [{ author: 'alice', body: 'Please add a test', path: 'src/a.ts', line: 10 }],
-      issue_comments: [{ author: 'bob', body: 'Looks good overall' }],
+      review_comments: [{ id: 1001, author: 'alice', body: 'Please add a test', path: 'src/a.ts', line: 10 }],
+      issue_comments: [{ id: 2001, author: 'bob', body: 'Looks good overall' }],
     };
 
     const result = assemblePrIterationPrompt('task-1', 'owner/repo', pr, 'Fix the null check Alice flagged');
@@ -532,5 +875,88 @@ describe('assemblePrIterationPrompt', () => {
     expect(result).toContain('bob');
     expect(result).toContain('Fix the null check Alice flagged');
     expect(result).toContain('src/a.ts');
+    expect(result).toContain('reply with comment_id: 1001');
+    expect(result).toContain('comment_id: 2001');
+  });
+
+  test('groups review comments by thread', () => {
+    const pr = {
+      number: 10,
+      title: 'Refactor auth',
+      body: 'Auth changes',
+      head_ref: 'refactor/auth',
+      base_ref: 'main',
+      state: 'open',
+      diff_summary: '',
+      review_comments: [
+        { id: 100, author: 'alice', body: 'Please add a null check here', path: 'src/auth.ts', line: 42, diff_hunk: '@@ -40,3 +40,5 @@' },
+        { id: 200, in_reply_to_id: 100, author: 'bob', body: 'I agree with Alice' },
+        { id: 300, author: 'alice', body: 'This function name is misleading', path: 'src/api.ts', line: 10 },
+      ],
+      issue_comments: [],
+    };
+
+    const result = assemblePrIterationPrompt('task-2', 'owner/repo', pr);
+
+    // First thread — rooted at comment 100
+    expect(result).toContain('reply with comment_id: 100');
+    expect(result).toContain('**@alice**: Please add a null check here');
+    expect(result).toContain('**@bob**: I agree with Alice');
+    expect(result).toContain('`src/auth.ts:42`');
+
+    // Second thread — rooted at comment 300
+    expect(result).toContain('reply with comment_id: 300');
+    expect(result).toContain('**@alice**: This function name is misleading');
+    expect(result).toContain('`src/api.ts:10`');
+  });
+
+  test('groups threads correctly when in_reply_to_id is undefined for thread roots', () => {
+    const pr = {
+      number: 10,
+      title: 'Test',
+      body: '',
+      head_ref: 'feat',
+      base_ref: 'main',
+      state: 'open',
+      diff_summary: '',
+      review_comments: [
+        { id: 100, in_reply_to_id: undefined, author: 'alice', body: 'Add null check', path: 'src/a.ts', line: 5 },
+        { id: 200, in_reply_to_id: 100, author: 'bob', body: 'Agreed' },
+      ],
+      issue_comments: [],
+    };
+
+    const result = assemblePrIterationPrompt('task-4', 'owner/repo', pr);
+
+    // Comment 100 should be a thread root, not an orphan
+    expect(result).toContain('reply with comment_id: 100');
+    expect(result).toContain('**@alice**: Add null check');
+    expect(result).toContain('**@bob**: Agreed');
+    // Should NOT contain orphan markers for these comments
+    expect(result).not.toContain('Comment on');
+  });
+
+  test('renders orphan replies as standalone entries', () => {
+    const pr = {
+      number: 10,
+      title: 'Test',
+      body: '',
+      head_ref: 'feat',
+      base_ref: 'main',
+      state: 'open',
+      diff_summary: '',
+      review_comments: [
+        // Reply whose root (id 999) is not in the fetched set
+        { id: 500, in_reply_to_id: 999, author: 'carol', body: 'What about edge cases?', path: 'src/util.ts', line: 5 },
+      ],
+      issue_comments: [],
+    };
+
+    const result = assemblePrIterationPrompt('task-3', 'owner/repo', pr);
+
+    // Orphan uses in_reply_to_id (999) as reply target, not its own id (500)
+    expect(result).toContain('reply with comment_id: 999');
+    expect(result).toContain('**@carol**: What about edge cases?');
+    expect(result).toContain('`src/util.ts:5`');
   });
 });

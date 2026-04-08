@@ -15,7 +15,10 @@ class TestGetSystemPrompt:
 
     def test_pr_iteration_returns_prompt_with_update_pr(self):
         prompt = get_system_prompt("pr_iteration")
-        assert "Update the PR" in prompt
+        assert "Post a summary comment on the PR" in prompt
+        assert "Reply to each review comment thread" in prompt
+        assert "gh api" in prompt
+        assert "comments/<comment_id>/replies" in prompt
         assert "{pr_number}" in prompt
         assert "{repo_url}" in prompt
         assert "{branch_name}" in prompt

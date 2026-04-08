@@ -402,5 +402,6 @@ class TestBuildSystemPromptTaskType:
             "notes": ["All OK"],
         }
         prompt = _build_system_prompt(config, setup, None, "")
-        assert "Update the PR" in prompt
+        assert "Post a summary comment on the PR" in prompt
+        assert "Reply to each review comment thread" in prompt
         assert "42" in prompt
