@@ -187,13 +187,6 @@ export class TaskOrchestrator extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 3;
 
-    // Validate ECS props are all-or-nothing
-    const ecsProps = [props.ecsClusterArn, props.ecsTaskDefinitionArn, props.ecsSubnets, props.ecsSecurityGroup, props.ecsContainerName];
-    const ecsPropsProvided = ecsProps.filter(p => p !== undefined);
-    if (ecsPropsProvided.length > 0 && ecsPropsProvided.length < ecsProps.length) {
-      throw new Error('ECS compute strategy requires all of: ecsClusterArn, ecsTaskDefinitionArn, ecsSubnets, ecsSecurityGroup, ecsContainerName');
-    }
-
     this.fn = new lambda.NodejsFunction(this, 'OrchestratorFn', {
       entry: path.join(handlersDir, 'orchestrate-task.ts'),
       handler: 'handler',
