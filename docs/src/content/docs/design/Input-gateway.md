@@ -32,39 +32,39 @@ In short: **every input channel connects through this central point; the gateway
 
 ### Inbound (requests from users)
 
-- **Single entry point**  
+- **Single entry point**
   All channels must go through the gateway. No channel should talk directly to task storage or orchestration.
 
-- **Channel-specific authentication and verification**  
+- **Channel-specific authentication and verification**
   Each channel has its own way to prove legitimacy (Cognito JWT, Slack signing secret, webhook secrets, etc.). The gateway (or per-channel adapters) must verify every request before processing.
 
-- **Normalization to an internal message schema**  
+- **Normalization to an internal message schema**
   Every channel-specific payload must be transformed into the same internal message structure. The rest of the system only ever sees this normalized form.
 
-- **Validation**  
+- **Validation**
   The gateway must validate normalized messages (required fields, types, allowed actions, target repo/issue refs, size limits) and reject malformed or invalid requests with clear errors.
 
-- **Access control**  
+- **Access control**
   The gateway enforces who can do what (e.g. only the task owner can cancel; only authenticated users can create tasks). This may be defined per channel or globally.
 
-- **Support for multiple action types**  
+- **Support for multiple action types**
   At minimum: create task, get task(s), cancel task. If the product supports human-in-the-loop, add approve/reject and possibly free-form message. The internal schema must represent these distinctly.
 
-- **Multi-modal input**  
+- **Multi-modal input**
   Users can send text and, where the channel allows it, images or other attachments. The internal message format must carry these in a channel-agnostic way (e.g. type + URL or inline data).
 
-- **Channel metadata preservation**  
+- **Channel metadata preservation**
   Enough channel-specific metadata (e.g. Slack channel + thread, CLI request id) must be stored with the task so that outbound notifications can be delivered to the right place.
 
 ### Outbound (notifications to users)
 
-- **Single internal notification format**  
+- **Single internal notification format**
   The core emits one canonical structure for all outbound events (e.g. status change, task completed, error, approval requested). Channel adapters consume only this.
 
-- **Channel-specific rendering and delivery**  
+- **Channel-specific rendering and delivery**
   Each channel gets a renderer that turns the internal notification into the right format (Slack blocks, CLI text, email HTML, etc.) and sends it using the channel’s API or protocol.
 
-- **Routing and preferences**  
+- **Routing and preferences**
   The system must know where to send notifications (e.g. only to the channel the task was created from, or to multiple channels per user preferences). Routing rules are part of the gateway/notification design, not of the core task logic.
 
 ### User channel preferences (future)
@@ -94,22 +94,22 @@ MVP can use **implicit routing**: send notifications only to the channel the tas
 
 The gateway defines a single **internal message** format that all channels produce. The rest of the system (task creation, orchestration) depends only on this. The following is a conceptual schema, not an implementation spec.
 
-- **Message identity**  
+- **Message identity**
   A unique id (e.g. ULID) for deduplication and tracing.
 
 - **Channel source**
   Which channel the message came from (e.g. `api`, `webhook`, `slack`, `web`, `github_actions`).
 
-- **Channel metadata**  
+- **Channel metadata**
   Opaque or structured data needed to route replies (e.g. Slack channel id, thread ts; CLI session or request id). Stored with the task for outbound.
 
-- **User identity**  
+- **User identity**
   A stable platform user id (e.g. Cognito sub or mapped id). All channels must map to this so authorization and “my tasks” work consistently.
 
-- **Action type**  
+- **Action type**
   One of: create task, get task(s), get one task, cancel task, approve/reject (if HITL), or other defined actions.
 
-- **Payload**  
+- **Payload**
   Action-specific data, for example:
   - **Create task:** user message text, repo URL or org/repo, issue/PR ref (e.g. issue number), optional attachments (images, files) with type and URL or inline data.
   - **Cancel / approve:** task id, and for approve: approval decision and optional response text.
@@ -122,16 +122,16 @@ Validation rules (e.g. required fields per action, max message length, allowed U
 
 When the core needs to notify the user, it produces a single **internal notification** format. Channel adapters turn this into Slack messages, CLI output, emails, etc.
 
-- **Notification identity**  
+- **Notification identity**
   Unique id for the notification.
 
-- **Task and user**  
+- **Task and user**
   Task id and user id so adapters can route and filter.
 
-- **Notification type**  
+- **Notification type**
   E.g. status change, task completed, error, approval requested, log or progress update.
 
-- **Payload**  
+- **Payload**
   Type-specific content: status value, short message, approval question, PR URL, error message, log snippet, etc.
 
 Adapters are responsible for rendering this into channel-specific formats (e.g. Slack Block Kit, plain text for CLI) and delivering via the channel’s API or protocol.
@@ -144,35 +144,35 @@ Adapters are responsible for rendering this into channel-specific formats (e.g. 
 
 - User runs: `bgagent submit --repo org/myapp --issue 42` (and optionally adds a message or attachment).
 - The CLI sends an HTTP request to the gateway with Cognito JWT.
-- **Gateway (inbound):**  
-  - Verifies the JWT.  
-  - Normalizes the request into the internal message: action = create task, repo = org/myapp, issue_ref = 42, user message from args, channel_source = cli, user_id from JWT.  
-  - Validates required fields and allowed values.  
+- **Gateway (inbound):**
+  - Verifies the JWT.
+  - Normalizes the request into the internal message: action = create task, repo = org/myapp, issue_ref = 42, user message from args, channel_source = cli, user_id from JWT.
+  - Validates required fields and allowed values.
   - Dispatches to the task pipeline (create task).
 - The task pipeline creates the task and starts orchestration. Later, when status changes or the task completes, the core emits internal notifications.
-- **Gateway (outbound):**  
+- **Gateway (outbound):**
   In MVP with CLI-only, “outbound” may be implicit (e.g. user polls `GET /tasks/{id}` and sees status in the response). When push is added, an adapter could stream or push these notifications to the CLI (e.g. over WebSocket or SSE).
 
 ### Example 2: User checks status from the CLI
 
 - User runs: `bgagent status abc-123`.
 - CLI sends `GET /tasks/abc-123` with Cognito JWT.
-- **Gateway:**  
+- **Gateway:**
   Verifies JWT, normalizes to internal “get one task” action with task_id = abc-123 and user_id from JWT, validates, dispatches. The handler loads the task, enforces that the user owns it, and returns status (and optionally PR URL, error message, etc.) in a consistent response format. The CLI renders that as text.
 
 ### Example 3: User cancels a task
 
 - User runs: `bgagent cancel abc-123`.
-- **Gateway:**  
+- **Gateway:**
   Verifies JWT, normalizes to “cancel task” with task_id and user_id, validates ownership (or delegates to a downstream service), dispatches. The task pipeline marks the task cancelled and stops the agent run. Outbound notifications (if any) can inform the user that the task was cancelled.
 
 ### Example 4: Future — User submits a task from Slack
 
 - User sends: “Implement the feature from issue #42 in org/myapp” in a Slack channel (or via a slash command).
 - Slack sends an HTTP POST to the gateway (e.g. `/channels/slack/events`) with its own signing and payload.
-- **Gateway (inbound):**  
+- **Gateway (inbound):**
   Verifies Slack signing secret, normalizes to the same internal message: action = create task, repo = org/myapp, issue_ref = 42, user message from Slack text, channel_source = slack, channel_metadata = { channel_id, thread_ts }, user_id = mapped from Slack user (e.g. via a Slack→Cognito or Slack→platform-user mapping). Validates and dispatches.
-- **Gateway (outbound):**  
+- **Gateway (outbound):**
   When the task completes or needs approval, the core emits an internal notification. The Slack adapter renders it (e.g. Block Kit with “Task completed” and PR link, or approval buttons), and sends it to the right channel/thread using the stored channel_metadata.
 
 ### Example 5: Same user, different channels

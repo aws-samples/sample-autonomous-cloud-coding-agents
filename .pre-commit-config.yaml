@@ -1,0 +1,78 @@
+# Git hooks via https://github.com/j178/prek (installed by `mise run install` in a Git checkout; re-run `mise run hooks:install` after edits).
+# Config format matches pre-commit; run hooks with `prek` from mise (`mise.toml` [tools]).
+
+default_install_hook_types: [pre-commit, pre-push]
+fail_fast: false
+exclude: ^\.threat-composer/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Skip generated trees and paths often checked in read-only (0444); mutating hooks must not touch them.
+        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$|\.(snap|lock)$)
+      - id: end-of-file-fixer
+        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
+      - id: check-merge-conflict
+      - id: check-yaml
+        exclude: ^(cdk/cdk\.out/|cdk\.out/|node_modules/|agent/\.venv/)
+      - id: check-json
+        exclude: ^(cdk/cdk\.out/|node_modules/)
+
+  - repo: local
+    hooks:
+      - id: gitleaks-staged
+        name: gitleaks (staged)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run security:secrets:staged'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: cdk-eslint
+        name: eslint (cdk)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //cdk:eslint'
+        language: system
+        pass_filenames: false
+        files: ^cdk/.*\.(ts|tsx|cjs|mjs|js)$
+        exclude: ^cdk/cdk\.out/
+        stages: [pre-commit]
+
+      - id: cli-eslint
+        name: eslint (cli)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //cli:eslint'
+        language: system
+        pass_filenames: false
+        files: ^cli/.*\.(ts|tsx|cjs|mjs|js)$
+        stages: [pre-commit]
+
+      - id: agent-quality
+        name: quality (agent)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/agent" && mise run quality'
+        language: system
+        pass_filenames: false
+        files: ^agent/.*\.py$
+        stages: [pre-commit]
+
+      - id: docs-astro-check
+        name: astro check (docs)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/docs" && ./node_modules/.bin/astro check'
+        language: system
+        pass_filenames: false
+        files: ^docs/
+        exclude: ^docs/node_modules/
+        stages: [pre-commit]
+
+      - id: monorepo-security-pre-push
+        name: security scans (pre-push)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:security'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: monorepo-tests-pre-push
+        name: package tests (pre-push)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:tests'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

@@ -42,6 +42,7 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 - Running raw **`jest`/`tsc`/`cdk`** from muscle memory — prefer **`mise //cdk:test`**, **`mise //cdk:compile`**, **`mise //cdk:synth`** (see [Commands you can use](#commands-you-can-use)).
 - **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 - **`mise run build`** runs **`//agent:quality`** before CDK — the deployed image bundles **`agent/`**; agent changes belong in that tree.
+- **`prek install`** fails if Git **`core.hooksPath`** is set — another hook manager owns hooks; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ### Tech stack
 
@@ -105,6 +106,8 @@ Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common co
 - **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
 - **`mise run security`** — Runs **`security:secrets`** then **`security:sast`**.
 - **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.
+- **`mise run hooks:install`** — Re-install **[prek](https://github.com/j178/prek)** git hooks (also run automatically at the end of **`mise run install`** inside a Git checkout). See [CONTRIBUTING.md](./CONTRIBUTING.md) if `core.hooksPath` blocks install.
+- **`mise run hooks:run`** — Run the same **pre-commit** and **pre-push** hook stages on all files (local verification).
 
 Use these instead of running `tsc`, `jest`, or `cdk` directly when possible, so the project's scripts and config stay consistent.
 

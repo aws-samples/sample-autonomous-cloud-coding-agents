@@ -80,10 +80,10 @@ cd sample-autonomous-cloud-coding-agents
 - [AWS CLI](https://aws.amazon.com/cli/): configure your credentials
 
 ```
-aws configure --profile [your-profile] 
+aws configure --profile [your-profile]
 AWS Access Key ID [None]: xxxxxx
 AWS Secret Access Key [None]:yyyyyyyyyy
-Default region name [None]: us-east-1 
+Default region name [None]: us-east-1
 Default output format [None]: json
 ```
 
