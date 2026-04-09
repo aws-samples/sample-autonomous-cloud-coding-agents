@@ -75,7 +75,8 @@ describe('EcsComputeStrategy', () => {
       expect(call.input.networkConfiguration.awsvpcConfiguration.securityGroups).toEqual(['sg-12345']);
       expect(call.input.networkConfiguration.awsvpcConfiguration.assignPublicIp).toBe('DISABLED');
 
-      const envVars = call.input.overrides.containerOverrides[0].environment;
+      const override = call.input.overrides.containerOverrides[0];
+      const envVars = override.environment;
       expect(envVars).toEqual(expect.arrayContaining([
         { name: 'TASK_ID', value: 'TASK001' },
         { name: 'REPO_URL', value: 'org/repo' },
@@ -84,6 +85,17 @@ describe('EcsComputeStrategy', () => {
         { name: 'MAX_TURNS', value: '50' },
         { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
       ]));
+
+      // AGENT_PAYLOAD contains the full orchestrator payload for direct run_task() invocation
+      const agentPayload = envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD');
+      expect(agentPayload).toBeDefined();
+      const parsed = JSON.parse(agentPayload.value);
+      expect(parsed.repo_url).toBe('org/repo');
+      expect(parsed.prompt).toBe('Fix the bug');
+
+      // Container command override — runs Python directly instead of uvicorn
+      expect(override.command).toBeDefined();
+      expect(override.command[0]).toBe('python');
     });
 
     test('throws when RunTask returns no task', async () => {

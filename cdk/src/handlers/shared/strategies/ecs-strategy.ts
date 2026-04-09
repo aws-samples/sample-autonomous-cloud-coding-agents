@@ -53,6 +53,13 @@ export class EcsComputeStrategy implements ComputeStrategy {
     const subnets = ECS_SUBNETS.split(',').map(s => s.trim()).filter(Boolean);
     const { taskId, payload, blueprintConfig } = input;
 
+    // The ECS container's default CMD starts the FastAPI server (uvicorn) which
+    // waits for HTTP POST to /invocations — but in standalone ECS nobody sends
+    // that request. We override the container command to invoke run_task()
+    // directly with the full orchestrator payload (including hydrated_context).
+    // This avoids the server entirely and runs the agent in batch mode.
+    const payloadJson = JSON.stringify(payload);
+
     const containerEnv = [
       { name: 'TASK_ID', value: taskId },
       { name: 'REPO_URL', value: String(payload.repo_url ?? '') },
@@ -63,6 +70,45 @@ export class EcsComputeStrategy implements ComputeStrategy {
       ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
       ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),
       { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
+      // Full orchestrator payload as JSON — the Python wrapper reads this to
+      // call run_task() with all fields including hydrated_context.
+      { name: 'AGENT_PAYLOAD', value: payloadJson },
+      ...(payload.github_token_secret_arn
+        ? [{ name: 'GITHUB_TOKEN_SECRET_ARN', value: String(payload.github_token_secret_arn) }]
+        : []),
+      ...(payload.memory_id ? [{ name: 'MEMORY_ID', value: String(payload.memory_id) }] : []),
+    ];
+
+    // Override the container command to run a Python one-liner that:
+    // 1. Reads the AGENT_PAYLOAD env var (full orchestrator payload JSON)
+    // 2. Calls entrypoint.run_task() directly with all fields
+    // 3. Exits with code 0 on success, 1 on failure
+    // This bypasses the uvicorn server entirely — no HTTP, no OTEL noise.
+    const bootCommand = [
+      'python', '-c',
+      'import json, os, sys; '
+      + 'sys.path.insert(0, "/app"); '
+      + 'from entrypoint import run_task; '
+      + 'p = json.loads(os.environ["AGENT_PAYLOAD"]); '
+      + 'r = run_task('
+      + 'repo_url=p.get("repo_url",""), '
+      + 'task_description=p.get("prompt",""), '
+      + 'issue_number=str(p.get("issue_number","")), '
+      + 'github_token=p.get("github_token",""), '
+      + 'anthropic_model=p.get("model_id",""), '
+      + 'max_turns=int(p.get("max_turns",100)), '
+      + 'max_budget_usd=p.get("max_budget_usd"), '
+      + 'aws_region=os.environ.get("AWS_REGION",""), '
+      + 'task_id=p.get("task_id",""), '
+      + 'hydrated_context=p.get("hydrated_context"), '
+      + 'system_prompt_overrides=p.get("system_prompt_overrides",""), '
+      + 'prompt_version=p.get("prompt_version",""), '
+      + 'memory_id=p.get("memory_id",""), '
+      + 'task_type=p.get("task_type","new_task"), '
+      + 'branch_name=p.get("branch_name",""), '
+      + 'pr_number=str(p.get("pr_number",""))'
+      + '); '
+      + 'sys.exit(0 if r.get("status")=="success" else 1)',
     ];
 
     const command = new RunTaskCommand({
@@ -80,6 +126,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
         containerOverrides: [{
           name: ECS_CONTAINER_NAME,
           environment: containerEnv,
+          command: bootCommand,
         }],
       },
     });

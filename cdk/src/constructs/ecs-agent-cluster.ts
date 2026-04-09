@@ -104,6 +104,7 @@ export class EcsAgentCluster extends Construct {
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         LOG_GROUP_NAME: logGroup.logGroupName,
+        GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
         ...(props.memoryId && { MEMORY_ID: props.memoryId }),
       },
     });
