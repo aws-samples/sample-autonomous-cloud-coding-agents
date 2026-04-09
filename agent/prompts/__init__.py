@@ -3,10 +3,12 @@
 from .base import BASE_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
+from .pr_review import PR_REVIEW_WORKFLOW
 
 _PROMPTS = {
     "new_task": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),
     "pr_iteration": BASE_PROMPT.replace("{workflow}", PR_ITERATION_WORKFLOW),
+    "pr_review": BASE_PROMPT.replace("{workflow}", PR_REVIEW_WORKFLOW),
 }
 
 

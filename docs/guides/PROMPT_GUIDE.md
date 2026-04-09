@@ -19,7 +19,7 @@ When you submit a task, the platform does not pass your input directly to the ag
 - Your task description, the issue/PR content, and task metadata are combined into a single **user prompt**.
 - If the assembled prompt exceeds the token budget, older comments are trimmed to fit.
 
-The hydrated prompt is then passed to the agent alongside a **system prompt** selected by task type. For `new_task`, the system prompt instructs the agent to create a branch, implement changes, and open a new PR. For `pr_iteration`, it instructs the agent to read review feedback, address it, push to the existing branch, and comment on the PR. Understanding this assembly helps you write better descriptions — you control what goes in, but the platform decides the final shape.
+The hydrated prompt is then passed to the agent alongside a **system prompt** selected by task type. For `new_task`, the system prompt instructs the agent to create a branch, implement changes, and open a new PR. For `pr_iteration`, it instructs the agent to read review feedback, address it, push to the existing branch, and comment on the PR. For `pr_review`, it instructs the agent to analyze the PR's changes and post structured review comments without modifying code. Understanding this assembly helps you write better descriptions — you control what goes in, but the platform decides the final shape.
 
 ### What the agent receives
 
@@ -44,7 +44,7 @@ Repository: owner/repo
 [your task description, if provided]
 ```
 
-For `pr_iteration` tasks (when using `--pr`), the user prompt has a different structure:
+For `pr_iteration` tasks (when using `--pr`) and `pr_review` tasks (when using `--review-pr`), the user prompt has a different structure:
 
 ```
 Task ID: bgagent-01HYX...
@@ -68,7 +68,7 @@ Repository: owner/repo
 The user prompt includes:
 - **Task ID** and **Repository** — always present.
 - **GitHub Issue** (title, body, and comments) — included when you use `--issue` (`new_task`).
-- **Pull Request context** (title, body, diff, review comments) — included when you use `--pr` (`pr_iteration`).
+- **Pull Request context** (title, body, diff, review comments) — included when you use `--pr` (`pr_iteration`) or `--review-pr` (`pr_review`).
 - **Task description** — included when you use `--task`.
 
 ### Token budget
@@ -147,7 +147,7 @@ Both are active simultaneously. Blueprint overrides are part of the system promp
 
 ## Choosing the right input mode
 
-You must provide at least one of `--issue`, `--task`, or `--pr`.
+You must provide at least one of `--issue`, `--task`, `--pr`, or `--review-pr`.
 
 | Mode | When to use | Example |
 |---|---|---|
@@ -156,10 +156,14 @@ You must provide at least one of `--issue`, `--task`, or `--pr`.
 | `--issue` + `--task` | The issue exists but needs clarification, scope narrowing, or additional instructions. | `bgagent submit --repo owner/repo --issue 42 --task "Focus only on the timeout in the OAuth flow. Don't change the retry logic."` |
 | `--pr` only | A PR has review feedback that needs addressing. The agent reads the diff, review comments, and pushes fixes. | `bgagent submit --repo owner/repo --pr 42` |
 | `--pr` + `--task` | A PR has review feedback, and you want to provide additional instructions or scope the work. | `bgagent submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged in the auth module"` |
+| `--review-pr` only | You want a structured code review of an existing PR. The agent reads the changes and posts review comments without modifying code. | `bgagent submit --repo owner/repo --review-pr 42` |
+| `--review-pr` + `--task` | You want a focused review of specific aspects of a PR. | `bgagent submit --repo owner/repo --review-pr 42 --task "Focus on security issues and error handling"` |
 
 **When to combine both:** Use `--issue` + `--task` when you want the agent to see the full issue context (including comments from other contributors) but need to override or narrow the scope. Your `--task` text appears after the issue content, so it acts as the final instruction.
 
 **PR iteration:** Use `--pr` when a reviewer has left feedback on an existing PR. The agent checks out the PR's branch, reads all review comments and the current diff, makes targeted changes to address the feedback, and pushes back to the same branch. The `--task` flag is optional but useful for narrowing scope (e.g., "Only address the security concern, not the style nits").
+
+**PR review:** Use `--review-pr` when you want the agent to analyze a PR and post structured review comments without modifying any code. The agent reads the full source files, runs the build for analysis, and posts findings using a structured format (type, severity, description, proposed fix, AI prompt). The `--task` flag is optional but useful for focusing the review (e.g., "Focus on security issues").
 
 ## Writing effective task descriptions
 
@@ -273,6 +277,7 @@ The `--max-turns` flag (API field: `max_turns`) controls how many agent turns (m
 | New feature (single module) | 100–200 | More exploration, implementation, and testing. Default of 100 is usually sufficient. |
 | Large refactoring or multi-file feature | 200–500 | Extensive codebase exploration and many file changes. Consider whether the task should be split instead. |
 | PR iteration (address review feedback) | 30–100 | The agent reads the existing diff and review comments, makes targeted changes, and pushes. Typically fewer turns than a new task since the scope is narrower. |
+| PR review (code review) | 30–80 | The agent reads the diff and source files, runs the build for analysis, and posts review comments. No code changes, so fewer turns needed. |
 
 If a task consistently times out or uses all turns without finishing, consider whether the task description is too broad. Splitting into smaller, focused tasks is usually more effective than increasing the turn limit.
 

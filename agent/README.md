@@ -1,6 +1,6 @@
 # Agent Runtime
 
-The agent runtime container for ABCA. Each agent instance clones a GitHub repo, works on a task using Claude, and opens a pull request. Runs as a Docker container with two modes:
+The agent runtime container for ABCA. Each agent instance clones a GitHub repo, works on a task using Claude, and delivers a result — a new pull request (`new_task`), updates to an existing PR (`pr_iteration`), or structured review comments on a PR (`pr_review`). Runs as a Docker container with two modes:
 
 - **Local mode** — batch execution via `run.sh` with AgentCore-matching constraints (2 vCPU, 8 GB RAM)
 - **AgentCore mode** — FastAPI server on port 8080 with `/invocations` and `/ping` endpoints, deployable to AWS Bedrock AgentCore Runtime
@@ -224,6 +224,12 @@ bgagent submit --repo owner/repo --task "update the rfc issue template"
 # Submit with a GitHub issue
 bgagent submit --repo owner/repo --issue 42
 
+# Iterate on a PR (address review feedback)
+bgagent submit --repo owner/repo --pr 42
+
+# Review a PR (read-only — posts structured review comments)
+bgagent submit --repo owner/repo --review-pr 55
+
 # Submit and wait for completion
 bgagent submit --repo owner/repo --issue 42 --wait
 ```
@@ -252,18 +258,18 @@ The `run.sh` script prints these commands when it starts.
 
 ## What It Does
 
-The agent pipeline (shared by both modes):
+The agent pipeline (shared by both modes). Behavior varies by task type (`new_task`, `pr_iteration`, `pr_review`):
 
 1. **Config validation** — checks required parameters
-2. **Context hydration** — fetches the GitHub issue (title, body, comments) if an issue number is provided
-3. **Prompt assembly** — combines the system prompt (behavioral contract) with the issue context and task description
-4. **Deterministic pre-hooks** — clones repo, creates branch, configures git auth, runs `mise trust`, `mise install`, `mise run build`, and `mise run lint`
+2. **Context hydration** — fetches the GitHub issue (title, body, comments) if an issue number is provided; for `pr_iteration` and `pr_review`, fetches PR context (diff, description, review comments)
+3. **Prompt assembly** — combines the system prompt (behavioral contract, selected by task type from `prompts/`) with the issue/PR context and task description
+4. **Deterministic pre-hooks** — clones repo, creates or checks out branch, configures git auth, runs `mise trust`, `mise install`, `mise run build`, and `mise run lint`
 5. **Agent execution** — invokes the Claude Agent SDK via the `ClaudeSDKClient` class (connect/query/receive_response pattern) in unattended mode. The agent:
    - Understands the codebase
-   - Makes changes, runs tests and linters
-   - Commits and pushes after each unit of work
-   - Creates a pull request with summary, testing notes, and decisions
-6. **Deterministic post-hooks** — verifies `mise run build` and `mise run lint`, ensures a PR exists (creates one if the agent did not)
+   - **`new_task`**: Makes changes, runs tests and linters, commits and pushes after each unit of work, creates a pull request
+   - **`pr_iteration`**: Reads review feedback, addresses it with focused changes, commits and pushes, posts a summary comment on the PR
+   - **`pr_review`**: Analyzes changes read-only (no `Write` or `Edit` tools available), composes structured review findings, posts a batch review via the GitHub Reviews API
+6. **Deterministic post-hooks** — verifies `mise run build` and `mise run lint`, ensures a PR exists (creates one if the agent did not). For `pr_review`, build status is informational only and the commit/push steps are skipped.
 7. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
 
 ## Metrics
@@ -322,9 +328,16 @@ agent/
 ├── task_state.py        Best-effort DynamoDB task status (no-op if TASK_TABLE_NAME unset)
 ├── observability.py     OpenTelemetry helpers (e.g. AgentCore session id)
 ├── memory.py            Optional memory / episode integration for the agent
+├── prompts/             Per-task-type system prompt workflows
+│   ├── __init__.py      Prompt registry — assembles base template + workflow for each task type
+│   ├── base.py          Shared base template (environment, rules, placeholders)
+│   ├── new_task.py      Workflow for new_task (create branch, implement, open PR)
+│   ├── pr_iteration.py  Workflow for pr_iteration (read feedback, address, push)
+│   └── pr_review.py     Workflow for pr_review (read-only analysis, structured review comments)
 ├── system_prompt.py     Behavioral contract (PRD Section 11)
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
+├── tests/               pytest unit tests for pure functions and prompt assembly
 ├── test_sdk_smoke.py    Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
 └── test_subprocess_threading.py  Diagnostic: subprocess-in-background-thread verification
 ```

@@ -366,6 +366,26 @@ class TestBuildConfigTaskType:
         )
         assert config["task_type"] == "new_task"
 
+    def test_pr_review_with_pr_number(self):
+        config = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            task_type="pr_review",
+            pr_number="55",
+        )
+        assert config["task_type"] == "pr_review"
+        assert config["pr_number"] == "55"
+
+    def test_pr_review_without_pr_number_raises(self):
+        with pytest.raises(ValueError, match="pr_number is required"):
+            build_config(
+                repo_url="owner/repo",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_type="pr_review",
+            )
+
 
 # ---------------------------------------------------------------------------
 # _build_system_prompt — task_type handling
@@ -405,3 +425,21 @@ class TestBuildSystemPromptTaskType:
         assert "Post a summary comment on the PR" in prompt
         assert "Reply to each review comment thread" in prompt
         assert "42" in prompt
+
+    def test_selects_pr_review_prompt(self):
+        config = {
+            "repo_url": "owner/repo",
+            "task_id": "test-123",
+            "max_turns": 100,
+            "task_type": "pr_review",
+            "pr_number": "55",
+        }
+        setup = {
+            "branch": "feature/review",
+            "default_branch": "main",
+            "notes": ["All OK"],
+        }
+        prompt = _build_system_prompt(config, setup, None, "")
+        assert "READ-ONLY" in prompt
+        assert "must NOT modify" in prompt
+        assert "55" in prompt

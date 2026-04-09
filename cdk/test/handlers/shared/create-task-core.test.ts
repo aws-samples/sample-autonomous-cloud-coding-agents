@@ -330,4 +330,37 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(400);
     expect(result.body).toContain('Invalid task_type');
   });
+
+  test('creates pr_review task with pr_number', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_type: 'pr_review', pr_number: 99 },
+      makeContext(),
+      'req-review-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.task_type).toBe('pr_review');
+    expect(body.data.pr_number).toBe(99);
+    expect(body.data.branch_name).toBe('pending:pr_resolution');
+  });
+
+  test('returns 400 for pr_review without pr_number', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_type: 'pr_review', task_description: 'Review it' },
+      makeContext(),
+      'req-review-2',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toContain('pr_number is required');
+  });
+
+  test('returns 400 for pr_number with new_task', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it', pr_number: 42 } as any,
+      makeContext(),
+      'req-review-3',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toContain('pr_number is only allowed');
+  });
 });

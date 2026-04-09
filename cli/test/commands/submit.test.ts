@@ -192,7 +192,7 @@ describe('submit command', () => {
         'node', 'test',
         '--repo', 'owner/repo',
       ]),
-    ).rejects.toThrow('At least one of --issue, --task, or --pr is required');
+    ).rejects.toThrow('At least one of --issue, --task, --pr, or --review-pr is required');
   });
 
   test('submits a pr_iteration task with --pr', async () => {
@@ -231,6 +231,56 @@ describe('submit command', () => {
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  test('submits a pr_review task with --review-pr', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'review-abc',
+      status: 'SUBMITTED',
+      repo: 'owner/repo',
+      issue_number: null,
+      task_type: 'pr_review',
+      pr_number: 55,
+      task_description: null,
+      branch_name: 'pending:pr_resolution',
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+      max_budget_usd: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--review-pr', '55',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', task_type: 'pr_review', pr_number: 55 },
+      undefined,
+    );
+    expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  test('rejects --pr and --review-pr together', async () => {
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--pr', '42',
+        '--review-pr', '55',
+      ]),
+    ).rejects.toThrow('--pr and --review-pr cannot be used together');
   });
 
   test('submits a pr_iteration task with --pr and --task', async () => {

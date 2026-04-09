@@ -6,12 +6,13 @@ The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack outp
 
 ### Task types
 
-The platform supports two task types:
+The platform supports three task types:
 
 | Type | Description | Outcome |
 |---|---|---|
 | `new_task` (default) | Create a new branch, implement changes, and open a new PR. | New pull request |
 | `pr_iteration` | Check out an existing PR's branch, read review feedback, address it, and push updates. | Updated pull request |
+| `pr_review` | Check out an existing PR's branch, analyze the changes read-only, and post a structured review. | Review comments on the PR |
 
 ### Create a task
 
@@ -65,6 +66,24 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
 ```
 
+To request a read-only review of an existing pull request:
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55}'
+```
+
+You can optionally include `task_description` with `pr_review` to focus the review on specific areas:
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
+```
+
 **Request body fields:**
 
 | Field | Type | Required | Description |
@@ -72,8 +91,8 @@ curl -X POST "$API_URL/tasks" \
 | `repo` | string | Yes | GitHub repository in `owner/repo` format |
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
-| `pr_number` | number | | PR number to iterate on (sets `task_type` to `pr_iteration`) |
-| `task_type` | string | No | `new_task` (default) or `pr_iteration`. Auto-set when `pr_number` is provided. |
+| `pr_number` | number | | PR number to iterate on or review (required for `pr_iteration` and `pr_review`) |
+| `task_type` | string | No | `new_task` (default), `pr_iteration`, or `pr_review`. |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 

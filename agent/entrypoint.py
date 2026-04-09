@@ -40,6 +40,9 @@ from system_prompt import SYSTEM_PROMPT
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 
+# Task types that operate on an existing pull request.
+PR_TASK_TYPES = frozenset(("pr_iteration", "pr_review"))
+
 
 def resolve_github_token() -> str:
     """Resolve GitHub token from Secrets Manager or environment variable.
@@ -110,9 +113,9 @@ def build_config(
         errors.append("github_token is required")
     if not config["aws_region"]:
         errors.append("aws_region is required for Bedrock")
-    if config["task_type"] == "pr_iteration":
+    if config["task_type"] in PR_TASK_TYPES:
         if not config["pr_number"]:
-            errors.append("pr_number is required for pr_iteration task type")
+            errors.append("pr_number is required for pr_iteration/pr_review task type")
     elif not config["issue_number"] and not config["task_description"]:
         errors.append("Either issue_number or task_description is required")
 
@@ -313,7 +316,7 @@ def setup_repo(config: dict) -> dict:
     repo_dir = f"{AGENT_WORKSPACE}/{config['task_id']}"
     setup: dict[str, str | list[str] | bool] = {"repo_dir": repo_dir, "notes": []}
 
-    if config.get("task_type") == "pr_iteration" and config.get("branch_name"):
+    if config.get("task_type") in PR_TASK_TYPES and config.get("branch_name"):
         branch = config["branch_name"]
         setup["branch"] = branch
     else:
@@ -358,7 +361,7 @@ def setup_repo(config: dict) -> dict:
     )
 
     # Branch setup
-    if config.get("task_type") == "pr_iteration" and config.get("branch_name"):
+    if config.get("task_type") in PR_TASK_TYPES and config.get("branch_name"):
         log("SETUP", f"Checking out existing PR branch: {branch}")
         run_cmd(
             ["git", "fetch", "origin", branch],
@@ -429,8 +432,8 @@ def setup_repo(config: dict) -> dict:
         setup["lint_before"] = True
 
     # Detect default branch
-    # For PR iteration: use base_branch from orchestrator if available
-    if config.get("task_type") == "pr_iteration" and config.get("base_branch"):
+    # For PR tasks (pr_iteration, pr_review): use base_branch from orchestrator if available
+    if config.get("task_type") in PR_TASK_TYPES and config.get("base_branch"):
         setup["default_branch"] = config["base_branch"]
     else:
         setup["default_branch"] = detect_default_branch(config["repo_url"], repo_dir)
@@ -651,6 +654,10 @@ def ensure_pr(
 ) -> str | None:
     """Check if a PR exists for the branch; if not, create one.
 
+    For ``new_task``: creates a new PR if needed.
+    For ``pr_iteration``: pushes commits, then resolves the existing PR URL.
+    For ``pr_review``: resolves the existing PR URL without pushing (read-only).
+
     Returns the PR URL, or None if there are no commits beyond the default
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
     the verification status shown in the PR body.
@@ -659,11 +666,14 @@ def ensure_pr(
     branch = setup["branch"]
     default_branch = setup.get("default_branch", "main")
 
-    # PR iteration: skip PR creation — just push and return existing PR URL
-    if config.get("task_type") == "pr_iteration":
-        if not ensure_pushed(repo_dir, branch):
-            log("WARN", "Failed to push commits before resolving PR URL")
-        log("POST", "PR iteration — returning existing PR URL")
+    # PR iteration/review: skip PR creation — just resolve existing PR URL
+    if config.get("task_type") in PR_TASK_TYPES:
+        if config.get("task_type") == "pr_iteration":
+            if not ensure_pushed(repo_dir, branch):
+                log("WARN", "Failed to push commits before resolving PR URL")
+        else:
+            log("POST", "pr_review task — skipping push (read-only)")
+        log("POST", f"{config.get('task_type')} — returning existing PR URL")
         result = subprocess.run(
             [
                 "gh",
@@ -1336,10 +1346,15 @@ async def run_agent(
     else:
         log("WARN", "claude CLI not found on PATH")
 
+    if config.get("task_type") == "pr_review":
+        allowed_tools = ["Bash", "Read", "Glob", "Grep", "WebFetch"]
+    else:
+        allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
+
     options = ClaudeAgentOptions(
         model=config["anthropic_model"],
         system_prompt=system_prompt,
-        allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"],
+        allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
         cwd=cwd,
         max_turns=config["max_turns"],
@@ -1849,8 +1864,11 @@ def run_task(
 
             # Post-hooks
             with task_span("task.post_hooks") as post_span:
-                # Safety net: commit any uncommitted tracked changes
-                safety_committed = ensure_committed(setup["repo_dir"])
+                # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)
+                if config.get("task_type") == "pr_review":
+                    safety_committed = False
+                else:
+                    safety_committed = ensure_committed(setup["repo_dir"])
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
                 build_passed = verify_build(setup["repo_dir"])
@@ -1894,8 +1912,13 @@ def run_task(
             # Default True = assume build was green before, so a post-agent
             # failure IS counted as a regression (conservative).
             build_before = setup.get("build_before", True)
-            build_ok = build_passed or not build_before
-            if not build_passed and not build_before:
+            if config.get("task_type") == "pr_review":
+                build_ok = True  # Review task — build status is informational only
+                if not build_passed:
+                    log("INFO", "pr_review: build failed — informational only, not gating")
+            else:
+                build_ok = build_passed or not build_before
+            if not build_passed and not build_before and config.get("task_type") != "pr_review":
                 log(
                     "WARN",
                     "Post-agent build failed, but build was already failing before "

@@ -127,8 +127,8 @@ POST /v1/tasks
 | `repo` | String | Yes | GitHub repository in `owner/repo` format. |
 | `issue_number` | Number | No | GitHub issue number. If provided, the issue title, body, and comments are fetched during context hydration. |
 | `task_description` | String | No | Free-text task description. At least one of `issue_number`, `task_description`, or `pr_number` must be provided. |
-| `task_type` | String | No | Task type: `new_task` (default) or `pr_iteration`. When `pr_iteration`, the agent iterates on an existing PR instead of creating a new one. |
-| `pr_number` | Number | No | Pull request number to iterate on. Required when `task_type` is `pr_iteration`; rejected otherwise. The agent checks out the PR's branch, reads review feedback, addresses it, and pushes back to the same branch. |
+| `task_type` | String | No | Task type: `new_task` (default), `pr_iteration`, or `pr_review`. When `pr_iteration`, the agent iterates on an existing PR. When `pr_review`, the agent performs a read-only review and posts structured comments. |
+| `pr_number` | Number | No | Pull request number to iterate on or review. Required when `task_type` is `pr_iteration` or `pr_review`; rejected otherwise. For `pr_iteration`, the agent checks out the PR's branch, reads review feedback, addresses it, and pushes back. For `pr_review`, the agent checks out the PR's branch, analyzes changes read-only, and posts a structured review. |
 | `max_turns` | Number | No | Maximum agent turns (1–500). Controls how many reasoning/tool-call iterations the agent can perform. Defaults to 100 if omitted. |
 | `max_budget_usd` | Number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. If omitted, no budget limit is applied (turn limit and session timeout still apply). |
 | `attachments` | Array | No | Multi-modal attachments (images, files). See Attachments schema below. |
@@ -184,13 +184,13 @@ POST /v1/tasks
 }
 ```
 
-For `pr_iteration` tasks, `branch_name` is initially set to `pending:pr_resolution` and resolved to the PR's `head_ref` during context hydration.
+For `pr_iteration` and `pr_review` tasks, `branch_name` is initially set to `pending:pr_resolution` and resolved to the PR's `head_ref` during context hydration.
 
 **Error responses:**
 
 | Status | Code | Condition |
 |---|---|---|
-| `400` | `VALIDATION_ERROR` | Missing required fields, invalid repo format, no task description or issue or PR number, invalid `task_type`, `pr_number` provided without `task_type: 'pr_iteration'`, `pr_number` missing when `task_type` is `pr_iteration`, invalid `max_turns` (not an integer or outside 1–500 range), invalid `max_budget_usd` (not a number or outside 0.01–100 range). |
+| `400` | `VALIDATION_ERROR` | Missing required fields, invalid repo format, no task description or issue or PR number, invalid `task_type`, `pr_number` provided without `task_type: 'pr_iteration'` or `'pr_review'`, `pr_number` missing when `task_type` is `pr_iteration` or `pr_review`, invalid `max_turns` (not an integer or outside 1–500 range), invalid `max_budget_usd` (not a number or outside 0.01–100 range). |
 | `401` | `UNAUTHORIZED` | Missing or invalid auth token. |
 | `409` | `DUPLICATE_TASK` | Idempotency key matches an existing task (returns the existing task in `data`). |
 | `422` | `REPO_NOT_ONBOARDED` | Repository is not registered with the platform. Repos are onboarded via CDK deployment (`Blueprint` construct), not via a runtime API. See [REPO_ONBOARDING.md](/design/repo-onboarding). |
@@ -243,8 +243,8 @@ GET /v1/tasks/{task_id}
 
 | Field | Type | Description |
 |---|---|---|
-| `task_type` | String | Task type: `new_task` or `pr_iteration`. |
-| `pr_number` | Number or null | Pull request number being iterated on. Only set for `pr_iteration` tasks. |
+| `task_type` | String | Task type: `new_task`, `pr_iteration`, or `pr_review`. |
+| `pr_number` | Number or null | Pull request number being iterated on or reviewed. Only set for `pr_iteration` and `pr_review` tasks. |
 | `max_turns` | Number or null | Maximum agent turns for this task. Always present in the response — reflects the effective value (user-specified or platform default of 100). |
 | `max_budget_usd` | Number or null | Maximum cost budget in USD for this task. Null if no budget limit was specified. |
 
@@ -617,7 +617,7 @@ Rate limit status is communicated via response headers (see Standard response he
 | `WEBHOOK_NOT_FOUND` | 404 | Webhook does not exist or belongs to a different user. |
 | `WEBHOOK_ALREADY_REVOKED` | 409 | Webhook is already revoked. |
 | `REPO_NOT_ONBOARDED` | 422 | Repository is not registered with the platform. Repos are onboarded via CDK deployment, not via a runtime API. There are no `/v1/repos` endpoints. |
-| `PR_NOT_FOUND_OR_CLOSED` | 422 | For `pr_iteration` tasks: the specified PR does not exist, is not open, or is not accessible with the configured GitHub token. Checked during the orchestrator's pre-flight step. |
+| `PR_NOT_FOUND_OR_CLOSED` | 422 | For `pr_iteration` and `pr_review` tasks: the specified PR does not exist, is not open, or is not accessible with the configured GitHub token. Checked during the orchestrator's pre-flight step. |
 | `INVALID_STEP_SEQUENCE` | 500 | The blueprint's step sequence is invalid (missing required steps or incorrect ordering). This indicates a CDK configuration error that slipped past synth-time validation. Visible via `GET /v1/tasks/{id}` as `error_code`. See [REPO_ONBOARDING.md](/design/repo-onboarding#step-sequence-validation). |
 | `RATE_LIMIT_EXCEEDED` | 429 | User exceeded rate limit. |
 | `INTERNAL_ERROR` | 500 | Unexpected server error. Includes `request_id` for support. |

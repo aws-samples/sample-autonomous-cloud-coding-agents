@@ -20,7 +20,7 @@
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
-import type { TaskRecord } from './types';
+import { isPrTaskType, type TaskRecord, type TaskType } from './types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -731,13 +731,13 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     const memoryId = options?.memoryId ?? process.env.MEMORY_ID;
     const tokenSecretArn = options?.githubTokenSecretArn ?? GITHUB_TOKEN_SECRET_ARN;
 
-    const isPrIteration = task.task_type === 'pr_iteration';
+    const isPrTask = isPrTaskType(task.task_type as TaskType);
 
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
     const [issueResult, memoryResult, prResult] = await Promise.all([
-      // Issue fetch (skip for pr_iteration)
+      // Issue fetch (skip for PR task types)
       (async () => {
-        if (isPrIteration) return undefined;
+        if (isPrTask) return undefined;
         if (task.issue_number !== undefined && tokenSecretArn) {
           try {
             const token = await resolveGitHubToken(tokenSecretArn);
@@ -754,9 +754,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       memoryId
         ? loadMemoryContext(memoryId, task.repo, task.task_description)
         : Promise.resolve(undefined),
-      // PR fetch (only for pr_iteration)
+      // PR fetch (only for PR task types)
       (async () => {
-        if (isPrIteration && task.pr_number !== undefined && tokenSecretArn) {
+        if (isPrTask && task.pr_number !== undefined && tokenSecretArn) {
           try {
             const token = await resolveGitHubToken(tokenSecretArn);
             return await fetchGitHubPullRequest(task.repo, task.pr_number, token) ?? undefined;
@@ -793,11 +793,11 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     let resolvedBranchName: string | undefined;
     let resolvedBaseBranch: string | undefined;
 
-    if (isPrIteration) {
+    if (isPrTask) {
       if (!prResult) {
-        // PR fetch failed for a pr_iteration task — log error and return minimal context
-        logger.error('PR context fetch failed for pr_iteration task', {
-          task_id: task.task_id, pr_number: task.pr_number,
+        // PR fetch failed — log error and return minimal context
+        logger.error(`PR context fetch failed for ${task.task_type} task`, {
+          task_id: task.task_id, pr_number: task.pr_number, task_type: task.task_type,
         });
         const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
         return {
@@ -812,13 +812,18 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
 
       // Enforce token budget on the assembled PR prompt
       const budgetResult = enforceTokenBudget(undefined, task.task_description, USER_PROMPT_TOKEN_BUDGET);
-      userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, prResult, budgetResult.taskDescription);
+      let effectiveTaskDescription = budgetResult.taskDescription;
+      if (!effectiveTaskDescription && task.task_type === 'pr_review') {
+        logger.info('Using default task description for pr_review task', { task_id: task.task_id });
+        effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
+      }
+      userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, prResult, effectiveTaskDescription);
 
       // Trim PR context if the assembled prompt exceeds the token budget
       let truncated = budgetResult.truncated;
       const promptEstimate = estimateTokens(userPrompt);
       if (promptEstimate > USER_PROMPT_TOKEN_BUDGET) {
-        logger.warn('PR iteration prompt exceeds token budget — trimming review comments', {
+        logger.warn('PR task prompt exceeds token budget — trimming review comments', {
           task_id: task.task_id, estimate: promptEstimate, budget: USER_PROMPT_TOKEN_BUDGET,
         });
         // Build thread-grouped list so we can trim whole threads at a time
