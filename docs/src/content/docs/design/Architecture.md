@@ -206,10 +206,13 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Adaptive model router | ROADMAP.md (Iter 5) | COST_MODEL.md |
 | Capability-based security | ROADMAP.md (Iter 5) | SECURITY.md |
 | Live session replay | ROADMAP.md (Iter 4) | API_CONTRACT.md |
+| PR iteration task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
+| PR review task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
 
 ### Per-repo model selection
 
 Different tasks and repos may benefit from different models. The `model_id` field in the blueprint config (see [ORCHESTRATOR.md](/design/orchestrator)) allows per-repo overrides. Suggested defaults:
-- **Implementation tasks:** Claude Sonnet 4 (good balance of quality and cost)
-- **PR review tasks:** Claude Haiku (fast, cheap — review is read-only analysis)
+- **Implementation tasks (`new_task`):** Claude Sonnet 4 (good balance of quality and cost)
+- **PR iteration tasks (`pr_iteration`):** Claude Sonnet 4 (needs to understand review feedback and make code changes — similar complexity to implementation)
+- **PR review tasks (`pr_review`):** Claude Haiku (fast, cheap — review is read-only analysis)
 - **Complex/critical repos:** Claude Opus 4 (highest quality, highest cost — opt-in per repo)

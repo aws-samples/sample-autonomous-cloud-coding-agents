@@ -17,7 +17,7 @@ The platform is built on AWS CDK with a modular architecture: an input gateway n
 
 ## The use case
 
-Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository, creates a branch, works on the task, and opens a pull request.
+Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository and works on it. Depending on the task type, the agent creates a new branch and opens a pull request (`new_task`), iterates on an existing PR to address review feedback (`pr_iteration`), or performs a read-only review and posts structured comments on an existing PR (`pr_review`).
 
 Key characteristics:
 
@@ -34,6 +34,7 @@ Each task follows a **blueprint** — a hybrid workflow that mixes deterministic
 
 1. **Admission** — the orchestrator validates the request, checks concurrency limits, and queues the task if needed.
 2. **Context hydration** — the platform gathers context: task description, GitHub issue body, repo-intrinsic knowledge (CLAUDE.md, README), and memory from past tasks on the same repo.
-3. **Agent execution** — the agent runs in an isolated MicroVM: clones the repo, creates a branch, edits code, commits, runs tests and lint. The orchestrator polls for completion without blocking compute.
-4. **Finalization** — the orchestrator infers the result (PR created or not), runs optional validation (lint, tests), extracts learnings into memory, and updates task status.
+3. **Pre-flight** — fail-closed readiness checks verify GitHub API reachability and repository access before consuming compute. Doomed tasks fail fast with a clear reason (`GITHUB_UNREACHABLE`, `REPO_NOT_FOUND_OR_NO_ACCESS`) instead of burning runtime.
+4. **Agent execution** — the agent runs in an isolated MicroVM with persistent session storage for select caches: clones the repo, creates a branch, edits code, commits, runs tests and lint. The orchestrator polls for completion without blocking compute.
+5. **Finalization** — the orchestrator infers the result (PR created or not), runs optional validation (lint, tests), extracts learnings into memory, and updates task status.
 

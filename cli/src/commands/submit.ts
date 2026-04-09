@@ -32,12 +32,23 @@ export function makeSubmitCommand(): Command {
     .option('--task <description>', 'Task description')
     .option('--max-turns <number>', 'Maximum agent turns (1-500)', parseInt)
     .option('--max-budget <dollars>', 'Maximum budget in USD (0.01-100)', parseFloat)
+    .option('--pr <number>', 'PR number to iterate on (sets task_type to pr_iteration)', parseInt)
+    .option('--review-pr <number>', 'PR number to review (sets task_type to pr_review)', parseInt)
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
-      if (opts.issue === undefined && !opts.task) {
-        throw new CliError('At least one of --issue or --task is required.');
+      if (opts.pr !== undefined && isNaN(opts.pr)) {
+        throw new CliError('--pr must be a valid number.');
+      }
+      if (opts.reviewPr !== undefined && isNaN(opts.reviewPr)) {
+        throw new CliError('--review-pr must be a valid number.');
+      }
+      if (opts.pr !== undefined && opts.reviewPr !== undefined) {
+        throw new CliError('--pr and --review-pr cannot be used together.');
+      }
+      if (opts.pr === undefined && opts.reviewPr === undefined && opts.issue === undefined && !opts.task) {
+        throw new CliError('At least one of --issue, --task, --pr, or --review-pr is required.');
       }
       if (opts.issue !== undefined && isNaN(opts.issue)) {
         throw new CliError('--issue must be a valid number.');
@@ -60,6 +71,9 @@ export function makeSubmitCommand(): Command {
         ...(opts.task && { task_description: opts.task }),
         ...(opts.maxTurns !== undefined && { max_turns: opts.maxTurns }),
         ...(opts.maxBudget !== undefined && { max_budget_usd: opts.maxBudget }),
+        // Note: --pr and --review-pr are mutually exclusive (validated above).
+        ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
+        ...(opts.reviewPr !== undefined && { task_type: 'pr_review' as const, pr_number: opts.reviewPr }),
       };
 
       const task = await client.createTask(body, opts.idempotencyKey);

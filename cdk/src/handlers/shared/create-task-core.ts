@@ -27,8 +27,8 @@ import { generateBranchName } from './gateway';
 import { logger } from './logger';
 import { checkRepoOnboarded } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
-import { type CreateTaskRequest, type TaskRecord, toTaskDetail } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns } from './validation';
+import { type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
+import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -74,6 +74,25 @@ export async function createTaskCore(
 
   if (!hasTaskSpec(body)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'At least one of issue_number or task_description is required.', requestId);
+  }
+
+  // Validate task_type
+  if (!isValidTaskType(body.task_type)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_type. Must be "new_task", "pr_iteration", or "pr_review".', requestId);
+  }
+  const taskType: TaskType = (body.task_type as TaskType) ?? 'new_task';
+  const isPrTask = isPrTaskType(taskType);
+
+  // Validate pr_number
+  const prNumberResult = validatePrNumber(body.pr_number);
+  if (prNumberResult === null) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid pr_number. Must be a positive integer.', requestId);
+  }
+  if (isPrTask && prNumberResult === undefined) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `pr_number is required when task_type is "${taskType}".`, requestId);
+  }
+  if (!isPrTask && prNumberResult !== undefined) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed when task_type is "pr_iteration" or "pr_review".', requestId);
   }
 
   if (body.task_description && !isValidTaskDescriptionLength(body.task_description)) {
@@ -149,7 +168,9 @@ export async function createTaskCore(
   // 4. Generate identifiers and timestamps
   const taskId = ulid();
   const now = new Date().toISOString();
-  const branchName = generateBranchName(taskId, body.task_description ?? body.repo);
+  const branchName = isPrTask
+    ? 'pending:pr_resolution'
+    : generateBranchName(taskId, body.task_description ?? body.repo);
 
   // 5. Build task record
   const taskRecord: TaskRecord = {
@@ -158,6 +179,8 @@ export async function createTaskCore(
     status: TaskStatus.SUBMITTED,
     repo: body.repo,
     ...(body.issue_number !== undefined && { issue_number: body.issue_number }),
+    task_type: taskType,
+    ...(prNumberResult !== undefined && { pr_number: prNumberResult }),
     ...(body.task_description !== undefined && { task_description: body.task_description }),
     branch_name: branchName,
     ...(userMaxTurns !== undefined && { max_turns: userMaxTurns }),

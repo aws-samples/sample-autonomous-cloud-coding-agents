@@ -166,7 +166,7 @@ See the Admission control section for details. Validates that the task is allowe
 
 #### Step 2: Context hydration (deterministic)
 
-See the Context hydration section for details. Assembles the agent's prompt from multiple sources: user message, GitHub issue (title, body, comments), memory (relevant past context), repo configuration (system prompt template, rules), and platform defaults. The output is a fully assembled prompt and system prompt, ready to pass to the compute session.
+See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). The output is a fully assembled prompt, ready to pass to the compute session.
 
 #### Step 3: Session start and agent execution (deterministic start + agentic execution)
 
@@ -246,19 +246,25 @@ Admission control runs immediately after the input gateway dispatches a "create 
 
 Context hydration assembles the agent's user prompt from multiple sources. It runs as a deterministic step in the orchestrator Lambda after admission control and before session start. The goal is to perform I/O-bound work (GitHub API calls, Secrets Manager lookups) *before* expensive agent compute is consumed, enabling fast failure when external APIs are unavailable.
 
-### Current implementation (Iteration 3a)
+### Current implementation (Iteration 3a+)
 
 The orchestrator's `hydrateAndTransition()` function calls `hydrateContext()` (`src/handlers/shared/context-hydration.ts`) which:
 
 1. **Resolves the GitHub token** from Secrets Manager (if `GITHUB_TOKEN_SECRET_ARN` is configured). The token is cached in a module-level variable with a 5-minute TTL for Lambda execution context reuse.
-2. **Fetches the GitHub issue** (title, body, comments) via the GitHub REST API using native `fetch()` — if `issue_number` is present on the task and a token is available.
+2. **Fetches external context** based on task type:
+   - **`new_task`**: Fetches the GitHub issue (title, body, comments) via the GitHub REST API if `issue_number` is present.
+   - **`pr_iteration`** / **`pr_review`**: Fetches the pull request context via `fetchGitHubPullRequest()` — four parallel calls: three REST API calls (PR metadata, conversation comments, changed files) plus one GraphQL query for inline review comments. The GraphQL query filters out resolved review threads at fetch time so the agent only sees unresolved feedback. PR metadata includes title, body, head/base refs, and state; the diff summary covers changed files. The PR's `head_ref` is stored as `resolved_branch_name` and `base_ref` as `resolved_base_branch` on the hydrated context. These are used by the orchestrator to update the task record's `branch_name` from the placeholder `pending:pr_resolution` to the actual PR branch. For `pr_review`, if no `task_description` is provided, a default review instruction is used.
 3. **Enforces a token budget** on the combined context. Uses a character-based heuristic (~4 chars per token). Default budget: 100K tokens (configurable via `USER_PROMPT_TOKEN_BUDGET` environment variable). When the budget is exceeded, oldest comments are removed first. The `truncated` flag is set in the result.
-4. **Assembles the user prompt** — a structured markdown document containing Task ID, Repository, GitHub Issue section (title, body, comments), and Task section (user's task description or default instruction). The format mirrors the Python `assemble_prompt()` in `agent/entrypoint.py` for cross-language consistency.
-5. **Returns a `HydratedContext` object** containing `version`, `user_prompt`, `issue`, `sources`, `token_estimate`, and `truncated`.
+4. **Assembles the user prompt** based on task type:
+   - **`new_task`**: A structured markdown document with Task ID, Repository, GitHub Issue section, and Task section. The format mirrors the Python `assemble_prompt()` in `agent/entrypoint.py`.
+   - **`pr_iteration`**: Assembled by `assemblePrIterationPrompt()` — includes PR metadata (number, title, body), the diff summary (changed files and patches), review comments (inline and conversation), and optional user instructions from `task_description`.
+5. **Returns a `HydratedContext` object** containing `version`, `user_prompt`, `issue`, `sources`, `token_estimate`, `truncated`, and for `pr_iteration`/`pr_review` tasks: `resolved_branch_name` and `resolved_base_branch`.
 
 The hydrated context is passed to the agent as a new `hydrated_context` field in the invocation payload, alongside the existing legacy fields (`repo_url`, `task_id`, `branch_name`, `issue_number`, `prompt`). The agent checks for `hydrated_context` with `version == 1`; if present, it uses the pre-assembled `user_prompt` directly and skips in-container GitHub fetching and prompt assembly. If absent (e.g. during a deployment rollout or when the secret ARN isn't configured), the agent falls back to its existing behavior.
 
 **Graceful degradation:** If any step fails (Secrets Manager unavailable, GitHub API error, network timeout), the orchestrator proceeds with whatever context is available. The worst case is a minimal prompt with just the task ID and repository — the agent can still attempt its own GitHub fetch as a fallback via the legacy `issue_number` field.
+
+**PR iteration branch resolution:** After hydration, if `resolved_branch_name` is present on the hydrated context, the orchestrator updates the task record's `branch_name` in DynamoDB from the placeholder (`pending:pr_resolution`) to the PR's actual `head_ref`. This ensures the task record always reflects the real branch name that the agent will push to.
 
 ### Hydration events
 
@@ -277,7 +283,9 @@ We evaluated routing GitHub API calls through AgentCore Gateway (with the GitHub
 
 2. **Repo configuration (Iteration 3+).** Per-repo rules, instructions, or context loaded from the onboarding store. This can include static artifacts discovered during onboarding (e.g. content from `.cursor/rules`, `CLAUDE.md`, `CONTRIBUTING.md`) and dynamic artifacts generated by the onboarding pipeline (e.g. codebase summaries, dependency graphs). See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md).
 
-3. **GitHub issue context.** If the task references a GitHub issue: fetch the issue title, body, and comments via the GitHub REST API. **Now done in the orchestrator** (`fetchGitHubIssue` in `src/handlers/shared/context-hydration.ts`), not in the agent container.
+3. **GitHub issue context** (`new_task`). If the task references a GitHub issue: fetch the issue title, body, and comments via the GitHub REST API. **Now done in the orchestrator** (`fetchGitHubIssue` in `src/handlers/shared/context-hydration.ts`), not in the agent container.
+
+3b. **Pull request context** (`pr_iteration`, `pr_review`). If the task references a PR (`pr_number` set): fetch the PR metadata, conversation comments, and changed files via REST API, and inline review comments via GraphQL (which filters out resolved threads at fetch time) — four parallel calls total via `fetchGitHubPullRequest()`. The PR's `head_ref` and `base_ref` are extracted for branch resolution. Review comments and diff are formatted into the user prompt so the agent understands the feedback to address.
 
 4. **User message.** The free-text task description provided by the user (via CLI `--task` flag or equivalent). May supplement or replace the issue context.
 
@@ -289,28 +297,60 @@ We evaluated routing GitHub API calls through AgentCore Gateway (with the GitHub
 
 The orchestrator assembles one artifact during hydration:
 
-- **User prompt.** Assembled by `assembleUserPrompt()` in the orchestrator from the issue context and user message. Format: `Task ID: {id}\nRepository: {repo}\n\n## GitHub Issue #{n}: {title}\n...\n\n## Task\n\n{description}`. This mirrors the Python `assemble_prompt()` function.
+- **User prompt.** Assembled differently based on task type:
+  - **`new_task`**: `assembleUserPrompt()` — Format: `Task ID: {id}\nRepository: {repo}\n\n## GitHub Issue #{n}: {title}\n...\n\n## Task\n\n{description}`. This mirrors the Python `assemble_prompt()` function.
+  - **`pr_iteration`**: `assemblePrIterationPrompt()` — Format: `Task ID: {id}\nRepository: {repo}\n\n## Pull Request #{n}: {title}\n\n{body}\n\n### Changed Files\n...\n\n### Review Comments\n...\n\n## Additional Instructions\n\n{description}`. This provides the agent with the full PR context, diff summary, and reviewer feedback.
+  - **`pr_review`**: Uses `assemblePrIterationPrompt()` (same format as `pr_iteration`). If no task description is provided, defaults to "Review this pull request. Follow the workflow in your system instructions."
 
-The system prompt is **not** assembled in the orchestrator — it remains in the agent container because it depends on `setup_repo()` output (`{setup_notes}` placeholder). In the target state, additional sections may be injected: repo-specific rules, memory-derived insights.
+The system prompt is **not** assembled in the orchestrator — it remains in the agent container because it depends on `setup_repo()` output (`{setup_notes}` placeholder). The agent selects the appropriate system prompt template based on `task_type`: the `new_task` workflow (understand → implement → test → commit → create PR), the `pr_iteration` workflow (understand feedback → address → test → push → comment on PR), or the `pr_review` workflow (analyze changes → compose findings → post review comments → post summary). In the target state, additional sections may be injected: repo-specific rules, memory-derived insights.
 
 ### Payload contract
 
 ```
 Legacy:   { repo_url, task_id, branch_name, issue_number?, prompt? }
-Current:  { repo_url, task_id, branch_name, issue_number?, prompt?, hydrated_context }
+Current:  { repo_url, task_id, branch_name, issue_number?, prompt?, task_type, pr_number?, base_branch?, hydrated_context }
 ```
 
-Where `hydrated_context`:
+For `new_task` (default):
 ```json
 {
-  "version": 1,
-  "user_prompt": "Task ID: ...\nRepository: ...\n\n## GitHub Issue #42: ...",
-  "issue": { "number": 42, "title": "...", "body": "...", "comments": [...] },
-  "sources": ["issue", "task_description"],
-  "token_estimate": 1250,
-  "truncated": false
+  "repo_url": "owner/repo",
+  "task_id": "01HYX...",
+  "branch_name": "bgagent/01HYX.../fix-auth-bug",
+  "task_type": "new_task",
+  "hydrated_context": {
+    "version": 1,
+    "user_prompt": "Task ID: ...\nRepository: ...\n\n## GitHub Issue #42: ...",
+    "issue": { "number": 42, "title": "...", "body": "...", "comments": [...] },
+    "sources": ["issue", "task_description"],
+    "token_estimate": 1250,
+    "truncated": false
+  }
 }
 ```
+
+For `pr_iteration`:
+```json
+{
+  "repo_url": "owner/repo",
+  "task_id": "01HYX...",
+  "branch_name": "feature/my-branch",
+  "task_type": "pr_iteration",
+  "pr_number": 42,
+  "base_branch": "main",
+  "hydrated_context": {
+    "version": 1,
+    "user_prompt": "Task ID: ...\nRepository: ...\n\n## Pull Request #42: ...\n\n### Review Comments\n...",
+    "sources": ["pr_context", "task_description"],
+    "token_estimate": 3400,
+    "truncated": false,
+    "resolved_branch_name": "feature/my-branch",
+    "resolved_base_branch": "main"
+  }
+}
+```
+
+The `branch_name` for `pr_iteration` and `pr_review` tasks is the PR's `head_ref` (resolved during hydration), not a generated `bgagent/...` branch. The `base_branch` field is populated from the PR's `base_ref` so the agent knows the merge target.
 
 ### Token budget
 
@@ -318,7 +358,10 @@ The orchestrator enforces a token budget on the user prompt before assembly:
 
 - **Estimation heuristic:** `Math.ceil(text.length / 4)` (~4 characters per token).
 - **Default budget:** 100,000 tokens (configurable via `USER_PROMPT_TOKEN_BUDGET` CDK prop / environment variable).
-- **Truncation strategy:** When the combined estimated token count (issue body + comments + task description) exceeds the budget, oldest comments are removed first. If still over budget after removing all comments, the issue body and task description are kept as-is (they are assumed to be essential). The `truncated` flag is set in the hydrated context metadata.
+- **Truncation strategy:** Differs by task type:
+  - **`new_task`:** When the combined estimated token count (issue body + comments + task description) exceeds the budget, oldest comments are removed first. If still over budget after removing all comments, the issue body and task description are kept as-is (they are assumed to be essential).
+  - **`pr_iteration`/`pr_review`:** When the assembled PR prompt exceeds the budget, oldest issue comments are trimmed first (conversation comments on the PR), then oldest review comments (inline code review comments). The PR metadata, diff summary, and user instructions are preserved.
+  - The `truncated` flag is set in the hydrated context metadata when truncation occurs.
 - The agent harness handles its own context compaction during the run for multi-turn conversations.
 
 ---
@@ -791,9 +834,11 @@ The primary table for task state. DynamoDB.
 | `user_id` | String | Cognito sub or mapped platform user ID. |
 | `status` | String | Current state (see state machine). |
 | `repo` | String | GitHub owner/repo (e.g. `org/myapp`). |
+| `task_type` | String | Task type: `new_task` (default), `pr_iteration`, or `pr_review`. Determines the agent workflow (create new PR, iterate on existing PR, or review a PR). |
 | `issue_number` | Number (optional) | GitHub issue number, if task is issue-based. |
-| `task_description` | String (optional) | Free-text task description. |
-| `branch_name` | String | Agent branch: `bgagent/{task_id}/{slug}`. |
+| `pr_number` | Number (optional) | Pull request number, required when task type is `pr_iteration` or `pr_review`. |
+| `task_description` | String (optional) | Free-text task description. For `pr_iteration`/`pr_review`, used as additional instructions alongside PR context. |
+| `branch_name` | String | Agent branch. For `new_task`: `bgagent/{task_id}/{slug}`. For `pr_iteration`/`pr_review`: initially `pending:pr_resolution`, resolved to the PR's `head_ref` during context hydration. |
 | `session_id` | String (optional) | AgentCore runtime session ID, set when session is started. |
 | `execution_id` | String (optional) | Lambda durable execution ID, set when the orchestrator starts. |
 | `pr_url` | String (optional) | Pull request URL, set during finalization. |

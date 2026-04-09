@@ -25,12 +25,15 @@ import {
   isValidIdempotencyKey,
   isValidRepo,
   isValidTaskDescriptionLength,
+  isValidTaskType,
   isValidWebhookName,
   MAX_TASK_DESCRIPTION_LENGTH,
   parseBody,
   parseLimit,
   parseStatusFilter,
+  VALID_TASK_TYPES,
   validateMaxTurns,
+  validatePrNumber,
 } from '../../../src/handlers/shared/validation';
 
 describe('parseBody', () => {
@@ -88,6 +91,22 @@ describe('hasTaskSpec', () => {
 
   test('returns false when task_description is empty/whitespace', () => {
     expect(hasTaskSpec({ repo: 'org/repo', task_description: '  ' })).toBe(false);
+  });
+
+  test('returns true when task_type is pr_iteration and pr_number is provided', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_iteration', pr_number: 42 })).toBe(true);
+  });
+
+  test('returns false for pr_iteration without pr_number', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_iteration' })).toBe(false);
+  });
+
+  test('returns true when task_type is pr_review and pr_number is provided', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_review', pr_number: 42 })).toBe(true);
+  });
+
+  test('returns false for pr_review without pr_number', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_review' })).toBe(false);
   });
 });
 
@@ -298,5 +317,49 @@ describe('pagination token encode/decode', () => {
 
   test('decode returns undefined for invalid base64', () => {
     expect(decodePaginationToken('not-valid-base64!!!')).toBeUndefined();
+  });
+});
+
+describe('isValidTaskType', () => {
+  test('returns true for valid task types', () => {
+    expect(isValidTaskType('new_task')).toBe(true);
+    expect(isValidTaskType('pr_iteration')).toBe(true);
+  });
+
+  test('returns true for undefined/null (defaults to new_task)', () => {
+    expect(isValidTaskType(undefined)).toBe(true);
+    expect(isValidTaskType(null)).toBe(true);
+  });
+
+  test('returns true for pr_review', () => {
+    expect(isValidTaskType('pr_review')).toBe(true);
+  });
+
+  test('returns false for invalid values', () => {
+    expect(isValidTaskType('invalid')).toBe(false);
+    expect(isValidTaskType('')).toBe(false);
+    expect(isValidTaskType(42)).toBe(false);
+    expect(isValidTaskType(true)).toBe(false);
+  });
+});
+
+describe('validatePrNumber', () => {
+  test('returns the number for valid positive integers', () => {
+    expect(validatePrNumber(1)).toBe(1);
+    expect(validatePrNumber(42)).toBe(42);
+    expect(validatePrNumber(999)).toBe(999);
+  });
+
+  test('returns undefined for absent values', () => {
+    expect(validatePrNumber(undefined)).toBeUndefined();
+    expect(validatePrNumber(null)).toBeUndefined();
+  });
+
+  test('returns null for invalid values', () => {
+    expect(validatePrNumber(0)).toBeNull();
+    expect(validatePrNumber(-1)).toBeNull();
+    expect(validatePrNumber(1.5)).toBeNull();
+    expect(validatePrNumber('42')).toBeNull();
+    expect(validatePrNumber(true)).toBeNull();
   });
 });

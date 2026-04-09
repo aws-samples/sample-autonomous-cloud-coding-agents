@@ -51,6 +51,7 @@ RUN uv sync --frozen --no-dev --directory /app
 # Copy agent code (ARG busts cache so file edits are always picked up)
 ARG CACHE_BUST=0
 COPY entrypoint.py system_prompt.py server.py task_state.py observability.py memory.py /app/
+COPY prompts/ /app/prompts/
 COPY prepare-commit-msg.sh /app/
 COPY test_sdk_smoke.py test_subprocess_threading.py /app/
 

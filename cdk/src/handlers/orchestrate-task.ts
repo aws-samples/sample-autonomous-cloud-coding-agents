@@ -84,7 +84,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       if (TERMINAL_STATUSES.includes(current.status)) {
         return false;
       }
-      const result = await runPreflightChecks(task.repo, blueprintConfig);
+      const result = await runPreflightChecks(task.repo, blueprintConfig, task.pr_number);
       if (!result.passed) {
         const errorMessage = `Pre-flight check failed: ${result.failureReason}${result.failureDetail ? ' — ' + result.failureDetail : ''}`;
         await failTask(taskId, current.status, errorMessage, task.user_id, true);
