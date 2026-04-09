@@ -428,7 +428,7 @@ cdk/src/
 │   ├── webhook-create-task.ts       # POST /webhooks/tasks Lambda (HMAC-SHA256 verification)
 │   └── shared/
 │       ├── create-task-core.ts      # Shared task creation logic (Cognito + webhook)
-│       ├── context-hydration.ts     # GitHub issue fetching, prompt assembly, token budget
+│       ├── context-hydration.ts     # GitHub issue fetching, prompt assembly, token budget, guardrail screening
 │       ├── gateway.ts               # User extraction, webhook context, branch naming
 │       ├── logger.ts                # Structured logger
 │       ├── orchestrator.ts          # Orchestrator step helpers (DDB, AgentCore, concurrency)

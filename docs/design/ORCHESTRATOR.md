@@ -134,7 +134,7 @@ The **target state** (Iteration 2 and beyond) introduces a durable orchestrator 
 | `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, rate limit, validation failure |
 | `SUBMITTED` | `CANCELLED` | User cancels | Cancel request received |
 | `HYDRATING` | `RUNNING` | Hydration complete, session invoked | `invoke_agent_runtime` returns session ID |
-| `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, memory failure, prompt assembly error |
+| `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, memory failure, prompt assembly error, guardrail content blocked, guardrail service unavailable |
 | `HYDRATING` | `CANCELLED` | User cancels during hydration | Cancel request received |
 | `RUNNING` | `FINALIZING` | Session ends (response received or session status = terminated) | — |
 | `RUNNING` | `CANCELLED` | User cancels | `stop_runtime_session` called, then transition |
@@ -179,7 +179,7 @@ See the Admission control section for details. Validates that the task is allowe
 
 #### Step 2: Context hydration (deterministic)
 
-See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). The output is a fully assembled prompt, ready to pass to the compute session.
+See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). For PR tasks, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it. The output is a fully assembled prompt, ready to pass to the compute session.
 
 #### Step 3: Session start and agent execution (deterministic start + agentic execution)
 
@@ -271,11 +271,12 @@ The orchestrator's `hydrateAndTransition()` function calls `hydrateContext()` (`
 4. **Assembles the user prompt** based on task type:
    - **`new_task`**: A structured markdown document with Task ID, Repository, GitHub Issue section, and Task section. The format mirrors the Python `assemble_prompt()` in `agent/entrypoint.py`.
    - **`pr_iteration`**: Assembled by `assemblePrIterationPrompt()` — includes PR metadata (number, title, body), the diff summary (changed files and patches), review comments (inline and conversation), and optional user instructions from `task_description`.
-5. **Returns a `HydratedContext` object** containing `version`, `user_prompt`, `issue`, `sources`, `token_estimate`, `truncated`, and for `pr_iteration`/`pr_review` tasks: `resolved_branch_name` and `resolved_base_branch`.
+5. **Screens through Bedrock Guardrail** (PR tasks only): For `pr_iteration` and `pr_review` tasks, the assembled user prompt is screened through Amazon Bedrock Guardrails (`screenWithGuardrail()`) using the `PROMPT_ATTACK` content filter. If the guardrail detects prompt injection, `guardrail_blocked` is set on the result and the orchestrator fails the task. If the Bedrock API is unavailable, a `GuardrailScreeningError` is thrown (fail-closed — unscreened content never reaches the agent). Task descriptions for all task types are screened at submission time in `create-task-core.ts`.
+6. **Returns a `HydratedContext` object** containing `version`, `user_prompt`, `issue`, `sources`, `token_estimate`, `truncated`, and for `pr_iteration`/`pr_review` tasks: `resolved_branch_name` and `resolved_base_branch`.
 
 The hydrated context is passed to the agent as a new `hydrated_context` field in the invocation payload, alongside the existing legacy fields (`repo_url`, `task_id`, `branch_name`, `issue_number`, `prompt`). The agent checks for `hydrated_context` with `version == 1`; if present, it uses the pre-assembled `user_prompt` directly and skips in-container GitHub fetching and prompt assembly. If absent (e.g. during a deployment rollout or when the secret ARN isn't configured), the agent falls back to its existing behavior.
 
-**Graceful degradation:** If any step fails (Secrets Manager unavailable, GitHub API error, network timeout), the orchestrator proceeds with whatever context is available. The worst case is a minimal prompt with just the task ID and repository — the agent can still attempt its own GitHub fetch as a fallback via the legacy `issue_number` field.
+**Graceful degradation:** If any step fails (Secrets Manager unavailable, GitHub API error, network timeout), the orchestrator proceeds with whatever context is available. The worst case is a minimal prompt with just the task ID and repository — the agent can still attempt its own GitHub fetch as a fallback via the legacy `issue_number` field. **Exception:** `GuardrailScreeningError` is NOT caught by the fallback — it propagates to fail the task. This is intentional: unscreened content must never reach the agent (fail-closed).
 
 **PR iteration branch resolution:** After hydration, if `resolved_branch_name` is present on the hydrated context, the orchestrator updates the task record's `branch_name` in DynamoDB from the placeholder (`pending:pr_resolution`) to the PR's actual `head_ref`. This ensures the task record always reflects the real branch name that the agent will push to.
 
@@ -285,6 +286,7 @@ The orchestrator emits two task events during hydration:
 
 - `hydration_started` — emitted when the task transitions to `HYDRATING`
 - `hydration_complete` — emitted after context assembly, with metadata: `sources` (array of context sources used, e.g. `["issue", "task_description"]`), `token_estimate` (estimated token count of the assembled prompt), `truncated` (whether the token budget was exceeded)
+- `guardrail_blocked` — emitted when Bedrock Guardrail blocks content during hydration, with metadata: `reason`, `task_type`, `pr_number`, `sources`, `token_estimate`
 
 ### AgentCore Gateway — evaluated and deferred
 
@@ -520,6 +522,8 @@ This section uses an FMEA (Failure Mode and Effects Analysis) approach: for each
 | GitHub API unavailable or rate limited | Cannot fetch issue context | Retry with backoff. If the issue is essential (issue-based task), fail the task. If the user also provided a task description, proceed with degraded context (no issue body). |
 | Memory service unavailable | Cannot retrieve past insights | Proceed without memory context (memory is an enrichment, not required for MVP). Log warning. |
 | Prompt exceeds token budget | Agent may lose coherence or fail to start | Truncate lower-priority sources (old comments, memory) to fit budget. |
+| Bedrock Guardrail blocks content | Prompt injection or adversarial content detected | Task transitions to FAILED. No retry — content is adversarial. The `guardrail_blocked` event is emitted with metadata. |
+| Bedrock Guardrail API unavailable | Cannot screen content (fail-closed) | Task transitions to FAILED. Operator should check Bedrock service health. Tasks will succeed once Bedrock recovers. |
 
 ### Session start failures
 

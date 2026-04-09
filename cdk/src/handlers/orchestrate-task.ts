@@ -110,8 +110,8 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     try {
       return await hydrateAndTransition(task, blueprintConfig);
     } catch (err) {
-      // Transition may fail if task was externally cancelled — release concurrency
-      await failTask(taskId, task.status, `Hydration failed: ${String(err)}`, task.user_id, true);
+      // Hydration may fail due to external cancellation, guardrail blocking, or guardrail API failure — fail the task and release concurrency
+      await failTask(taskId, TaskStatus.HYDRATING, `Hydration failed: ${String(err)}`, task.user_id, true);
       throw err;
     }
   });

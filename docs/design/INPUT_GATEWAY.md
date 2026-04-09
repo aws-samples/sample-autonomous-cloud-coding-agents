@@ -38,7 +38,7 @@ In short: **every input channel connects through this central point; the gateway
   Every channel-specific payload must be transformed into the same internal message structure. The rest of the system only ever sees this normalized form.
 
 - **Validation**
-  The gateway must validate normalized messages (required fields, types, allowed actions, target repo/issue refs, size limits) and reject malformed or invalid requests with clear errors.
+  The gateway must validate normalized messages (required fields, types, allowed actions, target repo/issue refs, size limits) and reject malformed or invalid requests with clear errors. Task descriptions are additionally screened by Amazon Bedrock Guardrails for prompt injection at submission time (fail-closed). See [SECURITY.md](./SECURITY.md).
 
 - **Access control**
   The gateway enforces who can do what (e.g. only the task owner can cancel; only authenticated users can create tasks). This may be defined per channel or globally.

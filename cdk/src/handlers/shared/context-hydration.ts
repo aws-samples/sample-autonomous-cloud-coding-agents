@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
@@ -85,6 +86,7 @@ export interface HydratedContext {
   readonly token_estimate: number;
   readonly truncated: boolean;
   readonly fallback_error?: string;
+  readonly guardrail_blocked?: string;
   readonly resolved_branch_name?: string;
   readonly resolved_base_branch?: string;
 }
@@ -96,6 +98,81 @@ export interface HydratedContext {
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN;
 const USER_PROMPT_TOKEN_BUDGET = Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? '100000');
 const GITHUB_API_TIMEOUT_MS = 30_000;
+const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
+const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
+const bedrockClient = (GUARDRAIL_ID && GUARDRAIL_VERSION) ? new BedrockRuntimeClient({}) : undefined;
+if (GUARDRAIL_ID && !GUARDRAIL_VERSION) {
+  logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
+    metric_type: 'guardrail_misconfiguration',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Bedrock Guardrail screening
+// ---------------------------------------------------------------------------
+
+/**
+ * Error thrown when the Bedrock Guardrail API call fails. Distinguished from
+ * other errors so the outer catch in hydrateContext can re-throw it instead of
+ * falling back to unscreened content (fail-closed).
+ */
+export class GuardrailScreeningError extends Error {
+  constructor(message: string, cause?: Error) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'GuardrailScreeningError';
+  }
+}
+
+/**
+ * Screen text through the Bedrock Guardrail for prompt injection detection.
+ * Fail-closed: throws on Bedrock errors so unscreened content never reaches the agent.
+ * @param text - the text to screen.
+ * @param taskId - the task ID (for logging).
+ * @returns 'GUARDRAIL_INTERVENED' if blocked, 'NONE' if allowed, undefined when guardrail is
+ *          not configured (env vars missing).
+ * @throws GuardrailScreeningError when the Bedrock Guardrail API call fails (fail-closed).
+ */
+export async function screenWithGuardrail(text: string, taskId: string): Promise<'GUARDRAIL_INTERVENED' | 'NONE' | undefined> {
+  if (!bedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
+    logger.info('Guardrail screening skipped — guardrail not configured', {
+      task_id: taskId,
+      metric_type: 'guardrail_screening_skipped',
+    });
+    return undefined;
+  }
+
+  try {
+    const result = await bedrockClient.send(new ApplyGuardrailCommand({
+      guardrailIdentifier: GUARDRAIL_ID,
+      guardrailVersion: GUARDRAIL_VERSION,
+      source: 'INPUT',
+      content: [{ text: { text } }],
+    }));
+
+    if (result.action === 'GUARDRAIL_INTERVENED') {
+      logger.warn('Content blocked by guardrail', {
+        task_id: taskId,
+        guardrail_id: GUARDRAIL_ID,
+        guardrail_version: GUARDRAIL_VERSION,
+      });
+      return 'GUARDRAIL_INTERVENED';
+    }
+
+    return 'NONE';
+  } catch (err) {
+    logger.error('Guardrail screening failed (fail-closed)', {
+      task_id: taskId,
+      guardrail_id: GUARDRAIL_ID,
+      error: err instanceof Error ? err.message : String(err),
+      error_name: err instanceof Error ? err.name : undefined,
+      metric_type: 'guardrail_screening_failure',
+    });
+    throw new GuardrailScreeningError(
+      `Guardrail screening unavailable: ${err instanceof Error ? err.message : String(err)}`,
+      err instanceof Error ? err : undefined,
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GitHub token resolution (Secrets Manager with caching)
@@ -715,11 +792,15 @@ export interface HydrateContextOptions {
 }
 
 /**
- * Hydrate context for a task: resolve GitHub token, fetch issue, enforce
- * token budget, and assemble the user prompt.
+ * Hydrate context for a task: resolve GitHub token, fetch issue/PR, enforce
+ * token budget, assemble the user prompt, and (for PR tasks) screen through
+ * Bedrock Guardrail for prompt injection.
  * @param task - the task record from DynamoDB.
  * @param options - optional per-repo overrides.
- * @returns the hydrated context.
+ * @returns the hydrated context. For PR tasks, `guardrail_blocked` is set when
+ *          the guardrail intervened.
+ * @throws GuardrailScreeningError when the Bedrock Guardrail API call fails
+ *         (fail-closed — propagated to prevent unscreened content from reaching the agent).
  */
 export async function hydrateContext(task: TaskRecord, options?: HydrateContextOptions): Promise<HydratedContext> {
   const sources: string[] = [];
@@ -889,7 +970,10 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       resolvedBranchName = prResult.head_ref;
       resolvedBaseBranch = prResult.base_ref;
 
-      return {
+      // Screen assembled PR prompt through Bedrock Guardrail for prompt injection
+      const guardrailAction = await screenWithGuardrail(userPrompt, task.task_id);
+
+      const prContext: HydratedContext = {
         version: 1,
         user_prompt: userPrompt,
         memory_context: memoryContext,
@@ -898,7 +982,12 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         sources,
         token_estimate: estimateTokens(userPrompt),
         truncated,
+        ...(guardrailAction === 'GUARDRAIL_INTERVENED' && {
+          guardrail_blocked: 'PR context blocked by content policy',
+        }),
       };
+
+      return prContext;
     }
 
     // Standard task: existing behavior
@@ -918,6 +1007,10 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       truncated: budgetResult.truncated,
     };
   } catch (err) {
+    // Guardrail failures must propagate (fail-closed) — unscreened content must not reach the agent
+    if (err instanceof GuardrailScreeningError) {
+      throw err;
+    }
     // Fallback: minimal context from task_description only
     logger.error('Unexpected error during context hydration', {
       task_id: task.task_id, error: err instanceof Error ? err.message : String(err),

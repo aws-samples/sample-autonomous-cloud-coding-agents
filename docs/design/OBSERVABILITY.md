@@ -126,6 +126,7 @@ Both are one-time, account-level setup steps — not managed by CDK.
 
 - Task creation, status transitions (SUBMITTED → HYDRATING → RUNNING → COMPLETED / FAILED / CANCELLED / TIMED_OUT), and terminal state.
 - **Step-level events** — The blueprint framework emits events for each pipeline step: `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. For built-in steps these overlap with the fixed event types (e.g. `hydration_started`). For custom Lambda steps, the step name is user-defined (e.g. `sast-scan_started`, `prepare-environment_completed`). See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md#blueprint-execution-framework) and [API_CONTRACT.md](./API_CONTRACT.md).
+- **Guardrail screening events** — `guardrail_blocked` (content blocked by Bedrock Guardrail during hydration, with metadata: `reason`, `task_type`, `pr_number`, `sources`, `token_estimate`). Screening failures are logged with structured `metric_type` fields (not emitted as task events).
 - Time in each state (e.g. time in HYDRATING, time RUNNING, cold start to first agent activity).
 - Correlation with a task id and user id so users and operators can filter by task or user.
 
@@ -161,6 +162,8 @@ Plans call for defining at least:
 - Active tasks (RUNNING count).
 - Pending tasks (SUBMITTED count).
 - Task completion rate (success vs failed/cancelled/timed out).
+- Guardrail screening failure rate (`metric_type: 'guardrail_screening_failure'` in structured logs — use CloudWatch Logs Insights metric filter).
+- Guardrail blocked rate (`guardrail_blocked` task events).
 
 These can be emitted as custom CloudWatch metrics (or equivalent) and used in dashboards and alarms.
 
@@ -182,6 +185,7 @@ Critical alarms called out in the plans include:
 - **Orchestration / execution failures** — durable function execution failures (e.g. repeated session start failures).
 - **Agent crash rate** — spike or sustained high rate of agent/session failures.
 - **Pending depth** — SUBMITTED tasks exceeding a threshold (signals that the system is at capacity, e.g. AgentCore concurrent session quota bottleneck); may warrant a quota increase or capacity planning.
+- **Guardrail screening failures** — sustained Bedrock Guardrail API failures blocking task submissions and PR task hydration (fail-closed). Filter: `metric_type = "guardrail_screening_failure"`. Indicates a Bedrock outage affecting task throughput.
 
 ## Code attribution and capture for agent search
 
@@ -237,6 +241,7 @@ When an alarm fires, the operator should follow the corresponding procedure. The
 | **Orchestration failures** | 1. Check Lambda Durable Functions execution logs. 2. Identify the failing step (load-blueprint, admission-control, start-session, etc.). 3. For `INVALID_STEP_SEQUENCE`: fix the Blueprint CDK construct config and redeploy. 4. For transient failures (DynamoDB throttle, AgentCore timeout): verify service health; the durable execution should auto-retry. |
 | **Agent crash rate spike** | 1. Check for common root causes: model API errors (Bedrock throttling), compute quota exceeded (AgentCore session limit), image pull failures. 2. Query recent failed tasks by `error_code` for patterns. 3. If quota-related: request a quota increase or reduce concurrency limits. |
 | **Submitted backlog over threshold** | 1. Check system concurrency: are all slots occupied by running tasks? 2. If yes: the system is at capacity. Options: increase per-user or system-wide concurrency limits (if quota allows), or wait for running tasks to complete. 3. If no: check for orchestrator backlog (tasks in SUBMITTED state not being picked up). |
+| **Guardrail screening failures** | 1. Check Bedrock service health in the AWS console. 2. Query CloudWatch Logs: `filter metric_type = "guardrail_screening_failure" | stats count() by bin(5m)`. 3. If Bedrock is down, tasks will fail at submission (503) and during hydration (FAILED). No action needed — tasks will succeed once Bedrock recovers. 4. If failures are unexpected, check guardrail configuration (`GUARDRAIL_ID`, `GUARDRAIL_VERSION` env vars on the orchestrator Lambda). |
 
 ## Deployment safety for long-running sessions
 

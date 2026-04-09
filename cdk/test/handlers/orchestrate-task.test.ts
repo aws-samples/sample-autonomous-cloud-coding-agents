@@ -176,6 +176,49 @@ describe('hydrateAndTransition', () => {
     expect(payload.max_turns).toBe(100);
   });
 
+  test('throws when guardrail_blocked is set on hydrated context', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce({
+      ...mockHydratedContext,
+      guardrail_blocked: 'PR context blocked by content policy',
+    });
+    const prTask = { ...baseTask, task_type: 'pr_iteration', pr_number: 10 };
+    await expect(hydrateAndTransition(prTask as any)).rejects.toThrow(
+      'Guardrail blocked: PR context blocked by content policy',
+    );
+
+    // Verify guardrail_blocked event was emitted before the throw
+    const putCalls = mockDdbSend.mock.calls
+      .filter((c: any) => c[0]._type === 'Put')
+      .map((c: any) => c[0].input.Item);
+    const guardrailEvent = putCalls.find((item: any) => item.event_type === 'guardrail_blocked');
+    expect(guardrailEvent).toBeDefined();
+    expect(guardrailEvent.metadata.reason).toBe('PR context blocked by content policy');
+    expect(guardrailEvent.metadata.task_type).toBe('pr_iteration');
+    expect(guardrailEvent.metadata.pr_number).toBe(10);
+    expect(guardrailEvent.metadata.sources).toEqual(['task_description']);
+    expect(guardrailEvent.metadata.token_estimate).toBe(20);
+  });
+
+  test('still throws guardrail error when emitTaskEvent fails during guardrail_blocked handling', async () => {
+    let callCount = 0;
+    mockDdbSend.mockImplementation(() => {
+      callCount++;
+      // First two calls succeed (transitionTask SUBMITTED->HYDRATING, emitTaskEvent hydration_started)
+      // Third call is emitTaskEvent('guardrail_blocked') — fail it
+      if (callCount === 3) return Promise.reject(new Error('DDB write failed'));
+      return Promise.resolve({});
+    });
+    mockHydrateContext.mockResolvedValueOnce({
+      ...mockHydratedContext,
+      guardrail_blocked: 'PR context blocked by content policy',
+    });
+    const prTask = { ...baseTask, task_type: 'pr_iteration', pr_number: 10 };
+    await expect(hydrateAndTransition(prTask as any)).rejects.toThrow(
+      'Guardrail blocked: PR context blocked by content policy',
+    );
+  });
+
   test('hydration_complete event includes source metadata', async () => {
     mockDdbSend.mockResolvedValue({});
     mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
@@ -476,6 +519,15 @@ describe('failTask', () => {
     await failTask('TASK001', 'HYDRATING', 'hydration error', 'user-123', true);
     // transitionTask + emitTaskEvent + decrementConcurrency = 3 calls
     expect(mockDdbSend).toHaveBeenCalledTimes(3);
+  });
+
+  test('transitions from HYDRATING to FAILED when called with HYDRATING status', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await failTask('TASK001', 'HYDRATING', 'Guardrail blocked: PR context blocked by content policy', 'user-123', true);
+    // First call: transitionTask UpdateCommand
+    const transitionCall = mockDdbSend.mock.calls[0][0];
+    expect(transitionCall.input.ExpressionAttributeValues[':fromStatus']).toBe('HYDRATING');
+    expect(transitionCall.input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
   });
 
   test('handles transition failure gracefully', async () => {

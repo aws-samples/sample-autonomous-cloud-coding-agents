@@ -24,6 +24,12 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
 }));
 
+const mockBedrockSend = jest.fn();
+jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
+  BedrockRuntimeClient: jest.fn(() => ({ send: mockBedrockSend })),
+  ApplyGuardrailCommand: jest.fn((input: unknown) => ({ _type: 'ApplyGuardrail', input })),
+}));
+
 const mockLoadMemoryContext = jest.fn();
 jest.mock('../../../src/handlers/shared/memory', () => ({
   loadMemoryContext: mockLoadMemoryContext,
@@ -32,6 +38,8 @@ jest.mock('../../../src/handlers/shared/memory', () => ({
 // Set env vars before importing
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token';
 process.env.USER_PROMPT_TOKEN_BUDGET = '100000';
+process.env.GUARDRAIL_ID = 'gr-test-123';
+process.env.GUARDRAIL_VERSION = '1';
 
 import {
   assemblePrIterationPrompt,
@@ -41,8 +49,10 @@ import {
   estimateTokens,
   fetchGitHubIssue,
   fetchGitHubPullRequest,
+  GuardrailScreeningError,
   hydrateContext,
   resolveGitHubToken,
+  screenWithGuardrail,
   type GitHubIssueContext,
   type IssueComment,
 } from '../../../src/handlers/shared/context-hydration';
@@ -686,6 +696,7 @@ describe('hydrateContext', () => {
       .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
       .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
       .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
 
     const task = {
       ...baseTask,
@@ -984,5 +995,147 @@ describe('assemblePrIterationPrompt', () => {
     expect(result).toContain('reply with comment_id: 999');
     expect(result).toContain('**@carol**: What about edge cases?');
     expect(result).toContain('`src/util.ts:5`');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// screenWithGuardrail
+// ---------------------------------------------------------------------------
+
+describe('screenWithGuardrail', () => {
+  test('returns NONE when guardrail allows the text', async () => {
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+    const result = await screenWithGuardrail('safe text', 'TASK001');
+    expect(result).toBe('NONE');
+    expect(mockBedrockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns GUARDRAIL_INTERVENED when guardrail blocks the text', async () => {
+    mockBedrockSend.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
+    const result = await screenWithGuardrail('malicious text', 'TASK001');
+    expect(result).toBe('GUARDRAIL_INTERVENED');
+  });
+
+  test('throws GuardrailScreeningError on Bedrock error (fail-closed)', async () => {
+    mockBedrockSend.mockRejectedValueOnce(new Error('Service unavailable'));
+    const error = await screenWithGuardrail('some text', 'TASK001').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GuardrailScreeningError);
+    expect((error as GuardrailScreeningError).message).toBe('Guardrail screening unavailable: Service unavailable');
+    expect((error as GuardrailScreeningError).cause).toBeInstanceOf(Error);
+    expect(((error as GuardrailScreeningError).cause as Error).message).toBe('Service unavailable');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hydrateContext — guardrail screening for PR tasks
+// ---------------------------------------------------------------------------
+
+describe('hydrateContext — guardrail screening', () => {
+  const basePrTask = {
+    task_id: 'TASK-PR-001',
+    user_id: 'user-123',
+    status: 'SUBMITTED',
+    repo: 'org/repo',
+    branch_name: 'bgagent/TASK-PR-001/fix',
+    channel_source: 'api',
+    status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    task_type: 'pr_iteration',
+    pr_number: 10,
+  };
+
+  function mockPrFetch(): void {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          number: 10, title: 'Test PR', body: 'body', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open',
+        }),
+      })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+  }
+
+  test('returns guardrail_blocked when PR context is blocked', async () => {
+    mockPrFetch();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
+
+    const result = await hydrateContext(basePrTask as any);
+    expect(result.guardrail_blocked).toBe('PR context blocked by content policy');
+    expect(result.user_prompt).toContain('Pull Request #10');
+    expect(result.resolved_branch_name).toBe('feat');
+    expect(result.resolved_base_branch).toBe('main');
+    expect(result.sources).toContain('pull_request');
+    expect(result.token_estimate).toBeGreaterThan(0);
+    expect(result.version).toBe(1);
+  });
+
+  test('proceeds normally when PR context passes guardrail', async () => {
+    mockPrFetch();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const result = await hydrateContext(basePrTask as any);
+    expect(result.guardrail_blocked).toBeUndefined();
+    expect(result.user_prompt).toContain('Pull Request #10');
+  });
+
+  test('throws when guardrail screening fails (fail-closed)', async () => {
+    mockPrFetch();
+    mockBedrockSend.mockRejectedValueOnce(new Error('Bedrock timeout'));
+
+    await expect(hydrateContext(basePrTask as any)).rejects.toThrow('Guardrail screening unavailable: Bedrock timeout');
+  });
+
+  test('returns guardrail_blocked for pr_review task type', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          number: 20, title: 'Review PR', body: 'body', head: { ref: 'review-branch' }, base: { ref: 'main' }, state: 'open',
+        }),
+      })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+    mockBedrockSend.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
+
+    const prReviewTask = {
+      ...basePrTask,
+      task_type: 'pr_review',
+      pr_number: 20,
+    };
+    const result = await hydrateContext(prReviewTask as any);
+    expect(result.guardrail_blocked).toBe('PR context blocked by content policy');
+    expect(mockBedrockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not invoke guardrail for new_task type', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ number: 42, title: 'Bug', body: 'Details', comments: 0 }),
+    });
+
+    const newTask = {
+      task_id: 'TASK-NEW-001',
+      user_id: 'user-123',
+      status: 'SUBMITTED',
+      repo: 'org/repo',
+      branch_name: 'bgagent/TASK-NEW-001/fix',
+      channel_source: 'api',
+      status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      task_type: 'new_task',
+      issue_number: 42,
+      task_description: 'Fix it',
+    };
+    const result = await hydrateContext(newTask as any);
+    expect(result.guardrail_blocked).toBeUndefined();
+    expect(mockBedrockSend).not.toHaveBeenCalled();
   });
 });
