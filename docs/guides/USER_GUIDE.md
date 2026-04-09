@@ -111,6 +111,16 @@ When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value 
 
 The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack output.
 
+### Task types
+
+The platform supports three task types:
+
+| Type | Description | Outcome |
+|---|---|---|
+| `new_task` (default) | Create a new branch, implement changes, and open a new PR. | New pull request |
+| `pr_iteration` | Check out an existing PR's branch, read review feedback, address it, and push updates. | Updated pull request |
+| `pr_review` | Check out an existing PR's branch, analyze the changes read-only, and post a structured review. | Review comments on the PR |
+
 ### Create a task
 
 ```bash
@@ -145,6 +155,42 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "issue_number": 42}'
 ```
 
+To iterate on an existing pull request (address review feedback):
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42}'
+```
+
+You can optionally include `task_description` with `pr_iteration` to provide additional instructions alongside the review feedback:
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
+```
+
+To request a read-only review of an existing pull request:
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55}'
+```
+
+You can optionally include `task_description` with `pr_review` to focus the review on specific areas:
+
+```bash
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
+```
+
 **Request body fields:**
 
 | Field | Type | Required | Description |
@@ -152,6 +198,8 @@ curl -X POST "$API_URL/tasks" \
 | `repo` | string | Yes | GitHub repository in `owner/repo` format |
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
+| `pr_number` | number | | PR number to iterate on or review (required for `pr_iteration` and `pr_review`) |
+| `task_type` | string | No | `new_task` (default), `pr_iteration`, or `pr_review`. |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
@@ -253,6 +301,18 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42
 # From a text description
 node lib/bin/bgagent.js submit --repo owner/repo --task "Add input validation to the /users POST endpoint"
 
+# Iterate on an existing pull request (address review feedback)
+node lib/bin/bgagent.js submit --repo owner/repo --pr 42
+
+# Iterate on a PR with additional instructions
+node lib/bin/bgagent.js submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged"
+
+# Review an existing pull request (read-only — posts structured review comments)
+node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
+
+# Review a PR with a specific focus area
+node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
+
 # Submit and wait for completion
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
@@ -279,13 +339,15 @@ Created:     2026-04-01T00:39:51.271Z
 | `--repo` | GitHub repository (`owner/repo`). Required. |
 | `--issue` | GitHub issue number. |
 | `--task` | Task description text. |
+| `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
+| `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
-At least one of `--issue` or `--task` is required.
+At least one of `--issue`, `--task`, `--pr`, or `--review-pr` is required. The `--pr` and `--review-pr` flags are mutually exclusive.
 
 ### Checking task status
 
@@ -415,7 +477,7 @@ curl -X POST "$API_URL/webhooks/tasks" \
   -d "$BODY"
 ```
 
-The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported.
+The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `task_type`, `pr_number`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported. You can submit `pr_iteration` tasks via webhook to automate PR feedback loops, or `pr_review` tasks to trigger automated code reviews.
 
 **Example response** (same shape as a successful `POST /tasks` — `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
 
@@ -484,11 +546,13 @@ Each lifecycle transition is recorded as an audit event. Use the events endpoint
 curl "$API_URL/tasks/<TASK_ID>/events" -H "Authorization: $TOKEN"
 ```
 
-Events include: `task_created`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Event records are subject to the same 90-day retention as task records and are automatically deleted after that period.
+Events include: `task_created`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `pr_updated`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Event records are subject to the same 90-day retention as task records and are automatically deleted after that period.
 
 ## What the agent does
 
-When a task is submitted, the agent:
+### New task (`new_task`)
+
+When a `new_task` is submitted, the agent:
 
 1. Clones the repository into an isolated workspace
 2. Creates a branch named `bgagent/<task-id>/<short-description>`
@@ -501,6 +565,38 @@ When a task is submitted, the agent:
 9. Creates a pull request with a summary of changes, build/test results, and decisions made
 
 The PR title follows conventional commit format (e.g., `feat(auth): add OAuth2 login flow`).
+
+### PR iteration (`pr_iteration`)
+
+When a `pr_iteration` task is submitted, the agent:
+
+1. Clones the repository into an isolated workspace
+2. Checks out the existing PR branch (fetched from the remote)
+3. Installs dependencies via `mise install` and runs an initial build
+4. Loads repo-level project configuration if present
+5. Reads the review feedback (inline comments, conversation comments, and the PR diff)
+6. Addresses the feedback with focused changes
+7. Runs the build and tests (`mise run build`)
+8. Commits and pushes to the existing PR branch
+9. Posts a summary comment on the PR describing what was addressed
+
+The agent does **not** create a new PR — it updates the existing one in place. The PR's branch, title, and description remain unchanged; the agent adds commits and a comment summarizing its work.
+
+### PR review (`pr_review`)
+
+When a `pr_review` task is submitted, the agent:
+
+1. Clones the repository into an isolated workspace
+2. Checks out the existing PR branch (fetched from the remote)
+3. Installs dependencies via `mise install` and runs an initial build (informational only — build failures do not block the review)
+4. Loads repo-level project configuration if present
+5. Reads the PR context (diff, description, existing comments) and analyzes the changes
+6. Leverages repository memory context (codebase patterns, past episodes) when available
+7. Composes structured findings using a defined comment format: type (comment / question / issue / good_point), severity for issues (minor / medium / major / critical), title, description, proposed fix, and a ready-to-use AI prompt for addressing each finding
+8. Posts the review via the GitHub Reviews API (`gh api repos/{repo}/pulls/{pr_number}/reviews`) as a single batch review
+9. Posts a summary conversation comment on the PR
+
+The agent operates in **read-only mode** — it does not modify any files, create commits, or push changes. The `Write` and `Edit` tools are not available during `pr_review` tasks.
 
 ## Viewing logs
 
