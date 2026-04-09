@@ -114,14 +114,15 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.message).toContain('content policy');
   });
 
-  test('creates task when guardrail service fails (fail-open)', async () => {
+  test('returns 503 when guardrail service fails (fail-closed)', async () => {
     mockBedrockSend.mockRejectedValueOnce(new Error('Bedrock service unavailable'));
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it' },
       makeContext(),
       'req-1',
     );
-    expect(result.statusCode).toBe(201);
+    expect(result.statusCode).toBe(503);
+    expect(JSON.parse(result.body).error.message).toContain('Content screening is temporarily unavailable');
   });
 
   test('returns 409 for duplicate idempotency key', async () => {

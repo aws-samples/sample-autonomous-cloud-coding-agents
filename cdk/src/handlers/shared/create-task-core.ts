@@ -46,7 +46,13 @@ export interface TaskCreationContext {
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({}) : undefined;
-const bedrockClient = process.env.GUARDRAIL_ID ? new BedrockRuntimeClient({}) : undefined;
+const bedrockClient = (process.env.GUARDRAIL_ID && process.env.GUARDRAIL_VERSION)
+  ? new BedrockRuntimeClient({}) : undefined;
+if (process.env.GUARDRAIL_ID && !process.env.GUARDRAIL_VERSION) {
+  logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
+    metric_type: 'guardrail_misconfiguration',
+  });
+}
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -117,8 +123,8 @@ export async function createTaskCore(
   }
   const userMaxBudgetUsd = maxBudgetResult;
 
-  // 2. Screen task description with Bedrock Guardrail (fail-open: a Bedrock outage
-  //    should not block all task submissions — log the error and proceed)
+  // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
+  //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
     try {
       const guardrailResult = await bedrockClient.send(new ApplyGuardrailCommand({
@@ -133,11 +139,13 @@ export async function createTaskCore(
         return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Task description was blocked by content policy.', requestId);
       }
     } catch (guardrailErr) {
-      logger.error('Guardrail screening failed — proceeding without screening (fail-open)', {
+      logger.error('Guardrail screening failed (fail-closed)', {
         error: String(guardrailErr),
         user_id: context.userId,
         request_id: requestId,
+        metric_type: 'guardrail_screening_failure',
       });
+      return errorResponse(503, ErrorCode.INTERNAL_ERROR, 'Content screening is temporarily unavailable. Please try again later.', requestId);
     }
   }
 

@@ -193,8 +193,10 @@ For `pr_iteration` and `pr_review` tasks, `branch_name` is initially set to `pen
 | `400` | `VALIDATION_ERROR` | Missing required fields, invalid repo format, no task description or issue or PR number, invalid `task_type`, `pr_number` provided without `task_type: 'pr_iteration'` or `'pr_review'`, `pr_number` missing when `task_type` is `pr_iteration` or `pr_review`, invalid `max_turns` (not an integer or outside 1–500 range), invalid `max_budget_usd` (not a number or outside 0.01–100 range). |
 | `401` | `UNAUTHORIZED` | Missing or invalid auth token. |
 | `409` | `DUPLICATE_TASK` | Idempotency key matches an existing task (returns the existing task in `data`). |
+| `400` | `GUARDRAIL_BLOCKED` | Task description blocked by content screening (prompt injection detected). |
 | `422` | `REPO_NOT_ONBOARDED` | Repository is not registered with the platform. Repos are onboarded via CDK deployment (`Blueprint` construct), not via a runtime API. See [REPO_ONBOARDING.md](/design/repo-onboarding). |
 | `429` | `RATE_LIMIT_EXCEEDED` | User exceeded the per-user rate limit. |
+| `503` | `SERVICE_UNAVAILABLE` | Content screening service temporarily unavailable. Retry with backoff. |
 
 ---
 
@@ -583,8 +585,10 @@ HMAC verification is performed by the handler (not the authorizer) because API G
 | Status | Code | Condition |
 |---|---|---|
 | `400` | `VALIDATION_ERROR` | Missing required fields, invalid repo format, no task description or issue or PR number, invalid `task_type`, invalid `pr_number`, invalid `max_turns`, invalid `max_budget_usd`. |
+| `400` | `GUARDRAIL_BLOCKED` | Task description blocked by content screening. |
 | `401` | `UNAUTHORIZED` | Missing webhook headers, webhook not found, revoked, or invalid signature. |
 | `409` | `DUPLICATE_TASK` | Idempotency key matches an existing task. |
+| `503` | `SERVICE_UNAVAILABLE` | Content screening service temporarily unavailable. |
 
 **Channel metadata:** Tasks created via webhook record `channel_source: 'webhook'` and `channel_metadata` including `webhook_id`, `source_ip`, `user_agent`, and `api_request_id` for audit purposes.
 
@@ -619,9 +623,10 @@ Rate limit status is communicated via response headers (see Standard response he
 | `REPO_NOT_ONBOARDED` | 422 | Repository is not registered with the platform. Repos are onboarded via CDK deployment, not via a runtime API. There are no `/v1/repos` endpoints. |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | For `pr_iteration` and `pr_review` tasks: the specified PR does not exist, is not open, or is not accessible with the configured GitHub token. Checked during the orchestrator's pre-flight step. |
 | `INVALID_STEP_SEQUENCE` | 500 | The blueprint's step sequence is invalid (missing required steps or incorrect ordering). This indicates a CDK configuration error that slipped past synth-time validation. Visible via `GET /v1/tasks/{id}` as `error_code`. See [REPO_ONBOARDING.md](/design/repo-onboarding#step-sequence-validation). |
+| `GUARDRAIL_BLOCKED` | 400 | Task description was blocked by Bedrock Guardrail content screening (prompt injection detected). Revise the task description and retry. |
 | `RATE_LIMIT_EXCEEDED` | 429 | User exceeded rate limit. |
 | `INTERNAL_ERROR` | 500 | Unexpected server error. Includes `request_id` for support. |
-| `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (e.g. DynamoDB, AgentCore). Retry with backoff. |
+| `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (e.g. DynamoDB, AgentCore, Bedrock Guardrails). Retry with backoff. |
 
 ---
 

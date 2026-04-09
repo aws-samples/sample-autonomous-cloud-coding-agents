@@ -252,6 +252,26 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     memoryId: MEMORY_ID,
   });
 
+  // If guardrail screening blocked the hydrated context, emit audit event and throw
+  // to trigger task failure (the caller in orchestrate-task.ts catches and transitions to FAILED)
+  if (hydratedContext.guardrail_blocked) {
+    try {
+      await emitTaskEvent(task.task_id, 'guardrail_blocked', {
+        reason: hydratedContext.guardrail_blocked,
+        task_type: task.task_type,
+        pr_number: task.pr_number,
+        sources: hydratedContext.sources,
+        token_estimate: hydratedContext.token_estimate,
+      });
+    } catch (eventErr) {
+      logger.error('Failed to emit guardrail_blocked event', {
+        task_id: task.task_id,
+        error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+      });
+    }
+    throw new Error(`Guardrail blocked: ${hydratedContext.guardrail_blocked}`);
+  }
+
   // For PR iteration: resolve actual branch name from PR head_ref
   if (hydratedContext.resolved_branch_name) {
     try {

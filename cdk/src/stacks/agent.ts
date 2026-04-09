@@ -282,6 +282,8 @@ export class AgentStack extends Stack {
       runtimeArn: runtime.agentRuntimeArn,
       githubTokenSecretArn: githubTokenSecret.secretArn,
       memoryId: agentMemory.memory.memoryId,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
     });
 
     // Grant the orchestrator Lambda read+write access to memory

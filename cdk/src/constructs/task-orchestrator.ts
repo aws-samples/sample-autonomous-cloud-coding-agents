@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -100,6 +100,18 @@ export interface TaskOrchestratorProps {
    * and writes fallback episodes during finalization.
    */
   readonly memoryId?: string;
+
+  /**
+   * Bedrock Guardrail ID used by the orchestrator to screen assembled PR prompts
+   * for prompt injection during context hydration. The same guardrail is also
+   * used by the Task API for submission-time task description screening.
+   */
+  readonly guardrailId?: string;
+
+  /**
+   * Bedrock Guardrail version. Required when guardrailId is provided.
+   */
+  readonly guardrailVersion?: string;
 }
 
 /**
@@ -124,6 +136,13 @@ export class TaskOrchestrator extends Construct {
 
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
+
+    if (props.guardrailId && !props.guardrailVersion) {
+      throw new Error('guardrailVersion is required when guardrailId is provided');
+    }
+    if (!props.guardrailId && props.guardrailVersion) {
+      throw new Error('guardrailId is required when guardrailVersion is provided');
+    }
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 3;
@@ -152,6 +171,8 @@ export class TaskOrchestrator extends Construct {
           USER_PROMPT_TOKEN_BUDGET: String(props.userPromptTokenBudget),
         }),
         ...(props.memoryId && { MEMORY_ID: props.memoryId }),
+        ...(props.guardrailId && { GUARDRAIL_ID: props.guardrailId }),
+        ...(props.guardrailVersion && { GUARDRAIL_VERSION: props.guardrailVersion }),
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -198,6 +219,20 @@ export class TaskOrchestrator extends Construct {
         this, `AdditionalSecret${index}`, secretArn,
       );
       secret.grantRead(this.fn);
+    }
+
+    // Bedrock Guardrail permissions
+    if (props.guardrailId) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
     }
 
     // Create alias for durable function invocation

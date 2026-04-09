@@ -85,7 +85,7 @@ For the full orchestrator design — task state machine, execution model, failur
 
 The steps below are the blueprint in action: deterministic orchestration (1–2, 4) and one agentic step (3).
 
-1. **Deterministic:** The task orchestrator runs admission control, then context hydration (task id, issue body, user message, memory context → assembled prompt). When AgentCore Memory is configured, context hydration loads repository knowledge (semantic search) and past task episodes (episodic search) in parallel and injects them into the system prompt. See [MEMORY.md](./MEMORY.md).
+1. **Deterministic:** The task orchestrator runs admission control, then context hydration (task id, issue body, user message, memory context → assembled prompt). When AgentCore Memory is configured, context hydration loads repository knowledge (semantic search) and past task episodes (episodic search) in parallel and injects them into the system prompt. For PR tasks, the assembled prompt is screened through Bedrock Guardrails for prompt injection before proceeding to session start. See [MEMORY.md](./MEMORY.md).
 2. **Deterministic:** The orchestrator starts the agent session (compute environment) and passes in the prompt. The prompt version (SHA-256 hash of deterministic prompt parts) is stored on the task record for traceability.
 3. **Agentic:** The agent runs in the isolated environment: clone repo, create branch, edit code, commit often, run tests and lint, create PR. Commits are attributed via git trailers (`Task-Id`, `Prompt-Version`). At task end, the agent writes memory (task episode + repo learnings) to AgentCore Memory. The orchestrator does not execute this logic; it only waits for the session to finish.
 4. **Deterministic:** The orchestrator infers the result (e.g. by querying GitHub for a PR on the agent's branch), updates task status, and finalizes (result inference, cleanup). If the agent did not write memory (crash, timeout), the orchestrator writes a fallback episode. A validation step may run here (e.g. configurable post-agent checks); see repo onboarding for customizing these steps.
@@ -204,6 +204,7 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Live session replay | ROADMAP.md (Iter 4) | API_CONTRACT.md |
 | PR iteration task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
 | PR review task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
+| Bedrock Guardrail input screening | SECURITY.md (Input validation and guardrails) | ORCHESTRATOR.md (Context hydration), API_CONTRACT.md (Error codes), OBSERVABILITY.md (Alarms), ROADMAP.md (3c) |
 
 ### Per-repo model selection
 

@@ -30,6 +30,8 @@ interface StackOverrides {
   additionalRuntimeArns?: string[];
   additionalSecretArns?: string[];
   memoryId?: string;
+  guardrailId?: string;
+  guardrailVersion?: string;
 }
 
 function createStack(overrides?: StackOverrides): { stack: Stack; template: Template } {
@@ -55,7 +57,7 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     })
     : undefined;
 
-  const { includeRepoTable: _, additionalRuntimeArns, additionalSecretArns, memoryId, ...rest } = overrides ?? {};
+  const { includeRepoTable: _, additionalRuntimeArns, additionalSecretArns, memoryId, guardrailId, guardrailVersion, ...rest } = overrides ?? {};
 
   new TaskOrchestrator(stack, 'TaskOrchestrator', {
     taskTable,
@@ -66,6 +68,8 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     ...(additionalRuntimeArns && { additionalRuntimeArns }),
     ...(additionalSecretArns && { additionalSecretArns }),
     ...(memoryId && { memoryId }),
+    ...(guardrailId && { guardrailId }),
+    ...(guardrailVersion && { guardrailVersion }),
     ...rest,
   });
 
@@ -340,5 +344,75 @@ describe('TaskOrchestrator construct', () => {
     template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
       MaximumRetryAttempts: 0,
     });
+  });
+
+  test('includes GUARDRAIL_ID and GUARDRAIL_VERSION when provided', () => {
+    const { template } = createStack({ guardrailId: 'gr-test-123', guardrailVersion: '1' });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          GUARDRAIL_ID: 'gr-test-123',
+          GUARDRAIL_VERSION: '1',
+        }),
+      },
+    });
+  });
+
+  test('does not include GUARDRAIL_ID when not provided', () => {
+    const { template } = createStack();
+    const functions = template.findResources('AWS::Lambda::Function');
+    for (const [, fn] of Object.entries(functions)) {
+      const envVars = (fn as any).Properties.Environment?.Variables ?? {};
+      expect(envVars).not.toHaveProperty('GUARDRAIL_ID');
+      expect(envVars).not.toHaveProperty('GUARDRAIL_VERSION');
+    }
+  });
+
+  test('grants bedrock:ApplyGuardrail scoped to guardrail ARN when guardrailId is provided', () => {
+    const { template } = createStack({ guardrailId: 'gr-test-123', guardrailVersion: '1' });
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'bedrock:ApplyGuardrail',
+            Effect: 'Allow',
+            Resource: {
+              'Fn::Join': Match.arrayWith([
+                Match.arrayWith([
+                  Match.stringLikeRegexp('guardrail/gr-test-123'),
+                ]),
+              ]),
+            },
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('does not grant bedrock:ApplyGuardrail when guardrailId is not provided', () => {
+    const { template } = createStack();
+    const policies = template.findResources('AWS::IAM::Policy');
+    for (const [, policy] of Object.entries(policies)) {
+      const statements = (policy as any).Properties.PolicyDocument.Statement;
+      for (const stmt of statements) {
+        if (typeof stmt.Action === 'string') {
+          expect(stmt.Action).not.toBe('bedrock:ApplyGuardrail');
+        } else if (Array.isArray(stmt.Action)) {
+          expect(stmt.Action).not.toContain('bedrock:ApplyGuardrail');
+        }
+      }
+    }
+  });
+
+  test('throws when guardrailId is provided without guardrailVersion', () => {
+    expect(() => createStack({ guardrailId: 'gr-test-123' })).toThrow(
+      'guardrailVersion is required when guardrailId is provided',
+    );
+  });
+
+  test('throws when guardrailVersion is provided without guardrailId', () => {
+    expect(() => createStack({ guardrailVersion: '1' })).toThrow(
+      'guardrailId is required when guardrailVersion is provided',
+    );
   });
 });
