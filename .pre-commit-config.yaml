@@ -11,9 +11,9 @@ repos:
     hooks:
       - id: trailing-whitespace
         # Skip generated trees and paths often checked in read-only (0444); mutating hooks must not touch them.
-        exclude: (cdk/cdk\.out/|node_modules/|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$|\.(snap|lock)$)
+        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$|\.(snap|lock)$)
       - id: end-of-file-fixer
-        exclude: (cdk/cdk\.out/|node_modules/|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
+        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
       - id: check-merge-conflict
       - id: check-yaml
         exclude: ^(cdk/cdk\.out/|cdk\.out/|node_modules/|agent/\.venv/)
@@ -65,7 +65,14 @@ repos:
 
       - id: monorepo-security-pre-push
         name: security scans (pre-push)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run security'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:security'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: monorepo-tests-pre-push
+        name: package tests (pre-push)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:tests'
         language: system
         pass_filenames: false
         stages: [pre-push]

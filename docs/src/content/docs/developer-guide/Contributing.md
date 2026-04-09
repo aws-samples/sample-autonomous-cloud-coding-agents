@@ -67,7 +67,11 @@ mise run hooks:install
 | Stage | What runs |
 |-------|-----------|
 | **pre-commit** | Trailing whitespace / EOF / merge-conflict / YAML+JSON checks; **gitleaks** on **staged** changes only; **eslint** (cdk, cli), **ruff** (agent), **astro check** (docs) when matching paths are touched. |
-| **pre-push** | **`mise run security`** — same as the root security task (gitleaks, OSV, Semgrep, Grype, Retire.js, agent Bandit + image scan when Docker is available). |
+| **pre-push** | Two pre-push hooks run in order:
+1. **`mise run hooks:pre-push:security`** — root security scans.
+2. **`mise run hooks:pre-push:tests`** — tests in `cdk`, `cli`, and `agent` packages.
+
+For convenience, **`mise run hooks:pre-push`** runs both steps sequentially. |
 
 Dry-run or reproduce locally without committing:
 
