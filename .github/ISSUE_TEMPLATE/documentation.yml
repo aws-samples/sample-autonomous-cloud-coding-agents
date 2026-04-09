@@ -9,6 +9,20 @@ body:
     attributes:
       value: |
         Thanks for helping improve the documentation. Relevant docs live in `docs/guides/`, `docs/design/`, and the repo README.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Doc area
+      description: What kind of documentation is affected?
+      options:
+        - User guide (`docs/guides/USER_GUIDE.md` or synced site)
+        - Developer guide (`docs/guides/DEVELOPER_GUIDE.md` or synced site)
+        - Design / architecture (`docs/design/`)
+        - Roadmap or prompts (`docs/guides/`)
+        - README / root docs
+        - Other
+    validations:
+      required: true
   - type: textarea
     id: description
     attributes:

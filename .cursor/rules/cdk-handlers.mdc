@@ -1,0 +1,13 @@
+---
+description: CDK Lambda handlers and shared task pipeline conventions
+globs: cdk/src/handlers/**/*.ts
+alwaysApply: false
+---
+
+# CDK handlers
+
+- Prefer extending existing helpers in `cdk/src/handlers/shared/` (orchestration, validation, preflight) over duplicating logic.
+- When changing API shapes, edit **`cdk/src/handlers/shared/types.ts`** and mirror the same definitions in **`cli/src/types.ts`**.
+- Add or update Jest tests under **`cdk/test/handlers/`** or **`cdk/test/handlers/shared/`** next to the behavior you change (see **AGENTS.md** for a file map).
+- Use **`mise //cdk:test`** and **`mise //cdk:compile`** from the repo root instead of ad-hoc `jest` / `tsc` in the wrong directory.
+- Task lifecycle and admission behavior are described in **`docs/design/ORCHESTRATOR.md`**.

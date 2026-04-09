@@ -22,6 +22,8 @@ When filing an issue, please check [existing open](https://github.com/aws-sample
 
 ### Pull Request Checklist
 
+When planning edits, use **[AGENTS.md](./AGENTS.md)** at the repo root for **where to change code** (CDK vs CLI vs agent vs docs), **which tests to extend**, and **common pitfalls** (generated docs, mirrored API types, `mise` tasks).
+
 * [ ] Testing
   - Unit test added (prefer not to modify an existing test, otherwise, it's probably a breaking change)
   - Integration test added (if adding a new pattern or making a significant update to an existing pattern)

@@ -17,6 +17,9 @@
  *  SOFTWARE.
  */
 
+// Task lifecycle engine: state transitions, runtime invoke, finalization. Design: docs/design/ORCHESTRATOR.md
+// Tests: cdk/test/handlers/orchestrate-task.test.ts, cdk/test/constructs/task-orchestrator.test.ts
+
 import { randomUUID } from 'crypto';
 import { InvokeAgentRuntimeCommand, BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';

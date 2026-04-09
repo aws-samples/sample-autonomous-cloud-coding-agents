@@ -8,7 +8,40 @@ You are an **AWS CDK (Cloud Development Kit) and TypeScript** expert. This proje
 
 ## Project knowledge
 
-To get started and understand the developer flow, follow the [Developer guide](./docs/guides/DEVELOPER_GUIDE.md). For architecture and design, see [docs/design/](./docs/design/ARCHITECTURE.md).
+To get started and understand the developer flow, follow the [Developer guide](./docs/guides/DEVELOPER_GUIDE.md). For architecture and design, see [docs/design/](./docs/design/ARCHITECTURE.md). Task lifecycle and handler contracts are summarized in [Orchestrator design](./docs/design/ORCHESTRATOR.md) (including **API and agent contracts**).
+
+### Where to make changes
+
+Use this routing before editing so the right package and tests get updated:
+
+| Change | Primary location | Also update |
+|--------|------------------|-------------|
+| REST API, Lambdas, task validation, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | Matching tests under `cdk/test/` |
+| Shared API request/response shapes | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** (must stay in sync) |
+| `bgagent` CLI commands and HTTP client | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API types change |
+| Agent runtime (clone, tools, prompts, container) | `agent/` (`entrypoint.py`, `prompts/`, `Dockerfile`, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
+| User-facing or design prose | `docs/guides/`, `docs/design/` | Run **`mise //docs:sync`** or **`mise //docs:build`** (do not edit `docs/src/content/docs/` by hand) |
+| Monorepo tasks, CI glue | Root `mise.toml`, `scripts/`, `.github/workflows/` | — |
+
+### CDK handler tests (quick map)
+
+Colocated tests under `cdk/test/handlers/shared/` cover most shared logic:
+
+- `validation.test.ts` — request validation
+- `preflight.test.ts` — preflight / admission checks
+- `create-task-core.test.ts` — task creation core path
+- `context-hydration.test.ts` — prompt / context assembly
+- `repo-config.test.ts`, `memory.test.ts`, `gateway.test.ts`, `response.test.ts`, `prompt-version.test.ts` — respective modules
+
+Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.test.ts`, `webhook-create-task.test.ts`. Construct wiring: `cdk/test/constructs/task-orchestrator.test.ts`, `task-api.test.ts`.
+
+### Common mistakes
+
+- Editing **`docs/src/content/docs/`** instead of **`docs/guides/`** or **`docs/design/`** — content is generated; sync from sources.
+- Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.
+- Running raw **`jest`/`tsc`/`cdk`** from muscle memory — prefer **`mise //cdk:test`**, **`mise //cdk:compile`**, **`mise //cdk:synth`** (see [Commands you can use](#commands-you-can-use)).
+- **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+- **`mise run build`** runs **`//agent:quality`** before CDK — the deployed image bundles **`agent/`**; agent changes belong in that tree.
 
 ### Tech stack
 

@@ -1,0 +1,13 @@
+---
+description: Python agent runtime in isolated compute
+globs: agent/**/*.py
+alwaysApply: false
+---
+
+# Agent runtime (`agent/`)
+
+- **`entrypoint.py`** is the main task loop; prompts live under **`agent/prompts/`** with **`system_prompt.py`** for shared behavior.
+- Follow **`agent/README.md`** for GitHub PAT scopes, env vars, and local **`./agent/run.sh`** usage.
+- Use **`mise run quality`** in **`agent/`** (or root **`mise run build`**, which runs agent quality before CDK) after substantive changes.
+- Do not embed secrets; the stack supplies credentials via Secrets Manager / env as documented.
+- Prefer **`ruff`** / existing patterns; see **`pyproject.toml`** for **`ruff`** and **`pytest`** configuration.

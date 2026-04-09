@@ -17,6 +17,9 @@
  *  SOFTWARE.
  */
 
+// Admission / pre-invoke checks before orchestration. See docs/design/ORCHESTRATOR.md (admission control).
+// Tests: cdk/test/handlers/shared/preflight.test.ts
+
 import { resolveGitHubToken } from './context-hydration';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';

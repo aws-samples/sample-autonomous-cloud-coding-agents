@@ -1,0 +1,13 @@
+---
+description: bgagent CLI package conventions
+globs: cli/src/**/*.ts
+alwaysApply: false
+---
+
+# CLI (`@backgroundagent/cli`)
+
+- One command per file under **`cli/src/commands/`**; wire flags and options consistently with existing commands.
+- **`cli/src/types.ts`** must stay aligned with **`cdk/src/handlers/shared/types.ts`** when the REST API changes.
+- Console output is intentional: **`no-console`** is disabled for CLI sources.
+- The API base URL from deployment already includes the stage (e.g. **`/v1/`**); append only resource paths in **`api-client.ts`**.
+- Run **`mise //cli:build`** or **`cd cli && mise run test`** to verify changes.

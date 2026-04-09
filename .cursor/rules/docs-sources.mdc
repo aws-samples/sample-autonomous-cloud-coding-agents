@@ -1,0 +1,11 @@
+---
+description: Authoritative docs live under guides/ and design/; Starlight is generated
+globs: docs/guides/**/*.md,docs/design/**/*.md
+alwaysApply: false
+---
+
+# Documentation sources
+
+- Edit **`docs/guides/`** and **`docs/design/`** (and root **`CONTRIBUTING.md`** when it affects the site). Do **not** hand-edit **`docs/src/content/docs/`** — that tree is produced by **`docs/scripts/sync-starlight.mjs`**.
+- After changing guides or design Markdown, run **`mise //docs:sync`** or **`mise //docs:build`** from the repo root.
+- **`AGENTS.md`** is the root entry for contributors and coding agents; keep it in sync conceptually when you change cross-cutting dev workflows.

@@ -18,6 +18,19 @@ The orchestrator does **not** run the agent. The agent runs inside an isolated c
 - **Most important sections for readers:** Responsibilities, State machine, Admission control, and Cancellation.
 - **Scope:** orchestrator behavior only; API surface and security policy are defined in their dedicated docs.
 
+## API and agent contracts
+
+These boundaries matter whenever you change task submission, the CLI, or the runtime container.
+
+| Concern | Canonical location | Notes |
+|---------|-------------------|--------|
+| REST request/response types | `cdk/src/handlers/shared/types.ts` | **Mirror** in `cli/src/types.ts` for `bgagent` — keep them aligned on every API change. |
+| HTTP handlers & orchestration code | `cdk/src/handlers/` (e.g. shared `orchestrator.ts`, `create-task-core.ts`, `preflight.ts`) | Colocated Jest tests under `cdk/test/handlers/` and `cdk/test/handlers/shared/`. |
+| Agent runtime behavior | `agent/` (`entrypoint.py`, `prompts/`, `system_prompt.py`, Dockerfile) | Consumes task payload and environment set by CDK/Lambda; see `agent/README.md` for PAT, tools, and local run. |
+| User-facing API documentation | `docs/guides/USER_GUIDE.md` (and synced site) | Regenerate Starlight content with `mise //docs:sync` after guide edits. |
+
+The orchestrator document describes **behavior** (state machine, admission, cancellation). The TypeScript `types.ts` files are the **schema** the API and CLI share; the agent implements the **work** inside compute.
+
 **Relationship to blueprints.** The orchestrator is a **framework** that enforces platform invariants — the task state machine, event emission, concurrency management, and cancellation handling — and delegates variable work to **blueprint-defined step implementations**. A blueprint defines which steps run, in what order, and how each step is implemented (built-in strategy, Lambda-backed custom step, or custom sequence). The default blueprint is defined in this document (Section 4). Per-repo customization (see [REPO_ONBOARDING.md](/design/repo-onboarding)) changes the steps the orchestrator executes, not the framework guarantees it enforces. The orchestrator wraps every step with state transitions, event emission, and cancellation checks — regardless of whether the step is a built-in or a custom Lambda.
 
 ### Iteration 1 vs. target state

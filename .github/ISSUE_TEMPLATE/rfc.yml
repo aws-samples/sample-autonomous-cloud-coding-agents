@@ -9,6 +9,21 @@ body:
     attributes:
       value: |
         Use this template for significant feature or design proposals. Please add as much detail as possible. See the [ROADMAP](https://github.com/krokoko/bgagent/blob/main/docs/guides/ROADMAP.md) and [design docs](https://github.com/krokoko/bgagent/tree/main/docs/design) for existing direction; your RFC should align or explain divergence.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      description: Which part of the repo does this RFC mainly affect?
+      options:
+        - CDK / infrastructure
+        - Agent (Python runtime)
+        - CLI (bgagent)
+        - API or orchestration
+        - Documentation
+        - Tooling / CI
+        - Cross-cutting / multiple
+    validations:
+      required: true
   - type: input
     id: relation
     attributes:
