@@ -8,7 +8,7 @@
   <strong>
     Autonomous Background Coding Agents on AWS
   </strong>
- 
+
   <br />
   <br />
   <p align="center">
