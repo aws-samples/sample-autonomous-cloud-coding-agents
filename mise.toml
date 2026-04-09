@@ -103,6 +103,25 @@ run = [
   "prek run --all-files --stage pre-push",
 ]
 
+[tasks."hooks:pre-push:security"]
+description = "Pre-push security scans"
+run = "mise run security"
+
+[tasks."hooks:pre-push:tests"]
+description = "Pre-push tests in cdk/cli/agent"
+run = [
+  "MISE_EXPERIMENTAL=1 mise //cdk:test",
+  "MISE_EXPERIMENTAL=1 mise //cli:test",
+  "cd agent && mise run test",
+]
+
+[tasks."hooks:pre-push"]
+description = "Pre-push gate: security scans then tests in cdk/cli/agent"
+run = [
+  "mise run hooks:pre-push:security",
+  "mise run hooks:pre-push:tests",
+]
+
 ##################
 ##### BUILD #####
 ##################
