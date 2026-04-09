@@ -665,4 +665,3 @@ The API is implemented as an **Amazon API Gateway REST API** (or HTTP API) with 
 ### Relationship to internal message schema
 
 The API request/response schemas defined here are the **external** contract. The input gateway normalizes API requests into the **internal message schema** (see [INPUT_GATEWAY.md](/design/input-gateway)) before dispatching to the task pipeline. The internal schema may include additional fields (e.g. `channel_metadata`, `normalized_at`) that are not exposed in the API.
-

@@ -9,6 +9,7 @@ experimental = true
 
 [tools]
 node = "22"
+prek = "0.3.8"
 gitleaks = "latest"
 semgrep = "latest"
 osv-scanner = "latest"
@@ -24,10 +25,12 @@ config_roots = ["cdk", "agent", "cli", "docs"]
 # One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`).
 # `//cdk:install`, `//cli:install`, and `//docs:install` are thin wrappers around the same command.
 [tasks.install]
-description = "Yarn workspaces (cdk, cli, docs) + agent Python (uv)"
+description = "Yarn workspaces (cdk, cli, docs) + agent Python (uv) + prek git hooks when inside a Git repo"
 run = [
   "yarn install --check-files",
   "cd agent && mise run install",
+  # Install prek shims only in a real checkout (skip tarballs / no-.git environments).
+  "bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; prek install --prepare-hooks'",
 ]
 
 ##################
@@ -50,6 +53,10 @@ run = [
 [tasks."security:secrets"]
 description = "Scan for secrets with gitleaks"
 run = "gitleaks detect --source . --no-banner"
+
+[tasks."security:secrets:staged"]
+description = "gitleaks on staged changes (pre-commit hook)"
+run = "gitleaks protect --staged --no-banner"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
@@ -79,6 +86,40 @@ run = [
     { task = "security:grype" },
     { task = "security:retire" },
     "MISE_EXPERIMENTAL=1 mise //agent:security",
+]
+
+##################
+##### HOOKS ######
+##################
+
+[tasks."hooks:install"]
+description = "Install or refresh prek git hooks (also runs at end of `mise run install` in a Git repo)"
+run = "prek install --prepare-hooks"
+
+[tasks."hooks:run"]
+description = "Run prek on all files (pre-commit then pre-push stages)"
+run = [
+  "prek run --all-files --stage pre-commit",
+  "prek run --all-files --stage pre-push",
+]
+
+[tasks."hooks:pre-push:security"]
+description = "Pre-push security scans"
+run = "mise run security"
+
+[tasks."hooks:pre-push:tests"]
+description = "Pre-push tests in cdk/cli/agent"
+run = [
+  "MISE_EXPERIMENTAL=1 mise //cdk:test",
+  "MISE_EXPERIMENTAL=1 mise //cli:test",
+  "cd agent && mise run test",
+]
+
+[tasks."hooks:pre-push"]
+description = "Pre-push gate: security scans then tests in cdk/cli/agent"
+run = [
+  "mise run hooks:pre-push:security",
+  "mise run hooks:pre-push:tests",
 ]
 
 ##################

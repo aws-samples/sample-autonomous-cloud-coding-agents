@@ -34,7 +34,7 @@ body:
     id: use-case
     attributes:
       label: Use case
-      description: Why do you need this? For example: "I'm always frustrated when..."
+      description: "Why do you need this? For example: I'm always frustrated when..."
     validations:
       required: true
   - type: textarea

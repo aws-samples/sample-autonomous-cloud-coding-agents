@@ -54,6 +54,33 @@ This repository uses [mise](https://mise.jdx.dev/) for tool versions and tasks. 
 
 Project configuration is hand-owned in this repository. Prefer `mise` tasks from the repo root (`mise run install`, `mise run build`) or package-level tasks (`mise //cdk:build`, `mise //cli:build`, `mise //docs:build`).
 
+### Git hooks ([prek](https://github.com/j178/prek))
+
+**`mise run install`** already runs **`prek install --prepare-hooks`** when the current directory is inside a **Git** working tree (it is skipped if there is no `.git`, e.g. a source tarball). [`prek`](https://github.com/j178/prek) is pinned in the root **`mise.toml`** and reads **`.pre-commit-config.yaml`**.
+
+Re-apply hook shims after you change hook config or if install was skipped:
+
+```bash
+mise run hooks:install
+```
+
+| Stage | What runs |
+|-------|-----------|
+| **pre-commit** | Trailing whitespace / EOF / merge-conflict / YAML+JSON checks; **gitleaks** on **staged** changes only; **eslint** (cdk, cli), **ruff** (agent), **astro check** (docs) when matching paths are touched. |
+| **pre-push** | Two pre-push hooks run in order:
+1. **`mise run hooks:pre-push:security`** — root security scans.
+2. **`mise run hooks:pre-push:tests`** — tests in `cdk`, `cli`, and `agent` packages.
+
+For convenience, **`mise run hooks:pre-push`** runs both steps sequentially. |
+
+Dry-run or reproduce locally without committing:
+
+```bash
+mise run hooks:run
+```
+
+If **`prek install`** exits with *refusing to install hooks with `core.hooksPath` set* — another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath` for **local** and/or **global**) or integrate these checks into that hook manager instead.
+
 ### Step 1: Open Issue
 
 If there isn't one already, open an issue describing what you intend to contribute. It's useful to communicate in advance, because sometimes, someone is already working in this space, so maybe it's worth collaborating with them instead of duplicating the efforts.
