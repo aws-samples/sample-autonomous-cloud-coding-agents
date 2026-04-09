@@ -18,7 +18,7 @@
  */
 
 /** Valid task types for task creation. */
-export type TaskType = 'new_task' | 'pr_iteration';
+export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {

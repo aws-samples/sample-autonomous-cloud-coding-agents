@@ -20,7 +20,12 @@
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Valid task types for task creation. */
-export type TaskType = 'new_task' | 'pr_iteration';
+export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+
+/** Task types that operate on an existing pull request. */
+export function isPrTaskType(taskType: TaskType): boolean {
+  return taskType === 'pr_iteration' || taskType === 'pr_review';
+}
 
 /**
  * Full task record as stored in DynamoDB.

@@ -100,6 +100,14 @@ describe('hasTaskSpec', () => {
   test('returns false for pr_iteration without pr_number', () => {
     expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_iteration' })).toBe(false);
   });
+
+  test('returns true when task_type is pr_review and pr_number is provided', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_review', pr_number: 42 })).toBe(true);
+  });
+
+  test('returns false for pr_review without pr_number', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_review' })).toBe(false);
+  });
 });
 
 describe('isValidIdempotencyKey', () => {
@@ -321,6 +329,10 @@ describe('isValidTaskType', () => {
   test('returns true for undefined/null (defaults to new_task)', () => {
     expect(isValidTaskType(undefined)).toBe(true);
     expect(isValidTaskType(null)).toBe(true);
+  });
+
+  test('returns true for pr_review', () => {
+    expect(isValidTaskType('pr_review')).toBe(true);
   });
 
   test('returns false for invalid values', () => {

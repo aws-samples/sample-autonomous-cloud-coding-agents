@@ -674,6 +674,32 @@ describe('hydrateContext', () => {
     expect(result.version).toBe(1);
   });
 
+  test('pr_review task hydrates PR context', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          number: 55, title: 'Review PR', body: 'Please review', head: { ref: 'feature/review' }, base: { ref: 'main' }, state: 'open',
+        }),
+      })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+
+    const task = {
+      ...baseTask,
+      task_type: 'pr_review',
+      pr_number: 55,
+    };
+    const result = await hydrateContext(task as any);
+
+    expect(result.sources).toContain('pull_request');
+    expect(result.resolved_branch_name).toBe('feature/review');
+    expect(result.resolved_base_branch).toBe('main');
+    expect(result.user_prompt).toContain('Review this pull request');
+  });
+
   test('pr_iteration prompt: removing a thread root also removes its replies from prompt', () => {
     // Thread 1: root (id 100) + reply (id 200)
     // Thread 2: root (id 300)

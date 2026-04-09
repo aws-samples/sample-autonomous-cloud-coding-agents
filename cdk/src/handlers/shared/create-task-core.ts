@@ -27,7 +27,7 @@ import { generateBranchName } from './gateway';
 import { logger } from './logger';
 import { checkRepoOnboarded } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
-import { type CreateTaskRequest, type TaskRecord, type TaskType, toTaskDetail } from './types';
+import { type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -78,20 +78,21 @@ export async function createTaskCore(
 
   // Validate task_type
   if (!isValidTaskType(body.task_type)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_type. Must be "new_task" or "pr_iteration".', requestId);
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_type. Must be "new_task", "pr_iteration", or "pr_review".', requestId);
   }
   const taskType: TaskType = (body.task_type as TaskType) ?? 'new_task';
+  const isPrTask = isPrTaskType(taskType);
 
   // Validate pr_number
   const prNumberResult = validatePrNumber(body.pr_number);
   if (prNumberResult === null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid pr_number. Must be a positive integer.', requestId);
   }
-  if (taskType === 'pr_iteration' && prNumberResult === undefined) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is required when task_type is "pr_iteration".', requestId);
+  if (isPrTask && prNumberResult === undefined) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `pr_number is required when task_type is "${taskType}".`, requestId);
   }
-  if (taskType !== 'pr_iteration' && prNumberResult !== undefined) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed when task_type is "pr_iteration".', requestId);
+  if (!isPrTask && prNumberResult !== undefined) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed when task_type is "pr_iteration" or "pr_review".', requestId);
   }
 
   if (body.task_description && !isValidTaskDescriptionLength(body.task_description)) {
@@ -167,7 +168,7 @@ export async function createTaskCore(
   // 4. Generate identifiers and timestamps
   const taskId = ulid();
   const now = new Date().toISOString();
-  const branchName = taskType === 'pr_iteration'
+  const branchName = isPrTask
     ? 'pending:pr_resolution'
     : generateBranchName(taskId, body.task_description ?? body.repo);
 

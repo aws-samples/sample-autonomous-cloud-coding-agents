@@ -53,7 +53,7 @@ run = "gitleaks detect --source . --no-banner"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
-run = "semgrep scan --config auto --config p/python --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
 
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"

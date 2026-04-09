@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import type { CreateTaskRequest } from './types';
+import { isPrTaskType, type CreateTaskRequest, type TaskType } from './types';
 import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
@@ -64,10 +64,11 @@ export function isValidRepo(repo: string): boolean {
 /**
  * Validate that a create task request has at least one task specification.
  * @param req - the parsed create task request.
- * @returns true if issue_number or task_description is provided.
+ * @returns true if the request has a sufficient task specification:
+ *   issue_number or task_description for new_task; pr_number for pr_iteration or pr_review.
  */
 export function hasTaskSpec(req: CreateTaskRequest): boolean {
-  if (req.task_type === 'pr_iteration' && req.pr_number !== undefined && req.pr_number !== null) {
+  if ((req.task_type === 'pr_iteration' || req.task_type === 'pr_review') && req.pr_number !== undefined && req.pr_number !== null) {
     return true;
   }
   return (req.issue_number !== undefined && req.issue_number !== null) ||
@@ -192,8 +193,11 @@ export function computeTtlEpoch(retentionDays: number): number {
   return Math.floor(Date.now() / 1000) + retentionDays * 86400;
 }
 
-/** Valid task type values. */
-export const VALID_TASK_TYPES = new Set<string>(['new_task', 'pr_iteration']);
+/** Valid task type values. Compile-time check ensures this stays in sync with TaskType. */
+const TASK_TYPE_LIST = ['new_task', 'pr_iteration', 'pr_review'] as const satisfies readonly TaskType[];
+type _AssertExhaustive = Exclude<TaskType, (typeof TASK_TYPE_LIST)[number]> extends never ? true : never;
+const _exhaustiveCheck: _AssertExhaustive = true; // eslint-disable-line @typescript-eslint/no-unused-vars
+export const VALID_TASK_TYPES = new Set<string>(TASK_TYPE_LIST);
 
 /**
  * Validate a task_type value from a request body.
