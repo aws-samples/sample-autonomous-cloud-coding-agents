@@ -793,12 +793,12 @@ export interface HydrateContextOptions {
 
 /**
  * Hydrate context for a task: resolve GitHub token, fetch issue/PR, enforce
- * token budget, assemble the user prompt, and (for PR tasks) screen through
- * Bedrock Guardrail for prompt injection.
+ * token budget, assemble the user prompt, and screen through Bedrock Guardrail
+ * for prompt injection (PR tasks; new_task when issue content is present).
  * @param task - the task record from DynamoDB.
  * @param options - optional per-repo overrides.
- * @returns the hydrated context. For PR tasks, `guardrail_blocked` is set when
- *          the guardrail intervened.
+ * @returns the hydrated context. `guardrail_blocked` is set when the guardrail
+ *          intervened (PR tasks: always screened; new_task: screened when issue content is present).
  * @throws GuardrailScreeningError when the Bedrock Guardrail API call fails
  *         (fail-closed — propagated to prevent unscreened content from reaching the agent).
  */
@@ -990,12 +990,18 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       return prContext;
     }
 
-    // Standard task: existing behavior
+    // Standard task
     const budgetResult = enforceTokenBudget(issue, task.task_description, USER_PROMPT_TOKEN_BUDGET);
     issue = budgetResult.issue;
 
     userPrompt = assembleUserPrompt(task.task_id, task.repo, issue, budgetResult.taskDescription);
     const tokenEstimate = estimateTokens(userPrompt);
+
+    // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).
+    // Skipped when no issue is present — task_description is already screened at submission time.
+    const guardrailAction = issue
+      ? await screenWithGuardrail(userPrompt, task.task_id)
+      : undefined;
 
     return {
       version: 1,
@@ -1005,6 +1011,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       sources,
       token_estimate: tokenEstimate,
       truncated: budgetResult.truncated,
+      ...(guardrailAction === 'GUARDRAIL_INTERVENED' && {
+        guardrail_blocked: 'Task context blocked by content policy',
+      }),
     };
   } catch (err) {
     // Guardrail failures must propagate (fail-closed) — unscreened content must not reach the agent

@@ -546,6 +546,8 @@ describe('hydrateContext', () => {
         ok: true,
         json: async () => ({ number: 42, title: 'Bug', body: 'Details', comments: 0 }),
       });
+    // Guardrail screens assembled prompt when issue content is present
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
 
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix it' };
     const result = await hydrateContext(task as any);
@@ -571,6 +573,9 @@ describe('hydrateContext', () => {
     expect(result.sources).toContain('task_description');
     expect(result.issue).toBeUndefined();
     expect(result.user_prompt).toContain('Fix it');
+    // No issue content fetched — guardrail should not be called (task_description already screened)
+    expect(result.guardrail_blocked).toBeUndefined();
+    expect(mockBedrockSend).not.toHaveBeenCalled();
   });
 
   test('no issue number — assembles from task description only', async () => {
@@ -628,6 +633,8 @@ describe('hydrateContext', () => {
       ok: true,
       json: async () => ({ number: 10, title: 'Test', body: 'body', comments: 0 }),
     });
+    // Guardrail screens assembled prompt when issue content is present
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
 
     const task = { ...baseTask, issue_number: 10, task_description: 'Fix' };
     const result = await hydrateContext(task as any, { githubTokenSecretArn: perRepoArn });
@@ -1027,7 +1034,7 @@ describe('screenWithGuardrail', () => {
 });
 
 // ---------------------------------------------------------------------------
-// hydrateContext — guardrail screening for PR tasks
+// hydrateContext — guardrail screening
 // ---------------------------------------------------------------------------
 
 describe('hydrateContext — guardrail screening', () => {
@@ -1113,29 +1120,70 @@ describe('hydrateContext — guardrail screening', () => {
     expect(mockBedrockSend).toHaveBeenCalledTimes(1);
   });
 
-  test('does not invoke guardrail for new_task type', async () => {
+  // --- new_task guardrail screening ---
+
+  const baseNewTask = {
+    task_id: 'TASK-NEW-001',
+    user_id: 'user-123',
+    status: 'SUBMITTED',
+    repo: 'org/repo',
+    branch_name: 'bgagent/TASK-NEW-001/fix',
+    channel_source: 'api',
+    status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    task_type: 'new_task',
+    task_description: 'Fix it',
+  };
+
+  function mockIssueFetch(): void {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ number: 42, title: 'Bug', body: 'Details', comments: 0 }),
     });
+  }
 
-    const newTask = {
-      task_id: 'TASK-NEW-001',
-      user_id: 'user-123',
-      status: 'SUBMITTED',
-      repo: 'org/repo',
-      branch_name: 'bgagent/TASK-NEW-001/fix',
-      channel_source: 'api',
-      status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
-      created_at: '2024-01-01T00:00:00Z',
-      updated_at: '2024-01-01T00:00:00Z',
-      task_type: 'new_task',
-      issue_number: 42,
-      task_description: 'Fix it',
-    };
-    const result = await hydrateContext(newTask as any);
+  test('invokes guardrail for new_task with issue content', async () => {
+    mockIssueFetch();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const result = await hydrateContext({ ...baseNewTask, issue_number: 42 } as any);
+    expect(result.guardrail_blocked).toBeUndefined();
+    expect(mockBedrockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not invoke guardrail for new_task without issue_number', async () => {
+    const result = await hydrateContext(baseNewTask as any);
     expect(result.guardrail_blocked).toBeUndefined();
     expect(mockBedrockSend).not.toHaveBeenCalled();
+  });
+
+  test('returns guardrail_blocked when new_task issue context is blocked', async () => {
+    mockIssueFetch();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
+
+    const result = await hydrateContext({ ...baseNewTask, issue_number: 42 } as any);
+    expect(result.guardrail_blocked).toBe('Task context blocked by content policy');
+    expect(mockBedrockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('proceeds normally when new_task issue context passes guardrail', async () => {
+    mockIssueFetch();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const result = await hydrateContext({ ...baseNewTask, issue_number: 42 } as any);
+    expect(result.guardrail_blocked).toBeUndefined();
+    expect(result.issue).toBeDefined();
+    expect(result.sources).toContain('issue');
+  });
+
+  test('throws when guardrail screening fails for new_task (fail-closed)', async () => {
+    mockIssueFetch();
+    mockBedrockSend.mockRejectedValueOnce(new Error('Bedrock timeout'));
+
+    await expect(
+      hydrateContext({ ...baseNewTask, issue_number: 42 } as any),
+    ).rejects.toThrow('Guardrail screening unavailable: Bedrock timeout');
   });
 });

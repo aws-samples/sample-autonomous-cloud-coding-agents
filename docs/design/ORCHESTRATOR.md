@@ -179,7 +179,7 @@ See the Admission control section for details. Validates that the task is allowe
 
 #### Step 2: Context hydration (deterministic)
 
-See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). For PR tasks, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it. The output is a fully assembled prompt, ready to pass to the compute session.
+See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). The assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it (PR tasks: always screened; `new_task`: screened when issue content is present). The output is a fully assembled prompt, ready to pass to the compute session.
 
 #### Step 3: Session start and agent execution (deterministic start + agentic execution)
 
@@ -253,6 +253,8 @@ Admission control runs immediately after the input gateway dispatches a "create 
 - **Rejected.** Task transitions to `FAILED` with a reason (repo not onboarded, rate limit exceeded, concurrency limit, validation error). No counter change.
 - **Deduplicated.** Existing task ID returned. No new task created.
 
+**Planned (Iteration 5):** Admission control checks will be governed by Cedar policies as part of the centralized policy framework. Cedar replaces the current inline admission logic with formally verifiable policy evaluation — the same Cedar policy store handles admission, budget/quota resolution, tool-call interception, and (when multi-user/team lands) tenant-scoped authorization. All admission decisions will emit a structured `PolicyDecisionEvent` for audit. See [ROADMAP.md Iteration 5](../guides/ROADMAP.md) (Centralized policy framework) and [SECURITY.md](./SECURITY.md) (Policy enforcement and audit).
+
 ---
 
 ## Context hydration
@@ -271,7 +273,7 @@ The orchestrator's `hydrateAndTransition()` function calls `hydrateContext()` (`
 4. **Assembles the user prompt** based on task type:
    - **`new_task`**: A structured markdown document with Task ID, Repository, GitHub Issue section, and Task section. The format mirrors the Python `assemble_prompt()` in `agent/entrypoint.py`.
    - **`pr_iteration`**: Assembled by `assemblePrIterationPrompt()` — includes PR metadata (number, title, body), the diff summary (changed files and patches), review comments (inline and conversation), and optional user instructions from `task_description`.
-5. **Screens through Bedrock Guardrail** (PR tasks only): For `pr_iteration` and `pr_review` tasks, the assembled user prompt is screened through Amazon Bedrock Guardrails (`screenWithGuardrail()`) using the `PROMPT_ATTACK` content filter. If the guardrail detects prompt injection, `guardrail_blocked` is set on the result and the orchestrator fails the task. If the Bedrock API is unavailable, a `GuardrailScreeningError` is thrown (fail-closed — unscreened content never reaches the agent). Task descriptions for all task types are screened at submission time in `create-task-core.ts`.
+5. **Screens through Bedrock Guardrail** (PR tasks; `new_task` when issue content is present): The assembled user prompt is screened through Amazon Bedrock Guardrails (`screenWithGuardrail()`) using the `PROMPT_ATTACK` content filter. For `new_task` tasks without issue content, screening is skipped because the task description was already screened at submission time. If the guardrail detects prompt injection, `guardrail_blocked` is set on the result and the orchestrator fails the task. If the Bedrock API is unavailable, a `GuardrailScreeningError` is thrown (fail-closed — unscreened content never reaches the agent). Task descriptions for all task types are screened at submission time in `create-task-core.ts`.
 6. **Returns a `HydratedContext` object** containing `version`, `user_prompt`, `issue`, `sources`, `token_estimate`, `truncated`, and for `pr_iteration`/`pr_review` tasks: `resolved_branch_name` and `resolved_base_branch`.
 
 The hydrated context is passed to the agent as a new `hydrated_context` field in the invocation payload, alongside the existing legacy fields (`repo_url`, `task_id`, `branch_name`, `issue_number`, `prompt`). The agent checks for `hydrated_context` with `version == 1`; if present, it uses the pre-assembled `user_prompt` directly and skips in-container GitHub fetching and prompt assembly. If absent (e.g. during a deployment rollout or when the secret ARN isn't configured), the agent falls back to its existing behavior.
