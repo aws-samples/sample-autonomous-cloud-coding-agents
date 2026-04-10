@@ -133,7 +133,8 @@ Cost efficiency is a design principle. The following estimates are based on **50
 | **API Gateway** (REST API, ~2K requests/day) | ~$5–15 | Per-request pricing |
 | **AgentCore Memory** (events, records, retrieval) | TBD | Pricing not fully public; proportional to usage |
 | **CloudWatch** (logs, metrics, traces, Transaction Search) | ~$20–50 | Log ingestion + storage |
-| **Secrets Manager** (GitHub App keys, webhook secrets) | ~$5–10 | Per-secret/month + API calls |
+| **Secrets Manager** (GitHub token or App private key, webhook secrets) | ~$5–10 | Per-secret/month + API calls |
+| **AgentCore Identity** (planned — WorkloadIdentity, Token Vault credential provider) | TBD | Token vending API calls; replaces per-task Secrets Manager reads for GitHub tokens |
 | **S3** (artifacts, memory backups) | ~$1–5 | Storage + requests |
 | **Total** | **~$700–1,600/month** | |
 
@@ -205,10 +206,17 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Agent swarm orchestration | ROADMAP.md (Iter 6) | — |
 | Adaptive model router | ROADMAP.md (Iter 5) | COST_MODEL.md |
 | Capability-based security | ROADMAP.md (Iter 5) | SECURITY.md |
+| Centralized policy framework | ROADMAP.md (Iter 5), SECURITY.md (Policy enforcement and audit) | ORCHESTRATOR.md, OBSERVABILITY.md |
+| GitHub App + AgentCore Token Vault | ROADMAP.md (Iter 3c), SECURITY.md (Authentication) | ORCHESTRATOR.md (context hydration), COMPUTE.md |
 | Live session replay | ROADMAP.md (Iter 4) | API_CONTRACT.md |
 | PR iteration task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
 | PR review task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
+| Orchestrator pre-flight checks | ORCHESTRATOR.md (Context hydration, pre-flight sub-step) | API_CONTRACT.md (Error codes: GITHUB_UNREACHABLE, REPO_NOT_FOUND_OR_NO_ACCESS), ROADMAP.md (3c), SECURITY.md |
 | Bedrock Guardrail input screening | SECURITY.md (Input validation and guardrails) | ORCHESTRATOR.md (Context hydration), API_CONTRACT.md (Error codes), OBSERVABILITY.md (Alarms), ROADMAP.md (3c) |
+| Memory input hardening (3e Phase 1) | ROADMAP.md (Iter 3e Phase 1, co-ships with 3d) | MEMORY.md, SECURITY.md (Memory-specific threats) |
+| Per-tool-call structured telemetry | ROADMAP.md (Iter 3d) | SECURITY.md (Mid-execution enforcement), EVALUATION.md, OBSERVABILITY.md |
+| Mid-execution behavioral monitoring | ROADMAP.md (Iter 5), SECURITY.md (Mid-execution enforcement) | OBSERVABILITY.md |
+| Tool-call interceptor (Guardian pattern) | SECURITY.md (Mid-execution enforcement), ROADMAP.md (Iter 5) | REPO_ONBOARDING.md (Blueprint security props) |
 
 ### Per-repo model selection
 
