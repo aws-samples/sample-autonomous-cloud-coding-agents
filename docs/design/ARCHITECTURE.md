@@ -207,7 +207,12 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Live session replay | ROADMAP.md (Iter 4) | API_CONTRACT.md |
 | PR iteration task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
 | PR review task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
+| Orchestrator pre-flight checks | ORCHESTRATOR.md (Context hydration, pre-flight sub-step) | API_CONTRACT.md (Error codes: GITHUB_UNREACHABLE, REPO_NOT_FOUND_OR_NO_ACCESS), ROADMAP.md (3c), SECURITY.md |
 | Bedrock Guardrail input screening | SECURITY.md (Input validation and guardrails) | ORCHESTRATOR.md (Context hydration), API_CONTRACT.md (Error codes), OBSERVABILITY.md (Alarms), ROADMAP.md (3c) |
+| Memory input hardening (3e Phase 1) | ROADMAP.md (Iter 3e Phase 1, co-ships with 3d) | MEMORY.md, SECURITY.md (Memory-specific threats) |
+| Per-tool-call structured telemetry | ROADMAP.md (Iter 3d) | SECURITY.md (Mid-execution enforcement), EVALUATION.md, OBSERVABILITY.md |
+| Mid-execution behavioral monitoring | ROADMAP.md (Iter 5), SECURITY.md (Mid-execution enforcement) | OBSERVABILITY.md |
+| Tool-call interceptor (Guardian pattern) | SECURITY.md (Mid-execution enforcement), ROADMAP.md (Iter 5) | REPO_ONBOARDING.md (Blueprint security props) |
 
 ### Per-repo model selection
 
