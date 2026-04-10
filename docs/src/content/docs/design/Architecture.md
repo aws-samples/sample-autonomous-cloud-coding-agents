@@ -206,6 +206,8 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Agent swarm orchestration | ROADMAP.md (Iter 6) | — |
 | Adaptive model router | ROADMAP.md (Iter 5) | COST_MODEL.md |
 | Capability-based security | ROADMAP.md (Iter 5) | SECURITY.md |
+| Centralized policy framework | ROADMAP.md (Iter 5), SECURITY.md (Policy enforcement and audit) | ORCHESTRATOR.md, OBSERVABILITY.md |
+| GitHub App + AgentCore Token Vault | ROADMAP.md (Iter 3c), SECURITY.md (Authentication) | ORCHESTRATOR.md (context hydration), COMPUTE.md |
 | Live session replay | ROADMAP.md (Iter 4) | API_CONTRACT.md |
 | PR iteration task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
 | PR review task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |

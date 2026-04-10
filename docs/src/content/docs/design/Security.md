@@ -106,6 +106,42 @@ The `functionArn` in `CustomStepConfig` should be validated at CDK synth time to
   - **Per-repo `egressAllowlist` is a declarative annotation**, not per-session enforcement. All agent sessions share the same VPC and DNS Firewall rules. Per-repo allowlists are aggregated (union) into the platform-wide policy.
   - **DNS Firewall does not prevent IP-based connections.** A direct connection to an IP address (e.g. `curl https://1.2.3.4/`) bypasses DNS resolution. This is acceptable for the "confused agent" threat model (the agent uses domain names in its tool calls) but does not defend against a sophisticated adversary. Closing this gap would require AWS Network Firewall (SNI-based filtering) at ~$274/month/endpoint.
 
+## Policy enforcement and audit
+
+The platform enforces policies at multiple points in the task lifecycle. Today, these policies are implemented inline across ~20 files (handlers, constructs, agent code). A centralized policy framework is planned (Iteration 5) to improve auditability, consistency, and change control.
+
+### Current policy enforcement map
+
+| Phase | Policy | Enforcement location | Audit trail |
+|---|---|---|---|
+| **Submission** | Input validation (format, ranges, lengths) | `validation.ts`, `create-task-core.ts` | HTTP 400 response only — no event emitted |
+| **Submission** | Repo onboarding gate | `repo-config.ts` → `create-task-core.ts` | HTTP 422 response only — no event emitted |
+| **Submission** | Guardrail input screening | `create-task-core.ts` (Bedrock Guardrails) | HTTP 400 response only — no event emitted |
+| **Submission** | Idempotency check | `create-task-core.ts` | HTTP 409 response only — no event emitted |
+| **Admission** | Concurrency limit | `orchestrator.ts` (`admissionControl`) | `admission_rejected` event emitted |
+| **Pre-flight** | GitHub reachability, repo access, PR access | `preflight.ts` | `preflight_failed` event emitted |
+| **Hydration** | Guardrail PR prompt screening | `context-hydration.ts` | `guardrail_blocked` event emitted |
+| **Hydration** | Budget/quota resolution (3-tier max_turns, 2-tier max_budget_usd) | `orchestrator.ts` (`hydrateAndTransition`) | Values persisted on task record — no policy decision event |
+| **Hydration** | Token budget for prompt assembly | `context-hydration.ts` | No event emitted |
+| **Session** | Tool access control (pr_review restrictions) | `agent/entrypoint.py` | No event emitted |
+| **Session** | Budget enforcement (turns, cost) | Claude Agent SDK | Agent SDK enforces; cost in task result |
+| **Finalization** | Build/lint verification | `agent/entrypoint.py` | Results in task record and PR body |
+| **Infrastructure** | DNS Firewall egress allowlist | `dns-firewall.ts`, `agent.ts` (CDK synth) | DNS query logs in CloudWatch |
+| **Infrastructure** | WAF rate limiting | `task-api.ts` (CDK synth) | WAF logs |
+| **State machine** | Valid transition enforcement | `task-status.ts`, `orchestrator.ts` | DynamoDB conditional writes |
+
+### Audit gaps (planned remediation)
+
+Submission-time policy decisions (validation, onboarding gate, guardrail screening, idempotency) currently return HTTP errors without emitting structured audit events. Budget resolution decisions are persisted but not logged as policy decisions with reason codes. Tool access selection is implicit (hardcoded in agent code) with no audit event.
+
+**Planned (Iteration 5, Phase 1):** A unified `PolicyDecisionEvent` schema will normalize all policy decisions into structured events with: decision ID, policy name, version, phase, input hash, result, reason codes, and enforcement mode. See [ROADMAP.md Iteration 5](/roadmap/roadmap) for the full centralized policy framework design.
+
+### Policy resolution (planned)
+
+**Planned (Iteration 5, Phase 2):** Budget/quota/tool-access resolution will be consolidated into a `PolicyInput → PolicyDecision` module that computes effective values from the 3-tier hierarchy (per-task → Blueprint → platform default). This replaces the current scattered merge logic across handlers.
+
+**Planned (Iteration 5, Phase 3):** Cedar authorization policies for multi-tenant access control. Cedar is preferred over OPA for this system: it is AWS-native, has formal verification guarantees, integrates with AgentCore Gateway, and policies can be evaluated in-process via the Cedar SDK without a separate service dependency.
+
 ## Memory-specific threats
 
 ### OWASP ASI06 — Memory and context poisoning
