@@ -41,6 +41,10 @@ export interface TaskRecord {
   readonly task_description?: string;
   readonly branch_name: string;
   readonly session_id?: string;
+  /** AgentCore runtime ARN used for this session (StopRuntimeSession on cancel). */
+  readonly agent_runtime_arn?: string;
+  /** ISO timestamp of last agent heartbeat (DynamoDB); optional, written by the runtime. */
+  readonly agent_heartbeat_at?: string;
   readonly execution_id?: string;
   readonly pr_url?: string;
   readonly error_message?: string;

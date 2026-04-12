@@ -305,6 +305,7 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      agentCoreStopSessionRuntimeArns: [runtime.agentRuntimeArn],
     });
 
     // --- Operator dashboard ---

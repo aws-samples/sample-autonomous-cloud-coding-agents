@@ -1,8 +1,9 @@
-"""Unit tests for pipeline.py — cedar_policies injection."""
+"""Unit tests for pipeline.py — cedar_policies injection and pure helpers."""
 
 from unittest.mock import MagicMock, patch
 
 from models import AgentResult, RepoSetup, TaskConfig
+from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
 
 
 class TestCedarPoliciesInjection:
@@ -137,3 +138,96 @@ class TestCedarPoliciesInjection:
 
         assert captured_config is not None
         assert captured_config.cedar_policies == []
+
+
+class TestChainPriorAgentError:
+    def test_none_agent_result_returns_exception_only(self):
+        exc = RuntimeError("post-hook crash")
+        assert _chain_prior_agent_error(None, exc) == "RuntimeError: post-hook crash"
+
+    def test_agent_with_error_chains_both(self):
+        ar = AgentResult(status="error", error="SDK timeout")
+        exc = ValueError("PR creation failed")
+        result = _chain_prior_agent_error(ar, exc)
+        assert result == "SDK timeout; subsequent failure: ValueError: PR creation failed"
+
+    def test_agent_error_status_without_error_message(self):
+        ar = AgentResult(status="error")
+        exc = OSError("disk full")
+        result = _chain_prior_agent_error(ar, exc)
+        assert result == "Agent reported status=error; subsequent failure: OSError: disk full"
+
+    def test_agent_success_returns_exception_only(self):
+        ar = AgentResult(status="success")
+        exc = RuntimeError("unexpected")
+        assert _chain_prior_agent_error(ar, exc) == "RuntimeError: unexpected"
+
+    def test_agent_unknown_no_error_returns_exception_only(self):
+        ar = AgentResult(status="unknown")
+        exc = TypeError("bad arg")
+        assert _chain_prior_agent_error(ar, exc) == "TypeError: bad arg"
+
+
+class TestResolveOverallTaskStatus:
+    def test_success_with_build_ok(self):
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
+        assert status == "success"
+        assert err is None
+
+    def test_end_turn_with_build_ok(self):
+        ar = AgentResult(status="end_turn")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert status == "success"
+        assert err is None
+
+    def test_success_with_build_failed(self):
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url="https://pr")
+        assert status == "error"
+        assert err is not None
+        assert "agent_status='success'" in err
+        assert "build_ok=False" in err
+
+    def test_unknown_always_error_even_with_pr_and_build(self):
+        """agent_status=unknown must always fail — never infer success from PR/build."""
+        ar = AgentResult(status="unknown")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
+        assert status == "error"
+        assert err is not None
+        assert "ResultMessage" in err
+
+    def test_unknown_with_prior_error_chains(self):
+        ar = AgentResult(status="unknown", error="connection reset")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert status == "error"
+        assert err is not None
+        assert "connection reset" in err
+        assert "ResultMessage" in err
+
+    def test_error_status_preserves_agent_error(self):
+        ar = AgentResult(status="error", error="OOM killed")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert status == "error"
+        assert err == "OOM killed"
+
+    def test_error_status_without_agent_error_generates_message(self):
+        ar = AgentResult(status="error")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert status == "error"
+        assert err is not None
+        assert "agent_status='error'" in err
+
+    def test_unknown_no_pr_no_build(self):
+        ar = AgentResult(status="unknown")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert status == "error"
+        assert err is not None
+        assert "ResultMessage" in err
+
+    def test_success_preserves_existing_error(self):
+        """If agent reports success with a non-fatal error, it's preserved on success."""
+        ar = AgentResult(status="success", error="non-fatal warning")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert status == "success"
+        assert err == "non-fatal warning"

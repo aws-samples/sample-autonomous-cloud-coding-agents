@@ -31,6 +31,7 @@ const mockAgentCoreSend = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
   InvokeAgentRuntimeCommand: jest.fn((input: unknown) => ({ _type: 'InvokeAgentRuntime', input })),
+  StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
 }));
 
 const mockHydrateContext = jest.fn();
@@ -244,6 +245,13 @@ describe('startSession', () => {
     // Session ID is a UUID v4 (36 chars), not a ULID
     expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+    const transitionCall = mockDdbSend.mock.calls.find(
+      (c: any[]) => c[0]._type === 'Update' && c[0].input.ExpressionAttributeValues?.[':toStatus'] === 'RUNNING',
+    );
+    expect(transitionCall).toBeDefined();
+    expect(transitionCall![0].input.ExpressionAttributeValues[':attr_agent_runtime_arn']).toBe(
+      'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test',
+    );
   });
 });
 
@@ -253,6 +261,7 @@ describe('pollTaskStatus', () => {
     const result = await pollTaskStatus('TASK001', { attempts: 5 });
     expect(result.attempts).toBe(6);
     expect(result.lastStatus).toBe('RUNNING');
+    expect(result.sessionUnhealthy).toBe(false);
   });
 
   test('handles missing item gracefully', async () => {
@@ -260,6 +269,59 @@ describe('pollTaskStatus', () => {
     const result = await pollTaskStatus('TASK001', { attempts: 0 });
     expect(result.attempts).toBe(1);
     expect(result.lastStatus).toBeUndefined();
+  });
+
+  test('sets sessionUnhealthy when agent heartbeat is stale (RUNNING)', async () => {
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('does not set sessionUnhealthy when heartbeat is fresh', async () => {
+    const started = new Date(Date.now() - 200_000).toISOString();
+    const hb = new Date(Date.now() - 30_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: started,
+        agent_heartbeat_at: hb,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('does not set sessionUnhealthy when agent_heartbeat_at is absent but within grace period', async () => {
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: new Date(Date.now() - 60_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('sets sessionUnhealthy when agent_heartbeat_at is absent and past grace + stale window', async () => {
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: new Date(Date.now() - 400_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(true);
   });
 });
 
@@ -508,6 +570,23 @@ describe('finalizeTask', () => {
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     // Verify emitTaskEvent was called (PutCommand)
     expect(mockDdbSend).toHaveBeenCalled();
+  });
+
+  test('transitions RUNNING to FAILED when pollState.sessionUnhealthy', async () => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING' } }) // loadTask
+      .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+    const transitionCall = mockDdbSend.mock.calls[1][0];
+    expect(transitionCall.input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
+    expect(transitionCall.input.ExpressionAttributeValues[':fromStatus']).toBe('RUNNING');
+    const eventCall = mockDdbSend.mock.calls[2][0];
+    expect(eventCall.input.Item.event_type).toBe('task_failed');
+    expect(eventCall.input.Item.metadata.reason).toBe('agent_heartbeat_stale');
   });
 
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {

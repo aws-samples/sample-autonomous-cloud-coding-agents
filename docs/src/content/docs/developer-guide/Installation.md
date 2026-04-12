@@ -22,7 +22,7 @@ Default output format [None]: json
 - [Docker](https://docs.docker.com/engine/install/) — for local agent runs and CDK asset builds.
 - [mise](https://mise.jdx.dev/getting-started.html) — task runner and version manager for Node, security tools, and (under `agent/`) Python. Install from the official guide; it is **not** installed via npm.
 - **AWS CDK CLI** ≥ 2.233.0 — install globally with npm **after** mise is active so it uses the same Node as this repo (see [Set up your toolchain](#set-up-your-toolchain)): `npm install -g aws-cdk`.
-- A **GitHub personal access token** (PAT) with permission to access every repository you onboard (clone, push to branches, create and update pull requests)—often a fine-grained token scoped to **your fork** of `awslabs/agent-plugins` if you follow the fork workflow under **Repository preparation**. After deployment, store it in the Secrets Manager secret the stack creates ([Post-deployment setup](#post-deployment-setup)); for local agent runs, export `GITHUB_TOKEN` (see **Local testing**). Required scopes are documented in `agent/README.md`.
+- A **GitHub personal access token** (PAT) with permission to access every repository you onboard—see **[Repository preparation](#repository-preparation)** (steps 2–3) for required fine-grained permissions and how to store the value in Secrets Manager after deploy. For local agent runs, export `GITHUB_TOKEN` (see **Local testing**). Extra runtime notes live in `agent/README.md`.
 
 **Versions this repo pins via mise (no separate Node/Yarn/Python install needed for the standard path):**
 
@@ -282,11 +282,11 @@ If `put-secret-value` returns **`Invalid endpoint: https://secretsmanager..amazo
 
 #### Set the GitHub token
 
-The agent reads the GitHub personal access token from Secrets Manager at startup. After deploying, store your PAT in the secret:
+The agent reads the GitHub personal access token from Secrets Manager at runtime. The canonical flow (permissions table + `put-secret-value` commands) is **[Repository preparation](#repository-preparation), step 3**—follow that first.
+
+If you only need the commands here, use the same snippet as in that section (adjust **`--stack-name`** if you renamed the stack). If `SECRET_ARN` is empty after setting `REGION`, list outputs in that Region (`describe-stacks` … `--query 'Stacks[0].Outputs' --output table`) and confirm the row `GitHubTokenSecretArn` exists—wrong stack name or an incomplete deployment are the other common causes.
 
 ```bash
-# Same Region you deployed to (example: us-east-1). Must be non-empty—see note above
-# about "Invalid endpoint: ...secretsmanager..amazonaws.com".
 REGION=us-east-1
 
 SECRET_ARN=$(aws cloudformation describe-stacks \
@@ -300,10 +300,6 @@ aws secretsmanager put-secret-value \
   --secret-id "$SECRET_ARN" \
   --secret-string "ghp_your_fine_grained_pat_here"
 ```
-
-If `SECRET_ARN` is still empty after setting `REGION`, list outputs in that Region (`describe-stacks` … `--query 'Stacks[0].Outputs' --output table`) and confirm the row `GitHubTokenSecretArn` exists—wrong stack name or an incomplete deployment are the other common causes.
-
-See `agent/README.md` for the required PAT permissions.
 
 #### Onboard repositories
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TaskType(StrEnum):
@@ -24,36 +25,64 @@ class TaskType(StrEnum):
 
 
 class IssueComment(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    """Single GitHub issue comment — mirrors ``IssueComment`` in context-hydration.ts."""
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: int
     author: str
     body: str
 
 
 class GitHubIssue(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    """GitHub issue slice — mirrors ``GitHubIssueContext`` in context-hydration.ts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     title: str
     body: str = ""
     number: int
-    comments: list[IssueComment] = []
+    comments: list[IssueComment] = Field(default_factory=list)
 
 
 class MemoryContext(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    repo_knowledge: list[str] = []
-    past_episodes: list[str] = []
+    repo_knowledge: list[str] = Field(default_factory=list)
+    past_episodes: list[str] = Field(default_factory=list)
+
+
+# Bump when this agent supports a new orchestrator HydratedContext shape
+# (see cdk/src/handlers/shared/context-hydration.ts).
+SUPPORTED_HYDRATED_CONTEXT_VERSION = 1
 
 
 class HydratedContext(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    """Orchestrator context JSON — keep in sync with HydratedContext in context-hydration.ts."""
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version: int = 1
     user_prompt: str
     issue: GitHubIssue | None = None
-    resolved_base_branch: str | None = None
-    truncated: bool = False
     memory_context: MemoryContext | None = None
+    sources: list[str] = Field(default_factory=list)
+    token_estimate: int = 0
+    truncated: bool = False
+    fallback_error: str | None = None
+    guardrail_blocked: str | None = None
+    resolved_branch_name: str | None = None
+    resolved_base_branch: str | None = None
+
+    @model_validator(mode="after")
+    def version_supported(self) -> Self:
+        if self.version > SUPPORTED_HYDRATED_CONTEXT_VERSION:
+            raise ValueError(
+                f"HydratedContext schema version {self.version} is not supported by this agent "
+                f"(max supported: {SUPPORTED_HYDRATED_CONTEXT_VERSION}). "
+                "Deploy an updated agent container image."
+            )
+        return self
 
 
 class TaskConfig(BaseModel):

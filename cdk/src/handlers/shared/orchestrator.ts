@@ -51,7 +51,14 @@ const MEMORY_ID = process.env.MEMORY_ID;
 export interface PollState {
   readonly attempts: number;
   readonly lastStatus?: TaskStatusType;
+  /** True when the agent stopped sending heartbeats while still RUNNING (likely crash/OOM). */
+  readonly sessionUnhealthy?: boolean;
 }
+
+/** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
+const AGENT_HEARTBEAT_GRACE_SEC = 120;
+/** If `agent_heartbeat_at` exists and is older than this, the session is treated as lost. */
+const AGENT_HEARTBEAT_STALE_SEC = 240;
 
 /**
  * Load a task record from DynamoDB.
@@ -381,6 +388,7 @@ export async function startSession(
   await transitionTask(task.task_id, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
     session_id: sessionId,
     started_at: new Date().toISOString(),
+    agent_runtime_arn: runtimeArn,
   });
   await emitTaskEvent(task.task_id, 'session_started', { session_id: sessionId });
 
@@ -400,15 +408,54 @@ export async function pollTaskStatus(taskId: string, state: PollState): Promise<
   const result = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
-    ProjectionExpression: '#status',
-    ExpressionAttributeNames: { '#status': 'status' },
+    ProjectionExpression: '#st, session_id, started_at, agent_heartbeat_at',
+    ExpressionAttributeNames: { '#st': 'status' },
   }));
 
   const currentStatus = result.Item?.status as TaskStatusType | undefined;
+  const item = result.Item as Record<string, unknown> | undefined;
+
+  let sessionUnhealthy = false;
+  if (
+    currentStatus === TaskStatus.RUNNING
+    && item?.session_id
+    && typeof item.started_at === 'string'
+  ) {
+    const startedMs = Date.parse(item.started_at);
+    const now = Date.now();
+    if (!Number.isNaN(startedMs)) {
+      const runningAgeSec = (now - startedMs) / 1000;
+
+      if (typeof item.agent_heartbeat_at === 'string') {
+        // Agent has sent at least one heartbeat — check staleness
+        const hbMs = Date.parse(item.agent_heartbeat_at);
+        if (!Number.isNaN(hbMs)) {
+          const hbAgeSec = (now - hbMs) / 1000;
+          if (runningAgeSec > AGENT_HEARTBEAT_GRACE_SEC && hbAgeSec > AGENT_HEARTBEAT_STALE_SEC) {
+            sessionUnhealthy = true;
+            logger.warn('Agent heartbeat stale while task RUNNING', {
+              task_id: taskId,
+              agent_heartbeat_at: item.agent_heartbeat_at,
+              heartbeat_age_sec: Math.round(hbAgeSec),
+            });
+          }
+        }
+      } else if (runningAgeSec > AGENT_HEARTBEAT_GRACE_SEC + AGENT_HEARTBEAT_STALE_SEC) {
+        // Agent never sent a heartbeat and task has been RUNNING well past
+        // the grace period — likely early crash before pipeline started.
+        sessionUnhealthy = true;
+        logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
+          task_id: taskId,
+          running_age_sec: Math.round(runningAgeSec),
+        });
+      }
+    }
+  }
 
   return {
     attempts: state.attempts + 1,
     lastStatus: currentStatus,
+    sessionUnhealthy,
   };
 }
 
@@ -425,6 +472,52 @@ export async function finalizeTask(
 ): Promise<void> {
   const task = await loadTask(taskId);
   const currentStatus = task.status;
+
+  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
+  if (
+    pollState.sessionUnhealthy
+    && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
+  ) {
+    let transitioned = false;
+    try {
+      await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
+        completed_at: new Date().toISOString(),
+        error_message:
+          'Agent session lost: no recent heartbeat from the runtime (container may have crashed, been OOM-killed, or stopped)',
+      });
+      transitioned = true;
+    } catch (err) {
+      // Task may have transitioned concurrently (e.g. agent wrote terminal status).
+      // Re-read to avoid double-decrement or contradictory events.
+      logger.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
+        task_id: taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (transitioned) {
+      await emitTaskEvent(taskId, 'task_failed', {
+        reason: 'agent_heartbeat_stale',
+        poll_attempts: pollState.attempts,
+      });
+      await decrementConcurrency(userId);
+    } else {
+      // Transition failed — re-read task to determine actual state.
+      // If already terminal the block below will handle TTL + concurrency.
+      const reread = await loadTask(taskId);
+      if (TERMINAL_STATUSES.includes(reread.status)) {
+        logger.info('Heartbeat path: task already terminal after failed transition', { task_id: taskId, status: reread.status });
+        await emitTaskEvent(taskId, `task_${reread.status.toLowerCase()}`, {
+          final_status: reread.status,
+          poll_attempts: pollState.attempts,
+        });
+        await decrementConcurrency(userId);
+      } else {
+        logger.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { task_id: taskId, status: reread.status });
+        await decrementConcurrency(userId);
+      }
+    }
+    return;
+  }
 
   // If the agent already wrote a terminal status, just finalize
   if (TERMINAL_STATUSES.includes(currentStatus)) {

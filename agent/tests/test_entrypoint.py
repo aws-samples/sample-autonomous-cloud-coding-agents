@@ -239,7 +239,7 @@ class TestAssemblePrompt:
                 number=42,
                 title="Login broken",
                 body="Users cannot log in",
-                comments=[IssueComment(author="alice", body="Confirmed!")],
+                comments=[IssueComment(id=1, author="alice", body="Confirmed!")],
             ),
         )
         result = assemble_prompt(config)

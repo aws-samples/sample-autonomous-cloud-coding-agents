@@ -162,4 +162,4 @@ Transitions the task to `CANCELLED` and records a cancellation event. Only tasks
 curl "$API_URL/tasks/<TASK_ID>/events" -H "Authorization: $TOKEN"
 ```
 
-Returns the chronological event log for a task (e.g., `task_created`, `session_started`, `task_completed`). Supports `limit` and `next_token` pagination parameters.
+Returns the chronological event log for a task (e.g., `task_created`, `preflight_failed`, `session_started`, `task_completed`). Supports `limit` and `next_token` pagination parameters. If the task failed before the agent ran, inspect `preflight_failed` entries for `reason` and `detail` (see **Task events** under **Task lifecycle**).

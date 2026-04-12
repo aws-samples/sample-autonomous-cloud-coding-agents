@@ -31,7 +31,8 @@ def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIs
         )
         comments_resp.raise_for_status()
         comments = [
-            IssueComment(author=c["user"]["login"], body=c["body"]) for c in comments_resp.json()
+            IssueComment(id=int(c["id"]), author=c["user"]["login"], body=c["body"] or "")
+            for c in comments_resp.json()
         ]
 
     return GitHubIssue(

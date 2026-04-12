@@ -135,7 +135,7 @@ To be safe, the agent isolates each task into its own workspace directory:
 
 ### Endpoints
 
-**`GET /ping`** — Health check. Returns `{"status": "healthy"}`. Stays responsive while the agent runs.
+**`GET /ping`** — Health check. Returns `{"status": "healthy"}` while the last accepted task completed normally (or no task has failed in the background thread). If the background pipeline thread raised after `/invocations` returned, returns **503** with `{"status":"unhealthy","reason":"background_pipeline_failed"}` so a live process is not mistaken for successful work. The task should also be marked **FAILED** in DynamoDB (written from both `pipeline.run_task` and the server thread as a backup). A separate daemon thread writes a DynamoDB heartbeat (`agent_heartbeat_at`) every 45 seconds while a task is running; the orchestrator uses this to detect agent crashes (see [ORCHESTRATOR.md](../docs/design/ORCHESTRATOR.md)). The heartbeat worker is resilient to transient DynamoDB errors — each write is wrapped in try/except so a single failure does not kill the thread.
 
 **`POST /invocations`** — Accept a task and start the agent in a **background thread**. The handler returns **immediately** with an acceptance payload; it does not wait for the agent to finish. While the task runs, progress and the final outcome are written to **DynamoDB** when `TASK_TABLE_NAME` is set (see `task_state.py`); the deployed platform polls that table via the orchestrator. For ad-hoc local testing without DynamoDB, follow **`docker logs -f bgagent-run`** (or your container name).
 
@@ -270,7 +270,8 @@ The agent pipeline (shared by both modes). Behavior varies by task type (`new_ta
    - **`pr_iteration`**: Reads review feedback, addresses it with focused changes, commits and pushes, posts a summary comment on the PR
    - **`pr_review`**: Analyzes changes read-only (no `Write` or `Edit` tools available), composes structured review findings, posts a batch review via the GitHub Reviews API
 6. **Deterministic post-hooks** — verifies `mise run build` and `mise run lint`, ensures a PR exists (creates one if the agent did not). For `pr_review`, build status is informational only and the commit/push steps are skipped.
-7. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
+7. **Status resolution** — `_resolve_overall_task_status()` maps the agent outcome (success/end_turn/error/unknown) and build gate into a final task status. `agent_status=unknown` (SDK stream ended without a ResultMessage) always fails — success is never inferred from PR or build alone. If a post-hook raises after the agent ran, `_chain_prior_agent_error()` preserves the agent-layer error so it is not masked by the later exception.
+8. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
 
 ## Metrics
 
@@ -327,8 +328,8 @@ agent/
 │   ├── __init__.py
 │   ├── entrypoint.py    Re-export shim for backward compatibility (tests); delegates to specific modules
 │   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), TaskType validation
-│   ├── models.py        Data models and enumerations (TaskType StrEnum with is_pr_task property)
-│   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration
+│   ├── models.py        Pydantic data models (TaskConfig, RepoSetup, AgentResult, TaskResult, HydratedContext, etc.) and enumerations (TaskType StrEnum)
+│   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration, status resolution, error chaining
 │   ├── runner.py        Agent runner: run_agent() — ClaudeSDKClient connect/query/receive_response
 │   ├── context.py       Context hydration: fetch_github_issue(), assemble_prompt() (local/dry-run only)
 │   ├── prompt_builder.py System prompt assembly + memory context, repo config scanning
@@ -338,8 +339,8 @@ agent/
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
 │   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
 │   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
-│   ├── server.py        FastAPI — async /invocations (background thread) and /ping; OTEL session correlation
-│   ├── task_state.py    Best-effort DynamoDB task status (no-op if TASK_TABLE_NAME unset)
+│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, heartbeat daemon; OTEL session correlation
+│   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent
 │   ├── system_prompt.py Behavioral contract (PRD Section 11)
@@ -354,9 +355,9 @@ agent/
 ├── tests/               pytest unit tests (pythonpath: src/)
 │   ├── test_config.py       Config validation and TaskType tests
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
-│   ├── test_models.py       TaskType enum tests
+│   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
-│   ├── test_pipeline.py     Pipeline orchestration tests (cedar_policies injection)
+│   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
 ├── test_sdk_smoke.py    Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)

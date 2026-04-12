@@ -18,9 +18,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import task_state
 from config import resolve_github_token
+from models import TaskResult
 from observability import set_session_id
 from pipeline import run_task
 
@@ -44,6 +47,21 @@ logging.getLogger("uvicorn.access").addFilter(_PingFilter())
 # Track active background threads for graceful shutdown
 _active_threads: list[threading.Thread] = []
 _threads_lock = threading.Lock()
+
+# Set when the pipeline thread raises after /invocations accepted (Dynamo backup + ping signal).
+_background_pipeline_failed = False
+
+
+def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
+    """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
+    while not stop.wait(timeout=45):
+        try:
+            task_state.write_heartbeat(task_id)
+        except Exception as e:
+            print(
+                f"[heartbeat] write_heartbeat error (will retry): {type(e).__name__}: {e}",
+                flush=True,
+            )
 
 
 def _drain_threads(timeout: int = 300) -> None:
@@ -85,7 +103,15 @@ class InvocationResponse(BaseModel):
 
 @app.get("/ping")
 async def ping():
-    """Health check endpoint. Must remain responsive at all times."""
+    """Health check endpoint. Returns 503 if the last background pipeline thread crashed."""
+    if _background_pipeline_failed:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "reason": "background_pipeline_failed",
+            },
+        )
     return {"status": "healthy"}
 
 
@@ -110,6 +136,19 @@ def _run_task_background(
     cedar_policies: list[str] | None = None,
 ) -> None:
     """Run the agent task in a background thread."""
+    global _background_pipeline_failed
+
+    stop_heartbeat = threading.Event()
+    hb_thread: threading.Thread | None = None
+    if task_id:
+        hb_thread = threading.Thread(
+            target=_heartbeat_worker,
+            args=(task_id, stop_heartbeat),
+            name=f"heartbeat-{task_id}",
+            daemon=True,
+        )
+        hb_thread.start()
+
     try:
         # Propagate session ID into this thread's OTEL context so spans
         # are correlated with the AgentCore session in CloudWatch.
@@ -135,9 +174,22 @@ def _run_task_background(
             pr_number=pr_number,
             cedar_policies=cedar_policies,
         )
+        _background_pipeline_failed = False
     except Exception as e:
+        _background_pipeline_failed = True
         print(f"Background task {task_id} failed: {type(e).__name__}: {e}")
         traceback.print_exc()
+        if task_id:
+            backup = TaskResult(
+                status="error",
+                error=f"Background pipeline thread: {type(e).__name__}: {e}",
+                task_id=task_id,
+            )
+            task_state.write_terminal(task_id, "FAILED", backup.model_dump())
+    finally:
+        stop_heartbeat.set()
+        if hb_thread is not None and hb_thread.is_alive():
+            hb_thread.join(timeout=3)
 
 
 @app.post("/invocations", response_model=InvocationResponse)
@@ -203,8 +255,12 @@ def invoke_agent(request: Request, body: InvocationRequest):
     )
     # Track the thread for graceful shutdown BEFORE starting it so
     # _drain_threads cannot miss a very-short-lived thread.
+    global _background_pipeline_failed
+
     with _threads_lock:
         _active_threads[:] = [t for t in _active_threads if t.is_alive()]
+        if not _active_threads:
+            _background_pipeline_failed = False
         _active_threads.append(thread)
     thread.start()
 

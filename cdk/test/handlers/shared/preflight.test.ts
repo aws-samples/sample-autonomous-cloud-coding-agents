@@ -45,6 +45,15 @@ const baseBlueprintConfig: BlueprintConfig = {
   github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token',
 };
 
+/** Successful GET /repos/... with a `permissions` object (preflight parses JSON). */
+function githubRepoOk(permissions: { push?: boolean; pull?: boolean } = { push: true }) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ permissions }),
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   clearTokenCache();
@@ -60,7 +69,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -106,7 +115,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: false, status: 500 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -119,7 +128,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_revoked' });
     mockFetch
       .mockResolvedValueOnce({ ok: false, status: 401 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -132,7 +141,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockRejectedValueOnce(new Error('The operation was aborted'))
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -145,7 +154,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockRejectedValueOnce(new Error('getaddrinfo ENOTFOUND api.github.com'))
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -224,7 +233,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -238,7 +247,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
@@ -294,7 +303,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 }) // reachability
-      .mockResolvedValueOnce({ ok: true, status: 200 }) // repo access
+      .mockResolvedValueOnce(githubRepoOk()) // repo access
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) }); // PR
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
@@ -309,7 +318,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
       .mockResolvedValueOnce({ ok: false, status: 404 });
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
@@ -322,7 +331,7 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'closed' }) });
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
@@ -340,12 +349,82 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_per_repo' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce(githubRepoOk());
 
     const result = await runPreflightChecks('owner/repo', config);
 
     expect(result.passed).toBe(true);
     const smCall = mockSmSend.mock.calls[0][0];
     expect(smCall.input.SecretId).toBe(perRepoArn);
+  });
+
+  test('fails INSUFFICIENT_GITHUB_REPO_PERMISSIONS when token is read-only (GraphQL viewer READ)', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_readonly' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { repository: { viewerPermission: 'READ' } } }),
+      });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS);
+    expect(result.failureDetail).toMatch(/push|Contents write/i);
+  });
+
+  test('passes new_task when REST omits push but GraphQL reports WRITE', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_fine_grained' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk({}))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { repository: { viewerPermission: 'WRITE' } } }),
+      });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
+
+    expect(result.passed).toBe(true);
+    expect(result.checks.filter(c => c.check === 'repo_access' && c.passed)).toHaveLength(1);
+  });
+
+  test('passes pr_review when token has TRIAGE but not push (GraphQL)', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_triage' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { repository: { viewerPermission: 'TRIAGE' } } }),
+      });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, 'pr_review');
+
+    expect(result.passed).toBe(true);
+  });
+
+  test('fails pr_review when viewerPermission is READ-only', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_readonly' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { repository: { viewerPermission: 'READ' } } }),
+      });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, 'pr_review');
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS);
   });
 });
