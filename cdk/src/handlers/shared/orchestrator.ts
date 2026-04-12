@@ -234,6 +234,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
+    cedar_policies: repoConfig?.cedar_policies,
   };
 }
 
@@ -327,6 +328,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
+    ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,

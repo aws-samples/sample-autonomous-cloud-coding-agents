@@ -347,6 +347,30 @@ describe('loadBlueprintConfig', () => {
     const config = await loadBlueprintConfig(baseTask as any);
     expect(config.poll_interval_ms).toBeUndefined();
   });
+
+  test('passes cedar_policies from repo config', async () => {
+    const policies = ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'];
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      cedar_policies: policies,
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.cedar_policies).toEqual(policies);
+  });
+
+  test('returns undefined cedar_policies when repo config has none', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.cedar_policies).toBeUndefined();
+  });
 });
 
 describe('hydrateAndTransition with blueprint config', () => {
@@ -425,6 +449,39 @@ describe('hydrateAndTransition with blueprint config', () => {
       expect.anything(),
       expect.objectContaining({ githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:per-repo-token' }),
     );
+  });
+
+  test('includes cedar_policies in payload when blueprint config has them', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const policies = ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'];
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: policies,
+    });
+    expect(payload.cedar_policies).toEqual(policies);
+  });
+
+  test('omits cedar_policies from payload when blueprint config has none', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+    });
+    expect(payload.cedar_policies).toBeUndefined();
+  });
+
+  test('omits cedar_policies from payload when array is empty', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: [],
+    });
+    expect(payload.cedar_policies).toBeUndefined();
   });
 });
 
