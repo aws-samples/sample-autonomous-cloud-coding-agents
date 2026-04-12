@@ -2,6 +2,27 @@
 
 Uses cedarpy (in-process Cedar evaluation) to enforce per-task-type
 tool restrictions. No network calls, no AWS Verified Permissions.
+
+Custom Cedar policies (via Blueprint ``security.cedarPolicies``) must
+use ``context`` conditions in ``when`` clauses — not ``resource ==``
+matching — for ``write_file`` and ``execute_bash`` actions.  The engine
+passes fixed sentinel resource IDs (``Agent::File::"file"``,
+``Agent::BashCommand::"command"``) because Cedar entity UIDs cannot
+contain the special characters found in file paths and bash commands.
+The actual values are available in ``context.file_path`` and
+``context.command`` respectively.  For ``invoke_tool`` actions, the
+resource ID is the real tool name (e.g. ``Agent::Tool::"Write"``), so
+``resource ==`` matching works normally there.
+
+Example — correct custom policy::
+
+    forbid (principal, action == Agent::Action::"execute_bash", resource)
+    when { context.command like "*curl*" };
+
+Example — WILL NOT WORK (resource is always ``"command"``)::
+
+    forbid (principal, action == Agent::Action::"execute_bash",
+        resource == Agent::BashCommand::"curl http://evil.com");
 """
 
 import time
@@ -39,6 +60,8 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
 when { context.command like "*git push --force*" };
 forbid (principal, action == Agent::Action::"execute_bash", resource)
 when { context.command like "*git push -f *" };
+forbid (principal, action == Agent::Action::"execute_bash", resource)
+when { context.command like "*git push -f" };
 """
 
 
@@ -200,39 +223,32 @@ class PolicyEngine:
                 )
                 return PolicyDecision(allowed=False, reason=reason, duration_ms=elapsed)
 
-            # Additional checks for Write/Edit: check file path.
-            # Use a fixed sentinel resource_id ("file") because file paths
-            # may contain quotes/special chars that break Cedar UID parsing.
-            # The actual path is in context.file_path where policies match it.
+            # Write/Edit: check file path against write_file policies.
+            # Sentinel resource_id avoids Cedar UID parsing issues (see _evaluate docstring).
             if tool_name in ("Write", "Edit"):
                 file_path = tool_input.get("file_path", "")
                 if file_path:
-                    file_context = {**base_context, "file_path": file_path}
                     allowed, deny_reason = self._evaluate(
                         "write_file",
                         "Agent::File",
                         "file",
-                        file_context,
+                        {**base_context, "file_path": file_path},
                     )
                     if not allowed:
                         elapsed = (time.monotonic() - start) * 1000
                         reason = deny_reason or f"Cedar policy denied write to {file_path}"
                         return PolicyDecision(allowed=False, reason=reason, duration_ms=elapsed)
 
-            # Additional checks for Bash: check command.
-            # Use a fixed sentinel resource_id ("command") because bash
-            # commands contain quotes/special chars that break Cedar UID
-            # parsing.  The actual command is in context.command where
-            # policies match it.
+            # Bash: check command against execute_bash policies.
+            # Sentinel resource_id avoids Cedar UID parsing issues (see _evaluate docstring).
             if tool_name == "Bash":
                 command = tool_input.get("command", "")
                 if command:
-                    bash_context = {**base_context, "command": command}
                     allowed, deny_reason = self._evaluate(
                         "execute_bash",
                         "Agent::BashCommand",
                         "command",
-                        bash_context,
+                        {**base_context, "command": command},
                     )
                     if not allowed:
                         elapsed = (time.monotonic() - start) * 1000

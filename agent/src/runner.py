@@ -9,6 +9,13 @@ from shell import log, truncate
 from telemetry import _TrajectoryWriter
 
 
+def _format_tool_result(block) -> tuple[str, str]:
+    """Extract status label and content string from a ToolResultBlock."""
+    status = "ERROR" if block.is_error else "ok"
+    content = block.content if isinstance(block.content, str) else str(block.content)
+    return status, content
+
+
 def _setup_agent_env(config: dict) -> tuple[str | None, str | None]:
     """Configure process environment for the Claude Code CLI subprocess.
 
@@ -139,6 +146,7 @@ async def run_agent(
         ThinkingBlock,
         ToolResultBlock,
         ToolUseBlock,
+        UserMessage,
     )
 
     _setup_agent_env(config)
@@ -257,10 +265,7 @@ async def run_agent(
                             log("TOOL", f"{block.name}: {truncate(str(tool_input))}")
                         turn_tool_calls.append({"name": block.name, "input": tool_input})
                     elif isinstance(block, ToolResultBlock):
-                        status = "ERROR" if block.is_error else "ok"
-                        content = (
-                            block.content if isinstance(block.content, str) else str(block.content)
-                        )
+                        status, content = _format_tool_result(block)
                         log("RESULT", f"[{status}] {truncate(content)}")
                         turn_tool_results.append(
                             {
@@ -351,6 +356,19 @@ async def run_agent(
                     session_id=getattr(message, "session_id", ""),
                     usage=usage_dict,
                 )
+
+            elif isinstance(message, UserMessage):
+                message_counts["other"] += 1
+                # UserMessage carries tool results fed back to the model.
+                # For hook-denied calls, content is a ToolResultBlock with
+                # is_error=True and the denial reason.
+                if isinstance(message.content, list):
+                    for block in message.content:
+                        if isinstance(block, ToolResultBlock):
+                            status, content = _format_tool_result(block)
+                            log("RESULT", f"[{status}] {truncate(content)}")
+                elif isinstance(message.content, str):
+                    log("USER", truncate(message.content))
 
             else:
                 message_counts["other"] += 1

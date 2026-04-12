@@ -123,6 +123,11 @@ class TestDestructiveBashCommands:
         result = engine.evaluate_tool_use("Bash", {"command": "git push -f origin main"})
         assert result.allowed is False
 
+    def test_denies_git_push_f_no_trailing_args(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = engine.evaluate_tool_use("Bash", {"command": "git push -f"})
+        assert result.allowed is False
+
     def test_allows_normal_bash(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = engine.evaluate_tool_use("Bash", {"command": "npm test"})
@@ -137,32 +142,19 @@ class TestDestructiveBashCommands:
 class TestBashCommandsWithQuotes:
     """Commands containing double quotes must not cause NoDecision."""
 
-    def test_allows_git_commit_with_message(self):
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'git commit -m "fix: login bug"',
+            'git commit-tree HEAD^{tree} -m "squash"',
+            'gh pr create --title "my PR" --body "desc"',
+            'gh api --method POST /repos/o/r/pulls -f title="PR"',
+            "git commit -m \"$(cat <<'EOF'\nFix the bug\nEOF\n)\"",
+        ],
+        ids=["git-commit-msg", "git-commit-tree", "gh-pr-create", "gh-api-post", "heredoc-commit"],
+    )
+    def test_allows_command_with_quotes(self, cmd):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        result = engine.evaluate_tool_use("Bash", {"command": 'git commit -m "fix: login bug"'})
-        assert result.allowed is True
-
-    def test_allows_git_commit_tree(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        cmd = 'git commit-tree HEAD^{tree} -m "squash"'
-        result = engine.evaluate_tool_use("Bash", {"command": cmd})
-        assert result.allowed is True
-
-    def test_allows_gh_pr_create(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        cmd = 'gh pr create --title "my PR" --body "desc"'
-        result = engine.evaluate_tool_use("Bash", {"command": cmd})
-        assert result.allowed is True
-
-    def test_allows_gh_api_post(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        cmd = 'gh api --method POST /repos/o/r/pulls -f title="PR"'
-        result = engine.evaluate_tool_use("Bash", {"command": cmd})
-        assert result.allowed is True
-
-    def test_allows_heredoc_commit(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        cmd = "git commit -m \"$(cat <<'EOF'\nFix the bug\nEOF\n)\""
         result = engine.evaluate_tool_use("Bash", {"command": cmd})
         assert result.allowed is True
 
