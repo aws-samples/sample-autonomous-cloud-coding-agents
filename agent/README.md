@@ -81,7 +81,7 @@ The second argument is auto-detected:
 
 When an issue number is given, the optional third argument provides additional instructions on top of the issue context.
 
-The `run.sh` script overrides the container's default CMD to run `python /app/entrypoint.py` (batch mode) instead of the uvicorn server.
+The `run.sh` script overrides the container's default CMD to run `python /app/src/entrypoint.py` (batch mode) instead of the uvicorn server.
 
 ### Environment Variables
 
@@ -320,24 +320,45 @@ docker images bgagent-local --format "{{.Size}}"
 agent/
 ├── Dockerfile           Python 3.13 + Node.js 20 + Claude Code CLI + git + gh + mise (default platform linux/arm64)
 ├── .dockerignore
-├── pyproject.toml       App dependencies (claude-agent-sdk, FastAPI, boto3, OpenTelemetry distro, MCP, …)
+├── pyproject.toml       App dependencies (claude-agent-sdk, FastAPI, boto3, OpenTelemetry distro, MCP, cedarpy, …)
 ├── uv.lock              Locked deps for reproducible `uv sync` in the image
 ├── mise.toml            Tool versions / tasks used when the target repo relies on mise
-├── entrypoint.py        Config, context hydration, ClaudeSDKClient pipeline, metrics, run_task()
-├── server.py            FastAPI — async /invocations (background thread) and /ping; OTEL session correlation
-├── task_state.py        Best-effort DynamoDB task status (no-op if TASK_TABLE_NAME unset)
-├── observability.py     OpenTelemetry helpers (e.g. AgentCore session id)
-├── memory.py            Optional memory / episode integration for the agent
-├── prompts/             Per-task-type system prompt workflows
-│   ├── __init__.py      Prompt registry — assembles base template + workflow for each task type
-│   ├── base.py          Shared base template (environment, rules, placeholders)
-│   ├── new_task.py      Workflow for new_task (create branch, implement, open PR)
-│   ├── pr_iteration.py  Workflow for pr_iteration (read feedback, address, push)
-│   └── pr_review.py     Workflow for pr_review (read-only analysis, structured review comments)
-├── system_prompt.py     Behavioral contract (PRD Section 11)
+├── src/                 Agent source modules (pythonpath configured in pyproject.toml)
+│   ├── __init__.py
+│   ├── entrypoint.py    Re-export shim for backward compatibility (tests); delegates to specific modules
+│   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), TaskType validation
+│   ├── models.py        Data models and enumerations (TaskType StrEnum with is_pr_task property)
+│   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration
+│   ├── runner.py        Agent runner: run_agent() — ClaudeSDKClient connect/query/receive_response
+│   ├── context.py       Context hydration: fetch_github_issue(), assemble_prompt() (local/dry-run only)
+│   ├── prompt_builder.py System prompt assembly + memory context, repo config scanning
+│   ├── hooks.py         PreToolUse hook callback for Cedar policy enforcement (Claude Agent SDK hooks)
+│   ├── policy.py        Cedar policy engine — in-process cedarpy evaluation, fail-closed, deny-list model
+│   ├── post_hooks.py    Deterministic post-hooks: ensure_committed, ensure_pushed, ensure_pr, verify_build, verify_lint
+│   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
+│   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
+│   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
+│   ├── server.py        FastAPI — async /invocations (background thread) and /ping; OTEL session correlation
+│   ├── task_state.py    Best-effort DynamoDB task status (no-op if TASK_TABLE_NAME unset)
+│   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
+│   ├── memory.py        Optional memory / episode integration for the agent
+│   ├── system_prompt.py Behavioral contract (PRD Section 11)
+│   └── prompts/         Per-task-type system prompt workflows
+│       ├── __init__.py  Prompt registry — assembles base template + workflow for each task type
+│       ├── base.py      Shared base template (environment, rules, placeholders)
+│       ├── new_task.py  Workflow for new_task (create branch, implement, open PR)
+│       ├── pr_iteration.py  Workflow for pr_iteration (read feedback, address, push)
+│       └── pr_review.py     Workflow for pr_review (read-only analysis, structured review comments)
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
-├── tests/               pytest unit tests for pure functions and prompt assembly
+├── tests/               pytest unit tests (pythonpath: src/)
+│   ├── test_config.py       Config validation and TaskType tests
+│   ├── test_hooks.py        PreToolUse hook and hook matcher tests
+│   ├── test_models.py       TaskType enum tests
+│   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
+│   ├── test_pipeline.py     Pipeline orchestration tests (cedar_policies injection)
+│   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
+│   └── ...
 ├── test_sdk_smoke.py    Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
 └── test_subprocess_threading.py  Diagnostic: subprocess-in-background-thread verification
 ```

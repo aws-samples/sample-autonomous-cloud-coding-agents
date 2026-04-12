@@ -27,6 +27,20 @@ import { isPrTaskType, type TaskRecord, type TaskType } from './types';
 // Types
 // ---------------------------------------------------------------------------
 
+/** Detail of a single guardrail filter that triggered. */
+export interface GuardrailAssessmentDetail {
+  readonly filter_type: 'CONTENT' | 'TOPIC' | 'WORD' | 'SENSITIVE_INFO';
+  readonly filter_name: string;
+  readonly confidence?: string;
+  readonly action: string;
+}
+
+/** Result of guardrail screening including assessment details. */
+export interface GuardrailScreeningResult {
+  readonly action: 'GUARDRAIL_INTERVENED' | 'NONE';
+  readonly assessments?: GuardrailAssessmentDetail[];
+}
+
 /**
  * A single comment on a GitHub issue.
  */
@@ -123,16 +137,74 @@ export class GuardrailScreeningError extends Error {
   }
 }
 
+/** Mapping from policy response keys to assessment detail extraction rules. */
+const POLICY_EXTRACTORS: ReadonlyArray<{
+  readonly policyKey: string;
+  readonly itemsKey: string;
+  readonly filterType: GuardrailAssessmentDetail['filter_type'];
+  readonly nameField: string;
+}> = [
+  { policyKey: 'contentPolicy', itemsKey: 'filters', filterType: 'CONTENT', nameField: 'type' },
+  { policyKey: 'topicPolicy', itemsKey: 'topics', filterType: 'TOPIC', nameField: 'name' },
+  { policyKey: 'wordPolicy', itemsKey: 'customWords', filterType: 'WORD', nameField: 'match' },
+  { policyKey: 'wordPolicy', itemsKey: 'managedWordLists', filterType: 'WORD', nameField: 'match' },
+  { policyKey: 'sensitiveInformationPolicy', itemsKey: 'piiEntities', filterType: 'SENSITIVE_INFO', nameField: 'type' },
+];
+
+/**
+ * Extract assessment details from the Bedrock ApplyGuardrail response.
+ */
+function extractAssessmentDetails(
+  assessments: Array<Record<string, unknown>> | undefined,
+): GuardrailAssessmentDetail[] {
+  const details: GuardrailAssessmentDetail[] = [];
+  if (!assessments) return details;
+
+  for (const assessment of assessments) {
+    for (const extractor of POLICY_EXTRACTORS) {
+      const policy = assessment[extractor.policyKey] as Record<string, unknown> | undefined;
+      const items = policy?.[extractor.itemsKey] as Array<Record<string, unknown>> | undefined;
+      if (items) {
+        for (const item of items) {
+          details.push({
+            filter_type: extractor.filterType,
+            filter_name: (item[extractor.nameField] as string) ?? 'UNKNOWN',
+            ...(item.confidence !== undefined && { confidence: item.confidence as string }),
+            action: (item.action as string) ?? 'BLOCKED',
+          });
+        }
+      }
+    }
+  }
+
+  return details;
+}
+
+/**
+ * Format a guardrail-blocked message from the screening result.
+ * Returns undefined when the guardrail did not intervene.
+ */
+function formatGuardrailBlocked(
+  screenResult: GuardrailScreeningResult | undefined,
+  prefix: string,
+): string | undefined {
+  if (screenResult?.action !== 'GUARDRAIL_INTERVENED') return undefined;
+  const details = screenResult.assessments
+    ?.map(a => `${a.filter_type}/${a.filter_name}${a.confidence ? ` (${a.confidence})` : ''}`)
+    .join(', ');
+  return `${prefix} blocked by content policy${details ? ': ' + details : ''}`;
+}
+
 /**
  * Screen text through the Bedrock Guardrail for prompt injection detection.
  * Fail-closed: throws on Bedrock errors so unscreened content never reaches the agent.
  * @param text - the text to screen.
  * @param taskId - the task ID (for logging).
- * @returns 'GUARDRAIL_INTERVENED' if blocked, 'NONE' if allowed, undefined when guardrail is
- *          not configured (env vars missing).
+ * @returns a GuardrailScreeningResult with action and assessment details, or undefined when
+ *          guardrail is not configured (env vars missing).
  * @throws GuardrailScreeningError when the Bedrock Guardrail API call fails (fail-closed).
  */
-export async function screenWithGuardrail(text: string, taskId: string): Promise<'GUARDRAIL_INTERVENED' | 'NONE' | undefined> {
+export async function screenWithGuardrail(text: string, taskId: string): Promise<GuardrailScreeningResult | undefined> {
   if (!bedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
     logger.info('Guardrail screening skipped — guardrail not configured', {
       task_id: taskId,
@@ -149,16 +221,24 @@ export async function screenWithGuardrail(text: string, taskId: string): Promise
       content: [{ text: { text } }],
     }));
 
+    const assessments = extractAssessmentDetails(
+      result.assessments as Array<Record<string, unknown>> | undefined,
+    );
+
     if (result.action === 'GUARDRAIL_INTERVENED') {
       logger.warn('Content blocked by guardrail', {
         task_id: taskId,
         guardrail_id: GUARDRAIL_ID,
         guardrail_version: GUARDRAIL_VERSION,
+        assessment_details: assessments.length > 0 ? JSON.stringify(assessments) : undefined,
       });
-      return 'GUARDRAIL_INTERVENED';
+      return {
+        action: 'GUARDRAIL_INTERVENED',
+        ...(assessments.length > 0 && { assessments }),
+      };
     }
 
-    return 'NONE';
+    return { action: 'NONE' };
   } catch (err) {
     logger.error('Guardrail screening failed (fail-closed)', {
       task_id: taskId,
@@ -971,7 +1051,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       resolvedBaseBranch = prResult.base_ref;
 
       // Screen assembled PR prompt through Bedrock Guardrail for prompt injection
-      const guardrailAction = await screenWithGuardrail(userPrompt, task.task_id);
+      const screenResult = await screenWithGuardrail(userPrompt, task.task_id);
+
+      const guardrailBlocked = formatGuardrailBlocked(screenResult, 'PR context');
 
       const prContext: HydratedContext = {
         version: 1,
@@ -982,9 +1064,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         sources,
         token_estimate: estimateTokens(userPrompt),
         truncated,
-        ...(guardrailAction === 'GUARDRAIL_INTERVENED' && {
-          guardrail_blocked: 'PR context blocked by content policy',
-        }),
+        ...(guardrailBlocked && { guardrail_blocked: guardrailBlocked }),
       };
 
       return prContext;
@@ -999,9 +1079,11 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
 
     // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).
     // Skipped when no issue is present — task_description is already screened at submission time.
-    const guardrailAction = issue
+    const screenResult = issue
       ? await screenWithGuardrail(userPrompt, task.task_id)
       : undefined;
+
+    const guardrailBlocked = formatGuardrailBlocked(screenResult, 'Task context');
 
     return {
       version: 1,
@@ -1011,9 +1093,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       sources,
       token_estimate: tokenEstimate,
       truncated: budgetResult.truncated,
-      ...(guardrailAction === 'GUARDRAIL_INTERVENED' && {
-        guardrail_blocked: 'Task context blocked by content policy',
-      }),
+      ...(guardrailBlocked && { guardrail_blocked: guardrailBlocked }),
     };
   } catch (err) {
     // Guardrail failures must propagate (fail-closed) — unscreened content must not reach the agent
