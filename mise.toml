@@ -14,6 +14,7 @@ gitleaks = "latest"
 semgrep = "latest"
 osv-scanner = "latest"
 "grype" = "0.110.0"
+"aqua:zizmorcore/zizmor" = "1.23.1"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs"]
@@ -77,6 +78,11 @@ run = [
 description = "Retire.js (CDK, CLI, docs)"
 run = "npx retire --path cdk --severity high --ignore \"node_modules/**,cdk.out/**,cdk/cdk.out/**\" && cd cli && npm run security:retire && cd ../docs && npm run security:retire"
 
+[tasks."security:gh-actions"]
+description = "Static analysis of GitHub Actions workflows (zizmor)"
+# Offline: no GitHub API for online-only rules; config in .github/zizmor.yml
+run = "zizmor --offline .github"
+
 [tasks.security]
 description = "Run security scans"
 run = [
@@ -85,6 +91,7 @@ run = [
     { task = "security:sast" },
     { task = "security:grype" },
     { task = "security:retire" },
+    { task = "security:gh-actions" },
     "MISE_EXPERIMENTAL=1 mise //agent:security",
 ]
 

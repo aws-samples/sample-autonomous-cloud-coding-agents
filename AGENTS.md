@@ -104,8 +104,9 @@ Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common co
 - **`mise run security:secrets`** — Gitleaks at repo root.
 - **`mise run security:sast`** — Semgrep on the repo (root; includes **`agent/`** Python among paths).
 - **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
-- **`mise run security`** — Runs **`security:secrets`** then **`security:sast`**.
+- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
 - **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.
+- **`mise run security:gh-actions`** — Static analysis of GitHub Actions under **`.github/`** ([zizmor](https://github.com/zizmorcore/zizmor)).
 - **`mise run hooks:install`** — Re-install **[prek](https://github.com/j178/prek)** git hooks (also run automatically at the end of **`mise run install`** inside a Git checkout). See [CONTRIBUTING.md](./CONTRIBUTING.md) if `core.hooksPath` blocks install.
 - **`mise run hooks:run`** — Run the same **pre-commit** and **pre-push** hook stages on all files (local verification).
 
