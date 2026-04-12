@@ -1,11 +1,17 @@
 """Telemetry: metrics, trajectory writer, and disk usage."""
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 import time
+from typing import TYPE_CHECKING
 
 from config import AGENT_WORKSPACE
+
+if TYPE_CHECKING:
+    from models import TokenUsage
 
 
 def get_disk_usage(path: str = AGENT_WORKSPACE) -> float:
@@ -233,7 +239,7 @@ class _TrajectoryWriter:
         duration_ms: int,
         duration_api_ms: int,
         session_id: str,
-        usage: dict | None,
+        usage: TokenUsage | None,
     ) -> None:
         """Write a TRAJECTORY_RESULT summary event at session end."""
         self._put_event(
@@ -246,7 +252,7 @@ class _TrajectoryWriter:
                 "duration_ms": duration_ms,
                 "duration_api_ms": duration_api_ms,
                 "session_id": session_id,
-                "usage": usage,
+                "usage": usage.model_dump() if usage else None,
             }
         )
 

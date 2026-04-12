@@ -1,10 +1,14 @@
 """Agent invocation: environment setup and Claude Agent SDK execution."""
 
+from __future__ import annotations
+
 import os
 import subprocess
+from typing import Any
 from urllib.parse import quote
 
 from config import AGENT_WORKSPACE
+from models import AgentResult, TaskConfig, TokenUsage
 from shell import log, truncate
 from telemetry import _TrajectoryWriter
 
@@ -16,7 +20,22 @@ def _format_tool_result(block) -> tuple[str, str]:
     return status, content
 
 
-def _setup_agent_env(config: dict) -> tuple[str | None, str | None]:
+def _parse_token_usage(raw_usage: Any) -> TokenUsage:
+    """Normalize a raw usage value (dict or dataclass) into a TokenUsage model."""
+    fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    )
+    if isinstance(raw_usage, dict):
+        values = {f: raw_usage.get(f, 0) for f in fields}
+    else:
+        values = {f: getattr(raw_usage, f, 0) for f in fields}
+    return TokenUsage(**values)
+
+
+def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     """Configure process environment for the Claude Code CLI subprocess.
 
     Sets Bedrock credentials, strips OTEL auto-instrumentation vars, and
@@ -25,10 +44,10 @@ def _setup_agent_env(config: dict) -> tuple[str | None, str | None]:
     Returns (otlp_endpoint, otlp_protocol) for logging.
     """
     os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"
-    os.environ["AWS_REGION"] = config["aws_region"]
-    os.environ["ANTHROPIC_MODEL"] = config["anthropic_model"]
-    os.environ["GITHUB_TOKEN"] = config["github_token"]
-    os.environ["GH_TOKEN"] = config["github_token"]
+    os.environ["AWS_REGION"] = config.aws_region
+    os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
+    os.environ["GITHUB_TOKEN"] = config.github_token
+    os.environ["GH_TOKEN"] = config.github_token
     # DO NOT set ANTHROPIC_LOG — any logging level causes the CLI to write to
     # stderr, which fills the OS pipe buffer (64 KB) and deadlocks the
     # single-threaded Node.js CLI process (blocked stderr write prevents stdout
@@ -117,9 +136,9 @@ def _setup_agent_env(config: dict) -> tuple[str | None, str | None]:
         # Values are percent-encoded per the OTEL_RESOURCE_ATTRIBUTES spec to
         # handle any special characters (commas, equals, spaces) in config values.
         os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
-            f"task.id={quote(config.get('task_id', 'unknown'), safe='')},"
-            f"repo.url={quote(config.get('repo_url', 'unknown'), safe='')},"
-            f"agent.model={quote(config.get('anthropic_model', 'unknown'), safe='')}"
+            f"task.id={quote(config.task_id or 'unknown', safe='')},"
+            f"repo.url={quote(config.repo_url or 'unknown', safe='')},"
+            f"agent.model={quote(config.anthropic_model or 'unknown', safe='')}"
         )
         log(
             "AGENT",
@@ -133,8 +152,8 @@ def _setup_agent_env(config: dict) -> tuple[str | None, str | None]:
 
 
 async def run_agent(
-    prompt: str, system_prompt: str, config: dict, cwd: str = AGENT_WORKSPACE
-) -> dict:
+    prompt: str, system_prompt: str, config: TaskConfig, cwd: str = AGENT_WORKSPACE
+) -> AgentResult:
     """Invoke the Claude Agent SDK and stream output."""
     from claude_agent_sdk import (
         AssistantMessage,
@@ -177,14 +196,14 @@ async def run_agent(
     allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
 
     # Create trajectory writer and Cedar policy engine with hook matchers
-    trajectory = _TrajectoryWriter(config.get("task_id", "unknown"))
+    trajectory = _TrajectoryWriter(config.task_id or "unknown")
 
     from hooks import build_hook_matchers
     from policy import PolicyEngine
 
-    task_type = config.get("task_type", "new_task")
-    repo_url = config.get("repo_url", "")
-    cedar_policies = config.get("cedar_policies") or []
+    task_type = config.task_type
+    repo_url = config.repo_url
+    cedar_policies = config.cedar_policies
     policy_engine = PolicyEngine(
         task_type=task_type,
         repo=repo_url,
@@ -199,19 +218,19 @@ async def run_agent(
     hooks = build_hook_matchers(engine=policy_engine, trajectory=trajectory)
 
     options = ClaudeAgentOptions(
-        model=config["anthropic_model"],
+        model=config.anthropic_model,
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
         cwd=cwd,
-        max_turns=config["max_turns"],
+        max_turns=config.max_turns,
         setting_sources=["project"],
         hooks=hooks,
-        **({"max_budget_usd": config["max_budget_usd"]} if config.get("max_budget_usd") else {}),
+        max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,
     )
 
-    result: dict[str, object] = {"status": "unknown", "turns": 0, "cost_usd": None}
+    result = AgentResult()
     message_counts = {"system": 0, "assistant": 0, "result": 0, "other": 0}
 
     # Use ClaudeSDKClient (connect/query/receive_response) instead of the
@@ -235,8 +254,8 @@ async def run_agent(
 
             elif isinstance(message, AssistantMessage):
                 message_counts["assistant"] += 1
-                result["turns"] += 1
-                log("TURN", f"#{result['turns']} (model: {message.model})")
+                result.turns += 1
+                log("TURN", f"#{result.turns} (model: {message.model})")
 
                 # Per-turn accumulators for trajectory
                 turn_thinking = ""
@@ -277,7 +296,7 @@ async def run_agent(
 
                 # Write trajectory event for this turn
                 trajectory.write_turn(
-                    turn=result["turns"],
+                    turn=result.turns,
                     model=message.model,
                     thinking=turn_thinking.strip(),
                     text=turn_text.strip(),
@@ -287,39 +306,21 @@ async def run_agent(
 
             elif isinstance(message, ResultMessage):
                 message_counts["result"] += 1
-                result["status"] = message.subtype
-                result["cost_usd"] = getattr(message, "total_cost_usd", None)
-                result["num_turns"] = getattr(message, "num_turns", 0)
-                result["duration_ms"] = getattr(message, "duration_ms", 0)
-                result["duration_api_ms"] = getattr(message, "duration_api_ms", 0)
-                result["session_id"] = getattr(message, "session_id", "")
+                result.status = message.subtype
+                result.cost_usd = getattr(message, "total_cost_usd", None)
+                result.num_turns = getattr(message, "num_turns", 0)
+                result.duration_ms = getattr(message, "duration_ms", 0)
+                result.duration_api_ms = getattr(message, "duration_api_ms", 0)
+                result.session_id = getattr(message, "session_id", "") or ""
 
                 # Capture token usage from ResultMessage
                 raw_usage = getattr(message, "usage", None)
+                usage: TokenUsage | None = None
                 if raw_usage is not None:
                     # Handle both object (dataclass) and dict forms
-                    if isinstance(raw_usage, dict):
-                        usage_dict: dict | None = {
-                            "input_tokens": raw_usage.get("input_tokens", 0),
-                            "output_tokens": raw_usage.get("output_tokens", 0),
-                            "cache_read_input_tokens": raw_usage.get("cache_read_input_tokens", 0),
-                            "cache_creation_input_tokens": raw_usage.get(
-                                "cache_creation_input_tokens", 0
-                            ),
-                        }
-                    else:
-                        usage_dict = {
-                            "input_tokens": getattr(raw_usage, "input_tokens", 0),
-                            "output_tokens": getattr(raw_usage, "output_tokens", 0),
-                            "cache_read_input_tokens": getattr(
-                                raw_usage, "cache_read_input_tokens", 0
-                            ),
-                            "cache_creation_input_tokens": getattr(
-                                raw_usage, "cache_creation_input_tokens", 0
-                            ),
-                        }
-                    result["usage"] = usage_dict
-                    if all(v == 0 for v in usage_dict.values()):
+                    usage = _parse_token_usage(raw_usage)
+                    result.usage = usage
+                    if all(v == 0 for v in usage.model_dump().values()):
                         log(
                             "WARN",
                             f"All token usage values are zero — usage object "
@@ -328,14 +329,11 @@ async def run_agent(
                     else:
                         log(
                             "USAGE",
-                            f"input={usage_dict['input_tokens']} "
-                            f"output={usage_dict['output_tokens']} "
-                            f"cache_read={usage_dict['cache_read_input_tokens']} "
-                            f"cache_create={usage_dict['cache_creation_input_tokens']}",
+                            f"input={usage.input_tokens} "
+                            f"output={usage.output_tokens} "
+                            f"cache_read={usage.cache_read_input_tokens} "
+                            f"cache_create={usage.cache_creation_input_tokens}",
                         )
-                else:
-                    usage_dict = None
-                    result["usage"] = None
 
                 log(
                     "DONE",
@@ -354,7 +352,7 @@ async def run_agent(
                     duration_ms=getattr(message, "duration_ms", 0),
                     duration_api_ms=getattr(message, "duration_api_ms", 0),
                     session_id=getattr(message, "session_id", ""),
-                    usage=usage_dict,
+                    usage=usage,
                 )
 
             elif isinstance(message, UserMessage):
@@ -380,9 +378,9 @@ async def run_agent(
 
     except Exception as e:
         log("ERROR", f"Exception during receive_response(): {type(e).__name__}: {e}")
-        if result["status"] == "unknown":
-            result["status"] = "error"
-            result["error"] = f"receive_response() failed: {e}"
+        if result.status == "unknown":
+            result.status = "error"
+            result.error = f"receive_response() failed: {e}"
 
     log("AGENT", f"Generator finished. Messages received: {message_counts}")
     log("AGENT", f"CLI stderr lines received: {stderr_line_count}")

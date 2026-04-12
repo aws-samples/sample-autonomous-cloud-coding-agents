@@ -3,6 +3,7 @@
 import pytest
 
 from config import PR_TASK_TYPES, build_config
+from models import TaskConfig
 
 
 class TestAgentWorkspaceConstant:
@@ -50,11 +51,11 @@ class TestTaskTypeValidation:
                 task_type=tt,
                 pr_number=pr,
             )
-            assert config["task_type"] == tt
+            assert config.task_type == tt
 
 
 class TestBuildConfig:
-    def test_valid_config_returns_dict(self):
+    def test_valid_config_returns_task_config(self):
         config = build_config(
             repo_url="owner/repo",
             task_description="fix bug",
@@ -62,9 +63,9 @@ class TestBuildConfig:
             aws_region="us-east-1",
             task_id="test-id",
         )
-        assert isinstance(config, dict)
-        assert config["repo_url"] == "owner/repo"
-        assert config["task_id"] == "test-id"
+        assert isinstance(config, TaskConfig)
+        assert config.repo_url == "owner/repo"
+        assert config.task_id == "test-id"
 
     def test_missing_repo_raises(self):
         with pytest.raises(ValueError, match="repo_url"):
@@ -82,5 +83,5 @@ class TestBuildConfig:
             github_token="ghp_test",
             aws_region="us-east-1",
         )
-        assert config["task_id"]
-        assert len(config["task_id"]) == 12
+        assert config.task_id
+        assert len(config.task_id) == 12

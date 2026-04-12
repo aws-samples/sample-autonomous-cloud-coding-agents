@@ -20,6 +20,18 @@ from config import (  # noqa: F401
     resolve_github_token,
 )
 from context import assemble_prompt, fetch_github_issue  # noqa: F401
+from models import (  # noqa: F401
+    AgentResult,
+    GitHubIssue,
+    HydratedContext,
+    IssueComment,
+    MemoryContext,
+    RepoSetup,
+    TaskConfig,
+    TaskResult,
+    TaskType,
+    TokenUsage,
+)
 from pipeline import main, run_task  # noqa: F401
 from post_hooks import (  # noqa: F401
     ensure_committed,

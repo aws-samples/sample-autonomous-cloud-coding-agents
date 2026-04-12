@@ -4,31 +4,30 @@ import os
 import subprocess
 
 from config import AGENT_WORKSPACE, PR_TASK_TYPES
+from models import RepoSetup, TaskConfig
 from shell import log, run_cmd, slugify
 
 
-def setup_repo(config: dict) -> dict:
+def setup_repo(config: TaskConfig) -> RepoSetup:
     """Clone repo, create branch, configure git auth, run mise install.
 
-    Returns a dict with keys: repo_dir, branch, notes, build_before,
+    Returns a RepoSetup with repo_dir, branch, notes, build_before,
     lint_before, and default_branch.
     """
-    repo_dir = f"{AGENT_WORKSPACE}/{config['task_id']}"
-    setup: dict[str, str | list[str] | bool] = {"repo_dir": repo_dir, "notes": []}
+    repo_dir = f"{AGENT_WORKSPACE}/{config.task_id}"
+    notes: list[str] = []
 
-    if config.get("task_type") in PR_TASK_TYPES and config.get("branch_name"):
-        branch = config["branch_name"]
-        setup["branch"] = branch
+    if config.task_type in PR_TASK_TYPES and config.branch_name:
+        branch = config.branch_name
     else:
         # Derive branch slug from issue title or task description
         title = ""
-        if config.get("issue"):
-            title = config["issue"]["title"]
+        if config.issue:
+            title = config.issue.title
         if not title:
-            title = config["task_description"]
+            title = config.task_description
         slug = slugify(title)
-        branch = f"bgagent/{config['task_id']}/{slug}"
-        setup["branch"] = branch
+        branch = f"bgagent/{config.task_id}/{slug}"
 
     # Mark the repo directory as safe for git.  On persistent session storage
     # the mount may be owned by a different UID than the container user,
@@ -39,29 +38,29 @@ def setup_repo(config: dict) -> dict:
     )
 
     # Clone
-    log("SETUP", f"Cloning {config['repo_url']}...")
+    log("SETUP", f"Cloning {config.repo_url}...")
     run_cmd(
-        ["gh", "repo", "clone", config["repo_url"], repo_dir],
+        ["gh", "repo", "clone", config.repo_url, repo_dir],
         label="clone",
     )
 
     # Configure remote URL with embedded token so git push works without
     # credential helpers or extra auth setup inside the agent.
-    token = config["github_token"]
+    token = config.github_token
     run_cmd(
         [
             "git",
             "remote",
             "set-url",
             "origin",
-            f"https://x-access-token:{token}@github.com/{config['repo_url']}.git",
+            f"https://x-access-token:{token}@github.com/{config.repo_url}.git",
         ],
         label="set-remote-url",
         cwd=repo_dir,
     )
 
     # Branch setup
-    if config.get("task_type") in PR_TASK_TYPES and config.get("branch_name"):
+    if config.task_type in PR_TASK_TYPES and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
         run_cmd(
             ["git", "fetch", "origin", branch],
@@ -95,9 +94,9 @@ def setup_repo(config: dict) -> dict:
     )
     if result.returncode != 0:
         note = f"mise install failed (exit {result.returncode})"
-        setup["notes"].append(note)
+        notes.append(note)
     else:
-        setup["notes"].append("mise install: OK")
+        notes.append("mise install: OK")
 
     # Initial build (record whether the project builds before agent changes)
     log("SETUP", "Running initial build (mise run build)...")
@@ -109,11 +108,11 @@ def setup_repo(config: dict) -> dict:
     )
     if result.returncode != 0:
         note = "Initial build (mise run build) FAILED before agent changes"
-        setup["notes"].append(note)
-        setup["build_before"] = False
+        notes.append(note)
+        build_before = False
     else:
-        setup["notes"].append("Initial build (mise run build): OK")
-        setup["build_before"] = True
+        notes.append("Initial build (mise run build): OK")
+        build_before = True
 
     # Initial lint baseline (record whether lint passes before agent changes)
     log("SETUP", "Running initial lint (mise run lint)...")
@@ -125,23 +124,30 @@ def setup_repo(config: dict) -> dict:
     )
     if result.returncode != 0:
         note = "Initial lint (mise run lint) FAILED before agent changes"
-        setup["notes"].append(note)
-        setup["lint_before"] = False
+        notes.append(note)
+        lint_before = False
     else:
-        setup["notes"].append("Initial lint (mise run lint): OK")
-        setup["lint_before"] = True
+        notes.append("Initial lint (mise run lint): OK")
+        lint_before = True
 
     # Detect default branch
     # For PR tasks (pr_iteration, pr_review): use base_branch from orchestrator if available
-    if config.get("task_type") in PR_TASK_TYPES and config.get("base_branch"):
-        setup["default_branch"] = config["base_branch"]
+    if config.task_type in PR_TASK_TYPES and config.base_branch:
+        default_branch = config.base_branch
     else:
-        setup["default_branch"] = detect_default_branch(config["repo_url"], repo_dir)
+        default_branch = detect_default_branch(config.repo_url, repo_dir)
 
     # Install prepare-commit-msg hook for code attribution
     _install_commit_hook(repo_dir)
 
-    return setup
+    return RepoSetup(
+        repo_dir=repo_dir,
+        branch=branch,
+        notes=notes,
+        build_before=build_before,
+        lint_before=lint_before,
+        default_branch=default_branch,
+    )
 
 
 def _install_commit_hook(repo_dir: str) -> None:
