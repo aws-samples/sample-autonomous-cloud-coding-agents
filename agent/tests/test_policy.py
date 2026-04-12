@@ -85,15 +85,14 @@ class TestPrReviewPermissions:
 
 
 class TestProtectedPaths:
-    def test_denies_write_to_github_workflows(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        result = engine.evaluate_tool_use("Write", {"file_path": ".github/workflows/ci.yml"})
-        assert result.allowed is False
-        assert ".github/workflows/ci.yml" in result.reason
-
     def test_denies_write_to_git_dir(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = engine.evaluate_tool_use("Write", {"file_path": ".git/config"})
+        assert result.allowed is False
+
+    def test_denies_write_to_git_dir_absolute_path(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = engine.evaluate_tool_use("Write", {"file_path": "/workspace/abc123/.git/config"})
         assert result.allowed is False
 
     def test_allows_write_to_normal_path(self):
@@ -101,10 +100,15 @@ class TestProtectedPaths:
         result = engine.evaluate_tool_use("Write", {"file_path": "src/app.ts"})
         assert result.allowed is True
 
-    def test_denies_edit_to_github_workflows(self):
+    def test_allows_write_to_github_workflows(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = engine.evaluate_tool_use("Write", {"file_path": ".github/workflows/ci.yml"})
+        assert result.allowed is True
+
+    def test_allows_edit_to_github_workflows(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = engine.evaluate_tool_use("Edit", {"file_path": ".github/workflows/deploy.yml"})
-        assert result.allowed is False
+        assert result.allowed is True
 
 
 class TestDestructiveBashCommands:
@@ -172,9 +176,9 @@ class TestFilePathsWithSpecialChars:
         result = engine.evaluate_tool_use("Write", {"file_path": '/workspace/it"s-a-file.ts'})
         assert result.allowed is True
 
-    def test_denies_protected_path_with_quotes(self):
+    def test_denies_git_dir_path_with_quotes(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        result = engine.evaluate_tool_use("Write", {"file_path": '.github/workflows/ci"test.yml'})
+        result = engine.evaluate_tool_use("Write", {"file_path": '.git/hooks/pre"commit'})
         assert result.allowed is False
 
 

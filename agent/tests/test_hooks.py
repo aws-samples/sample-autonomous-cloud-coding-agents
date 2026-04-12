@@ -45,12 +45,12 @@ class TestPreToolUseHook:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "pr_review" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def test_denies_protected_path(self):
+    def test_denies_git_internals_path(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         hook_input = {
             "hook_event_name": "PreToolUse",
             "tool_name": "Write",
-            "tool_input": {"file_path": ".github/workflows/ci.yml"},
+            "tool_input": {"file_path": ".git/config"},
             "tool_use_id": "test-789",
             "session_id": "sess-1",
             "transcript_path": "/tmp/t",

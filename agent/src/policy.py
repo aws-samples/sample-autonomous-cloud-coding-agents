@@ -47,11 +47,11 @@ forbid (
     resource == Agent::Tool::"Edit"
 );
 
-// All agents: forbid writes to protected paths
-forbid (principal, action == Agent::Action::"write_file", resource)
-when { context.file_path like ".github/workflows/*" };
+// All agents: forbid writes to .git internals
 forbid (principal, action == Agent::Action::"write_file", resource)
 when { context.file_path like ".git/*" };
+forbid (principal, action == Agent::Action::"write_file", resource)
+when { context.file_path like "*/.git/*" };
 
 // All agents: forbid destructive bash commands
 forbid (principal, action == Agent::Action::"execute_bash", resource)
