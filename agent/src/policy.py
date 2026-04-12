@@ -131,6 +131,12 @@ class PolicyEngine:
         """Run a single Cedar authorization check.
 
         Returns (allowed, reason). Fails closed on NoDecision.
+
+        ``resource_id`` must be a simple identifier safe for Cedar entity
+        UID parsing (no quotes, newlines, or special chars). Callers that
+        evaluate user-supplied values (bash commands, file paths) should
+        pass a fixed sentinel and put the real value in ``context`` where
+        the policies match against it.
         """
         cedarpy = self._cedarpy
         if cedarpy is None:
@@ -194,7 +200,10 @@ class PolicyEngine:
                 )
                 return PolicyDecision(allowed=False, reason=reason, duration_ms=elapsed)
 
-            # Additional checks for Write/Edit: check file path
+            # Additional checks for Write/Edit: check file path.
+            # Use a fixed sentinel resource_id ("file") because file paths
+            # may contain quotes/special chars that break Cedar UID parsing.
+            # The actual path is in context.file_path where policies match it.
             if tool_name in ("Write", "Edit"):
                 file_path = tool_input.get("file_path", "")
                 if file_path:
@@ -202,7 +211,7 @@ class PolicyEngine:
                     allowed, deny_reason = self._evaluate(
                         "write_file",
                         "Agent::File",
-                        file_path,
+                        "file",
                         file_context,
                     )
                     if not allowed:
@@ -210,7 +219,11 @@ class PolicyEngine:
                         reason = deny_reason or f"Cedar policy denied write to {file_path}"
                         return PolicyDecision(allowed=False, reason=reason, duration_ms=elapsed)
 
-            # Additional checks for Bash: check command
+            # Additional checks for Bash: check command.
+            # Use a fixed sentinel resource_id ("command") because bash
+            # commands contain quotes/special chars that break Cedar UID
+            # parsing.  The actual command is in context.command where
+            # policies match it.
             if tool_name == "Bash":
                 command = tool_input.get("command", "")
                 if command:
@@ -218,7 +231,7 @@ class PolicyEngine:
                     allowed, deny_reason = self._evaluate(
                         "execute_bash",
                         "Agent::BashCommand",
-                        command[:200],
+                        "command",
                         bash_context,
                     )
                     if not allowed:
