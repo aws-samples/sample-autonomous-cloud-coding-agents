@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from models import AgentResult, RepoSetup, TaskConfig
+
 
 class TestCedarPoliciesInjection:
     @patch("pipeline.run_agent")
@@ -20,21 +22,22 @@ class TestCedarPoliciesInjection:
         mock_run_agent,
         monkeypatch,
     ):
-        """When cedar_policies are passed, they appear in the config dict."""
+        """When cedar_policies are passed, they appear in the config."""
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        mock_setup_repo.return_value = {
-            "repo_dir": "/workspace/repo",
-            "branch": "bgagent/test/branch",
-            "build_before": True,
-        }
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
 
-        captured_config = {}
+        captured_config: TaskConfig | None = None
 
         async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
-            captured_config.update(config)
-            return {"status": "success", "turns": 1, "cost_usd": 0.01, "num_turns": 1}
+            nonlocal captured_config
+            captured_config = config
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
 
         mock_run_agent.side_effect = fake_run_agent
 
@@ -68,8 +71,8 @@ class TestCedarPoliciesInjection:
                 cedar_policies=policies,
             )
 
-        assert "cedar_policies" in captured_config
-        assert captured_config["cedar_policies"] == policies
+        assert captured_config is not None
+        assert captured_config.cedar_policies == policies
 
     @patch("pipeline.run_agent")
     @patch("pipeline.build_system_prompt")
@@ -87,21 +90,22 @@ class TestCedarPoliciesInjection:
         mock_run_agent,
         monkeypatch,
     ):
-        """When cedar_policies are not passed, the key is absent from config."""
+        """When cedar_policies are not passed, the default empty list is on config."""
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        mock_setup_repo.return_value = {
-            "repo_dir": "/workspace/repo",
-            "branch": "bgagent/test/branch",
-            "build_before": True,
-        }
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
 
-        captured_config = {}
+        captured_config: TaskConfig | None = None
 
         async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
-            captured_config.update(config)
-            return {"status": "success", "turns": 1, "cost_usd": 0.01, "num_turns": 1}
+            nonlocal captured_config
+            captured_config = config
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
 
         mock_run_agent.side_effect = fake_run_agent
 
@@ -131,4 +135,5 @@ class TestCedarPoliciesInjection:
                 task_id="test-id",
             )
 
-        assert "cedar_policies" not in captured_config
+        assert captured_config is not None
+        assert captured_config.cedar_policies == []

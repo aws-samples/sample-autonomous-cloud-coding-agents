@@ -4,7 +4,7 @@ import os
 import sys
 import uuid
 
-from models import TaskType
+from models import TaskConfig, TaskType
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 
@@ -52,54 +52,60 @@ def build_config(
     task_type: str = "new_task",
     branch_name: str = "",
     pr_number: str = "",
-) -> dict:
+) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
     Parameters fall back to environment variables if empty.
     """
-    config = {
-        "repo_url": repo_url or os.environ.get("REPO_URL", ""),
-        "issue_number": issue_number or os.environ.get("ISSUE_NUMBER", ""),
-        "task_description": task_description or os.environ.get("TASK_DESCRIPTION", ""),
-        "github_token": github_token or resolve_github_token(),
-        "aws_region": aws_region or os.environ.get("AWS_REGION", ""),
-        "anthropic_model": anthropic_model
-        or os.environ.get("ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6"),
-        "dry_run": dry_run,
-        "max_turns": max_turns,
-        "max_budget_usd": max_budget_usd,
-        "system_prompt_overrides": system_prompt_overrides,
-        "task_type": task_type,
-        "branch_name": branch_name,
-        "pr_number": pr_number,
-    }
+    resolved_repo_url = repo_url or os.environ.get("REPO_URL", "")
+    resolved_issue_number = issue_number or os.environ.get("ISSUE_NUMBER", "")
+    resolved_task_description = task_description or os.environ.get("TASK_DESCRIPTION", "")
+    resolved_github_token = github_token or resolve_github_token()
+    resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
+    resolved_anthropic_model = anthropic_model or os.environ.get(
+        "ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6"
+    )
 
     errors = []
-    if not config["repo_url"]:
+    if not resolved_repo_url:
         errors.append("repo_url is required (e.g., 'owner/repo')")
-    if not config["github_token"]:
+    if not resolved_github_token:
         errors.append("github_token is required")
-    if not config["aws_region"]:
+    if not resolved_aws_region:
         errors.append("aws_region is required for Bedrock")
     try:
-        task = TaskType(config["task_type"])
+        task = TaskType(task_type)
     except ValueError:
-        errors.append(f"Invalid task_type: '{config['task_type']}'")
+        errors.append(f"Invalid task_type: '{task_type}'")
         task = None
     if task and task.is_pr_task:
-        if not config["pr_number"]:
+        if not pr_number:
             errors.append("pr_number is required for pr_iteration/pr_review task type")
-    elif task and not config["issue_number"] and not config["task_description"]:
+    elif task and not resolved_issue_number and not resolved_task_description:
         errors.append("Either issue_number or task_description is required")
 
     if errors:
         raise ValueError("; ".join(errors))
 
-    config["task_id"] = task_id or uuid.uuid4().hex[:12]
-    return config
+    return TaskConfig(
+        repo_url=resolved_repo_url,
+        issue_number=resolved_issue_number,
+        task_description=resolved_task_description,
+        github_token=resolved_github_token,
+        aws_region=resolved_aws_region,
+        anthropic_model=resolved_anthropic_model,
+        dry_run=dry_run,
+        max_turns=max_turns,
+        max_budget_usd=max_budget_usd,
+        system_prompt_overrides=system_prompt_overrides,
+        task_type=task_type,
+        branch_name=branch_name,
+        pr_number=pr_number,
+        task_id=task_id or uuid.uuid4().hex[:12],
+    )
 
 
-def get_config() -> dict:
+def get_config() -> TaskConfig:
     """Parse configuration from environment variables (local batch mode)."""
     try:
         return build_config(

@@ -1,9 +1,15 @@
 """Post-agent hooks: build/lint verification, commit, push, PR creation."""
 
+from __future__ import annotations
+
 import re
 import subprocess
+from typing import TYPE_CHECKING
 
 from shell import log, run_cmd
+
+if TYPE_CHECKING:
+    from models import AgentResult, RepoSetup, TaskConfig
 
 
 def verify_build(repo_dir: str) -> bool:
@@ -143,11 +149,11 @@ def ensure_pushed(repo_dir: str, branch: str) -> bool:
 
 
 def ensure_pr(
-    config: dict,
-    setup: dict,
+    config: TaskConfig,
+    setup: RepoSetup,
     build_passed: bool,
     lint_passed: bool,
-    agent_result: dict | None = None,
+    agent_result: AgentResult | None = None,
 ) -> str | None:
     """Check if a PR exists for the branch; if not, create one.
 
@@ -159,20 +165,20 @@ def ensure_pr(
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
     the verification status shown in the PR body.
     """
-    repo_dir = setup["repo_dir"]
-    branch = setup["branch"]
-    default_branch = setup.get("default_branch", "main")
+    repo_dir = setup.repo_dir
+    branch = setup.branch
+    default_branch = setup.default_branch
 
     # PR iteration/review: skip PR creation — just resolve existing PR URL
     from config import PR_TASK_TYPES
 
-    if config.get("task_type") in PR_TASK_TYPES:
-        if config.get("task_type") == "pr_iteration":
+    if config.task_type in PR_TASK_TYPES:
+        if config.task_type == "pr_iteration":
             if not ensure_pushed(repo_dir, branch):
                 log("WARN", "Failed to push commits before resolving PR URL")
         else:
             log("POST", "pr_review task — skipping push (read-only)")
-        log("POST", f"{config.get('task_type')} — returning existing PR URL")
+        log("POST", f"{config.task_type} — returning existing PR URL")
         result = subprocess.run(
             [
                 "gh",
@@ -180,7 +186,7 @@ def ensure_pr(
                 "view",
                 branch,
                 "--repo",
-                config["repo_url"],
+                config.repo_url,
                 "--json",
                 "url",
                 "-q",
@@ -208,7 +214,7 @@ def ensure_pr(
             "view",
             branch,
             "--repo",
-            config["repo_url"],
+            config.repo_url,
             "--json",
             "url",
             "-q",
@@ -260,22 +266,22 @@ def ensure_pr(
     pr_title = (
         first_commit.stdout.strip().split("\n")[0]
         if first_commit.stdout.strip()
-        else f"chore: bgagent/{config['task_id']}"
+        else f"chore: bgagent/{config.task_id}"
     )
 
     # Build PR body
     task_source = ""
-    if config["issue_number"]:
-        task_source = f"Resolves #{config['issue_number']}\n\n"
-    elif config["task_description"]:
-        task_source = f"**Task:** {config['task_description']}\n\n"
+    if config.issue_number:
+        task_source = f"Resolves #{config.issue_number}\n\n"
+    elif config.task_description:
+        task_source = f"**Task:** {config.task_description}\n\n"
 
     build_status = "PASS" if build_passed else "FAIL"
     lint_status = "PASS" if lint_passed else "FAIL"
 
     cost_line = ""
-    if agent_result and agent_result.get("cost_usd") is not None:
-        cost_line = f"- Agent cost: **${agent_result['cost_usd']:.4f}**\n"
+    if agent_result and agent_result.cost_usd is not None:
+        cost_line = f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
 
     pr_body = (
         f"## Summary\n\n"
@@ -298,7 +304,7 @@ def ensure_pr(
             "pr",
             "create",
             "--repo",
-            config["repo_url"],
+            config.repo_url,
             "--head",
             branch,
             "--base",
@@ -321,7 +327,7 @@ def ensure_pr(
         return None
 
 
-def _extract_agent_notes(repo_dir: str, branch: str, config: dict) -> str | None:
+def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str | None:
     """Extract the "## Agent notes" section from the PR body.
 
     Checks the existing PR body via `gh pr view`. Returns the text content
@@ -335,7 +341,7 @@ def _extract_agent_notes(repo_dir: str, branch: str, config: dict) -> str | None
                 "view",
                 branch,
                 "--repo",
-                config["repo_url"],
+                config.repo_url,
                 "--json",
                 "body",
                 "-q",
