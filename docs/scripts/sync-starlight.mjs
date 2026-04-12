@@ -44,6 +44,17 @@ function rewriteDocsLinkTarget(target) {
     CONTRIBUTING: '/developer-guide/contributing',
   };
 
+  /** `splitGuide` emits each `##` from DEVELOPER_GUIDE as its own page — map #anchors to those routes. */
+  const developerGuideAnchorRoutes = {
+    'repository-preparation': '/developer-guide/repository-preparation',
+  };
+  if (stem === 'DEVELOPER_GUIDE' && anchor) {
+    const splitRoute = developerGuideAnchorRoutes[anchor.toLowerCase()];
+    if (splitRoute) {
+      return splitRoute;
+    }
+  }
+
   if (explicitGuideRoutes[stem]) {
     return `${explicitGuideRoutes[stem]}${anchorSuffix}`;
   }

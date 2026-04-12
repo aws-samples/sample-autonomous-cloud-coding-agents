@@ -621,6 +621,8 @@ Rate limit status is communicated via response headers (see Standard response he
 | `WEBHOOK_NOT_FOUND` | 404 | Webhook does not exist or belongs to a different user. |
 | `WEBHOOK_ALREADY_REVOKED` | 409 | Webhook is already revoked. |
 | `REPO_NOT_ONBOARDED` | 422 | Repository is not registered with the platform. Repos are onboarded via CDK deployment, not via a runtime API. There are no `/v1/repos` endpoints. |
+| `GITHUB_UNREACHABLE` | 502 | The GitHub API was unreachable during the orchestrator's pre-flight check. The task fails fast without consuming compute. Transient — retry with backoff. |
+| `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | The target repository does not exist or the configured credentials lack access. Checked during the orchestrator's pre-flight step (`GET /repos/{owner}/{repo}`). Distinct from `REPO_NOT_ONBOARDED` — the repo is onboarded but the credential cannot reach it. |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | For `pr_iteration` and `pr_review` tasks: the specified PR does not exist, is not open, or is not accessible with the configured GitHub token. Checked during the orchestrator's pre-flight step. |
 | `INVALID_STEP_SEQUENCE` | 500 | The blueprint's step sequence is invalid (missing required steps or incorrect ordering). This indicates a CDK configuration error that slipped past synth-time validation. Visible via `GET /v1/tasks/{id}` as `error_code`. See [REPO_ONBOARDING.md](/design/repo-onboarding#step-sequence-validation). |
 | `GUARDRAIL_BLOCKED` | 400 | Task description was blocked by Bedrock Guardrail content screening (prompt injection detected). Revise the task description and retry. |

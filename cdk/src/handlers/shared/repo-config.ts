@@ -41,6 +41,7 @@ export interface RepoConfig {
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
+  readonly cedar_policies?: string[];
 }
 
 /**
@@ -57,6 +58,7 @@ export interface BlueprintConfig {
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
+  readonly cedar_policies?: string[];
 }
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));

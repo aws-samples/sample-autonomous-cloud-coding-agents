@@ -129,7 +129,8 @@ Cost efficiency is a design principle. The following estimates are based on **50
 | **API Gateway** (REST API, ~2K requests/day) | ~$5–15 | Per-request pricing |
 | **AgentCore Memory** (events, records, retrieval) | TBD | Pricing not fully public; proportional to usage |
 | **CloudWatch** (logs, metrics, traces, Transaction Search) | ~$20–50 | Log ingestion + storage |
-| **Secrets Manager** (GitHub App keys, webhook secrets) | ~$5–10 | Per-secret/month + API calls |
+| **Secrets Manager** (GitHub token or App private key, webhook secrets) | ~$5–10 | Per-secret/month + API calls |
+| **AgentCore Identity** (planned — WorkloadIdentity, Token Vault credential provider) | TBD | Token vending API calls; replaces per-task Secrets Manager reads for GitHub tokens |
 | **S3** (artifacts, memory backups) | ~$1–5 | Storage + requests |
 | **Total** | **~$700–1,600/month** | |
 
@@ -166,7 +167,7 @@ The following risks were identified via external review (March 2026) and are tra
 |---|------|----------|-----------|-------------------|
 | 1 | **Agent vs. orchestrator DynamoDB race** — `agent/task_state.py` writes terminal status without conditional expressions, so it can overwrite orchestrator-managed CANCELLED with COMPLETED. The orchestrator's `transitionTask()` uses `ConditionExpression` but the agent side does not. | High | `agent/task_state.py` | Resolved (Iteration 3bis) — `ConditionExpression` guards added to `write_running()` (requires status IN SUBMITTED, HYDRATING) and `write_terminal()` (requires status IN RUNNING, HYDRATING, FINALIZING). `ConditionalCheckFailedException` is caught and logged as a skip. |
 | 2 | **No DLQ on orchestrator async invocation** — The orchestrator Lambda is invoked with `InvocationType: 'Event'` but has no dead-letter queue. Failed or throttled invocations leave tasks stuck in SUBMITTED. | High | `src/constructs/task-orchestrator.ts` | Resolved (Iteration 3bis) — SQS DLQ deliberately skipped since durable execution (`withDurableExecution`, 14-day retention) manages its own retries; a DLQ would conflict. Added `retryAttempts: 0` on alias async invoke config to prevent Lambda-level duplicate invocations. CloudWatch alarm on `fn.metricErrors()` (threshold: 3, 2 periods of 5min) provides alerting. |
-| 3 | **Concurrency counter drift** — If the orchestrator crashes between concurrency increment and decrement, the user's counter is permanently inflated. The `UserConcurrencyTable` JSDoc acknowledges this but no reconciliation process exists. | Medium | `src/constructs/user-concurrency-table.ts` | Resolved (Iteration 3bis) — `ConcurrencyReconciler` construct with scheduled Lambda (EventBridge rate 15min). Scans concurrency table, queries task table's `UserStatusIndex` GSI per user, compares actual count with stored `active_count`, and corrects drift. TOCTOU-safe via `ConditionExpression` on update. |
+| 3 | **Concurrency counter drift** — If the orchestrator crashes between concurrency increment and decrement, the user's counter is permanently inflated. The `UserConcurrencyTable` JSDoc acknowledges this but no reconciliation process exists. | Medium | `src/constructs/user-concurrency-table.ts` | Resolved (Iteration 3bis) — `ConcurrencyReconciler` construct with scheduled Lambda (EventBridge rate 15min). Scans concurrency table, queries task table's `UserStatusIndex` GSI per user, compares actual count with stored `active_count`, and corrects drift. TOCTOU-safe via `ConditionExpression` on update. Additionally, the `finalizeTask` heartbeat-detected crash path guards against double-decrement by only releasing concurrency after a successful `transitionTask`, and re-reading the task state on failure. |
 | 4 | **Single NAT Gateway** — `natGateways: 1` means a single AZ failure blocks all agent internet egress. Acceptable for development; needs multi-AZ NAT for production. | Medium | `src/constructs/agent-vpc.ts` | Mitigated (Iteration 3bis) — already configurable via `AgentVpcProps.natGateways` (default: 1). Deployers can set `natGateways: 2` or higher for multi-AZ redundancy. No code changes needed. |
 | 5 | **Dual-language prompt assembly** — Both TypeScript (`context-hydration.ts:assembleUserPrompt`) and Python (`entrypoint.py:assemble_prompt`) implement the same logic. Changes to one must be manually replicated in the other. | Medium | `src/handlers/shared/context-hydration.ts`, `agent/entrypoint.py` | Mitigated (Iteration 3bis) — production path uses orchestrator's `assembleUserPrompt()` exclusively; the Python `assemble_prompt()` has a deprecation docstring and is retained only for local batch mode and dry-run mode. Risk of divergence reduced but not eliminated. |
 
@@ -182,7 +183,7 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Agent self-feedback | MEMORY.md (Insights section) | EVALUATION.md (Agent self-feedback section) |
 | Prompt versioning | EVALUATION.md (Prompt versioning) | ORCHESTRATOR.md (data model: `prompt_version`), ROADMAP.md (3b), `src/handlers/shared/prompt-version.ts` |
 | Extraction prompts | MEMORY.md (Extraction prompts) | EVALUATION.md (references), ROADMAP.md (3b) |
-| Tiered tool access | SECURITY.md (Input validation) | REPO_ONBOARDING.md, ROADMAP.md (Iter 5) |
+| Tiered tool access / Cedar policy engine | SECURITY.md (Input validation, Policy enforcement), `agent/src/policy.py` | REPO_ONBOARDING.md, ROADMAP.md (Iter 3bis partial, Iter 5 full) |
 | Memory isolation | SECURITY.md (Memory-specific threats) | MEMORY.md (Requirements), ROADMAP.md (Iter 5) |
 | Data protection / DR | SECURITY.md (Data protection) | — |
 | 2GB image limit | COMPUTE.md (AgentCore Runtime 2GB) | ROADMAP.md (Iter 5: alternate runtime) |
@@ -201,10 +202,17 @@ Each concept has a **source-of-truth document** and one or more documents that r
 | Agent swarm orchestration | ROADMAP.md (Iter 6) | — |
 | Adaptive model router | ROADMAP.md (Iter 5) | COST_MODEL.md |
 | Capability-based security | ROADMAP.md (Iter 5) | SECURITY.md |
+| Centralized policy framework | ROADMAP.md (Iter 5), SECURITY.md (Policy enforcement and audit), `agent/src/policy.py` (in-process Cedar, partially implemented) | ORCHESTRATOR.md, OBSERVABILITY.md |
+| GitHub App + AgentCore Token Vault | ROADMAP.md (Iter 3c), SECURITY.md (Authentication) | ORCHESTRATOR.md (context hydration), COMPUTE.md |
 | Live session replay | ROADMAP.md (Iter 4) | API_CONTRACT.md |
 | PR iteration task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
 | PR review task type | API_CONTRACT.md, ORCHESTRATOR.md | USER_GUIDE.md, PROMPT_GUIDE.md, SECURITY.md, AGENT_HARNESS.md |
+| Orchestrator pre-flight checks | ORCHESTRATOR.md (Context hydration, pre-flight sub-step) | API_CONTRACT.md (Error codes: GITHUB_UNREACHABLE, REPO_NOT_FOUND_OR_NO_ACCESS), ROADMAP.md (3c), SECURITY.md |
 | Bedrock Guardrail input screening | SECURITY.md (Input validation and guardrails) | ORCHESTRATOR.md (Context hydration), API_CONTRACT.md (Error codes), OBSERVABILITY.md (Alarms), ROADMAP.md (3c) |
+| Memory input hardening (3e Phase 1) | ROADMAP.md (Iter 3e Phase 1, co-ships with 3d) | MEMORY.md, SECURITY.md (Memory-specific threats) |
+| Per-tool-call structured telemetry | ROADMAP.md (Iter 3d) | SECURITY.md (Mid-execution enforcement), EVALUATION.md, OBSERVABILITY.md |
+| Mid-execution behavioral monitoring | ROADMAP.md (Iter 5), SECURITY.md (Mid-execution enforcement) | OBSERVABILITY.md |
+| Tool-call interceptor (Guardian pattern) | SECURITY.md (Mid-execution enforcement), `agent/src/hooks.py` + `agent/src/policy.py` (pre-execution implemented), ROADMAP.md (Iter 5 for post-execution) | REPO_ONBOARDING.md (Blueprint security props) |
 
 ### Per-repo model selection
 

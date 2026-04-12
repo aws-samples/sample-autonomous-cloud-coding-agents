@@ -129,6 +129,7 @@ Both are one-time, account-level setup steps — not managed by CDK.
 - **Guardrail screening events** — `guardrail_blocked` (content blocked by Bedrock Guardrail during hydration, with metadata: `reason`, `task_type`, `pr_number`, `sources`, `token_estimate`). Screening failures are logged with structured `metric_type` fields (not emitted as task events).
 - Time in each state (e.g. time in HYDRATING, time RUNNING, cold start to first agent activity).
 - Correlation with a task id and user id so users and operators can filter by task or user.
+- **Planned (Iteration 5, Phase 1): `PolicyDecisionEvent`** — A unified event schema for all policy decisions across the task lifecycle: admission control, budget/quota resolution, guardrail screening, tool-call interception, and finalization. Each event carries: decision ID, policy name, version, phase, input hash, result (`allow` | `deny` | `modify`), reason codes, and enforcement mode (`enforced` | `observed` | `steered`). This normalizes the current mix of structured events (e.g. `admission_rejected`, `guardrail_blocked`) and silent HTTP errors into a single auditable event type. See [ROADMAP.md Iteration 5](../guides/ROADMAP.md) (Centralized policy framework) and [SECURITY.md](./SECURITY.md) (Policy enforcement and audit).
 
 ### Agent execution
 

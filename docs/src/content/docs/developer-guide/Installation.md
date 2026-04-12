@@ -2,17 +2,14 @@
 title: Installation
 ---
 
-Clone the repository and open the project root (commands below assume your shell is at the repo root).
-
-```bash
-git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
-cd sample-autonomous-cloud-coding-agents
-```
+Commands below assume your shell is at the repo root after you clone.
 
 ### Pre-requisites
 
-- An AWS account. We recommend you deploy this solution in a new account
-- [AWS CLI](https://aws.amazon.com/cli/): configure your credentials
+**Install and configure yourself (not provided by this repository’s mise files):**
+
+- An AWS account (we recommend a dedicated account for this solution).
+- [AWS CLI](https://aws.amazon.com/cli/) with credentials configured, for example:
 
 ```
 aws configure --profile [your-profile]
@@ -22,13 +19,21 @@ Default region name [None]: us-east-1
 Default output format [None]: json
 ```
 
-- [Node](https://nodejs.org/en) >= v22.0.0
-- [AWS CDK](https://github.com/aws/aws-cdk/releases/tag/v2.233.0) >= 2.233.0
-- [Python](https://www.python.org/downloads/) >=3.9
-- [Yarn](https://classic.yarnpkg.com/lang/en/docs/cli/install/) >= 1.22.19
-- [mise](https://mise.jdx.dev/getting-started.html) (required for local agent Python tasks and checks)
-- [Docker](https://docs.docker.com/engine/install/)
-- A **GitHub personal access token** (PAT) with permission to access every repository you onboard (clone, push to branches, create and update pull requests)—often a fine-grained token scoped to **your fork** of `awslabs/agent-plugins` if you follow the fork workflow under **Repository preparation** at the start of this guide. After deployment, store it in the Secrets Manager secret the stack creates ([Post-deployment setup](#post-deployment-setup)); for local agent runs, export `GITHUB_TOKEN` (see **Local testing** below). Required scopes are documented in `agent/README.md`.
+- [Docker](https://docs.docker.com/engine/install/) — for local agent runs and CDK asset builds.
+- [mise](https://mise.jdx.dev/getting-started.html) — task runner and version manager for Node, security tools, and (under `agent/`) Python. Install from the official guide; it is **not** installed via npm.
+- **AWS CDK CLI** ≥ 2.233.0 — install globally with npm **after** mise is active so it uses the same Node as this repo (see [Set up your toolchain](#set-up-your-toolchain)): `npm install -g aws-cdk`.
+- A **GitHub personal access token** (PAT) with permission to access every repository you onboard—see **[Repository preparation](#repository-preparation)** (steps 2–3) for required fine-grained permissions and how to store the value in Secrets Manager after deploy. For local agent runs, export `GITHUB_TOKEN` (see **Local testing**). Extra runtime notes live in `agent/README.md`.
+
+**Versions this repo pins via mise (no separate Node/Yarn/Python install needed for the standard path):**
+
+| Tool | Where it is defined | When it is installed |
+|------|---------------------|----------------------|
+| **Node.js** 22.x | Root `mise.toml` | `mise install` from the repo root |
+| **Yarn Classic** (1.22.x) | Not in mise — use Corepack with Node (see below) | After `corepack enable` and `corepack prepare yarn@…` |
+| **Python** + **uv** | `agent/mise.toml` | `mise run install` (runs `mise run install` inside `agent/`) |
+| gitleaks, semgrep, osv-scanner, grype, zizmor, prek, … | Root `mise.toml` | `mise install` from the repo root |
+
+You do **not** need standalone installs of Node or Yarn from nodejs.org or the Yarn website if you follow [Set up your toolchain](#set-up-your-toolchain).
 
 #### One-time AWS account setup
 
@@ -40,20 +45,92 @@ aws xray update-trace-segment-destination --destination CloudWatchLogs
 
 Without this, `cdk deploy` will fail with: *"X-Ray Delivery Destination is supported with CloudWatch Logs as a Trace Segment Destination."*
 
-Install [mise](https://mise.jdx.dev/getting-started.html) using the official guide; it is not installed via npm. For the Node-based CLIs, run:
+### Set up your toolchain
+
+1. **Install mise** — follow [Getting started](https://mise.jdx.dev/getting-started.html).
+
+2. **Activate mise in your shell** so `node`, task tools, and project tasks resolve correctly. Add one line to `~/.zshrc` or `~/.bashrc`:
+
+   ```bash
+   eval "$(mise activate zsh)"   # or: eval "$(mise activate bash)"
+   ```
+
+   Reload the file (`source ~/.zshrc`) or open a new terminal. Without this step, your shell may keep using a system Node (or no `yarn`), and `mise run install` can fail with **`yarn: command not found`**.
+
+3. **Clone the repository** and change into it:
+
+   ```bash
+   git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
+   cd sample-autonomous-cloud-coding-agents
+   ```
+
+4. **Trust this repository’s mise config.** Mise refuses to apply project-local settings until you trust them (security feature):
+
+   ```bash
+   mise trust
+   ```
+
+5. **Install tools from the root `mise.toml`** (Node 22, security scanners, prek, etc.):
+
+   ```bash
+   mise install
+   ```
+
+6. **Enable Yarn via Corepack.** Node ships with Corepack, but Yarn is not on your PATH until Corepack is enabled. This monorepo uses **Yarn Classic** (1.x) workspaces:
+
+   ```bash
+   corepack enable
+   corepack prepare yarn@1.22.22 --activate
+   ```
+
+   The `prepare` line installs a 1.22.x release compatible with the workspace (`yarn.lock` / engines expectations). If `yarn` is still missing, confirm step 2 (shell activation) and that `which node` points into your mise shims.
+
+7. **Sanity check** (optional):
+
+   ```bash
+   node --version   # expect v22.x
+   yarn --version   # expect 1.22.x
+   ```
+
+8. **Install the AWS CDK CLI** using the same Node as mise:
+
+   ```bash
+   npm install -g aws-cdk
+   ```
+
+9. **Install workspace dependencies and build.** Namespaced mise tasks require experimental mode:
+
+   ```bash
+   export MISE_EXPERIMENTAL=1
+   mise run install
+   mise run build
+   ```
+
+`mise run install` runs `yarn install` for the Yarn workspaces (`cdk`, `cli`, `docs`), then `mise run install` in `agent/` for Python dependencies, and installs [prek](https://github.com/j178/prek) git hooks when you are inside a Git checkout.
+
+### First time with mise? Troubleshooting
+
+Use this section if **`mise run install`** fails or versions look wrong.
+
+| Symptom | What to check |
+|---------|----------------|
+| **`yarn: command not found`** | Mise shell activation (step 2), then `corepack enable` and `corepack prepare yarn@1.22.22 --activate` (step 6). |
+| **`node` is not v22** | Shell activation (step 2); run `mise install` in the repo root (step 5). |
+| Mise errors about **untrusted** config | From the repo root: `mise trust`, then `mise install` again. |
+| **`MISE_EXPERIMENTAL` required** | Export `MISE_EXPERIMENTAL=1` for tasks like `mise //cdk:build` (see [CONTRIBUTING.md](/developer-guide/contributing)). |
+
+Minimal recovery sequence:
 
 ```bash
-npm install -g npm aws-cdk
-```
-
-Install repository dependencies and run an initial build before making changes:
-
-```bash
+eval "$(mise activate zsh)"   # or bash; add permanently to your shell rc file
+cd /path/to/sample-autonomous-cloud-coding-agents
+mise trust
+mise install
+corepack enable
+corepack prepare yarn@1.22.22 --activate
+export MISE_EXPERIMENTAL=1
 mise run install
-mise run build
 ```
-
-`mise run install` runs `yarn install` for the workspaces and `mise run install` in `agent/` for Python dependencies.
 
 ### Suggested development flow
 
@@ -205,11 +282,11 @@ If `put-secret-value` returns **`Invalid endpoint: https://secretsmanager..amazo
 
 #### Set the GitHub token
 
-The agent reads the GitHub personal access token from Secrets Manager at startup. After deploying, store your PAT in the secret:
+The agent reads the GitHub personal access token from Secrets Manager at runtime. The canonical flow (permissions table + `put-secret-value` commands) is **[Repository preparation](#repository-preparation), step 3**—follow that first.
+
+If you only need the commands here, use the same snippet as in that section (adjust **`--stack-name`** if you renamed the stack). If `SECRET_ARN` is empty after setting `REGION`, list outputs in that Region (`describe-stacks` … `--query 'Stacks[0].Outputs' --output table`) and confirm the row `GitHubTokenSecretArn` exists—wrong stack name or an incomplete deployment are the other common causes.
 
 ```bash
-# Same Region you deployed to (example: us-east-1). Must be non-empty—see note above
-# about "Invalid endpoint: ...secretsmanager..amazonaws.com".
 REGION=us-east-1
 
 SECRET_ARN=$(aws cloudformation describe-stacks \
@@ -223,10 +300,6 @@ aws secretsmanager put-secret-value \
   --secret-id "$SECRET_ARN" \
   --secret-string "ghp_your_fine_grained_pat_here"
 ```
-
-If `SECRET_ARN` is still empty after setting `REGION`, list outputs in that Region (`describe-stacks` … `--query 'Stacks[0].Outputs' --output table`) and confirm the row `GitHubTokenSecretArn` exists—wrong stack name or an incomplete deployment are the other common causes.
-
-See `agent/README.md` for the required PAT permissions.
 
 #### Onboard repositories
 

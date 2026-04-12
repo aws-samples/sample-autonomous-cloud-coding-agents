@@ -43,7 +43,20 @@ interface BlueprintProps {
   agent?: {
     modelId?: string;                  // foundation model override
     maxTurns?: number;                 // default turn limit for this repo
+    maxBudgetUsd?: number;             // default cost budget for this repo ($0.01–$100)
+    memoryTokenBudget?: number;        // memory context token budget override (default: 2000)
     systemPromptOverrides?: string;    // additional system prompt instructions
+  };
+  // Security (planned — Iteration 5)
+  security?: {
+    capabilityTier?: 'standard' | 'elevated' | 'read-only';  // tool access tier
+    filePathDenyList?: string[];       // deny writes to these paths (e.g. '.github/workflows/')
+    bashAllowlist?: string[];          // allowed bash commands (overrides default tier allowlist)
+    circuitBreaker?: {                 // behavioral circuit breaker thresholds
+      maxCallsPerMinute?: number;      // default: 50
+      maxCostUsd?: number;             // default: 10
+      maxConsecutiveFailures?: number; // default: 5
+    };
   };
   // Credentials
   credentials?: {
@@ -100,6 +113,8 @@ interface RepoConfig {
   // Agent
   model_id?: string;
   max_turns?: number;
+  max_budget_usd?: number;
+  memory_token_budget?: number;
   system_prompt_overrides?: string;
   // Credentials
   github_token_secret_arn?: string;
@@ -178,6 +193,8 @@ Used when a `RepoConfig` field is absent:
 | `runtime_arn` | Stack-level `RUNTIME_ARN` env var | CDK stack props |
 | `model_id` | Claude Sonnet 4 | CDK stack props |
 | `max_turns` | 100 | Platform constant (`DEFAULT_MAX_TURNS`) |
+| `max_budget_usd` | None (no budget limit) | — |
+| `memory_token_budget` | 2000 | Platform constant |
 | `github_token_secret_arn` | Stack-level `GITHUB_TOKEN_SECRET_ARN` | CDK stack props |
 | `poll_interval_ms` | 30000 | Orchestrator constant |
 | `system_prompt_overrides` | None | — |
@@ -203,7 +220,8 @@ The orchestrator loads the `RepoConfig` in the first step (after `load-task`) an
 | `load-blueprint` | `compute_type`, `custom_steps`, `step_sequence` (resolves the full step pipeline) |
 | `admission-control` | `status` (defense-in-depth; already checked at API level) |
 | `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides` |
-| `start-session` | `compute_type`, `runtime_arn`, `model_id`, `max_turns` |
+| `pre-flight` | `github_token_secret_arn` (verifies GitHub API reachability and repo access) |
+| `start-session` | `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd` |
 | `await-agent-completion` | `poll_interval_ms` |
 | `finalize` | (custom post-agent steps run before finalize if configured) |
 | Custom steps (layer 2/3) | `custom_steps[].config` (step-specific configuration) |
@@ -288,6 +306,7 @@ When a `stepSequence` is provided (Layer 3), the framework validates it at deplo
 | Step | Why it's required |
 |---|---|
 | `admission-control` | Enforces concurrency limits. Omitting it leaks concurrency slots. |
+| `pre-flight` | Fail-closed readiness checks (GitHub API reachability, repo access). Omitting it allows doomed tasks to consume compute. |
 | `start-session` | Starts the compute session. Without it, nothing runs. |
 | `await-agent-completion` | Polls for session completion. Without it, the orchestrator cannot detect when the agent finishes. |
 | `finalize` | Releases concurrency slots, emits terminal events, persists outcome. Omitting it leaks concurrency counters and leaves tasks in non-terminal states. |
@@ -296,6 +315,7 @@ When a `stepSequence` is provided (Layer 3), the framework validates it at deplo
 
 **Ordering constraints:**
 - `admission-control` must be first.
+- `pre-flight` must precede `start-session`.
 - `start-session` must precede `await-agent-completion`.
 - `finalize` must be last.
 - Custom steps can be inserted between any adjacent pair of built-in steps, but cannot precede `admission-control` or follow `finalize`.

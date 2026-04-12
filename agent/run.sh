@@ -227,5 +227,5 @@ if [[ "$MODE" == "server" ]]; then
     echo ""
     docker run "${DOCKER_ARGS[@]}" bgagent-local
 else
-    docker run "${DOCKER_ARGS[@]}" bgagent-local python /app/entrypoint.py
+    docker run "${DOCKER_ARGS[@]}" bgagent-local python /app/src/entrypoint.py
 fi
