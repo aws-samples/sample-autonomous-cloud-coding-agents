@@ -119,7 +119,7 @@ The platform enforces policies at multiple points in the task lifecycle. Today, 
 | **Submission** | Guardrail input screening | `create-task-core.ts` (Bedrock Guardrails) | HTTP 400 response only — no event emitted |
 | **Submission** | Idempotency check | `create-task-core.ts` | HTTP 409 response only — no event emitted |
 | **Admission** | Concurrency limit | `orchestrator.ts` (`admissionControl`) | `admission_rejected` event emitted |
-| **Pre-flight** | GitHub reachability, repo access, PR access | `preflight.ts` | `preflight_failed` event emitted |
+| **Pre-flight** | GitHub reachability, repo access, PAT repo permissions (push / `viewerPermission` by task type), PR access | `preflight.ts` | `preflight_failed` event emitted |
 | **Hydration** | Guardrail prompt screening (PR + issue content) | `context-hydration.ts` | `guardrail_blocked` event emitted |
 | **Hydration** | Budget/quota resolution (3-tier max_turns, 2-tier max_budget_usd) | `orchestrator.ts` (`hydrateAndTransition`) | Values persisted on task record — no policy decision event |
 | **Hydration** | Token budget for prompt assembly | `context-hydration.ts` | No event emitted |

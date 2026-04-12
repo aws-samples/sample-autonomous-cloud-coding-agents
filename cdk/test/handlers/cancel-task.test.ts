@@ -21,6 +21,11 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 // --- Mocks ---
 const mockSend = jest.fn();
+const mockAgentCoreSend = jest.fn();
+jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
+  BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
+  StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
+}));
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
@@ -34,6 +39,7 @@ jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.TASK_RETENTION_DAYS = '90';
+process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/default';
 
 import { handler } from '../../src/handlers/cancel-task';
 
@@ -47,6 +53,8 @@ const RUNNING_TASK = {
   status_created_at: 'RUNNING#2025-03-15T10:30:00Z',
   created_at: '2025-03-15T10:30:00Z',
   updated_at: '2025-03-15T10:31:00Z',
+  session_id: '550e8400-e29b-41d4-a716-446655440000',
+  agent_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/task-runtime',
 };
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
@@ -98,6 +106,7 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAgentCoreSend.mockResolvedValue({});
   // Default: GetCommand returns running task, UpdateCommand + PutCommand succeed
   mockSend
     .mockResolvedValueOnce({ Item: RUNNING_TASK }) // GetCommand
@@ -110,6 +119,10 @@ describe('cancel-task handler', () => {
     const result = await handler(makeEvent());
 
     expect(result.statusCode).toBe(200);
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+    const cmd = mockAgentCoreSend.mock.calls[0][0];
+    expect(cmd.input.runtimeSessionId).toBe(RUNNING_TASK.session_id);
+    expect(cmd.input.agentRuntimeArn).toBe(RUNNING_TASK.agent_runtime_arn);
     const body = JSON.parse(result.body);
     expect(body.data.task_id).toBe('task-1');
     expect(body.data.status).toBe('CANCELLED');
@@ -216,5 +229,49 @@ describe('cancel-task handler', () => {
 
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('does not call StopRuntimeSession when RUNNING but session_id is missing', async () => {
+    mockSend.mockReset();
+    const noSession = { ...RUNNING_TASK };
+    delete (noSession as { session_id?: string }).session_id;
+    mockSend
+      .mockResolvedValueOnce({ Item: noSession })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('uses RUNTIME_ARN when agent_runtime_arn is not on the task record', async () => {
+    mockSend.mockReset();
+    const withoutArn = { ...RUNNING_TASK };
+    delete (withoutArn as { agent_runtime_arn?: string }).agent_runtime_arn;
+    mockSend
+      .mockResolvedValueOnce({ Item: withoutArn })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+    const cmd = mockAgentCoreSend.mock.calls[0][0];
+    expect(cmd.input.agentRuntimeArn).toBe(process.env.RUNTIME_ARN);
+  });
+
+  test('returns 200 when StopRuntimeSession fails', async () => {
+    mockSend.mockReset();
+    mockAgentCoreSend.mockRejectedValueOnce(new Error('Throttling'));
+    mockSend
+      .mockResolvedValueOnce({ Item: RUNNING_TASK })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockAgentCoreSend).toHaveBeenCalled();
   });
 });

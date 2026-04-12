@@ -9,6 +9,8 @@ import subprocess
 import sys
 import time
 
+from pydantic import ValidationError
+
 import memory as agent_memory
 import task_state
 from config import AGENT_WORKSPACE, build_config, get_config
@@ -27,6 +29,55 @@ from runner import run_agent
 from shell import log
 from system_prompt import SYSTEM_PROMPT
 from telemetry import format_bytes, get_disk_usage, print_metrics
+
+_SDK_NO_RESULT_MESSAGE = (
+    "Agent SDK stream ended without a ResultMessage (agent_status=unknown). "
+    "Treat as failure: possible SDK bug, network interruption, or protocol mismatch."
+)
+
+
+def _chain_prior_agent_error(agent_result: AgentResult | None, exc: BaseException) -> str:
+    """Preserve agent-layer failures when a later pipeline stage raises."""
+    tail = f"{type(exc).__name__}: {exc}"
+    if agent_result is None:
+        return tail
+    if agent_result.error:
+        return f"{agent_result.error}; subsequent failure: {tail}"
+    if agent_result.status == "error":
+        return f"Agent reported status=error; subsequent failure: {tail}"
+    return tail
+
+
+def _resolve_overall_task_status(
+    agent_result: AgentResult,
+    *,
+    build_ok: bool,
+    pr_url: str | None,
+) -> tuple[str, str | None]:
+    """Map agent outcome + build gate to (overall_status, error_for_task_result)."""
+    agent_status = agent_result.status
+    err = agent_result.error
+
+    if agent_status in ("success", "end_turn") and build_ok:
+        return "success", err
+
+    if agent_status == "unknown":
+        if pr_url:
+            log(
+                "INFO",
+                f"No ResultMessage from SDK (agent_status=unknown); pr_url present: {pr_url}",
+            )
+        if build_ok:
+            log(
+                "INFO",
+                "No ResultMessage from SDK; build_ok=True (informational; task still failed)",
+            )
+        merged = f"{err}; {_SDK_NO_RESULT_MESSAGE}" if err else _SDK_NO_RESULT_MESSAGE
+        return "error", merged
+
+    if not err:
+        err = f"Task did not succeed (agent_status={agent_status!r}, build_ok={build_ok})"
+    return "error", err
 
 
 def _write_memory(
@@ -149,20 +200,43 @@ def run_task(
         },
     ) as root_span:
         task_state.write_running(config.task_id)
+        task_state.write_heartbeat(config.task_id)
 
+        agent_result: AgentResult | None = None
         try:
             # Context hydration
             with task_span("task.context_hydration"):
                 if hydrated_context:
                     log("TASK", "Using hydrated context from orchestrator")
-                    hc = HydratedContext.model_validate(hydrated_context)
+                    try:
+                        hc = HydratedContext.model_validate(hydrated_context)
+                    except ValidationError as err:
+                        parts = [
+                            f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}"
+                            for e in err.errors()
+                        ]
+                        log(
+                            "ERROR",
+                            "HydratedContext validation failed (orchestrator vs agent contract): "
+                            + "; ".join(parts),
+                        )
+                        raise
                     prompt = hc.user_prompt
                     if hc.issue:
                         config.issue = hc.issue
+                    if hc.resolved_branch_name:
+                        config.branch_name = hc.resolved_branch_name
                     if hc.resolved_base_branch:
                         config.base_branch = hc.resolved_base_branch
                     if hc.truncated:
                         log("WARN", "Context was truncated by orchestrator token budget")
+                    if hc.fallback_error:
+                        log("WARN", f"Orchestrator context fallback: {hc.fallback_error}")
+                    if hc.guardrail_blocked:
+                        log(
+                            "WARN",
+                            f"Orchestrator guardrail blocked content: {hc.guardrail_blocked}",
+                        )
                 else:
                     hc = None
                     # Local batch mode — fetch issue and assemble prompt in-container
@@ -240,7 +314,7 @@ def run_task(
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))
 
-            # Post-hooks
+            # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
                 # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)
                 if config.task_type == "pr_review":
@@ -276,16 +350,9 @@ def run_task(
             duration = time.time() - start_time
             disk_after = get_disk_usage(AGENT_WORKSPACE)
 
-            # Determine overall status:
-            #   - "success" if the agent reported success/end_turn and the build passes
-            #     (or the build was already broken before the agent ran — pre-existing failure)
-            #   - "success" if agent_status is unknown (SDK didn't yield ResultMessage)
-            #     but the pipeline produced a PR and the build didn't regress
-            #   - "error" otherwise
-            # NOTE: lint_passed is intentionally NOT used in the status
-            # determination — lint failures are advisory and reported in the PR
-            # body and span attributes but do not affect the task's terminal
-            # status. Lint regression detection is planned for Iteration 3c.
+            # Overall status: do not infer success from PR/build when the SDK never
+            # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
+            # NOTE: lint_passed is intentionally NOT used for terminal status.
             agent_status = agent_result.status
             # Default True = assume build was green before, so a post-agent
             # failure IS counted as a regression (conservative).
@@ -302,17 +369,11 @@ def run_task(
                     "Post-agent build failed, but build was already failing before "
                     "agent changes — not counting as regression",
                 )
-            if agent_status in ("success", "end_turn") and build_ok:
-                overall_status = "success"
-            elif agent_status == "unknown" and pr_url and build_ok:
-                log(
-                    "WARN",
-                    "Agent SDK did not yield a ResultMessage, but PR was created "
-                    "and build didn't regress — treating as success",
-                )
-                overall_status = "success"
-            else:
-                overall_status = "error"
+            overall_status, result_error = _resolve_overall_task_status(
+                agent_result,
+                build_ok=build_ok,
+                pr_url=pr_url,
+            )
 
             # Build TaskResult
             usage = agent_result.usage
@@ -331,7 +392,7 @@ def run_task(
                 disk_delta=format_bytes(disk_after - disk_before),
                 prompt_version=prompt_version or None,
                 memory_written=memory_written,
-                error=agent_result.error,
+                error=result_error,
                 session_id=agent_result.session_id or None,
                 input_tokens=usage.input_tokens if usage else None,
                 output_tokens=usage.output_tokens if usage else None,
@@ -377,7 +438,14 @@ def run_task(
         except Exception as e:
             # Ensure the task is marked FAILED in DynamoDB even if the pipeline
             # crashes before reaching the normal terminal-state write.
-            crash_result = TaskResult(status="error", error=str(e), task_id=config.task_id)
+            agent_for_chain = agent_result
+            combined = _chain_prior_agent_error(agent_for_chain, e)
+            crash_result = TaskResult(
+                status="error",
+                error=combined,
+                task_id=config.task_id,
+                agent_status=agent_for_chain.status if agent_for_chain else "unknown",
+            )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             raise
 

@@ -84,7 +84,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       if (TERMINAL_STATUSES.includes(current.status)) {
         return false;
       }
-      const result = await runPreflightChecks(task.repo, blueprintConfig, task.pr_number);
+      const result = await runPreflightChecks(task.repo, blueprintConfig, task.pr_number, task.task_type);
       if (!result.passed) {
         const errorMessage = `Pre-flight check failed: ${result.failureReason}${result.failureDetail ? ' — ' + result.failureDetail : ''}`;
         await failTask(taskId, current.status, errorMessage, task.user_id, true);
@@ -127,12 +127,11 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   // Step 5: Wait for agent to finish
-  // NOTE: Polls DynamoDB every 30s rather than re-invoking the AgentCore session.
-  // The agent writes terminal status directly to DDB. If the agent crashes without
-  // writing a terminal status, we detect it via the HYDRATING early-exit check
-  // (MAX_NON_RUNNING_POLLS ~5min); otherwise the loop runs up to MAX_POLL_ATTEMPTS
-  // (~8.5h). A future improvement could add AgentCore session status checks for
-  // faster crash detection.
+  // Polls DynamoDB on each interval. The agent writes terminal status when done.
+  // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
+  // goes stale, `pollTaskStatus` sets `sessionUnhealthy` so we fail fast instead
+  // of waiting the full MAX_POLL_ATTEMPTS window (~8.5h) after a silent crash.
+  // HYDRATING without transition to RUNNING is still bounded by MAX_NON_RUNNING_POLLS (~5min).
   const finalPollState = await context.waitForCondition<PollState>(
     'await-agent-completion',
     async (state) => {
@@ -142,6 +141,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       initialState: { attempts: 0 },
       waitStrategy: (state: PollState) => {
         if (state.lastStatus && TERMINAL_STATUSES.includes(state.lastStatus)) {
+          return { shouldContinue: false };
+        }
+        if (state.sessionUnhealthy) {
           return { shouldContinue: false };
         }
         if (state.attempts >= MAX_POLL_ATTEMPTS) {

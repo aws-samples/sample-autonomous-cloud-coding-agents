@@ -3,6 +3,7 @@ title: Tips
 ---
 
 - **Onboard your repo first**: Repositories must be registered via a `Blueprint` construct before tasks can target them. If you get a `REPO_NOT_ONBOARDED` error, contact your platform administrator.
+- **GitHub PAT and `preflight_failed`**: If a task ends in `FAILED` with a `preflight_failed` event, the platform rejected the run before the agent consumed compute—often a token scoped read-only while the task needed push access. Check event `reason` / `detail` and align your fine-grained PAT with [Repository preparation](/developer-guide/repository-preparation); then update the secret and submit a new task.
 - **Prepare your repo**: The agent works best with repositories that are agent friendly. See the [Developer guide](/developer-guide/introduction) for repository preparation advice.
 - **Add a CLAUDE.md**: The agent automatically loads project-level configuration from your repository — `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, `.claude/agents/`, and `.mcp.json`. Use these to provide project-specific build commands, conventions, constraints, custom subagents, and architecture notes. See the [Prompt guide](/user-guide/prompt-guide#repo-level-customization) for details and examples.
 - **Issue vs text**: When using `--issue` (CLI) or `issue_number` (API), the agent fetches the full issue body from GitHub, including any labels, comments, and linked context. This is usually better than a short text description.
