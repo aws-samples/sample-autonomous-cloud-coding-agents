@@ -125,6 +125,21 @@ describe('loadRepoConfig', () => {
     }
   });
 
+  test('returns cedar_policies when present in config', async () => {
+    const policies = ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'];
+    const config = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      cedar_policies: policies,
+    };
+    mockSend.mockResolvedValueOnce({ Item: config });
+
+    const result = await loadRepoConfig('org/repo');
+    expect(result?.cedar_policies).toEqual(policies);
+  });
+
   test('throws on DynamoDB error', async () => {
     mockSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
     await expect(loadRepoConfig('org/repo')).rejects.toThrow(

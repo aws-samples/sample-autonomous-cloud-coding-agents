@@ -20,8 +20,9 @@ from typing import Any
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
-from entrypoint import resolve_github_token, run_task
+from config import resolve_github_token
 from observability import set_session_id
+from pipeline import run_task
 
 # Log the active event loop policy at import time so operators can diagnose
 # uvloop-related subprocess conflicts (see: uvloop SIGCHLD bug).
@@ -106,6 +107,7 @@ def _run_task_background(
     task_type: str = "new_task",
     branch_name: str = "",
     pr_number: str = "",
+    cedar_policies: list[str] | None = None,
 ) -> None:
     """Run the agent task in a background thread."""
     try:
@@ -131,6 +133,7 @@ def _run_task_background(
             task_type=task_type,
             branch_name=branch_name,
             pr_number=pr_number,
+            cedar_policies=cedar_policies,
         )
     except Exception as e:
         print(f"Background task {task_id} failed: {type(e).__name__}: {e}")
@@ -170,6 +173,7 @@ def invoke_agent(request: Request, body: InvocationRequest):
     task_type = inp.get("task_type", "new_task")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
+    cedar_policies = inp.get("cedar_policies") or []
 
     # Extract AgentCore session ID from request headers for OTEL correlation
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
@@ -194,6 +198,7 @@ def invoke_agent(request: Request, body: InvocationRequest):
             task_type,
             branch_name,
             pr_number,
+            cedar_policies,
         ),
     )
     # Track the thread for graceful shutdown BEFORE starting it so

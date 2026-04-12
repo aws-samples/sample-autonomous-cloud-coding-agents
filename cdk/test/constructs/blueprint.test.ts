@@ -235,6 +235,71 @@ describe('Blueprint construct', () => {
     expect(blueprint.egressAllowlist).toEqual([]);
   });
 
+  test('exposes cedarPolicies as public property', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      security: { cedarPolicies: ['permit (principal, action, resource);'] },
+    });
+
+    expect(blueprint.cedarPolicies).toEqual(['permit (principal, action, resource);']);
+  });
+
+  test('cedarPolicies defaults to empty array', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+    });
+
+    expect(blueprint.cedarPolicies).toEqual([]);
+  });
+
+  test('maps security cedar policies to DynamoDB list', () => {
+    const { template } = createStack({
+      security: { cedarPolicies: ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'] },
+    });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('"cedar_policies":{"L":[{"S":"forbid (principal, action, resource) when { resource == Agent::Tool::\\"Bash\\" };"}]}');
+  });
+
+  test('omits cedar_policies when security is absent', () => {
+    const { template } = createStack();
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('cedar_policies');
+  });
+
+  test('omits cedar_policies when cedarPolicies is empty', () => {
+    const { template } = createStack({
+      security: { cedarPolicies: [] },
+    });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('cedar_policies');
+  });
+
+  test('onUpdate includes cedar_policies in UpdateExpression', () => {
+    const { template } = createStack({
+      security: { cedarPolicies: ['permit (principal, action, resource);'] },
+    });
+    const parts = getUpdateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('#cedar_policies');
+  });
+
   test('onUpdate uses DynamoDB updateItem to preserve onboarded_at', () => {
     const { template } = createStack();
     const parts = getUpdateJoinParts(template);
