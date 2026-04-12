@@ -179,7 +179,7 @@ See the Admission control section for details. Validates that the task is allowe
 
 #### Step 2: Context hydration (deterministic)
 
-See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). The assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it (PR tasks: always screened; `new_task`: screened when issue content is present). The output is a fully assembled prompt, ready to pass to the compute session.
+See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)) verifies PR accessibility when `pr_number` is set and validates that the resolved GitHub token has sufficient repository permissions for the task type (so read-only PATs fail early with `INSUFFICIENT_GITHUB_REPO_PERMISSIONS`). The assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it (PR tasks: always screened; `new_task`: screened when issue content is present). The output is a fully assembled prompt, ready to pass to the compute session.
 
 #### Step 3: Session start and agent execution (deterministic start + agentic execution)
 
@@ -224,7 +224,7 @@ When the orchestrator loads a task's `blueprint_config`, it resolves the step pi
 
 1. **Load `RepoConfig`** from the `RepoTable` by `repo` (PK). Merge with platform defaults (see [REPO_ONBOARDING.md](./REPO_ONBOARDING.md#platform-defaults) for default values and override precedence).
 2. **Resolve compute strategy** from `compute_type` (default: `agentcore`). The strategy implements the `ComputeStrategy` interface (see [REPO_ONBOARDING.md](./REPO_ONBOARDING.md#compute-strategy-interface)).
-3. **Build step list.** If `step_sequence` is provided, use it; otherwise use the default sequence (`admission-control` → `hydrate-context` → `pre-flight` → `start-session` → `await-agent-completion` → `finalize`). The `pre-flight` step runs fail-closed readiness checks (GitHub API reachability, repo access, PR accessibility for PR tasks) before consuming compute — see [ROADMAP.md Iteration 3c](../guides/ROADMAP.md). For each entry, resolve to a built-in step function or a Lambda invocation wrapper.
+3. **Build step list.** If `step_sequence` is provided, use it; otherwise use the default sequence (`admission-control` → `hydrate-context` → `pre-flight` → `start-session` → `await-agent-completion` → `finalize`). The `pre-flight` step runs fail-closed readiness checks (GitHub API reachability, repository access, **PAT privilege** for the task type via REST `permissions` and GraphQL `viewerPermission` when needed, PR accessibility for PR tasks) before consuming compute — see [ROADMAP.md Iteration 3c](../guides/ROADMAP.md). For each entry, resolve to a built-in step function or a Lambda invocation wrapper.
 4. **Inject custom steps.** If `custom_steps` are defined and no explicit `step_sequence` is provided, insert them at their declared `phase` position (pre-agent steps before `start-session`, post-agent steps after `await-agent-completion`).
 5. **Validate.** Check that required steps are present and correctly ordered (see [step sequence validation](./REPO_ONBOARDING.md#step-sequence-validation)). If invalid, fail the task with `INVALID_STEP_SEQUENCE`.
 6. **Execute.** Iterate the resolved list. For each step: check cancellation, filter `blueprintConfig` to only the fields that step needs (stripping credential ARNs for custom Lambda steps), execute with retry policy, enforce `StepOutput.metadata` size budget (10KB), prune `previousStepResults` to last 5 steps, emit events. Built-in steps that need durable waits (e.g. `await-agent-completion`) receive the `DurableContext` and `ComputeStrategy` so they can call `waitForCondition` and `computeStrategy.pollSession()` internally — no name-based special-casing in the framework loop.
@@ -424,7 +424,13 @@ The orchestrator needs to know whether the session is still running. Two complem
 
 **Iteration 1 (historical).** The `invoke_agent_runtime` call blocked; when it returned, the session was over. No explicit liveness check was needed.
 
-**Fallback: DynamoDB heartbeat (optional enhancement).** As defense in depth, the agent can write a heartbeat timestamp to DynamoDB every N minutes. The orchestrator reads it during its poll cycle. A missing heartbeat (e.g. none in the last 10 minutes while `/ping` reports `HealthyBusy`) could indicate the agent is stuck but not idle — triggering investigation or forced termination.
+**DynamoDB heartbeat (implemented).** The agent writes an `agent_heartbeat_at` timestamp to DynamoDB every 45 seconds via a daemon thread in `server.py`. The heartbeat worker is resilient to transient DynamoDB errors (each write is wrapped in try/except with a retry on the next interval). The orchestrator's `pollTaskStatus` reads this timestamp during each poll cycle and applies two thresholds:
+
+- **Grace period** (`AGENT_HEARTBEAT_GRACE_SEC = 120s`): After transitioning to RUNNING, the orchestrator waits this long before expecting heartbeats. This covers container startup and pipeline initialization.
+- **Stale threshold** (`AGENT_HEARTBEAT_STALE_SEC = 240s`): If `agent_heartbeat_at` exists and is older than this, the session is treated as lost (crash, OOM, or stuck).
+- **Early crash detection**: If `agent_heartbeat_at` is never set and the task has been RUNNING past the combined grace + stale window (360s), the orchestrator treats this as an early crash (agent died before the pipeline started).
+
+When either condition is met, `pollTaskStatus` sets `sessionUnhealthy = true` in the poll state. The `finalizeTask` function then transitions the task to FAILED with the reason `"Agent session lost: no recent heartbeat from the runtime"`. The pipeline also writes an initial heartbeat at the very start of `run_task()` to minimize the window between session start and first heartbeat.
 
 ### The 15-minute idle timeout problem
 
@@ -441,7 +447,7 @@ AgentCore Runtime terminates sessions after 15 minutes of inactivity (no `/ping`
 When the session ends (agent finishes, crashes, or is terminated), the orchestrator detects this:
 
 - **Iteration 1 (historical):** The `invoke_agent_runtime` call returned (it blocked). The response body contained the agent's output (status, PR URL, cost, etc.).
-- **Target state:** The orchestrator polls the agent via re-invocation on the same session (see Invocation model above). Completion is detected when: (a) the agent responds with a "completed" or "failed" status in the poll response, or (b) the re-invocation fails because the session was terminated (idle timeout, crash, or 8-hour limit reached). In the durable orchestrator, a `waitForCondition` evaluates the poll result at each interval and resumes the pipeline when the condition is met. See the session monitoring pattern in the Implementation options section.
+- **Target state:** The orchestrator polls the agent via re-invocation on the same session (see Invocation model above). Completion is detected when: (a) the agent responds with a "completed" or "failed" status in the poll response, (b) the re-invocation fails because the session was terminated (idle timeout, crash, or 8-hour limit reached), or (c) the DynamoDB heartbeat check detects the session is unhealthy (stale or missing `agent_heartbeat_at` — see DynamoDB heartbeat above). In the durable orchestrator, a `waitForCondition` evaluates the poll result at each interval and resumes the pipeline when the condition is met. See the session monitoring pattern in the Implementation options section.
 
 ### External termination (cancellation)
 
@@ -539,7 +545,8 @@ This section uses an FMEA (Failure Mode and Effects Analysis) approach: for each
 
 | Failure mode | Impact | Recovery |
 |---|---|---|
-| Agent crashes mid-task (unhandled exception) | Partial branch may exist on GitHub | Orchestrator detects session end. Finalization inspects GitHub state. If commits exist, may mark as partial completion. Task transitions to `FAILED` or `COMPLETED` with partial flag. |
+| Agent crashes mid-task (unhandled exception) | Partial branch may exist on GitHub | Orchestrator detects session end via DynamoDB heartbeat staleness check (see Liveness monitoring). Finalization inspects GitHub state. If commits exist, may mark as partial completion. Task transitions to `FAILED` or `COMPLETED` with partial flag. |
+| Agent crashes before pipeline starts (early crash: OOM during startup, import error, container failure) | `agent_heartbeat_at` is never set in DynamoDB | `pollTaskStatus` detects missing heartbeat after the combined grace + stale window (360s). Task transitions to `FAILED` with reason "Agent session lost". |
 | Agent runs out of turns (max_turns limit) | Agent stopped by SDK, not by crash | Session ends normally with status `end_turn`. Orchestrator finalizes; if PR exists, task is `COMPLETED`. |
 | Agent exceeds cost budget (max_budget_usd limit) | Agent stopped by SDK when budget is reached | Session ends normally. Orchestrator finalizes; if PR exists, task is `COMPLETED`. |
 | Agent is idle for 15 min (AgentCore kills session) | Work in progress may be lost if not committed | Task transitions to `TIMED_OUT`. Partial work may be on the branch if the agent committed before going idle. |
@@ -558,7 +565,7 @@ This section uses an FMEA (Failure Mode and Effects Analysis) approach: for each
 |---|---|---|
 | Orchestrator crashes during `HYDRATING` | Task stuck in `HYDRATING` | Durable execution (Lambda Durable Functions) automatically replays from the last checkpoint, skipping completed steps. Without durable orchestration, a recovery process detects stuck tasks (in `HYDRATING` for > N minutes) and restarts them. |
 | Orchestrator crashes during `RUNNING` | Task stuck in `RUNNING`, session may still be alive | Recovery process detects task is in `RUNNING` but orchestrator is not managing it. It resumes monitoring the session (using the stored session ID). When the session ends, it runs finalization. |
-| Orchestrator crashes during `FINALIZING` | Task stuck in `FINALIZING` | Recovery process detects and restarts finalization. Finalization steps must be idempotent (decrementing a counter twice should be detected and handled). |
+| Orchestrator crashes during `FINALIZING` | Task stuck in `FINALIZING` | Recovery process detects and restarts finalization. Finalization steps are idempotent. The heartbeat-detected crash finalization path avoids double-decrement by only emitting events and releasing concurrency after a successful `transitionTask`; if the transition fails (task already terminal), it re-reads the task and handles accordingly. |
 | DynamoDB unavailable during state transition | State not persisted | Retry with backoff. If the state transition cannot be persisted, the orchestrator must not proceed (risk of inconsistency). After retries are exhausted, alert operators. |
 
 ### Recovery mechanisms summary
@@ -603,7 +610,7 @@ Concurrency is tracked using atomic counters:
 - **UserConcurrency.** A DynamoDB item per user: `{ user_id, active_count }`. Incremented atomically (conditional update: `active_count < max`) during admission. Decremented during finalization.
 - **SystemConcurrency.** A single DynamoDB item: `{ pk: "SYSTEM", active_count }`. Same pattern.
 
-**Counter drift.** If the orchestrator crashes after starting a session but before persisting the session-to-task mapping, or after a session ends but before decrementing the counter, the counter drifts. Mitigation:
+**Counter drift.** If the orchestrator crashes after starting a session but before persisting the session-to-task mapping, or after a session ends but before decrementing the counter, the counter drifts. The heartbeat-detected crash finalization path (`finalizeTask` sessionUnhealthy branch) guards against double-decrement: it only decrements after a successful state transition, and re-reads the task if the transition fails to determine the correct action. Mitigation:
 
 - Always persist the task state transition **before** taking the action (write-ahead pattern). For example, persist the task as `RUNNING` and record the session ID before calling `invoke_agent_runtime`.
 - Run a **reconciliation Lambda** every 5 minutes (EventBridge schedule): query the Tasks table for tasks in `RUNNING` + `HYDRATING` state per user (GSI on `user_id` + `status`), compare the count to `UserConcurrency.active_count`, and correct via `UpdateItem` if different. The Lambda emits a `counter_drift_corrected` CloudWatch metric (dimensions: `user_id`, `drift_amount`) when it corrects a value, and a `counter_reconciliation_run` metric on every execution for health monitoring.

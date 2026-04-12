@@ -72,6 +72,30 @@ def write_submitted(
         print(f"[task_state] write_submitted failed (best-effort): {e}")
 
 
+def write_heartbeat(task_id: str) -> None:
+    """Update ``agent_heartbeat_at`` while the task is RUNNING (orchestrator crash detection)."""
+    try:
+        table = _get_table()
+        if table is None:
+            return
+        table.update_item(
+            Key={"task_id": task_id},
+            UpdateExpression="SET agent_heartbeat_at = :t",
+            ConditionExpression="#s = :running",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":t": _now_iso(), ":running": "RUNNING"},
+        )
+    except Exception as e:
+        from botocore.exceptions import ClientError
+
+        if (
+            isinstance(e, ClientError)
+            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+        ):
+            return
+        print(f"[task_state] write_heartbeat failed (best-effort): {type(e).__name__}: {e}")
+
+
 def write_running(task_id: str) -> None:
     """Transition a task to RUNNING (called at agent start)."""
     try:

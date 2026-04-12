@@ -20,7 +20,7 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably �
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
-| `FAILED` | Agent encountered an error, user concurrency limit was reached, or content was blocked by guardrail screening |
+| `FAILED` | Agent encountered an error, user concurrency limit was reached, content was blocked by guardrail screening, or **pre-flight** checks failed before the agent started (for example an underpowered GitHub PAT) |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~9 hours) |
 
@@ -43,3 +43,5 @@ curl "$API_URL/tasks/<TASK_ID>/events" -H "Authorization: $TOKEN"
 ```
 
 Events include: `task_created`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `guardrail_blocked`, `session_started`, `pr_created`, `pr_updated`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Event records are subject to the same 90-day retention as task records and are automatically deleted after that period.
+
+**`preflight_failed`:** The orchestrator could not safely start work (GitHub API checks run **before** hydration and AgentCore). Open the event in `bgagent events <TASK_ID>` (or the JSON from `GET /tasks/{id}/events`) and read **`reason`** and **`detail`**. Typical values for **`reason`** include `GITHUB_UNREACHABLE`, `REPO_NOT_FOUND_OR_NO_ACCESS`, `INSUFFICIENT_GITHUB_REPO_PERMISSIONS`, and `PR_NOT_FOUND_OR_CLOSED`. The most common fix for **`INSUFFICIENT_GITHUB_REPO_PERMISSIONS`** is to update the GitHub PAT in AWS Secrets Manager so it matches your task type—for **`new_task`** / **`pr_iteration`** you need **Contents** read/write and **Pull requests** read/write on the target repo; **`pr_review`** can pass with **Triage** (or higher) when you do not need to push. See [Developer guide — Repository preparation](/developer-guide/repository-preparation) for the full table and `put-secret-value` steps.

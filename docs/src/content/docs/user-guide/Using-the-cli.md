@@ -127,7 +127,10 @@ node lib/bin/bgagent.js list --repo owner/repo --limit 10
 ```bash
 node lib/bin/bgagent.js events <TASK_ID>
 node lib/bin/bgagent.js events <TASK_ID> --limit 20
+node lib/bin/bgagent.js events <TASK_ID> --output json
 ```
+
+Use **`--output json`** to see the full payload for **`preflight_failed`** (`reason`, `detail`, and per-check metadata). See **Task events** under **Task lifecycle** for how to interpret common `reason` values.
 
 ### Cancelling a task
 

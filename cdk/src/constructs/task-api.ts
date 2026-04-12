@@ -94,6 +94,12 @@ export interface TaskApiProps {
    * @default 30
    */
   readonly webhookRetentionDays?: number;
+
+  /**
+   * AgentCore runtime ARNs for which cancel-task may call `StopRuntimeSession`.
+   * First ARN is also passed as `RUNTIME_ARN` when the task record has no `agent_runtime_arn`.
+   */
+  readonly agentCoreStopSessionRuntimeArns?: string[];
 }
 
 /**
@@ -318,12 +324,18 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
+    const cancelTaskEnv: Record<string, string> = { ...commonEnv };
+    const stopSessionArns = props.agentCoreStopSessionRuntimeArns ?? [];
+    if (stopSessionArns.length > 0) {
+      cancelTaskEnv.RUNTIME_ARN = stopSessionArns[0]!;
+    }
+
     const cancelTaskFn = new lambda.NodejsFunction(this, 'CancelTaskFn', {
       entry: path.join(handlersDir, 'cancel-task.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      environment: commonEnv,
+      environment: cancelTaskEnv,
       bundling: commonBundling,
     });
 
@@ -342,6 +354,14 @@ export class TaskApi extends Construct {
     props.taskEventsTable.grantReadWriteData(createTaskFn);
     props.taskTable.grantReadWriteData(cancelTaskFn);
     props.taskEventsTable.grantReadWriteData(cancelTaskFn);
+
+    if (stopSessionArns.length > 0) {
+      const runtimeResources = stopSessionArns.flatMap(arn => [arn, `${arn}/*`]);
+      cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock-agentcore:StopRuntimeSession'],
+        resources: runtimeResources,
+      }));
+    }
 
     // Repo table read for onboarding gate
     if (props.repoTable) {
