@@ -18,8 +18,8 @@
  */
 
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';

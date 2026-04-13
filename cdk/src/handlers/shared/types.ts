@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import type { TaskStatusType } from '../../constructs/task-status';
 import type { ComputeType } from './repo-config';
+import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
