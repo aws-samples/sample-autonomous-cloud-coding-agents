@@ -71,37 +71,80 @@ See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on each iteration.
 
 ### Claude Code plugin (recommended)
 
-This repository ships a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) that provides guided workflows for setup, deployment, task submission, and troubleshooting. When you open this project in Claude Code, the plugin is auto-discovered from the `.claude-plugin/` directory.
+This repository ships a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) that provides guided workflows for setup, deployment, task submission, and troubleshooting.
 
-**Using the plugin:**
+#### Installing the plugin
 
-The plugin is automatically available when you clone this repo and open it in Claude Code. No manual installation needed — Claude Code discovers the `.claude-plugin/plugin.json` at the project root.
-
-| Component | What it does |
-|-----------|-------------|
-| `/setup` | Guided first-time setup: prerequisites, toolchain, deploy, smoke test |
-| `/deploy` | Deploy, diff, or destroy the CDK stack with pre-checks |
-| `/onboard-repo` | Add a new GitHub repository via Blueprint construct |
-| `/submit-task` | Submit a coding task with prompt quality coaching |
-| `/troubleshoot` | Diagnose deployment, auth, or task execution issues |
-| `/abca-status` | Quick platform health check |
-| `/abca-submit` | Shortcut for task submission |
-
-Specialized agents (`cdk-expert`, `agent-debugger`) are also available for CDK development and task failure investigation.
-
-**For local plugin development:**
-
-If you're modifying the plugin itself, the component files live at the project root:
-
-```
-.claude-plugin/plugin.json   # Plugin manifest
-skills/                       # Guided workflow skills (SKILL.md in subdirs)
-agents/                       # Specialized subagent definitions
-commands/                     # Slash commands
-hooks/hooks.json              # SessionStart hook for project context
+```bash
+git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
+cd sample-autonomous-cloud-coding-agents
+claude --plugin-dir .claude-plugin
 ```
 
-After editing plugin files, run `/reload-plugins` in Claude Code to pick up changes. No restart required.
+The `--plugin-dir` flag tells Claude Code to load the local plugin from the `.claude-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
+
+> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir .claude-plugin` to the extension's CLI arguments setting.
+
+#### What the plugin provides
+
+**Skills** (guided multi-step workflows — Claude activates these automatically based on your request):
+
+| Skill | Triggers on | What it does |
+|-------|------------|--------------|
+| `setup` | "get started", "install", "first time setup" | Full guided setup: prerequisites, toolchain, deploy, smoke test |
+| `deploy` | "deploy", "cdk diff", "destroy" | Deploy, diff, or destroy the CDK stack with pre-checks |
+| `onboard-repo` | "add a repo", "onboard", 422 errors | Add a new GitHub repository via Blueprint construct |
+| `submit-task` | "submit task", "run agent", "review PR" | Submit a coding task with prompt quality coaching |
+| `troubleshoot` | "debug", "error", "not working", "failed" | Diagnose deployment, auth, or task execution issues |
+
+**Commands** (slash commands for quick actions):
+
+| Command | What it does |
+|---------|-------------|
+| `/abca-status` | Quick platform health check: stack status, running tasks, build health |
+| `/abca-submit [repo] [description]` | Shortcut for task submission with auto-detected task type |
+
+**Agents** (specialized subagents, spawned automatically or via the Agent tool):
+
+| Agent | When it's used |
+|-------|---------------|
+| `cdk-expert` | CDK architecture, construct design, handler implementation, stack modifications |
+| `agent-debugger` | Task failure investigation, CloudWatch log analysis, agent runtime debugging |
+
+**Hook** (runs automatically):
+
+A `SessionStart` hook injects ABCA project context (key directories, commands, conventions) into every Claude Code session.
+
+#### Local plugin development
+
+If you're modifying the plugin itself, here's the file layout:
+
+```
+.claude-plugin/
+  plugin.json                    # Plugin manifest (name, version, description)
+  skills/
+    setup/SKILL.md               # First-time setup workflow
+    deploy/SKILL.md              # CDK deployment workflow
+    onboard-repo/SKILL.md        # Repository onboarding workflow
+    submit-task/SKILL.md         # Task submission with prompt coaching
+    troubleshoot/SKILL.md        # Diagnostic workflow
+  agents/
+    cdk-expert.md                # CDK infrastructure specialist
+    agent-debugger.md            # Task failure debugger
+  commands/
+    abca-status.md               # /abca-status command
+    abca-submit.md               # /abca-submit command
+  hooks/
+    hooks.json                   # SessionStart hook configuration
+```
+
+**Key conventions:**
+- All plugin components live inside `.claude-plugin/` alongside the manifest
+- Skills live in subdirectories with a `SKILL.md` file (not flat `.md` files)
+- Agents and commands are flat `.md` files with YAML frontmatter
+- Hooks use JSON configuration in `hooks/hooks.json`
+
+**After editing plugin files**, restart Claude Code with `claude --plugin-dir .claude-plugin` to pick up changes.
 
 ### Manual installation and deployment
 
