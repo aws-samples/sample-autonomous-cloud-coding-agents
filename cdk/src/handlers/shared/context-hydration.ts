@@ -21,6 +21,7 @@ import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bed
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
+import { sanitizeExternalContent } from './sanitization';
 import { isPrTaskType, type TaskRecord, type TaskType } from './types';
 
 // ---------------------------------------------------------------------------
@@ -727,12 +728,12 @@ export function assembleUserPrompt(
   parts.push(`Repository: ${repo}`);
 
   if (issue) {
-    parts.push(`\n## GitHub Issue #${issue.number}: ${issue.title}\n`);
-    parts.push(issue.body || '(no description)');
+    parts.push(`\n## GitHub Issue #${issue.number}: ${sanitizeExternalContent(issue.title)}\n`);
+    parts.push(sanitizeExternalContent(issue.body) || '(no description)');
     if (issue.comments.length > 0) {
       parts.push('\n### Comments\n');
       for (const c of issue.comments) {
-        parts.push(`**@${c.author}**: ${c.body}\n`);
+        parts.push(`**@${sanitizeExternalContent(c.author)}**: ${sanitizeExternalContent(c.body)}\n`);
       }
     }
   }
@@ -767,8 +768,8 @@ export function assemblePrIterationPrompt(
 
   parts.push(`Task ID: ${taskId}`);
   parts.push(`Repository: ${repo}`);
-  parts.push(`\n## Pull Request #${pr.number}: ${pr.title}\n`);
-  parts.push(pr.body || '(no description)');
+  parts.push(`\n## Pull Request #${pr.number}: ${sanitizeExternalContent(pr.title)}\n`);
+  parts.push(sanitizeExternalContent(pr.body) || '(no description)');
   parts.push(`\nBase branch: ${pr.base_ref}`);
   parts.push(`Head branch: ${pr.head_ref}`);
 
@@ -806,13 +807,13 @@ export function assemblePrIterationPrompt(
     for (const [rootId, root] of rootComments) {
       const location = root.path ? `\`${root.path}${root.line ? `:${root.line}` : ''}\`` : 'general';
       parts.push(`**Thread on ${location}** (reply with comment_id: ${rootId})`);
-      parts.push(`> **@${root.author}**: ${root.body}`);
+      parts.push(`> **@${sanitizeExternalContent(root.author)}**: ${sanitizeExternalContent(root.body)}`);
       if (root.diff_hunk) {
         parts.push(`> \`\`\`diff\n> ${root.diff_hunk}\n> \`\`\``);
       }
       const threadReplies = replies.get(rootId) ?? [];
       for (const r of threadReplies) {
-        parts.push(`\n  - **@${r.author}**: ${r.body}`);
+        parts.push(`\n  - **@${sanitizeExternalContent(r.author)}**: ${sanitizeExternalContent(r.body)}`);
       }
       parts.push('');
     }
@@ -824,7 +825,7 @@ export function assemblePrIterationPrompt(
         const location = r.path ? `\`${r.path}${r.line ? `:${r.line}` : ''}\`` : 'general';
         const replyTarget = r.in_reply_to_id ?? r.id;
         parts.push(`**Comment on ${location}** (reply with comment_id: ${replyTarget})`);
-        parts.push(`> **@${r.author}**: ${r.body}`);
+        parts.push(`> **@${sanitizeExternalContent(r.author)}**: ${sanitizeExternalContent(r.body)}`);
         if (r.diff_hunk) {
           parts.push(`> \`\`\`diff\n> ${r.diff_hunk}\n> \`\`\``);
         }
@@ -836,7 +837,7 @@ export function assemblePrIterationPrompt(
   if (pr.issue_comments.length > 0) {
     parts.push('\n### Conversation Comments\n');
     for (const c of pr.issue_comments) {
-      parts.push(`**@${c.author}** (comment_id: ${c.id}): ${c.body}\n`);
+      parts.push(`**@${sanitizeExternalContent(c.author)}** (comment_id: ${c.id}): ${sanitizeExternalContent(c.body)}\n`);
     }
   }
 

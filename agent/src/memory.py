@@ -7,6 +7,7 @@ programming errors (TypeError, ValueError, AttributeError) are logged at
 ERROR level to surface bugs quickly.
 """
 
+import hashlib
 import os
 import re
 import time
@@ -18,7 +19,7 @@ _REPO_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
 # Current event schema version — used to distinguish records written under
 # different namespace schemes (v1 = repos/ prefix, v2 = namespace templates).
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "3"
 
 
 def _get_client():
@@ -94,10 +95,13 @@ def write_task_episode(
             parts.append(f"Agent notes: {self_feedback}")
 
         episode_text = " ".join(parts)
+        content_hash = hashlib.sha256(episode_text.encode("utf-8")).hexdigest()
 
         metadata = {
             "task_id": {"stringValue": task_id},
             "type": {"stringValue": "task_episode"},
+            "source_type": {"stringValue": "agent_episode"},
+            "content_sha256": {"stringValue": content_hash},
             "schema_version": {"stringValue": _SCHEMA_VERSION},
         }
         if pr_url:
@@ -148,6 +152,9 @@ def write_repo_learnings(
         _validate_repo(repo)
         client = _get_client()
 
+        learnings_text = f"Repository learnings: {learnings}"
+        content_hash = hashlib.sha256(learnings_text.encode("utf-8")).hexdigest()
+
         client.create_event(
             memoryId=memory_id,
             actorId=repo,
@@ -156,7 +163,7 @@ def write_repo_learnings(
             payload=[
                 {
                     "conversational": {
-                        "content": {"text": f"Repository learnings: {learnings}"},
+                        "content": {"text": learnings_text},
                         "role": "OTHER",
                     }
                 }
@@ -164,6 +171,8 @@ def write_repo_learnings(
             metadata={
                 "task_id": {"stringValue": task_id},
                 "type": {"stringValue": "repo_learnings"},
+                "source_type": {"stringValue": "agent_learning"},
+                "content_sha256": {"stringValue": content_hash},
                 "schema_version": {"stringValue": _SCHEMA_VERSION},
             },
         )

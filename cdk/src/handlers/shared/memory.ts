@@ -17,12 +17,14 @@
  *  SOFTWARE.
  */
 
+import { createHash } from 'crypto';
 import {
   BedrockAgentCoreClient,
   CreateEventCommand,
   RetrieveMemoryRecordsCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
 import { logger } from './logger';
+import { sanitizeExternalContent } from './sanitization';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 // ---------------------------------------------------------------------------
@@ -49,6 +51,25 @@ const MEMORY_TOKEN_BUDGET = 2_000;
 /** Rough token estimate: ~4 chars per token. */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+/** Compute SHA-256 hash of text content. */
+function hashContent(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/**
+ * Verify content integrity against a stored SHA-256 hash.
+ * Returns true if no hash is stored (backward compat with schema v2),
+ * or if the hash matches. Returns false only on mismatch.
+ */
+function verifyContentIntegrity(
+  text: string,
+  metadata?: Record<string, { stringValue?: string }>,
+): boolean {
+  const expected = metadata?.content_sha256?.stringValue;
+  if (!expected) return true; // No hash stored — skip verification
+  return hashContent(text) === expected;
 }
 
 // Lazy-init client (only created if MEMORY_ID is set)
@@ -138,7 +159,10 @@ export async function loadMemoryContext(
       for (const record of semanticResult.memoryRecordSummaries) {
         const text = record.content?.text;
         if (text) {
-          repoKnowledge.push(text);
+          if (!verifyContentIntegrity(text, record.metadata)) {
+            logger.warn('Memory record content integrity check failed', { repo, namespace: semanticNamespace });
+          }
+          repoKnowledge.push(sanitizeExternalContent(text));
         }
       }
     }
@@ -147,7 +171,10 @@ export async function loadMemoryContext(
       for (const record of episodicResult.memoryRecordSummaries) {
         const text = record.content?.text;
         if (text) {
-          pastEpisodes.push(text);
+          if (!verifyContentIntegrity(text, record.metadata)) {
+            logger.warn('Memory record content integrity check failed', { repo, namespace: episodicNamespace });
+          }
+          pastEpisodes.push(sanitizeExternalContent(text));
         }
       }
     }
@@ -238,6 +265,8 @@ export async function writeMinimalEpisode(
       'Note: This is a minimal episode written by the orchestrator because the agent did not write memory.',
     ].filter(Boolean).join(' ');
 
+    const contentHash = hashContent(episodeText);
+
     await client.send(new CreateEventCommand({
       memoryId,
       actorId: repo,
@@ -252,7 +281,9 @@ export async function writeMinimalEpisode(
       metadata: {
         task_id: { stringValue: taskId },
         type: { stringValue: 'orchestrator_fallback_episode' },
-        schema_version: { stringValue: '2' },
+        source_type: { stringValue: 'orchestrator_fallback' },
+        content_sha256: { stringValue: contentHash },
+        schema_version: { stringValue: '3' },
       },
     }));
 

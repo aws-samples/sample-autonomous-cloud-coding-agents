@@ -4,12 +4,52 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from typing import TYPE_CHECKING
 
 from config import AGENT_WORKSPACE
 from prompts import get_system_prompt
 from shell import log
 from system_prompt import SYSTEM_PROMPT
+
+# ---------------------------------------------------------------------------
+# Content sanitization for memory records
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_TAGS = re.compile(
+    r"(<(script|style|iframe|object|embed|form|input)[^>]*>[\s\S]*?</\2>"
+    r"|<(script|style|iframe|object|embed|form|input)[^>]*\/?>)",
+    re.IGNORECASE,
+)
+_HTML_TAGS = re.compile(r"</?[a-z][^>]*>", re.IGNORECASE)
+_INSTRUCTION_PREFIXES = re.compile(
+    r"^(SYSTEM|ASSISTANT|Human|Assistant)\s*:", re.MULTILINE | re.IGNORECASE
+)
+_INJECTION_PHRASES = re.compile(
+    r"(?:ignore previous instructions|disregard (?:above|previous|all)|new instructions\s*:)",
+    re.IGNORECASE,
+)
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_BIDI_CHARS = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_MISPLACED_BOM = re.compile(r"(?!^)\ufeff")
+
+
+def sanitize_memory_content(text: str) -> str:
+    """Sanitize memory content before injecting into the agent's system prompt.
+
+    Mirrors the TypeScript sanitizeExternalContent() in sanitization.ts.
+    """
+    if not text:
+        return text
+    s = _DANGEROUS_TAGS.sub("", text)
+    s = _HTML_TAGS.sub("", s)
+    s = _INSTRUCTION_PREFIXES.sub(r"[SANITIZED_PREFIX] \1:", s)
+    s = _INJECTION_PHRASES.sub("[SANITIZED_INSTRUCTION]", s)
+    s = _CONTROL_CHARS.sub("", s)
+    s = _BIDI_CHARS.sub("", s)
+    s = _MISPLACED_BOM.sub("", s)
+    return s
+
 
 if TYPE_CHECKING:
     from models import HydratedContext, RepoSetup, TaskConfig
@@ -49,11 +89,11 @@ def build_system_prompt(
         if mc.repo_knowledge:
             mc_parts.append("**Repository knowledge:**")
             for item in mc.repo_knowledge:
-                mc_parts.append(f"- {item}")
+                mc_parts.append(f"- {sanitize_memory_content(item)}")
         if mc.past_episodes:
             mc_parts.append("\n**Past task episodes:**")
             for item in mc.past_episodes:
-                mc_parts.append(f"- {item}")
+                mc_parts.append(f"- {sanitize_memory_content(item)}")
         if mc_parts:
             memory_context_text = "\n".join(mc_parts)
     system_prompt = system_prompt.replace("{memory_context}", memory_context_text)
