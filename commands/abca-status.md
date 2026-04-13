@@ -1,0 +1,52 @@
+---
+name: abca-status
+description: Check ABCA platform status — stack health, running tasks, and recent task history
+allowed-tools:
+  - Bash
+  - Read
+---
+
+# ABCA Platform Status
+
+Check the current state of the ABCA platform and report a concise status summary.
+
+## Checks to Run
+
+Run these in parallel where possible:
+
+1. **Stack status:**
+   ```bash
+   aws cloudformation describe-stacks --stack-name backgroundagent-dev \
+     --query 'Stacks[0].{Status:StackStatus,Updated:LastUpdatedTime}' --output json 2>/dev/null || echo "Stack not found"
+   ```
+
+2. **Running tasks:**
+   ```bash
+   cd cli && node lib/bin/bgagent.js list --status RUNNING,SUBMITTED,HYDRATING --output json 2>/dev/null || echo "CLI not configured"
+   ```
+
+3. **Recent completed tasks:**
+   ```bash
+   cd cli && node lib/bin/bgagent.js list --limit 5 --output json 2>/dev/null || echo "CLI not configured"
+   ```
+
+4. **Local build health:**
+   ```bash
+   export MISE_EXPERIMENTAL=1 && mise run //cdk:compile 2>&1 | tail -5
+   ```
+
+## Output Format
+
+Present a concise status report:
+
+```
+ABCA Platform Status
+====================
+Stack:    [UPDATE_COMPLETE | CREATE_COMPLETE | ...]
+Updated:  [timestamp]
+Active:   [N] tasks running
+Recent:   [N] tasks in last batch (show status breakdown)
+Build:    [PASS | FAIL with error summary]
+```
+
+If the CLI isn't configured, note this and suggest running the `setup` skill.

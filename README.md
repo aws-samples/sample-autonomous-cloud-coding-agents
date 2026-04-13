@@ -69,7 +69,41 @@ See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on each iteration.
 
 ## Getting started
 
-### Installation and deployment
+### Claude Code plugin (recommended)
+
+This repository ships a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) that provides guided workflows for setup, deployment, task submission, and troubleshooting. When you open this project in Claude Code, the plugin is auto-discovered from the `.claude-plugin/` directory.
+
+**Using the plugin:**
+
+The plugin is automatically available when you clone this repo and open it in Claude Code. No manual installation needed — Claude Code discovers the `.claude-plugin/plugin.json` at the project root.
+
+| Component | What it does |
+|-----------|-------------|
+| `/setup` | Guided first-time setup: prerequisites, toolchain, deploy, smoke test |
+| `/deploy` | Deploy, diff, or destroy the CDK stack with pre-checks |
+| `/onboard-repo` | Add a new GitHub repository via Blueprint construct |
+| `/submit-task` | Submit a coding task with prompt quality coaching |
+| `/troubleshoot` | Diagnose deployment, auth, or task execution issues |
+| `/abca-status` | Quick platform health check |
+| `/abca-submit` | Shortcut for task submission |
+
+Specialized agents (`cdk-expert`, `agent-debugger`) are also available for CDK development and task failure investigation.
+
+**For local plugin development:**
+
+If you're modifying the plugin itself, the component files live at the project root:
+
+```
+.claude-plugin/plugin.json   # Plugin manifest
+skills/                       # Guided workflow skills (SKILL.md in subdirs)
+agents/                       # Specialized subagent definitions
+commands/                     # Slash commands
+hooks/hooks.json              # SessionStart hook for project context
+```
+
+After editing plugin files, run `/reload-plugins` in Claude Code to pick up changes. No restart required.
+
+### Manual installation and deployment
 
 Install [mise](https://mise.jdx.dev/getting-started.html) if you want to use repo tasks (`mise run install`, `mise run build`). For monorepo-prefixed tasks (`mise //cdk:build`, etc.), set **`MISE_EXPERIMENTAL=1`** — see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
