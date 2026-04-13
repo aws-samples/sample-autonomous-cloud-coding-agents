@@ -78,12 +78,12 @@ This repository ships a [Claude Code plugin](https://docs.anthropic.com/en/docs/
 ```bash
 git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
 cd sample-autonomous-cloud-coding-agents
-claude --plugin-dir .claude-plugin
+claude --plugin-dir abca-plugin
 ```
 
-The `--plugin-dir` flag tells Claude Code to load the local plugin from the `.claude-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
+The `--plugin-dir` flag tells Claude Code to load the local plugin from the `abca-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
 
-> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir .claude-plugin` to the extension's CLI arguments setting.
+> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir abca-plugin` to the extension's CLI arguments setting.
 
 #### What the plugin provides
 
@@ -96,13 +96,8 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `.cl
 | `onboard-repo` | "add a repo", "onboard", 422 errors | Add a new GitHub repository via Blueprint construct |
 | `submit-task` | "submit task", "run agent", "review PR" | Submit a coding task with prompt quality coaching |
 | `troubleshoot` | "debug", "error", "not working", "failed" | Diagnose deployment, auth, or task execution issues |
-
-**Commands** (slash commands for quick actions):
-
-| Command | What it does |
-|---------|-------------|
-| `/abca-status` | Quick platform health check: stack status, running tasks, build health |
-| `/abca-submit [repo] [description]` | Shortcut for task submission with auto-detected task type |
+| `abca-status` | "status", "health check", "is ABCA running" | Quick platform health check: stack status, running tasks, build health |
+| `abca-submit` | "submit task", "quick submit" | Shortcut for task submission with auto-detected task type |
 
 **Agents** (specialized subagents, spawned automatically or via the Agent tool):
 
@@ -120,7 +115,7 @@ A `SessionStart` hook injects ABCA project context (key directories, commands, c
 If you're modifying the plugin itself, here's the file layout:
 
 ```
-.claude-plugin/
+abca-plugin/
   plugin.json                    # Plugin manifest (name, version, description)
   skills/
     setup/SKILL.md               # First-time setup workflow
@@ -128,23 +123,22 @@ If you're modifying the plugin itself, here's the file layout:
     onboard-repo/SKILL.md        # Repository onboarding workflow
     submit-task/SKILL.md         # Task submission with prompt coaching
     troubleshoot/SKILL.md        # Diagnostic workflow
+    abca-status/SKILL.md         # Quick platform health check
+    abca-submit/SKILL.md         # Quick task submission shortcut
   agents/
     cdk-expert.md                # CDK infrastructure specialist
     agent-debugger.md            # Task failure debugger
-  commands/
-    abca-status.md               # /abca-status command
-    abca-submit.md               # /abca-submit command
   hooks/
     hooks.json                   # SessionStart hook configuration
 ```
 
 **Key conventions:**
-- All plugin components live inside `.claude-plugin/` alongside the manifest
+- All plugin components live inside `abca-plugin/` alongside the manifest
 - Skills live in subdirectories with a `SKILL.md` file (not flat `.md` files)
-- Agents and commands are flat `.md` files with YAML frontmatter
+- Agents are flat `.md` files with YAML frontmatter
 - Hooks use JSON configuration in `hooks/hooks.json`
 
-**After editing plugin files**, restart Claude Code with `claude --plugin-dir .claude-plugin` to pick up changes.
+**After editing plugin files**, restart Claude Code with `claude --plugin-dir abca-plugin` to pick up changes.
 
 ### Manual installation and deployment
 

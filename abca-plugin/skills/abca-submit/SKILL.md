@@ -1,13 +1,7 @@
 ---
 name: abca-submit
-description: Quick task submission shortcut — submit a coding task with guided prompts
-arguments:
-  - name: repo
-    description: "GitHub repository in owner/repo format"
-    required: false
-  - name: description
-    description: "Task description or issue number"
-    required: false
+description: Quick task submission shortcut — submit a coding task with guided prompts. Use when the user says "submit task", "run agent on", "submit to ABCA", or "quick submit".
+argument-hint: <repo> [description]
 allowed-tools:
   - Bash
   - Read
@@ -19,8 +13,8 @@ Submit a task to ABCA quickly. If arguments are missing, ask the user.
 
 ## Collect Required Info
 
-If `$ARGUMENTS.repo` is not provided, ask for the repository (owner/repo format).
-If `$ARGUMENTS.description` is not provided, ask what the agent should do.
+If the repository is not provided, ask for the repository (owner/repo format).
+If the description is not provided, ask what the agent should do.
 
 ## Determine Task Type
 
