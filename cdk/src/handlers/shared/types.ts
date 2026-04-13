@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import type { ComputeType } from './repo-config';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Valid task types for task creation. */
@@ -63,6 +64,8 @@ export interface TaskRecord {
   readonly max_budget_usd?: number;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
+  readonly compute_type?: ComputeType;
+  readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
 }
 

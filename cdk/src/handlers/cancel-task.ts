@@ -19,6 +19,7 @@
 
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -31,10 +32,12 @@ import { computeTtlEpoch } from './shared/validation';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const agentCoreClient = new BedrockAgentCoreClient({});
+const ecsClient = new ECSClient({});
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const RUNTIME_ARN = process.env.RUNTIME_ARN;
+const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
 
 /**
  * DELETE /v1/tasks/{task_id} — Cancel a task.
@@ -107,19 +110,57 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw condErr;
     }
 
-    // 6b. Stop AgentCore runtime session so the container winds down (best-effort)
-    if (wasRunning && runtimeSessionId && agentRuntimeArn) {
-      try {
-        await agentCoreClient.send(new StopRuntimeSessionCommand({
-          runtimeSessionId: runtimeSessionId,
-          agentRuntimeArn: agentRuntimeArn,
-        }));
-        logger.info('StopRuntimeSession invoked after cancel', { task_id: taskId, request_id: requestId });
-      } catch (stopErr) {
-        logger.warn('StopRuntimeSession failed after cancel (session may already be gone)', {
+    // 6b. Stop the compute session so the container winds down (best-effort)
+    if (wasRunning && runtimeSessionId) {
+      const computeType = record.compute_type;
+      if (computeType === 'ecs') {
+        // ECS-backed task — stop the Fargate task
+        const clusterArn = record.compute_metadata?.clusterArn ?? ECS_CLUSTER_ARN;
+        const taskArn = record.compute_metadata?.taskArn;
+        if (clusterArn && taskArn) {
+          try {
+            await ecsClient.send(new StopTaskCommand({
+              cluster: clusterArn,
+              task: taskArn,
+              reason: 'Cancelled by user',
+            }));
+            logger.info('ECS StopTask invoked after cancel', { task_id: taskId, ecs_task_arn: taskArn, request_id: requestId });
+          } catch (stopErr) {
+            logger.warn('ECS StopTask failed after cancel (task may already be stopped)', {
+              task_id: taskId,
+              request_id: requestId,
+              error: stopErr instanceof Error ? stopErr.message : String(stopErr),
+            });
+          }
+        } else {
+          logger.warn('ECS task cancel skipped: missing clusterArn or taskArn in compute_metadata', {
+            task_id: taskId,
+            request_id: requestId,
+            has_cluster: !!clusterArn,
+            has_task: !!taskArn,
+          });
+        }
+      } else if (agentRuntimeArn) {
+        // AgentCore-backed task (default)
+        try {
+          await agentCoreClient.send(new StopRuntimeSessionCommand({
+            runtimeSessionId: runtimeSessionId,
+            agentRuntimeArn: agentRuntimeArn,
+          }));
+          logger.info('StopRuntimeSession invoked after cancel', { task_id: taskId, request_id: requestId });
+        } catch (stopErr) {
+          logger.warn('StopRuntimeSession failed after cancel (session may already be gone)', {
+            task_id: taskId,
+            request_id: requestId,
+            error: stopErr instanceof Error ? stopErr.message : String(stopErr),
+          });
+        }
+      } else {
+        logger.warn('Running task has no recognized compute backend to stop', {
           task_id: taskId,
           request_id: requestId,
-          error: stopErr instanceof Error ? stopErr.message : String(stopErr),
+          compute_type: computeType,
+          has_runtime_arn: !!agentRuntimeArn,
         });
       }
     }

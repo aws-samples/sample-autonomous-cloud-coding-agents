@@ -303,6 +303,44 @@ describe('TaskApi construct', () => {
       },
     });
   });
+
+  test('cancelTask Lambda gets ECS_CLUSTER_ARN env var and ecs:StopTask when ecsClusterArn is set', () => {
+    const { template } = createStack({
+      ecsClusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+    });
+
+    // Cancel Lambda should have the ECS_CLUSTER_ARN env var
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ECS_CLUSTER_ARN: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+        }),
+      },
+    });
+
+    // Should have ecs:StopTask permission
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'ecs:StopTask',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('cancelTask Lambda does not get ECS env vars when ecsClusterArn is not set', () => {
+    const { template } = createStack();
+
+    // Find all Lambda functions and verify none have ECS_CLUSTER_ARN
+    const functions = template.findResources('AWS::Lambda::Function');
+    for (const [, fn] of Object.entries(functions)) {
+      const vars = (fn as any).Properties?.Environment?.Variables ?? {};
+      expect(vars).not.toHaveProperty('ECS_CLUSTER_ARN');
+    }
+  });
 });
 
 describe('TaskApi construct with webhooks', () => {

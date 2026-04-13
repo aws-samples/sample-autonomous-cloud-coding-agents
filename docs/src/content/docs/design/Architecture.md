@@ -94,6 +94,20 @@ The steps below are the blueprint in action: deterministic orchestration (1–2,
 3. **Agentic:** The agent runs in the isolated environment: clone repo, create branch, edit code, commit often, run tests and lint, create PR. Commits are attributed via git trailers (`Task-Id`, `Prompt-Version`). At task end, the agent writes memory (task episode + repo learnings) to AgentCore Memory. The orchestrator does not execute this logic; it only waits for the session to finish.
 4. **Deterministic:** The orchestrator infers the result (e.g. by querying GitHub for a PR on the agent's branch), updates task status, and finalizes (result inference, cleanup). If the agent did not write memory (crash, timeout), the orchestrator writes a fallback episode. A validation step may run here (e.g. configurable post-agent checks); see repo onboarding for customizing these steps.
 
+### Why the orchestrator and agent are separate loops
+
+The orchestrator (deterministic) and the agent workload (non-deterministic) could in theory run as a single process, but they are deliberately separated. This separation is the architectural foundation for several guarantees:
+
+**Reliability boundary.** The agent is the component most likely to fail — LLM hallucination, OOM, session crash, idle timeout. The orchestrator wraps the agent with durable execution (checkpoint/resume via Lambda Durable Functions) so that when the agent dies mid-task, the platform still drives the task to a terminal state: it detects the failure via heartbeat/poll, transitions the task to FAILED or TIMED_OUT, releases concurrency counters, writes a fallback memory episode, and emits cleanup events. Without this boundary, a crashed agent would leave orphaned state — stuck counters, no terminal status, no user notification.
+
+**Cost separation.** Orchestrator steps are Lambda invocations costing fractions of a cent. Agent steps burn compute-hours and LLM inference tokens (the dominant cost at $0.20–0.60 per task). Keeping admission control, context hydration, result inference, and finalization out of the compute session avoids paying compute and token costs for bookkeeping work that requires no LLM reasoning.
+
+**Trust boundary.** The agent runs inside a sandboxed MicroVM (AgentCore Runtime) with a blast radius limited to one branch in one repository. The orchestrator runs in the trusted platform layer (Lambda + DynamoDB) and enforces invariants the agent cannot bypass: concurrency limits, cancellation, timeout enforcement, and conditional state transitions (`ConditionExpression` guards on DynamoDB writes). The agent's own state writes are guarded to prevent it from overwriting orchestrator-managed status (e.g. an agent writing COMPLETED over an orchestrator-set CANCELLED).
+
+**Testability.** Deterministic steps can be unit-tested without LLM calls, compute sessions, or GitHub API access. The orchestrator's admission control, context hydration, result inference, and state transitions are covered by fast, isolated Jest tests (`cdk/test/handlers/shared/`). The agent workload requires integration testing with a live model and compute environment. Keeping them separate means platform logic can be validated cheaply and quickly, independent of model behavior.
+
+**Independent evolution.** The orchestrator and agent communicate through a narrow contract: the orchestrator passes a hydrated prompt and environment variables; the agent pushes commits, creates a PR, and exits. Either side can change independently as long as the contract holds — the orchestrator can add new pre/post steps, switch durable execution engines, or change polling strategies without touching the agent code, and the agent can change its tool set, prompting strategy, or coding workflow without affecting the orchestrator.
+
 For the API contract — endpoints, request/response schemas, error codes, authentication, and pagination — see [API_CONTRACT.md](/design/api-contract).
 
 ## Onboarding pipeline

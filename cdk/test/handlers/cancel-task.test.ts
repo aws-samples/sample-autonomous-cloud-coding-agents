@@ -22,9 +22,14 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 // --- Mocks ---
 const mockSend = jest.fn();
 const mockAgentCoreSend = jest.fn();
+const mockEcsSend = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
   StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
+}));
+jest.mock('@aws-sdk/client-ecs', () => ({
+  ECSClient: jest.fn(() => ({ send: mockEcsSend })),
+  StopTaskCommand: jest.fn((input: unknown) => ({ _type: 'StopTask', input })),
 }));
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -40,6 +45,7 @@ process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.TASK_RETENTION_DAYS = '90';
 process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/default';
+process.env.ECS_CLUSTER_ARN = 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster';
 
 import { handler } from '../../src/handlers/cancel-task';
 
@@ -107,6 +113,7 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 beforeEach(() => {
   jest.clearAllMocks();
   mockAgentCoreSend.mockResolvedValue({});
+  mockEcsSend.mockResolvedValue({});
   // Default: GetCommand returns running task, UpdateCommand + PutCommand succeed
   mockSend
     .mockResolvedValueOnce({ Item: RUNNING_TASK }) // GetCommand
@@ -273,5 +280,90 @@ describe('cancel-task handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
     expect(mockAgentCoreSend).toHaveBeenCalled();
+  });
+
+  test('cancels ECS-backed running task via StopTask', async () => {
+    mockSend.mockReset();
+    const ecsTask = {
+      ...RUNNING_TASK,
+      compute_type: 'ecs',
+      compute_metadata: {
+        clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+        taskArn: 'arn:aws:ecs:us-east-1:123456789012:task/abc123',
+      },
+    };
+    mockSend
+      .mockResolvedValueOnce({ Item: ecsTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockEcsSend).toHaveBeenCalledTimes(1);
+    const cmd = mockEcsSend.mock.calls[0][0];
+    expect(cmd.input.cluster).toBe('arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster');
+    expect(cmd.input.task).toBe('arn:aws:ecs:us-east-1:123456789012:task/abc123');
+    // AgentCore should NOT have been called
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('skips ECS StopTask when compute_metadata.taskArn is missing', async () => {
+    mockSend.mockReset();
+    const ecsTask = {
+      ...RUNNING_TASK,
+      compute_type: 'ecs',
+      compute_metadata: {
+        clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+      },
+    };
+    mockSend
+      .mockResolvedValueOnce({ Item: ecsTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockEcsSend).not.toHaveBeenCalled();
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('falls back to AgentCore stop when compute_type is unrecognized but RUNTIME_ARN is available', async () => {
+    mockSend.mockReset();
+    const unknownTask = {
+      ...RUNNING_TASK,
+      compute_type: 'unknown',
+    };
+    delete (unknownTask as { agent_runtime_arn?: string }).agent_runtime_arn;
+    mockSend
+      .mockResolvedValueOnce({ Item: unknownTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockEcsSend).not.toHaveBeenCalled();
+    // Falls back to AgentCore because RUNTIME_ARN env var is set
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns 200 when ECS StopTask fails', async () => {
+    mockSend.mockReset();
+    mockEcsSend.mockRejectedValueOnce(new Error('ECS error'));
+    const ecsTask = {
+      ...RUNNING_TASK,
+      compute_type: 'ecs',
+      compute_metadata: {
+        clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+        taskArn: 'arn:aws:ecs:us-east-1:123456789012:task/abc123',
+      },
+    };
+    mockSend
+      .mockResolvedValueOnce({ Item: ecsTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockEcsSend).toHaveBeenCalled();
   });
 });
