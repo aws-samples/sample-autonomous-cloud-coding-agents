@@ -40,7 +40,7 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 const baseBlueprintConfig: BlueprintConfig = {
-  compute_type: 'AGENTCORE',
+  compute_type: 'agentcore',
   runtime_arn: 'arn:aws:bedrock:us-east-1:123456789012:agent-runtime/test',
   github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token',
 };

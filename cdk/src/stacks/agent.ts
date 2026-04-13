@@ -23,6 +23,8 @@ import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+// ecr_assets import is only needed when the ECS block below is uncommented
+// import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -34,6 +36,7 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
+// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { RepoTable } from '../constructs/repo-table';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
@@ -273,6 +276,26 @@ export class AgentStack extends Stack {
 
     inputGuardrail.createVersion('Initial version');
 
+    // --- ECS Fargate compute backend (optional) ---
+    // To enable ECS as an alternative compute backend, uncomment the block below
+    // and the EcsAgentCluster import at the top of this file. Repos can then use
+    // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
+    //
+    // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
+    //   directory: runnerPath,
+    //   platform: ecr_assets.Platform.LINUX_ARM64,
+    // });
+    //
+    // const ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
+    //   vpc: agentVpc.vpc,
+    //   agentImageAsset,
+    //   taskTable: taskTable.table,
+    //   taskEventsTable: taskEventsTable.table,
+    //   userConcurrencyTable: userConcurrencyTable.table,
+    //   githubTokenSecret,
+    //   memoryId: agentMemory.memory.memoryId,
+    // });
+
     // --- Task Orchestrator (durable Lambda function) ---
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
@@ -284,6 +307,16 @@ export class AgentStack extends Stack {
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      // To wire ECS, uncomment the ecsCluster block above and add:
+      // ecsConfig: {
+      //   clusterArn: ecsCluster.cluster.clusterArn,
+      //   taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+      //   subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
+      //   securityGroup: ecsCluster.securityGroup.securityGroupId,
+      //   containerName: ecsCluster.containerName,
+      //   taskRoleArn: ecsCluster.taskRoleArn,
+      //   executionRoleArn: ecsCluster.executionRoleArn,
+      // },
     });
 
     // Grant the orchestrator Lambda read+write access to memory
@@ -306,6 +339,8 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       agentCoreStopSessionRuntimeArns: [runtime.agentRuntimeArn],
+      // To allow cancel-task to stop ECS-backed tasks, uncomment:
+      // ecsClusterArn: ecsCluster.cluster.clusterArn,
     });
 
     // --- Operator dashboard ---
