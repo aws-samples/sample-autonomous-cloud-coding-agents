@@ -53,3 +53,4 @@ junit.xml
 .cdk.staging/
 .parcel-cache/
 !/.github/workflows/docs.yml
+local-docs/
