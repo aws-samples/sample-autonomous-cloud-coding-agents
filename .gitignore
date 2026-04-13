@@ -54,3 +54,4 @@ junit.xml
 .parcel-cache/
 !/.github/workflows/docs.yml
 local-docs/
+Plans/
