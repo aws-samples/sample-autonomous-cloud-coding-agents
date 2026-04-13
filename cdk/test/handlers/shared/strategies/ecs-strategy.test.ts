@@ -63,8 +63,9 @@ describe('EcsComputeStrategy', () => {
 
       expect(handle.sessionId).toBe(TASK_ARN);
       expect(handle.strategyType).toBe('ecs');
-      expect(handle.metadata.clusterArn).toBe(CLUSTER_ARN);
-      expect(handle.metadata.taskArn).toBe(TASK_ARN);
+      const ecsHandle = handle as Extract<typeof handle, { strategyType: 'ecs' }>;
+      expect(ecsHandle.clusterArn).toBe(CLUSTER_ARN);
+      expect(ecsHandle.taskArn).toBe(TASK_ARN);
       expect(mockSend).toHaveBeenCalledTimes(1);
 
       const call = mockSend.mock.calls[0][0];
@@ -144,7 +145,8 @@ describe('EcsComputeStrategy', () => {
     const makeHandle = () => ({
       sessionId: TASK_ARN,
       strategyType: 'ecs' as const,
-      metadata: { clusterArn: CLUSTER_ARN, taskArn: TASK_ARN },
+      clusterArn: CLUSTER_ARN,
+      taskArn: TASK_ARN,
     });
 
     test('returns running for RUNNING status', async () => {
@@ -242,17 +244,15 @@ describe('EcsComputeStrategy', () => {
       });
     });
 
-    test('returns failed when metadata is missing', async () => {
+    test('throws when handle is not ecs type', async () => {
       const strategy = new EcsComputeStrategy();
-      const result = await strategy.pollSession({
-        sessionId: 'test',
-        strategyType: 'ecs',
-        metadata: {},
-      });
-      expect(result).toEqual({
-        status: 'failed',
-        error: 'Missing clusterArn or taskArn in session handle',
-      });
+      await expect(
+        strategy.pollSession({
+          sessionId: 'test',
+          strategyType: 'agentcore',
+          runtimeArn: 'arn:test',
+        }),
+      ).rejects.toThrow('pollSession called with non-ecs handle');
     });
   });
 
@@ -264,7 +264,8 @@ describe('EcsComputeStrategy', () => {
       await strategy.stopSession({
         sessionId: TASK_ARN,
         strategyType: 'ecs',
-        metadata: { clusterArn: CLUSTER_ARN, taskArn: TASK_ARN },
+        clusterArn: CLUSTER_ARN,
+        taskArn: TASK_ARN,
       });
 
       expect(mockSend).toHaveBeenCalledTimes(1);
@@ -284,7 +285,8 @@ describe('EcsComputeStrategy', () => {
         strategy.stopSession({
           sessionId: TASK_ARN,
           strategyType: 'ecs',
-          metadata: { clusterArn: CLUSTER_ARN, taskArn: TASK_ARN },
+          clusterArn: CLUSTER_ARN,
+          taskArn: TASK_ARN,
         }),
       ).resolves.toBeUndefined();
     });
@@ -299,20 +301,21 @@ describe('EcsComputeStrategy', () => {
         strategy.stopSession({
           sessionId: TASK_ARN,
           strategyType: 'ecs',
-          metadata: { clusterArn: CLUSTER_ARN, taskArn: TASK_ARN },
+          clusterArn: CLUSTER_ARN,
+          taskArn: TASK_ARN,
         }),
       ).resolves.toBeUndefined();
     });
 
-    test('skips stop when metadata is missing', async () => {
+    test('throws when handle is not ecs type', async () => {
       const strategy = new EcsComputeStrategy();
-      await strategy.stopSession({
-        sessionId: 'test',
-        strategyType: 'ecs',
-        metadata: {},
-      });
-
-      expect(mockSend).not.toHaveBeenCalled();
+      await expect(
+        strategy.stopSession({
+          sessionId: 'test',
+          strategyType: 'agentcore',
+          runtimeArn: 'arn:test',
+        }),
+      ).rejects.toThrow('stopSession called with non-ecs handle');
     });
 
     test('logs error for unknown errors (best-effort)', async () => {
@@ -323,7 +326,8 @@ describe('EcsComputeStrategy', () => {
         strategy.stopSession({
           sessionId: TASK_ARN,
           strategyType: 'ecs',
-          metadata: { clusterArn: CLUSTER_ARN, taskArn: TASK_ARN },
+          clusterArn: CLUSTER_ARN,
+          taskArn: TASK_ARN,
         }),
       ).resolves.toBeUndefined();
     });

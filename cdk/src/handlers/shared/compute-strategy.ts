@@ -21,11 +21,9 @@ import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
 import { EcsComputeStrategy } from './strategies/ecs-strategy';
 
-export interface SessionHandle {
-  readonly sessionId: string;
-  readonly strategyType: ComputeType;
-  readonly metadata: Record<string, unknown>;
-}
+export type SessionHandle =
+  | { readonly sessionId: string; readonly strategyType: 'agentcore'; readonly runtimeArn: string }
+  | { readonly sessionId: string; readonly strategyType: 'ecs'; readonly clusterArn: string; readonly taskArn: string };
 
 export type SessionStatus =
   | { readonly status: 'running' }

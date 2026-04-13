@@ -41,6 +41,8 @@ interface OrchestrateTaskEvent {
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
 const MAX_NON_RUNNING_POLLS = 10; // ~5min grace period for session to start
+const MAX_CONSECUTIVE_ECS_POLL_FAILURES = 3;
+const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
   const { task_id: taskId } = event;
@@ -125,11 +127,18 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       const strategy = resolveComputeStrategy(blueprintConfig);
       const handle = await strategy.startSession({ taskId, payload, blueprintConfig });
 
+      // Build compute metadata for the task record so cancel-task can stop the right backend
+      const computeMetadata: Record<string, string> = handle.strategyType === 'ecs'
+        ? { clusterArn: handle.clusterArn, taskArn: handle.taskArn }
+        : { runtimeArn: handle.runtimeArn };
+
       await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
         session_id: handle.sessionId,
         started_at: new Date().toISOString(),
+        compute_type: handle.strategyType,
+        compute_metadata: computeMetadata,
+        ...(handle.strategyType === 'agentcore' && { agent_runtime_arn: handle.runtimeArn }),
       });
-      // Note: strategy_type is an additive field (not present in pre-strategy events)
       await emitTaskEvent(taskId, 'session_started', {
         session_id: handle.sessionId,
         strategy_type: handle.strategyType,
@@ -148,26 +157,34 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
   });
 
+  // Resolve the compute strategy once and reuse it across poll iterations
+  // instead of constructing a new instance on every cycle.
+  const computeStrategy = blueprintConfig.compute_type === 'ecs'
+    ? resolveComputeStrategy(blueprintConfig)
+    : undefined;
+
   // Step 5: Wait for agent to finish
   // Polls DynamoDB on each interval. The agent writes terminal status when done.
   // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
   // goes stale, `pollTaskStatus` sets `sessionUnhealthy` so we fail fast instead
   // of waiting the full MAX_POLL_ATTEMPTS window (~8.5h) after a silent crash.
   // HYDRATING without transition to RUNNING is still bounded by MAX_NON_RUNNING_POLLS (~5min).
+
   const finalPollState = await context.waitForCondition<PollState>(
     'await-agent-completion',
     async (state) => {
       const ddbState = await pollTaskStatus(taskId, state);
+      let consecutiveEcsPollFailures = 0;
+      let consecutiveEcsCompletedPolls = 0;
 
       // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
       if (
         ddbState.lastStatus &&
         !TERMINAL_STATUSES.includes(ddbState.lastStatus) &&
-        blueprintConfig.compute_type === 'ecs'
+        computeStrategy
       ) {
         try {
-          const strategy = resolveComputeStrategy(blueprintConfig);
-          const ecsStatus = await strategy.pollSession(sessionHandle);
+          const ecsStatus = await computeStrategy.pollSession(sessionHandle);
           if (ecsStatus.status === 'failed') {
             const errorMsg = 'error' in ecsStatus ? ecsStatus.error : 'ECS task failed';
             logger.warn('ECS task failed before DDB terminal write', {
@@ -177,15 +194,43 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
             await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, true);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
+          if (ecsStatus.status === 'completed') {
+            consecutiveEcsCompletedPolls = (state.consecutiveEcsCompletedPolls ?? 0) + 1;
+            if (consecutiveEcsCompletedPolls >= MAX_CONSECUTIVE_ECS_COMPLETED_POLLS) {
+              // ECS task exited successfully but DDB never reached terminal — the agent
+              // likely crashed after container exit code 0 but before writing status.
+              logger.error('ECS task completed but DDB never caught up — failing task', {
+                task_id: taskId,
+                consecutive_completed_polls: consecutiveEcsCompletedPolls,
+              });
+              await failTask(taskId, ddbState.lastStatus, `ECS task exited successfully but agent never wrote terminal status after ${consecutiveEcsCompletedPolls} polls`, task.user_id, true);
+              return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
+            }
+            logger.warn('ECS task completed but DDB not terminal — waiting for DDB catchup', {
+              task_id: taskId,
+              consecutive_completed_polls: consecutiveEcsCompletedPolls,
+            });
+          }
         } catch (err) {
+          consecutiveEcsPollFailures = (state.consecutiveEcsPollFailures ?? 0) + 1;
+          if (consecutiveEcsPollFailures >= MAX_CONSECUTIVE_ECS_POLL_FAILURES) {
+            logger.error('ECS pollSession failed repeatedly — failing task', {
+              task_id: taskId,
+              consecutive_failures: consecutiveEcsPollFailures,
+              error: err instanceof Error ? err.message : String(err),
+            });
+            await failTask(taskId, ddbState.lastStatus, `ECS poll failed ${consecutiveEcsPollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, true);
+            return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
+          }
           logger.warn('ECS pollSession check failed (non-fatal)', {
             task_id: taskId,
+            consecutive_failures: consecutiveEcsPollFailures,
             error: err instanceof Error ? err.message : String(err),
           });
         }
       }
 
-      return ddbState;
+      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls };
     },
     {
       initialState: { attempts: 0 },

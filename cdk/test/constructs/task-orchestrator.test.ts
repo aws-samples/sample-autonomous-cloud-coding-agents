@@ -32,13 +32,15 @@ interface StackOverrides {
   memoryId?: string;
   guardrailId?: string;
   guardrailVersion?: string;
-  ecsClusterArn?: string;
-  ecsTaskDefinitionArn?: string;
-  ecsSubnets?: string;
-  ecsSecurityGroup?: string;
-  ecsContainerName?: string;
-  ecsTaskRoleArn?: string;
-  ecsExecutionRoleArn?: string;
+  ecsConfig?: {
+    clusterArn: string;
+    taskDefinitionArn: string;
+    subnets: string;
+    securityGroup: string;
+    containerName: string;
+    taskRoleArn: string;
+    executionRoleArn: string;
+  };
 }
 
 function createStack(overrides?: StackOverrides): { stack: Stack; template: Template } {
@@ -71,13 +73,7 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     memoryId,
     guardrailId,
     guardrailVersion,
-    ecsClusterArn,
-    ecsTaskDefinitionArn,
-    ecsSubnets,
-    ecsSecurityGroup,
-    ecsContainerName,
-    ecsTaskRoleArn,
-    ecsExecutionRoleArn,
+    ecsConfig,
     ...rest
   } = overrides ?? {};
 
@@ -92,13 +88,7 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     ...(memoryId && { memoryId }),
     ...(guardrailId && { guardrailId }),
     ...(guardrailVersion && { guardrailVersion }),
-    ...(ecsClusterArn && { ecsClusterArn }),
-    ...(ecsTaskDefinitionArn && { ecsTaskDefinitionArn }),
-    ...(ecsSubnets && { ecsSubnets }),
-    ...(ecsSecurityGroup && { ecsSecurityGroup }),
-    ...(ecsContainerName && { ecsContainerName }),
-    ...(ecsTaskRoleArn && { ecsTaskRoleArn }),
-    ...(ecsExecutionRoleArn && { ecsExecutionRoleArn }),
+    ...(ecsConfig && { ecsConfig }),
     ...rest,
   });
 
@@ -447,13 +437,15 @@ describe('TaskOrchestrator construct', () => {
 
   describe('ECS compute strategy', () => {
     const ecsOverrides = {
-      ecsClusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
-      ecsTaskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
-      ecsSubnets: 'subnet-aaa,subnet-bbb',
-      ecsSecurityGroup: 'sg-12345',
-      ecsContainerName: 'AgentContainer',
-      ecsTaskRoleArn: 'arn:aws:iam::123456789012:role/TaskRole',
-      ecsExecutionRoleArn: 'arn:aws:iam::123456789012:role/ExecutionRole',
+      ecsConfig: {
+        clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+        taskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
+        subnets: 'subnet-aaa,subnet-bbb',
+        securityGroup: 'sg-12345',
+        containerName: 'AgentContainer',
+        taskRoleArn: 'arn:aws:iam::123456789012:role/TaskRole',
+        executionRoleArn: 'arn:aws:iam::123456789012:role/ExecutionRole',
+      },
     };
 
     test('includes ECS env vars when ECS props are provided', () => {
@@ -526,12 +518,6 @@ describe('TaskOrchestrator construct', () => {
           ]),
         },
       });
-    });
-
-    test('throws when only some ECS props are provided', () => {
-      expect(() => createStack({
-        ecsClusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
-      })).toThrow('ECS compute strategy requires all of');
     });
 
     test('does not grant ECS permissions when ECS props are omitted', () => {

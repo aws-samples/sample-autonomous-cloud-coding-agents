@@ -106,12 +106,16 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
-  test('creates a CloudWatch log group with 3-month retention', () => {
+  test('creates a CloudWatch log group with 3-month retention and CDK-generated name', () => {
     const { template } = createStack();
     template.hasResourceProperties('AWS::Logs::LogGroup', {
-      LogGroupName: '/ecs/abca-agent-tasks',
       RetentionInDays: 90,
     });
+    // Verify no hardcoded log group name — CDK auto-generates a unique name
+    const logGroups = template.findResources('AWS::Logs::LogGroup');
+    for (const [, lg] of Object.entries(logGroups)) {
+      expect((lg as any).Properties).not.toHaveProperty('LogGroupName');
+    }
   });
 
   test('task role has DynamoDB read/write permissions', () => {

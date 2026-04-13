@@ -53,7 +53,8 @@ describe('AgentCoreComputeStrategy', () => {
 
       expect(handle.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       expect(handle.strategyType).toBe('agentcore');
-      expect(handle.metadata.runtimeArn).toBe(defaultRuntimeArn);
+      const acHandle = handle as Extract<typeof handle, { strategyType: 'agentcore' }>;
+      expect(acHandle.runtimeArn).toBe(defaultRuntimeArn);
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
@@ -68,7 +69,8 @@ describe('AgentCoreComputeStrategy', () => {
         blueprintConfig: { compute_type: 'agentcore', runtime_arn: runtimeArn },
       });
 
-      expect(handle.metadata.runtimeArn).toBe(runtimeArn);
+      const acHandle = handle as Extract<typeof handle, { strategyType: 'agentcore' }>;
+      expect(acHandle.runtimeArn).toBe(runtimeArn);
       const invokeCall = mockSend.mock.calls[0][0];
       expect(invokeCall.input.agentRuntimeArn).toBe(runtimeArn);
     });
@@ -101,15 +103,14 @@ describe('AgentCoreComputeStrategy', () => {
   });
 
   describe('pollSession', () => {
-    test('throws because AgentCore polling is done at orchestrator level', async () => {
+    test('returns running status (AgentCore polling is done via DDB)', async () => {
       const strategy = new AgentCoreComputeStrategy();
-      await expect(
-        strategy.pollSession({
-          sessionId: 'test-session',
-          strategyType: 'agentcore',
-          metadata: { runtimeArn: defaultRuntimeArn },
-        }),
-      ).rejects.toThrow('pollSession is not implemented for AgentCore');
+      const result = await strategy.pollSession({
+        sessionId: 'test-session',
+        strategyType: 'agentcore',
+        runtimeArn: defaultRuntimeArn,
+      });
+      expect(result).toEqual({ status: 'running' });
     });
   });
 
@@ -121,7 +122,7 @@ describe('AgentCoreComputeStrategy', () => {
       await strategy.stopSession({
         sessionId: 'test-session',
         strategyType: 'agentcore',
-        metadata: { runtimeArn: defaultRuntimeArn },
+        runtimeArn: defaultRuntimeArn,
       });
 
       expect(mockSend).toHaveBeenCalledTimes(1);
@@ -140,7 +141,7 @@ describe('AgentCoreComputeStrategy', () => {
         strategy.stopSession({
           sessionId: 'test-session',
           strategyType: 'agentcore',
-          metadata: { runtimeArn: defaultRuntimeArn },
+          runtimeArn: defaultRuntimeArn,
         }),
       ).resolves.toBeUndefined();
     });
@@ -155,7 +156,7 @@ describe('AgentCoreComputeStrategy', () => {
         strategy.stopSession({
           sessionId: 'test-session',
           strategyType: 'agentcore',
-          metadata: { runtimeArn: defaultRuntimeArn },
+          runtimeArn: defaultRuntimeArn,
         }),
       ).resolves.toBeUndefined();
     });
@@ -170,7 +171,7 @@ describe('AgentCoreComputeStrategy', () => {
         strategy.stopSession({
           sessionId: 'test-session',
           strategyType: 'agentcore',
-          metadata: { runtimeArn: defaultRuntimeArn },
+          runtimeArn: defaultRuntimeArn,
         }),
       ).resolves.toBeUndefined();
     });
@@ -183,21 +184,22 @@ describe('AgentCoreComputeStrategy', () => {
         strategy.stopSession({
           sessionId: 'test-session',
           strategyType: 'agentcore',
-          metadata: { runtimeArn: defaultRuntimeArn },
+          runtimeArn: defaultRuntimeArn,
         }),
       ).resolves.toBeUndefined();
     });
 
-    test('skips stop when no runtimeArn in metadata', async () => {
+    test('throws when handle is not agentcore type', async () => {
       const strategy = new AgentCoreComputeStrategy();
 
-      await strategy.stopSession({
-        sessionId: 'test-session',
-        strategyType: 'agentcore',
-        metadata: {},
-      });
-
-      expect(mockSend).not.toHaveBeenCalled();
+      await expect(
+        strategy.stopSession({
+          sessionId: 'test-session',
+          strategyType: 'ecs',
+          clusterArn: 'arn:test',
+          taskArn: 'arn:test',
+        }),
+      ).rejects.toThrow('stopSession called with non-agentcore handle');
     });
   });
 });

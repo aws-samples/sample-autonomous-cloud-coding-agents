@@ -72,7 +72,6 @@ export class EcsAgentCluster extends Construct {
 
     // CloudWatch log group for agent task output
     const logGroup = new logs.LogGroup(this, 'TaskLogGroup', {
-      logGroupName: '/ecs/abca-agent-tasks',
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });

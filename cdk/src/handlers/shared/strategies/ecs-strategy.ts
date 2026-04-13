@@ -147,21 +147,17 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
     return {
       sessionId: ecsTask.taskArn,
-      strategyType: this.type,
-      metadata: {
-        clusterArn: ECS_CLUSTER_ARN,
-        taskArn: ecsTask.taskArn,
-      },
+      strategyType: 'ecs',
+      clusterArn: ECS_CLUSTER_ARN,
+      taskArn: ecsTask.taskArn,
     };
   }
 
   async pollSession(handle: SessionHandle): Promise<SessionStatus> {
-    const clusterArn = handle.metadata.clusterArn as string;
-    const taskArn = handle.metadata.taskArn as string;
-
-    if (!clusterArn || !taskArn) {
-      return { status: 'failed', error: 'Missing clusterArn or taskArn in session handle' };
+    if (handle.strategyType !== 'ecs') {
+      throw new Error('pollSession called with non-ecs handle');
     }
+    const { clusterArn, taskArn } = handle;
 
     const result = await getClient().send(new DescribeTasksCommand({
       cluster: clusterArn,
@@ -194,15 +190,10 @@ export class EcsComputeStrategy implements ComputeStrategy {
   }
 
   async stopSession(handle: SessionHandle): Promise<void> {
-    const clusterArn = handle.metadata.clusterArn as string;
-    const taskArn = handle.metadata.taskArn as string;
-
-    if (!clusterArn || !taskArn) {
-      logger.warn('No clusterArn/taskArn in session handle, cannot stop ECS task', {
-        session_id: handle.sessionId,
-      });
-      return;
+    if (handle.strategyType !== 'ecs') {
+      throw new Error('stopSession called with non-ecs handle');
     }
+    const { clusterArn, taskArn } = handle;
 
     try {
       await getClient().send(new StopTaskCommand({
@@ -212,7 +203,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
       }));
       logger.info('ECS task stopped', { task_arn: taskArn });
     } catch (err) {
-      const errName = err instanceof Error ? (err as Error & { name?: string }).name : undefined;
+      const errName = err instanceof Error ? err.name : undefined;
       if (errName === 'InvalidParameterException' || errName === 'ResourceNotFoundException') {
         logger.info('ECS task already stopped or not found', { task_arn: taskArn });
       } else {

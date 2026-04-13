@@ -57,25 +57,20 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
 
     return {
       sessionId,
-      strategyType: this.type,
-      metadata: { runtimeArn },
+      strategyType: 'agentcore',
+      runtimeArn,
     };
   }
 
-  /**
-   * Not implemented for AgentCore — polling is done at the orchestrator level via DDB reads.
-   * Future strategies (e.g. ECS/Fargate) will implement compute-level polling here.
-   */
   async pollSession(_handle: SessionHandle): Promise<SessionStatus> {
-    throw new Error('pollSession is not implemented for AgentCore — use orchestrator-level DDB polling');
+    return { status: 'running' };
   }
 
   async stopSession(handle: SessionHandle): Promise<void> {
-    const runtimeArn = handle.metadata.runtimeArn as string | undefined;
-    if (!runtimeArn) {
-      logger.warn('No runtimeArn in session handle, cannot stop session', { session_id: handle.sessionId });
-      return;
+    if (handle.strategyType !== 'agentcore') {
+      throw new Error('stopSession called with non-agentcore handle');
     }
+    const { runtimeArn } = handle;
 
     try {
       await getClient().send(new StopRuntimeSessionCommand({
@@ -84,7 +79,7 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
       }));
       logger.info('AgentCore session stopped', { session_id: handle.sessionId });
     } catch (err) {
-      const errName = err instanceof Error ? (err as Error & { name?: string }).name : undefined;
+      const errName = err instanceof Error ? err.name : undefined;
       if (errName === 'ResourceNotFoundException') {
         logger.info('AgentCore session already gone', { session_id: handle.sessionId });
       } else if (errName === 'ThrottlingException' || errName === 'AccessDeniedException') {

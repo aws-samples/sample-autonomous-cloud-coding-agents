@@ -114,37 +114,19 @@ export interface TaskOrchestratorProps {
   readonly guardrailVersion?: string;
 
   /**
-   * ARN of the ECS cluster for ECS compute strategy.
-   * When provided, ECS-related env vars and IAM policies are added.
+   * ECS Fargate compute strategy configuration.
+   * When provided, ECS-related env vars and IAM policies are added to the orchestrator.
+   * All fields are required — this makes the all-or-nothing constraint self-evident at the type level.
    */
-  readonly ecsClusterArn?: string;
-
-  /**
-   * ARN of the ECS task definition for ECS compute strategy.
-   */
-  readonly ecsTaskDefinitionArn?: string;
-
-  /**
-   * Comma-separated subnet IDs for ECS tasks.
-   */
-  readonly ecsSubnets?: string;
-
-  /**
-   * Security group ID for ECS tasks.
-   */
-  readonly ecsSecurityGroup?: string;
-
-  /**
-   * Container name in the ECS task definition.
-   */
-  readonly ecsContainerName?: string;
-
-  /**
-   * ARNs of the ECS task role and execution role for scoped iam:PassRole.
-   * Required when ecsClusterArn is provided.
-   */
-  readonly ecsTaskRoleArn?: string;
-  readonly ecsExecutionRoleArn?: string;
+  readonly ecsConfig?: {
+    readonly clusterArn: string;
+    readonly taskDefinitionArn: string;
+    readonly subnets: string;
+    readonly securityGroup: string;
+    readonly containerName: string;
+    readonly taskRoleArn: string;
+    readonly executionRoleArn: string;
+  };
 }
 
 /**
@@ -177,13 +159,6 @@ export class TaskOrchestrator extends Construct {
       throw new Error('guardrailId is required when guardrailVersion is provided');
     }
 
-    // Validate ECS props are all-or-nothing
-    const ecsProps = [props.ecsClusterArn, props.ecsTaskDefinitionArn, props.ecsSubnets, props.ecsSecurityGroup, props.ecsContainerName];
-    const ecsPropsProvided = ecsProps.filter(p => p !== undefined);
-    if (ecsPropsProvided.length > 0 && ecsPropsProvided.length < ecsProps.length) {
-      throw new Error('ECS compute strategy requires all of: ecsClusterArn, ecsTaskDefinitionArn, ecsSubnets, ecsSecurityGroup, ecsContainerName');
-    }
-
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 3;
 
@@ -213,11 +188,13 @@ export class TaskOrchestrator extends Construct {
         ...(props.memoryId && { MEMORY_ID: props.memoryId }),
         ...(props.guardrailId && { GUARDRAIL_ID: props.guardrailId }),
         ...(props.guardrailVersion && { GUARDRAIL_VERSION: props.guardrailVersion }),
-        ...(props.ecsClusterArn && { ECS_CLUSTER_ARN: props.ecsClusterArn }),
-        ...(props.ecsTaskDefinitionArn && { ECS_TASK_DEFINITION_ARN: props.ecsTaskDefinitionArn }),
-        ...(props.ecsSubnets && { ECS_SUBNETS: props.ecsSubnets }),
-        ...(props.ecsSecurityGroup && { ECS_SECURITY_GROUP: props.ecsSecurityGroup }),
-        ...(props.ecsContainerName && { ECS_CONTAINER_NAME: props.ecsContainerName }),
+        ...(props.ecsConfig && {
+          ECS_CLUSTER_ARN: props.ecsConfig.clusterArn,
+          ECS_TASK_DEFINITION_ARN: props.ecsConfig.taskDefinitionArn,
+          ECS_SUBNETS: props.ecsConfig.subnets,
+          ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
+          ECS_CONTAINER_NAME: props.ecsConfig.containerName,
+        }),
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -259,7 +236,7 @@ export class TaskOrchestrator extends Construct {
     }));
 
     // ECS compute strategy permissions (only when ECS is configured)
-    if (props.ecsClusterArn) {
+    if (props.ecsConfig) {
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         actions: [
           'ecs:RunTask',
@@ -269,15 +246,14 @@ export class TaskOrchestrator extends Construct {
         resources: ['*'],
         conditions: {
           ArnEquals: {
-            'ecs:cluster': props.ecsClusterArn,
+            'ecs:cluster': props.ecsConfig.clusterArn,
           },
         },
       }));
 
-      const passRoleResources = [props.ecsTaskRoleArn, props.ecsExecutionRoleArn].filter(Boolean) as string[];
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['iam:PassRole'],
-        resources: passRoleResources.length > 0 ? passRoleResources : ['*'],
+        resources: [props.ecsConfig.taskRoleArn, props.ecsConfig.executionRoleArn],
         conditions: {
           StringEquals: {
             'iam:PassedToService': 'ecs-tasks.amazonaws.com',

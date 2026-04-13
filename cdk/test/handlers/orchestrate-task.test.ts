@@ -76,7 +76,6 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
-  startSession,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
 
@@ -233,25 +232,6 @@ describe('hydrateAndTransition', () => {
     expect(metadata.sources).toEqual(['task_description']);
     expect(metadata.token_estimate).toBe(20);
     expect(metadata.truncated).toBe(false);
-  });
-});
-
-describe('startSession', () => {
-  test('invokes agent runtime and transitions to RUNNING', async () => {
-    mockAgentCoreSend.mockResolvedValueOnce({}); // InvokeAgentRuntime
-    mockDdbSend.mockResolvedValue({}); // transitionTask + emitTaskEvent
-
-    const sessionId = await startSession(baseTask as any, { repo_url: 'org/repo', task_id: 'TASK001' });
-    // Session ID is a UUID v4 (36 chars), not a ULID
-    expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
-    const transitionCall = mockDdbSend.mock.calls.find(
-      (c: any[]) => c[0]._type === 'Update' && c[0].input.ExpressionAttributeValues?.[':toStatus'] === 'RUNNING',
-    );
-    expect(transitionCall).toBeDefined();
-    expect(transitionCall![0].input.ExpressionAttributeValues[':attr_agent_runtime_arn']).toBe(
-      'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test',
-    );
   });
 });
 
