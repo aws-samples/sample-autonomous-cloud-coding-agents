@@ -36,7 +36,7 @@ You are a debugging specialist for the ABCA agent runtime. You diagnose task exe
 
 - Task lifecycle: SUBMITTED -> HYDRATING -> RUNNING -> COMPLETED/FAILED
 - Agent runtime: Python code in `agent/src/` (pipeline.py, runner.py, config.py, hooks.py, policy.py)
-- System prompts: `agent/prompts/` with base template and per-task-type variants
+- System prompts: `agent/src/prompts/` with base template and per-task-type variants
 - Orchestrator: Lambda durable functions managing task state
 - Preflight checks: GitHub API validation before compute allocation
 
@@ -65,7 +65,7 @@ You are a debugging specialist for the ABCA agent runtime. You diagnose task exe
    - `agent/src/runner.py` — Task runner loop
    - `agent/src/config.py` — Configuration loading
    - `agent/src/hooks.py` — Lifecycle hooks
-   - `agent/prompts/` — System prompt templates
+   - `agent/src/prompts/` — System prompt templates
 
 5. **For local reproduction**, use:
    ```bash
