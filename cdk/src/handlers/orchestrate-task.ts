@@ -41,8 +41,8 @@ interface OrchestrateTaskEvent {
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
 const MAX_NON_RUNNING_POLLS = 10; // ~5min grace period for session to start
-const MAX_CONSECUTIVE_ECS_POLL_FAILURES = 3;
-const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
+const MAX_CONSECUTIVE_COMPUTE_POLL_FAILURES = 3;
+const MAX_CONSECUTIVE_COMPUTE_COMPLETED_POLLS = 5;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
   const { task_id: taskId } = event;
@@ -176,63 +176,62 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     'await-agent-completion',
     async (state) => {
       const ddbState = await pollTaskStatus(taskId, state);
-      let consecutiveEcsPollFailures = 0;
-      let consecutiveEcsCompletedPolls = 0;
+      let consecutiveComputePollFailures = 0;
+      let consecutiveComputeCompletedPolls = 0;
+      const computeLabel = blueprintConfig.compute_type.toUpperCase();
 
-      // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
+      // Compute-level crash detection: if DDB is not terminal, check compute task status
       if (
         ddbState.lastStatus &&
         !TERMINAL_STATUSES.includes(ddbState.lastStatus) &&
         computeStrategy
       ) {
         try {
-          const ecsStatus = await computeStrategy.pollSession(sessionHandle);
-          if (ecsStatus.status === 'failed') {
-            const errorMsg = 'error' in ecsStatus ? ecsStatus.error : 'ECS task failed';
-            logger.warn('ECS task failed before DDB terminal write', {
+          const computeStatus = await computeStrategy.pollSession(sessionHandle);
+          if (computeStatus.status === 'failed') {
+            const errorMsg = 'error' in computeStatus ? computeStatus.error : `${computeLabel} task failed`;
+            logger.warn(`${computeLabel} task failed before DDB terminal write`, {
               task_id: taskId,
               error: errorMsg,
             });
-            await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, true);
+            await failTask(taskId, ddbState.lastStatus, `${computeLabel} compute failed: ${errorMsg}`, task.user_id, true);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
-          if (ecsStatus.status === 'completed') {
-            consecutiveEcsCompletedPolls = (state.consecutiveEcsCompletedPolls ?? 0) + 1;
-            if (consecutiveEcsCompletedPolls >= MAX_CONSECUTIVE_ECS_COMPLETED_POLLS) {
-              // ECS task exited successfully but DDB never reached terminal — the agent
-              // likely crashed after container exit code 0 but before writing status.
-              logger.error('ECS task completed but DDB never caught up — failing task', {
+          if (computeStatus.status === 'completed') {
+            consecutiveComputeCompletedPolls = (state.consecutiveComputeCompletedPolls ?? 0) + 1;
+            if (consecutiveComputeCompletedPolls >= MAX_CONSECUTIVE_COMPUTE_COMPLETED_POLLS) {
+              logger.error(`${computeLabel} task completed but DDB never caught up — failing task`, {
                 task_id: taskId,
-                consecutive_completed_polls: consecutiveEcsCompletedPolls,
+                consecutive_completed_polls: consecutiveComputeCompletedPolls,
               });
-              await failTask(taskId, ddbState.lastStatus, `ECS task exited successfully but agent never wrote terminal status after ${consecutiveEcsCompletedPolls} polls`, task.user_id, true);
+              await failTask(taskId, ddbState.lastStatus, `${computeLabel} task exited successfully but agent never wrote terminal status after ${consecutiveComputeCompletedPolls} polls`, task.user_id, true);
               return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
             }
-            logger.warn('ECS task completed but DDB not terminal — waiting for DDB catchup', {
+            logger.warn(`${computeLabel} task completed but DDB not terminal — waiting for DDB catchup`, {
               task_id: taskId,
-              consecutive_completed_polls: consecutiveEcsCompletedPolls,
+              consecutive_completed_polls: consecutiveComputeCompletedPolls,
             });
           }
         } catch (err) {
-          consecutiveEcsPollFailures = (state.consecutiveEcsPollFailures ?? 0) + 1;
-          if (consecutiveEcsPollFailures >= MAX_CONSECUTIVE_ECS_POLL_FAILURES) {
-            logger.error('ECS pollSession failed repeatedly — failing task', {
+          consecutiveComputePollFailures = (state.consecutiveComputePollFailures ?? 0) + 1;
+          if (consecutiveComputePollFailures >= MAX_CONSECUTIVE_COMPUTE_POLL_FAILURES) {
+            logger.error(`${computeLabel} pollSession failed repeatedly — failing task`, {
               task_id: taskId,
-              consecutive_failures: consecutiveEcsPollFailures,
+              consecutive_failures: consecutiveComputePollFailures,
               error: err instanceof Error ? err.message : String(err),
             });
-            await failTask(taskId, ddbState.lastStatus, `ECS poll failed ${consecutiveEcsPollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, true);
+            await failTask(taskId, ddbState.lastStatus, `${computeLabel} poll failed ${consecutiveComputePollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, true);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
-          logger.warn('ECS pollSession check failed (non-fatal)', {
+          logger.warn(`${computeLabel} pollSession check failed (non-fatal)`, {
             task_id: taskId,
-            consecutive_failures: consecutiveEcsPollFailures,
+            consecutive_failures: consecutiveComputePollFailures,
             error: err instanceof Error ? err.message : String(err),
           });
         }
       }
 
-      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls };
+      return { ...ddbState, consecutiveComputePollFailures, consecutiveComputeCompletedPolls };
     },
     {
       initialState: { attempts: 0 },

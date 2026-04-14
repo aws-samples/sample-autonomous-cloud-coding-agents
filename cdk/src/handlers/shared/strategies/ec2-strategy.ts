@@ -105,69 +105,75 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       ],
     }));
 
-    // 4. Build the boot command (mirrors ECS strategy env vars and Python boot command)
-    const envExports = [
-      `export TASK_ID='${taskId}'`,
-      `export REPO_URL='${String(payload.repo_url ?? '')}'`,
-      ...(payload.prompt ? [`export TASK_DESCRIPTION='${String(payload.prompt).replace(/'/g, "'\\''")}'`] : []),
-      ...(payload.issue_number ? [`export ISSUE_NUMBER='${String(payload.issue_number)}'`] : []),
-      `export MAX_TURNS='${String(payload.max_turns ?? 100)}'`,
-      ...(payload.max_budget_usd !== undefined ? [`export MAX_BUDGET_USD='${String(payload.max_budget_usd)}'`] : []),
-      ...(blueprintConfig.model_id ? [`export ANTHROPIC_MODEL='${blueprintConfig.model_id}'`] : []),
-      ...(blueprintConfig.system_prompt_overrides ? [`export SYSTEM_PROMPT_OVERRIDES='${blueprintConfig.system_prompt_overrides.replace(/'/g, "'\\''")}'`] : []),
-      "export CLAUDE_CODE_USE_BEDROCK='1'",
-      ...(payload.github_token_secret_arn ? [`export GITHUB_TOKEN_SECRET_ARN='${String(payload.github_token_secret_arn)}'`] : []),
-      ...(payload.memory_id ? [`export MEMORY_ID='${String(payload.memory_id)}'`] : []),
-    ];
-
+    // 4. Build the boot script
+    // All task data is read from the S3 payload at runtime to avoid shell
+    // injection — no untrusted values are interpolated into the script.
+    // Only infrastructure constants (bucket name, ECR URI) are embedded.
     const bootScript = [
       '#!/bin/bash',
       'set -euo pipefail',
       '',
+      '# Derive region from IMDS (SSM does not always set AWS_REGION)',
+      'export AWS_REGION=$(ec2-metadata --availability-zone | cut -d" " -f2 | sed \'s/.$/\'\'/)\'',
+      'export AWS_DEFAULT_REGION="$AWS_REGION"',
+      '',
+      '# Resolve instance ID for tag cleanup',
+      'INSTANCE_ID=$(ec2-metadata -i | cut -d" " -f2)',
+      '',
+      '# Cleanup trap — always retag instance as idle on exit (success, error, or signal)',
+      'cleanup() {',
+      '  docker system prune -f || true',
+      '  rm -f /tmp/payload.json',
+      `  aws ec2 create-tags --resources "$INSTANCE_ID" --region "$AWS_REGION" --tags Key=bgagent:status,Value=idle || true`,
+      `  aws ec2 delete-tags --resources "$INSTANCE_ID" --region "$AWS_REGION" --tags Key=bgagent:task-id || true`,
+      '}',
+      'trap cleanup EXIT',
+      '',
       '# Fetch payload from S3',
       `aws s3 cp "s3://${EC2_PAYLOAD_BUCKET}/${payloadKey}" /tmp/payload.json`,
       'export AGENT_PAYLOAD=$(cat /tmp/payload.json)',
-      '',
-      '# Set environment variables',
-      ...envExports,
+      'export CLAUDE_CODE_USE_BEDROCK=1',
       '',
       '# ECR login and pull',
-      `aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo '${ECR_IMAGE_URI}' | cut -d/ -f1)`,
+      `aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin $(echo '${ECR_IMAGE_URI}' | cut -d/ -f1)`,
       `docker pull '${ECR_IMAGE_URI}'`,
       '',
-      '# Run the agent container',
-      'docker run --rm \\',
-      '  -e TASK_ID -e REPO_URL -e CLAUDE_CODE_USE_BEDROCK -e AGENT_PAYLOAD \\',
-      '  -e AWS_REGION -e AWS_DEFAULT_REGION \\',
-      `  ${payload.prompt ? '-e TASK_DESCRIPTION ' : ''}${payload.issue_number ? '-e ISSUE_NUMBER ' : ''}-e MAX_TURNS \\`,
-      `  ${payload.max_budget_usd !== undefined ? '-e MAX_BUDGET_USD ' : ''}${blueprintConfig.model_id ? '-e ANTHROPIC_MODEL ' : ''}${blueprintConfig.system_prompt_overrides ? '-e SYSTEM_PROMPT_OVERRIDES ' : ''}\\`,
-      `  ${payload.github_token_secret_arn ? '-e GITHUB_TOKEN_SECRET_ARN ' : ''}${payload.memory_id ? '-e MEMORY_ID ' : ''}\\`,
-      `  '${ECR_IMAGE_URI}' \\`,
+      '# Run the agent container — all config is read from AGENT_PAYLOAD inside the container',
+      `docker run --rm -e AGENT_PAYLOAD -e CLAUDE_CODE_USE_BEDROCK -e AWS_REGION -e AWS_DEFAULT_REGION '${ECR_IMAGE_URI}' \\`,
       '  python -c \'import json, os, sys; sys.path.insert(0, "/app"); from entrypoint import run_task; p = json.loads(os.environ["AGENT_PAYLOAD"]); r = run_task(repo_url=p.get("repo_url",""), task_description=p.get("prompt",""), issue_number=str(p.get("issue_number","")), github_token=p.get("github_token",""), anthropic_model=p.get("model_id",""), max_turns=int(p.get("max_turns",100)), max_budget_usd=p.get("max_budget_usd"), aws_region=os.environ.get("AWS_REGION",""), task_id=p.get("task_id",""), hydrated_context=p.get("hydrated_context"), system_prompt_overrides=p.get("system_prompt_overrides",""), prompt_version=p.get("prompt_version",""), memory_id=p.get("memory_id",""), task_type=p.get("task_type","new_task"), branch_name=p.get("branch_name",""), pr_number=str(p.get("pr_number",""))); sys.exit(0 if r.get("status")=="success" else 1)\'',
-      '',
-      '# Cleanup',
-      'docker system prune -f',
-      'rm -f /tmp/payload.json',
-      '',
-      '# Tag instance back to idle',
-      'INSTANCE_ID=$(ec2-metadata -i | cut -d" " -f2)',
-      'aws ec2 create-tags --resources "$INSTANCE_ID" --tags Key=bgagent:status,Value=idle',
-      'aws ec2 delete-tags --resources "$INSTANCE_ID" --tags Key=bgagent:task-id',
     ].join('\n');
 
-    // 5. Send SSM Run Command
-    const ssmResult = await getSsmClient().send(new SendCommandCommand({
-      DocumentName: 'AWS-RunShellScript',
-      InstanceIds: [instanceId],
-      Parameters: {
-        commands: [bootScript],
-      },
-      TimeoutSeconds: 32400, // 9 hours, matches orchestrator max
-    }));
+    // 5. Send SSM Run Command — rollback instance tags on failure
+    let commandId: string;
+    try {
+      const ssmResult = await getSsmClient().send(new SendCommandCommand({
+        DocumentName: 'AWS-RunShellScript',
+        InstanceIds: [instanceId],
+        Parameters: {
+          commands: [bootScript],
+        },
+        TimeoutSeconds: 32400, // 9 hours, matches orchestrator max
+      }));
 
-    const commandId = ssmResult.Command?.CommandId;
-    if (!commandId) {
-      throw new Error('SSM SendCommand returned no CommandId');
+      if (!ssmResult.Command?.CommandId) {
+        throw new Error('SSM SendCommand returned no CommandId');
+      }
+      commandId = ssmResult.Command.CommandId;
+    } catch (err) {
+      // Rollback: retag instance as idle so it's not stuck as busy
+      try {
+        await getEc2Client().send(new CreateTagsCommand({
+          Resources: [instanceId],
+          Tags: [{ Key: 'bgagent:status', Value: 'idle' }],
+        }));
+        await getEc2Client().send(new DeleteTagsCommand({
+          Resources: [instanceId],
+          Tags: [{ Key: 'bgagent:task-id' }],
+        }));
+      } catch {
+        logger.warn('Failed to rollback instance tags after dispatch failure', { instance_id: instanceId, task_id: taskId });
+      }
+      throw err;
     }
 
     logger.info('EC2 SSM command dispatched', {

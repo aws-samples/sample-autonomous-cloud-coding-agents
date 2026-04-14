@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Tags } from 'aws-cdk-lib';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -184,10 +184,9 @@ export class Ec2AgentFleet extends Construct {
       healthCheck: autoscaling.HealthCheck.ec2(),
     });
 
-    // Tag the ASG instances for fleet identification
-    // CDK auto-propagates tags from the ASG to instances
-    this.autoScalingGroup.node.defaultChild;
-    this.autoScalingGroup.addUserData(`aws ec2 create-tags --resources "$(ec2-metadata -i | cut -d' ' -f2)" --region "$(ec2-metadata --availability-zone | cut -d' ' -f2 | sed 's/.$//')" --tags Key=${this.fleetTagKey},Value=${this.fleetTagValue}`);
+    // Tag ASG instances for fleet identification — CDK propagates these at launch
+    Tags.of(this.autoScalingGroup).add(this.fleetTagKey, this.fleetTagValue);
+    Tags.of(this.autoScalingGroup).add('bgagent:status', 'idle');
 
     NagSuppressions.addResourceSuppressions(this.instanceRole, [
       {

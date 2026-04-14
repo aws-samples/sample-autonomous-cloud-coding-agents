@@ -111,9 +111,7 @@ export interface TaskApiProps {
    * EC2 fleet configuration for cancel-task to stop EC2-backed tasks.
    * When provided, the cancel Lambda gets `ssm:CancelCommand` permission.
    */
-  readonly ec2FleetConfig?: {
-    readonly instanceRoleArn: string;
-  };
+  readonly ec2FleetConfig?: Record<string, never>;
 }
 
 /**

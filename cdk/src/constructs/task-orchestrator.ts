@@ -137,7 +137,6 @@ export interface TaskOrchestratorProps {
     readonly fleetTagValue: string;
     readonly payloadBucketName: string;
     readonly ecrImageUri: string;
-    readonly instanceRoleArn: string;
   };
 }
 
@@ -304,15 +303,9 @@ export class TaskOrchestrator extends Construct {
         resources: [`arn:${Aws.PARTITION}:s3:::${props.ec2Config.payloadBucketName}/*`],
       }));
 
-      this.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['iam:PassRole'],
-        resources: [props.ec2Config.instanceRoleArn],
-        conditions: {
-          StringEquals: {
-            'iam:PassedToService': 'ec2.amazonaws.com',
-          },
-        },
-      }));
+      // Note: iam:PassRole is not needed — the orchestrator does not pass the
+      // instance role to any EC2 API. The ASG launch template handles instance
+      // profile association at fleet creation time.
     }
 
     // Per-repo Secrets Manager grants (e.g. per-repo GitHub tokens from Blueprints)

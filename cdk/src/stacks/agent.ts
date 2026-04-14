@@ -339,7 +339,6 @@ export class AgentStack extends Stack {
       //   fleetTagValue: ec2Fleet.fleetTagValue,
       //   payloadBucketName: ec2Fleet.payloadBucket.bucketName,
       //   ecrImageUri: agentImageAsset.imageUri,
-      //   instanceRoleArn: ec2Fleet.instanceRole.roleArn,
       // },
     });
 
@@ -366,7 +365,7 @@ export class AgentStack extends Stack {
       // To allow cancel-task to stop ECS-backed tasks, uncomment:
       // ecsClusterArn: ecsCluster.cluster.clusterArn,
       // To allow cancel-task to stop EC2-backed tasks, uncomment:
-      // ec2FleetConfig: { instanceRoleArn: ec2Fleet.instanceRole.roleArn },
+      // ec2FleetConfig: {},
     });
 
     // --- Operator dashboard ---
