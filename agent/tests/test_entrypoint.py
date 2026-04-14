@@ -15,6 +15,14 @@ from entrypoint import (
     slugify,
     truncate,
 )
+from models import (
+    GitHubIssue,
+    HydratedContext,
+    IssueComment,
+    MemoryContext,
+    RepoSetup,
+    TaskConfig,
+)
 
 # ---------------------------------------------------------------------------
 # AGENT_WORKSPACE
@@ -150,9 +158,9 @@ class TestBuildConfig:
             aws_region="us-east-1",
             task_id="test-id",
         )
-        assert config["repo_url"] == "owner/repo"
-        assert config["task_id"] == "test-id"
-        assert config["max_turns"] == 10  # default
+        assert config.repo_url == "owner/repo"
+        assert config.task_id == "test-id"
+        assert config.max_turns == 10  # default
 
     def test_missing_repo_url(self):
         with pytest.raises(ValueError, match="repo_url"):
@@ -187,8 +195,8 @@ class TestBuildConfig:
             github_token="ghp_test",
             aws_region="us-east-1",
         )
-        assert config["task_id"]  # non-empty
-        assert len(config["task_id"]) == 12
+        assert config.task_id  # non-empty
+        assert len(config.task_id) == 12
 
     def test_env_fallback(self, monkeypatch):
         monkeypatch.setenv("AWS_REGION", "eu-west-1")
@@ -197,7 +205,7 @@ class TestBuildConfig:
             task_description="do something",
             github_token="ghp_test",
         )
-        assert config["aws_region"] == "eu-west-1"
+        assert config.aws_region == "eu-west-1"
 
 
 # ---------------------------------------------------------------------------
@@ -207,29 +215,33 @@ class TestBuildConfig:
 
 class TestAssemblePrompt:
     def test_with_description(self):
-        config = {
-            "task_id": "abc123",
-            "repo_url": "owner/repo",
-            "task_description": "Fix the login bug",
-            "issue_number": "",
-        }
+        config = TaskConfig(
+            task_id="abc123",
+            repo_url="owner/repo",
+            task_description="Fix the login bug",
+            issue_number="",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
         result = assemble_prompt(config)
         assert "abc123" in result
         assert "owner/repo" in result
         assert "Fix the login bug" in result
 
     def test_with_issue(self):
-        config = {
-            "task_id": "abc123",
-            "repo_url": "owner/repo",
-            "task_description": "",
-            "issue": {
-                "number": 42,
-                "title": "Login broken",
-                "body": "Users cannot log in",
-                "comments": [{"author": "alice", "body": "Confirmed!"}],
-            },
-        }
+        config = TaskConfig(
+            task_id="abc123",
+            repo_url="owner/repo",
+            task_description="",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            issue=GitHubIssue(
+                number=42,
+                title="Login broken",
+                body="Users cannot log in",
+                comments=[IssueComment(id=1, author="alice", body="Confirmed!")],
+            ),
+        )
         result = assemble_prompt(config)
         assert "#42" in result
         assert "Login broken" in result
@@ -298,12 +310,19 @@ class TestDiscoverProjectConfig:
 
 class TestBuildSystemPrompt:
     def test_placeholder_substitution(self):
-        config = {"repo_url": "owner/repo", "task_id": "t123", "max_turns": 50}
-        setup = {
-            "branch": "bgagent/t123/fix",
-            "default_branch": "main",
-            "notes": ["Note 1"],
-        }
+        config = TaskConfig(
+            repo_url="owner/repo",
+            task_id="t123",
+            max_turns=50,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        setup = RepoSetup(
+            repo_dir="/workspace/t123",
+            branch="bgagent/t123/fix",
+            default_branch="main",
+            notes=["Note 1"],
+        )
         result = _build_system_prompt(config, setup, None, "")
         assert "owner/repo" in result
         assert "t123" in result
@@ -311,21 +330,44 @@ class TestBuildSystemPrompt:
         assert "50" in result
 
     def test_memory_context_injected(self):
-        config = {"repo_url": "o/r", "task_id": "t1", "max_turns": 10}
-        setup = {"branch": "b", "default_branch": "main", "notes": []}
-        hydrated = {
-            "memory_context": {
-                "repo_knowledge": ["Uses TypeScript"],
-                "past_episodes": ["Task t0 completed"],
-            }
-        }
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        setup = RepoSetup(
+            repo_dir="/workspace/t1",
+            branch="b",
+            default_branch="main",
+            notes=[],
+        )
+        hydrated = HydratedContext(
+            user_prompt="test",
+            memory_context=MemoryContext(
+                repo_knowledge=["Uses TypeScript"],
+                past_episodes=["Task t0 completed"],
+            ),
+        )
         result = _build_system_prompt(config, setup, hydrated, "")
         assert "Uses TypeScript" in result
         assert "Task t0 completed" in result
 
     def test_overrides_appended(self):
-        config = {"repo_url": "o/r", "task_id": "t1", "max_turns": 10}
-        setup = {"branch": "b", "default_branch": "main", "notes": []}
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        setup = RepoSetup(
+            repo_dir="/workspace/t1",
+            branch="b",
+            default_branch="main",
+            notes=[],
+        )
         result = _build_system_prompt(config, setup, None, "Always use tabs")
         assert "Always use tabs" in result
         assert "Additional instructions" in result
@@ -345,8 +387,8 @@ class TestBuildConfigTaskType:
             task_type="pr_iteration",
             pr_number="42",
         )
-        assert config["task_type"] == "pr_iteration"
-        assert config["pr_number"] == "42"
+        assert config.task_type == "pr_iteration"
+        assert config.pr_number == "42"
 
     def test_pr_iteration_without_pr_number_raises(self):
         with pytest.raises(ValueError, match="pr_number is required"):
@@ -364,7 +406,7 @@ class TestBuildConfigTaskType:
             github_token="ghp_test",
             aws_region="us-east-1",
         )
-        assert config["task_type"] == "new_task"
+        assert config.task_type == "new_task"
 
     def test_pr_review_with_pr_number(self):
         config = build_config(
@@ -374,8 +416,8 @@ class TestBuildConfigTaskType:
             task_type="pr_review",
             pr_number="55",
         )
-        assert config["task_type"] == "pr_review"
-        assert config["pr_number"] == "55"
+        assert config.task_type == "pr_review"
+        assert config.pr_number == "55"
 
     def test_pr_review_without_pr_number_raises(self):
         with pytest.raises(ValueError, match="pr_number is required"):
@@ -394,51 +436,60 @@ class TestBuildConfigTaskType:
 
 class TestBuildSystemPromptTaskType:
     def test_selects_new_task_prompt(self):
-        config = {
-            "repo_url": "owner/repo",
-            "task_id": "test-123",
-            "max_turns": 100,
-            "task_type": "new_task",
-        }
-        setup = {
-            "branch": "bgagent/test-123/fix",
-            "default_branch": "main",
-            "notes": ["All OK"],
-        }
+        config = TaskConfig(
+            repo_url="owner/repo",
+            task_id="test-123",
+            max_turns=100,
+            task_type="new_task",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        setup = RepoSetup(
+            repo_dir="/workspace/test-123",
+            branch="bgagent/test-123/fix",
+            default_branch="main",
+            notes=["All OK"],
+        )
         prompt = _build_system_prompt(config, setup, None, "")
         assert "Create a Pull Request" in prompt
 
     def test_selects_pr_iteration_prompt(self):
-        config = {
-            "repo_url": "owner/repo",
-            "task_id": "test-123",
-            "max_turns": 100,
-            "task_type": "pr_iteration",
-            "pr_number": "42",
-        }
-        setup = {
-            "branch": "feature/fix",
-            "default_branch": "main",
-            "notes": ["All OK"],
-        }
+        config = TaskConfig(
+            repo_url="owner/repo",
+            task_id="test-123",
+            max_turns=100,
+            task_type="pr_iteration",
+            pr_number="42",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        setup = RepoSetup(
+            repo_dir="/workspace/test-123",
+            branch="feature/fix",
+            default_branch="main",
+            notes=["All OK"],
+        )
         prompt = _build_system_prompt(config, setup, None, "")
         assert "Post a summary comment on the PR" in prompt
         assert "Reply to each review comment thread" in prompt
         assert "42" in prompt
 
     def test_selects_pr_review_prompt(self):
-        config = {
-            "repo_url": "owner/repo",
-            "task_id": "test-123",
-            "max_turns": 100,
-            "task_type": "pr_review",
-            "pr_number": "55",
-        }
-        setup = {
-            "branch": "feature/review",
-            "default_branch": "main",
-            "notes": ["All OK"],
-        }
+        config = TaskConfig(
+            repo_url="owner/repo",
+            task_id="test-123",
+            max_turns=100,
+            task_type="pr_review",
+            pr_number="55",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        setup = RepoSetup(
+            repo_dir="/workspace/test-123",
+            branch="feature/review",
+            default_branch="main",
+            notes=["All OK"],
+        )
         prompt = _build_system_prompt(config, setup, None, "")
         assert "READ-ONLY" in prompt
         assert "must NOT modify" in prompt

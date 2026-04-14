@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// Task lifecycle engine: state transitions, runtime invoke, finalization. Design: docs/design/ORCHESTRATOR.md
-// Tests: cdk/test/handlers/orchestrate-task.test.ts, cdk/test/constructs/task-orchestrator.test.ts
-
-import { randomUUID } from 'crypto';
-import { InvokeAgentRuntimeCommand, BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
@@ -35,7 +30,6 @@ import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const agentCoreClient = new BedrockAgentCoreClient({});
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -51,7 +45,18 @@ const MEMORY_ID = process.env.MEMORY_ID;
 export interface PollState {
   readonly attempts: number;
   readonly lastStatus?: TaskStatusType;
+  /** True when the agent stopped sending heartbeats while still RUNNING (likely crash/OOM). */
+  readonly sessionUnhealthy?: boolean;
+  /** Consecutive ECS poll failures — escalated to error after 3. */
+  readonly consecutiveEcsPollFailures?: number;
+  /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
+  readonly consecutiveEcsCompletedPolls?: number;
 }
+
+/** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
+const AGENT_HEARTBEAT_GRACE_SEC = 120;
+/** If `agent_heartbeat_at` exists and is older than this, the session is treated as lost. */
+const AGENT_HEARTBEAT_STALE_SEC = 240;
 
 /**
  * Load a task record from DynamoDB.
@@ -234,6 +239,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
+    cedar_policies: repoConfig?.cedar_policies,
   };
 }
 
@@ -327,6 +333,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
+    ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,
@@ -351,43 +358,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 }
 
 /**
- * Start an AgentCore runtime session and transition task to RUNNING.
- * @param task - the task record.
- * @param payload - the hydrated invocation payload.
- * @param blueprintConfig - optional per-repo blueprint config for runtime ARN override.
- * @returns the session ID.
- */
-export async function startSession(
-  task: TaskRecord,
-  payload: Record<string, unknown>,
-  blueprintConfig?: BlueprintConfig,
-): Promise<string> {
-  // AgentCore requires runtimeSessionId >= 33 chars; UUID v4 is 36 chars.
-  const sessionId = randomUUID();
-  const runtimeArn = blueprintConfig?.runtime_arn ?? RUNTIME_ARN;
-
-  const command = new InvokeAgentRuntimeCommand({
-    agentRuntimeArn: runtimeArn,
-    runtimeSessionId: sessionId,
-    contentType: 'application/json',
-    accept: 'application/json',
-    payload: new TextEncoder().encode(JSON.stringify({ input: payload })),
-  });
-
-  await agentCoreClient.send(command);
-
-  await transitionTask(task.task_id, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
-    session_id: sessionId,
-    started_at: new Date().toISOString(),
-  });
-  await emitTaskEvent(task.task_id, 'session_started', { session_id: sessionId });
-
-  logger.info('Session started', { task_id: task.task_id, session_id: sessionId });
-
-  return sessionId;
-}
-
-/**
  * Poll the task record in DynamoDB to check if the agent wrote a terminal status.
  * Returns the updated PollState; the waitStrategy decides whether to continue.
  * @param taskId - the task to poll.
@@ -398,15 +368,54 @@ export async function pollTaskStatus(taskId: string, state: PollState): Promise<
   const result = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
-    ProjectionExpression: '#status',
-    ExpressionAttributeNames: { '#status': 'status' },
+    ProjectionExpression: '#st, session_id, started_at, agent_heartbeat_at',
+    ExpressionAttributeNames: { '#st': 'status' },
   }));
 
   const currentStatus = result.Item?.status as TaskStatusType | undefined;
+  const item = result.Item as Record<string, unknown> | undefined;
+
+  let sessionUnhealthy = false;
+  if (
+    currentStatus === TaskStatus.RUNNING
+    && item?.session_id
+    && typeof item.started_at === 'string'
+  ) {
+    const startedMs = Date.parse(item.started_at);
+    const now = Date.now();
+    if (!Number.isNaN(startedMs)) {
+      const runningAgeSec = (now - startedMs) / 1000;
+
+      if (typeof item.agent_heartbeat_at === 'string') {
+        // Agent has sent at least one heartbeat — check staleness
+        const hbMs = Date.parse(item.agent_heartbeat_at);
+        if (!Number.isNaN(hbMs)) {
+          const hbAgeSec = (now - hbMs) / 1000;
+          if (runningAgeSec > AGENT_HEARTBEAT_GRACE_SEC && hbAgeSec > AGENT_HEARTBEAT_STALE_SEC) {
+            sessionUnhealthy = true;
+            logger.warn('Agent heartbeat stale while task RUNNING', {
+              task_id: taskId,
+              agent_heartbeat_at: item.agent_heartbeat_at,
+              heartbeat_age_sec: Math.round(hbAgeSec),
+            });
+          }
+        }
+      } else if (runningAgeSec > AGENT_HEARTBEAT_GRACE_SEC + AGENT_HEARTBEAT_STALE_SEC) {
+        // Agent never sent a heartbeat and task has been RUNNING well past
+        // the grace period — likely early crash before pipeline started.
+        sessionUnhealthy = true;
+        logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
+          task_id: taskId,
+          running_age_sec: Math.round(runningAgeSec),
+        });
+      }
+    }
+  }
 
   return {
     attempts: state.attempts + 1,
     lastStatus: currentStatus,
+    sessionUnhealthy,
   };
 }
 
@@ -423,6 +432,52 @@ export async function finalizeTask(
 ): Promise<void> {
   const task = await loadTask(taskId);
   const currentStatus = task.status;
+
+  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
+  if (
+    pollState.sessionUnhealthy
+    && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
+  ) {
+    let transitioned = false;
+    try {
+      await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
+        completed_at: new Date().toISOString(),
+        error_message:
+          'Agent session lost: no recent heartbeat from the runtime (container may have crashed, been OOM-killed, or stopped)',
+      });
+      transitioned = true;
+    } catch (err) {
+      // Task may have transitioned concurrently (e.g. agent wrote terminal status).
+      // Re-read to avoid double-decrement or contradictory events.
+      logger.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
+        task_id: taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (transitioned) {
+      await emitTaskEvent(taskId, 'task_failed', {
+        reason: 'agent_heartbeat_stale',
+        poll_attempts: pollState.attempts,
+      });
+      await decrementConcurrency(userId);
+    } else {
+      // Transition failed — re-read task to determine actual state.
+      // If already terminal the block below will handle TTL + concurrency.
+      const reread = await loadTask(taskId);
+      if (TERMINAL_STATUSES.includes(reread.status)) {
+        logger.info('Heartbeat path: task already terminal after failed transition', { task_id: taskId, status: reread.status });
+        await emitTaskEvent(taskId, `task_${reread.status.toLowerCase()}`, {
+          final_status: reread.status,
+          poll_attempts: pollState.attempts,
+        });
+        await decrementConcurrency(userId);
+      } else {
+        logger.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { task_id: taskId, status: reread.status });
+        await decrementConcurrency(userId);
+      }
+    }
+    return;
+  }
 
   // If the agent already wrote a terminal status, just finalize
   if (TERMINAL_STATUSES.includes(currentStatus)) {

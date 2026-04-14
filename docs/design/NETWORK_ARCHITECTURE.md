@@ -24,17 +24,27 @@ The Runtime runs inside a VPC with 2 Availability Zones:
 
 - **Public subnets** — Host the NAT Gateway and Internet Gateway. No compute resources.
 - **Private subnets (with egress)** — Host the AgentCore Runtime ENIs. All outbound traffic goes through VPC endpoints or the NAT Gateway.
-- **Single NAT Gateway** — Provides internet egress (HTTPS only) for GitHub API access. Deployed in one AZ to minimize cost.
+- **Single NAT Gateway** — Provides internet egress (HTTPS only) for external services that have no VPC endpoint: GitHub (source control, API) and package registries (npm, PyPI). Deployed in one AZ to minimize cost.
 
-## Egress Policy
+## Egress paths
 
-The Runtime security group enforces **HTTPS-only egress** (TCP 443 to 0.0.0.0/0):
+Traffic from the agent runtime takes one of two paths depending on the destination:
 
-- **AWS services** — Reached via VPC endpoints (no NAT traffic, no internet traversal).
-- **GitHub API** — Reached via NAT Gateway → Internet Gateway → github.com:443.
-- **All other traffic** — Blocked by default (no other egress rules).
+| Destination | Path | Examples |
+|-------------|------|----------|
+| **AWS services** | VPC endpoints (private network, no internet traversal) | Bedrock Runtime, DynamoDB, S3, Secrets Manager, ECR, CloudWatch Logs, STS, X-Ray |
+| **GitHub** | NAT Gateway → Internet Gateway → internet | `github.com` (git clone/push), `api.github.com` (PRs, issues, `gh` CLI), `*.githubusercontent.com` (raw content) |
+| **Package registries** | NAT Gateway → Internet Gateway → internet | `registry.npmjs.org` / `*.npmjs.org` (npm), `pypi.org` / `*.pypi.org` / `files.pythonhosted.org` (pip) |
+| **Everything else** | Blocked at the port level by the security group (only TCP 443 is allowed). At the domain level, the DNS Firewall allowlist controls which domains can be resolved (see [DNS Firewall](#dns-firewall)). | — |
 
-Domain-level filtering is enforced by the DNS Firewall (see below).
+The Runtime security group enforces **HTTPS-only egress** (TCP 443 to 0.0.0.0/0). It restricts the port but not the destination — domain-level restriction is the responsibility of the DNS Firewall.
+
+**Important:** The NAT Gateway itself does not filter or restrict traffic. It is a packet forwarder. The actual egress controls are:
+
+1. **Security group** — enforces TCP 443 only (active, always enforced).
+2. **DNS Firewall** — enforces a domain allowlist (currently in **observation mode** — logs non-allowlisted queries as ALERT but does not block them). Once switched to enforcement mode, only domains on the platform baseline and Blueprint `egressAllowlist` can be resolved. See [DNS Firewall](#dns-firewall) for the rollout process.
+
+Until the DNS Firewall is switched to enforcement mode, the agent can reach any HTTPS endpoint on the internet via the NAT Gateway.
 
 ## VPC Endpoints
 
@@ -118,6 +128,15 @@ new Blueprint(this, 'MyRepoBlueprint', {
 - **DNS-only** — DNS Firewall intercepts DNS queries. A direct connection to an IP address (e.g. `curl https://1.2.3.4/`) bypasses DNS and is not blocked. This is acceptable for the "confused agent" threat model (the agent uses domain names) but not for a sophisticated adversary.
 - **Wildcard scope** — `*.amazonaws.com` is broad but necessary for VPC endpoint private DNS. GitHub wildcards (`*.githubusercontent.com`) include GitHub Pages, which is a potential exfiltration vector. Narrowing may be considered after analyzing query logs.
 - **Missing ecosystems** — The platform baseline covers npm and PyPI. Go (`proxy.golang.org`), Rust (`crates.io`, `static.crates.io`), and OS packages (`dl-cdn.alpinelinux.org`) may need to be added based on observation mode logs.
+
+## NAT Gateway removal tradeoffs
+
+The NAT Gateway (~$32/month) exists because two categories of external services lack VPC endpoint equivalents: GitHub and package registries. Removing it would require replacing both:
+
+1. **GitHub access** — Move git clone, push, and all GitHub API calls out of the agent container and into the orchestrator (Lambda, which has internet access). Alternatively, use a forward proxy in the public subnet or a PrivateLink partner integration. This changes the agent's execution model — the agent would no longer directly interact with git.
+2. **Package registries** — Use [AWS CodeArtifact](https://docs.aws.amazon.com/codeartifact/) as a private npm/PyPI mirror. CodeArtifact has a VPC endpoint (`codeartifact.api` and `codeartifact.repositories`), so agent traffic stays on the private network. This adds operational overhead (upstream sync, storage costs) but removes the last internet dependency from the agent runtime.
+
+If both are addressed, the agent runtime can run in `PRIVATE_ISOLATED` subnets with no NAT Gateway and no internet access at all. This is the strongest network isolation posture — the agent can only reach AWS services via VPC endpoints and has zero internet egress. The tradeoff is added complexity (proxy or orchestrator-mediated git, CodeArtifact mirrors) and the restriction that any new external dependency requires a VPC endpoint or proxy path.
 
 ## Cost Impact
 

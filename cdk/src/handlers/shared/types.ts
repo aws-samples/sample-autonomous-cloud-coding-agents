@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import type { ComputeType } from './repo-config';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Valid task types for task creation. */
@@ -41,6 +42,10 @@ export interface TaskRecord {
   readonly task_description?: string;
   readonly branch_name: string;
   readonly session_id?: string;
+  /** AgentCore runtime ARN used for this session (StopRuntimeSession on cancel). */
+  readonly agent_runtime_arn?: string;
+  /** ISO timestamp of last agent heartbeat (DynamoDB); optional, written by the runtime. */
+  readonly agent_heartbeat_at?: string;
   readonly execution_id?: string;
   readonly pr_url?: string;
   readonly error_message?: string;
@@ -59,6 +64,8 @@ export interface TaskRecord {
   readonly max_budget_usd?: number;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
+  readonly compute_type?: ComputeType;
+  readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
 }
 

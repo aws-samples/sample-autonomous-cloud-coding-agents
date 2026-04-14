@@ -96,6 +96,17 @@ export interface BlueprintProps {
   };
 
   /**
+   * Security configuration.
+   */
+  readonly security?: {
+    /**
+     * Additional Cedar policy strings evaluated by the agent's PolicyEngine.
+     * These are appended to the default policies (deny-list model).
+     */
+    readonly cedarPolicies?: string[];
+  };
+
+  /**
    * Network configuration for the agent.
    */
   readonly networking?: {
@@ -128,10 +139,16 @@ export class Blueprint extends Construct {
    */
   public readonly egressAllowlist: readonly string[];
 
+  /**
+   * Cedar policies from the security.cedarPolicies prop, exposed for inspection.
+   */
+  public readonly cedarPolicies: readonly string[];
+
   constructor(scope: Construct, id: string, props: BlueprintProps) {
     super(scope, id);
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
+    this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
 
     // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
@@ -170,6 +187,9 @@ export class Blueprint extends Construct {
     }
     if (this.egressAllowlist.length > 0) {
       item.egress_allowlist = { L: this.egressAllowlist.map(d => ({ S: d })) };
+    }
+    if (this.cedarPolicies.length > 0) {
+      item.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
@@ -240,6 +260,7 @@ export class Blueprint extends Construct {
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
+    if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     return fields.join('');
   }
 
@@ -253,6 +274,7 @@ export class Blueprint extends Construct {
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
+    if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
     return names;
   }
 
@@ -266,6 +288,7 @@ export class Blueprint extends Construct {
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
+    if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
     return values;
   }
 }

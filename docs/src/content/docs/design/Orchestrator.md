@@ -26,18 +26,18 @@ These boundaries matter whenever you change task submission, the CLI, or the run
 |---------|-------------------|--------|
 | REST request/response types | `cdk/src/handlers/shared/types.ts` | **Mirror** in `cli/src/types.ts` for `bgagent` — keep them aligned on every API change. |
 | HTTP handlers & orchestration code | `cdk/src/handlers/` (e.g. shared `orchestrator.ts`, `create-task-core.ts`, `preflight.ts`) | Colocated Jest tests under `cdk/test/handlers/` and `cdk/test/handlers/shared/`. |
-| Agent runtime behavior | `agent/` (`entrypoint.py`, `prompts/`, `system_prompt.py`, Dockerfile) | Consumes task payload and environment set by CDK/Lambda; see `agent/README.md` for PAT, tools, and local run. |
+| Agent runtime behavior | `agent/src/` (`entrypoint.py` re-export shim, `pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `policy.py`, `prompts/`, `system_prompt.py`, Dockerfile) | Consumes task payload and environment set by CDK/Lambda; see `agent/README.md` for PAT, tools, and local run. |
 | User-facing API documentation | `docs/guides/USER_GUIDE.md` (and synced site) | Regenerate Starlight content with `mise //docs:sync` after guide edits. |
 
 The orchestrator document describes **behavior** (state machine, admission, cancellation). The TypeScript `types.ts` files are the **schema** the API and CLI share; the agent implements the **work** inside compute.
 
 **Relationship to blueprints.** The orchestrator is a **framework** that enforces platform invariants — the task state machine, event emission, concurrency management, and cancellation handling — and delegates variable work to **blueprint-defined step implementations**. A blueprint defines which steps run, in what order, and how each step is implemented (built-in strategy, Lambda-backed custom step, or custom sequence). The default blueprint is defined in this document (Section 4). Per-repo customization (see [REPO_ONBOARDING.md](/design/repo-onboarding)) changes the steps the orchestrator executes, not the framework guarantees it enforces. The orchestrator wraps every step with state transitions, event emission, and cancellation checks — regardless of whether the step is a built-in or a custom Lambda.
 
-### Iteration 1 vs. target state
+### Iteration 1 vs. current state
 
-In **Iteration 1** (current), the orchestrator does not exist as a distinct component. The client calls `invoke_agent_runtime` synchronously, the agent runs to completion inside the AgentCore Runtime MicroVM, and the caller infers the result from the response. There is no durable state, no task management, no concurrency control, and no recovery. If the caller disconnects, the session is orphaned.
+In **Iteration 1**, the orchestrator did not exist as a distinct component. The client called `invoke_agent_runtime` synchronously, the agent ran to completion inside the AgentCore Runtime MicroVM, and the caller inferred the result from the response. There was no durable state, no task management, no concurrency control, and no recovery.
 
-The **target state** (Iteration 2 and beyond) introduces a durable orchestrator that manages the full task lifecycle. This document designs for the target state; where Iteration 1 constraints apply, they are called out explicitly.
+**Current state (Iteration 3+):** The durable orchestrator manages the full task lifecycle with checkpoint/resume (Lambda Durable Functions), the full state machine (8 states), concurrency control, cancellation, context hydration, memory integration, pre-flight checks, and multi-task-type support. This document describes the current architecture; where historical Iteration 1 constraints are referenced (e.g. synchronous invocation model), they are called out explicitly.
 
 ---
 
@@ -183,7 +183,7 @@ See the Admission control section for details. Validates that the task is allowe
 
 #### Step 2: Context hydration (deterministic)
 
-See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step verifies PR accessibility when `pr_number` is set (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)). For PR tasks, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it. The output is a fully assembled prompt, ready to pass to the compute session.
+See the Context hydration section for details. Assembles the agent's prompt from multiple sources depending on task type. For `new_task`: user message, GitHub issue (title, body, comments), memory, repo configuration, and platform defaults. For `pr_iteration`: PR metadata, review comments, diff summary, and optional user instructions. An additional **pre-flight** sub-step (see [preflight.ts](../../cdk/src/handlers/shared/preflight.ts)) verifies PR accessibility when `pr_number` is set and validates that the resolved GitHub token has sufficient repository permissions for the task type (so read-only PATs fail early with `INSUFFICIENT_GITHUB_REPO_PERMISSIONS`). The assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection before the agent receives it (PR tasks: always screened; `new_task`: screened when issue content is present). The output is a fully assembled prompt, ready to pass to the compute session.
 
 #### Step 3: Session start and agent execution (deterministic start + agentic execution)
 
@@ -228,7 +228,7 @@ When the orchestrator loads a task's `blueprint_config`, it resolves the step pi
 
 1. **Load `RepoConfig`** from the `RepoTable` by `repo` (PK). Merge with platform defaults (see [REPO_ONBOARDING.md](/design/repo-onboarding#platform-defaults) for default values and override precedence).
 2. **Resolve compute strategy** from `compute_type` (default: `agentcore`). The strategy implements the `ComputeStrategy` interface (see [REPO_ONBOARDING.md](/design/repo-onboarding#compute-strategy-interface)).
-3. **Build step list.** If `step_sequence` is provided, use it; otherwise use the default sequence (`admission-control` → `hydrate-context` → `start-session` → `await-agent-completion` → `finalize`). For each entry, resolve to a built-in step function or a Lambda invocation wrapper.
+3. **Build step list.** If `step_sequence` is provided, use it; otherwise use the default sequence (`admission-control` → `hydrate-context` → `pre-flight` → `start-session` → `await-agent-completion` → `finalize`). The `pre-flight` step runs fail-closed readiness checks (GitHub API reachability, repository access, **PAT privilege** for the task type via REST `permissions` and GraphQL `viewerPermission` when needed, PR accessibility for PR tasks) before consuming compute — see [ROADMAP.md Iteration 3c](/roadmap/roadmap). For each entry, resolve to a built-in step function or a Lambda invocation wrapper.
 4. **Inject custom steps.** If `custom_steps` are defined and no explicit `step_sequence` is provided, insert them at their declared `phase` position (pre-agent steps before `start-session`, post-agent steps after `await-agent-completion`).
 5. **Validate.** Check that required steps are present and correctly ordered (see [step sequence validation](/design/repo-onboarding#step-sequence-validation)). If invalid, fail the task with `INVALID_STEP_SEQUENCE`.
 6. **Execute.** Iterate the resolved list. For each step: check cancellation, filter `blueprintConfig` to only the fields that step needs (stripping credential ARNs for custom Lambda steps), execute with retry policy, enforce `StepOutput.metadata` size budget (10KB), prune `previousStepResults` to last 5 steps, emit events. Built-in steps that need durable waits (e.g. `await-agent-completion`) receive the `DurableContext` and `ComputeStrategy` so they can call `waitForCondition` and `computeStrategy.pollSession()` internally — no name-based special-casing in the framework loop.
@@ -257,6 +257,8 @@ Admission control runs immediately after the input gateway dispatches a "create 
 - **Rejected.** Task transitions to `FAILED` with a reason (repo not onboarded, rate limit exceeded, concurrency limit, validation error). No counter change.
 - **Deduplicated.** Existing task ID returned. No new task created.
 
+**Planned (Iteration 5):** Admission control checks will be governed by Cedar policies as part of the centralized policy framework. Cedar replaces the current inline admission logic with formally verifiable policy evaluation — the same Cedar policy store handles admission, budget/quota resolution, tool-call interception, and (when multi-user/team lands) tenant-scoped authorization. All admission decisions will emit a structured `PolicyDecisionEvent` for audit. See [ROADMAP.md Iteration 5](/roadmap/roadmap) (Centralized policy framework) and [SECURITY.md](/design/security) (Policy enforcement and audit).
+
 ---
 
 ## Context hydration
@@ -273,9 +275,9 @@ The orchestrator's `hydrateAndTransition()` function calls `hydrateContext()` (`
    - **`pr_iteration`** / **`pr_review`**: Fetches the pull request context via `fetchGitHubPullRequest()` — four parallel calls: three REST API calls (PR metadata, conversation comments, changed files) plus one GraphQL query for inline review comments. The GraphQL query filters out resolved review threads at fetch time so the agent only sees unresolved feedback. PR metadata includes title, body, head/base refs, and state; the diff summary covers changed files. The PR's `head_ref` is stored as `resolved_branch_name` and `base_ref` as `resolved_base_branch` on the hydrated context. These are used by the orchestrator to update the task record's `branch_name` from the placeholder `pending:pr_resolution` to the actual PR branch. For `pr_review`, if no `task_description` is provided, a default review instruction is used.
 3. **Enforces a token budget** on the combined context. Uses a character-based heuristic (~4 chars per token). Default budget: 100K tokens (configurable via `USER_PROMPT_TOKEN_BUDGET` environment variable). When the budget is exceeded, oldest comments are removed first. The `truncated` flag is set in the result.
 4. **Assembles the user prompt** based on task type:
-   - **`new_task`**: A structured markdown document with Task ID, Repository, GitHub Issue section, and Task section. The format mirrors the Python `assemble_prompt()` in `agent/entrypoint.py`.
+   - **`new_task`**: A structured markdown document with Task ID, Repository, GitHub Issue section, and Task section. The format mirrors the Python `assemble_prompt()` in `agent/src/context.py`.
    - **`pr_iteration`**: Assembled by `assemblePrIterationPrompt()` — includes PR metadata (number, title, body), the diff summary (changed files and patches), review comments (inline and conversation), and optional user instructions from `task_description`.
-5. **Screens through Bedrock Guardrail** (PR tasks only): For `pr_iteration` and `pr_review` tasks, the assembled user prompt is screened through Amazon Bedrock Guardrails (`screenWithGuardrail()`) using the `PROMPT_ATTACK` content filter. If the guardrail detects prompt injection, `guardrail_blocked` is set on the result and the orchestrator fails the task. If the Bedrock API is unavailable, a `GuardrailScreeningError` is thrown (fail-closed — unscreened content never reaches the agent). Task descriptions for all task types are screened at submission time in `create-task-core.ts`.
+5. **Screens through Bedrock Guardrail** (PR tasks; `new_task` when issue content is present): The assembled user prompt is screened through Amazon Bedrock Guardrails (`screenWithGuardrail()`) using the `PROMPT_ATTACK` content filter. For `new_task` tasks without issue content, screening is skipped because the task description was already screened at submission time. If the guardrail detects prompt injection, `guardrail_blocked` is set on the result and the orchestrator fails the task. If the Bedrock API is unavailable, a `GuardrailScreeningError` is thrown (fail-closed — unscreened content never reaches the agent). Task descriptions for all task types are screened at submission time in `create-task-core.ts`.
 6. **Returns a `HydratedContext` object** containing `version`, `user_prompt`, `issue`, `sources`, `token_estimate`, `truncated`, and for `pr_iteration`/`pr_review` tasks: `resolved_branch_name` and `resolved_base_branch`.
 
 The hydrated context is passed to the agent as a new `hydrated_context` field in the invocation payload, alongside the existing legacy fields (`repo_url`, `task_id`, `branch_name`, `issue_number`, `prompt`). The agent checks for `hydrated_context` with `version == 1`; if present, it uses the pre-assembled `user_prompt` directly and skips in-container GitHub fetching and prompt assembly. If absent (e.g. during a deployment rollout or when the secret ARN isn't configured), the agent falls back to its existing behavior.
@@ -308,7 +310,7 @@ We evaluated routing GitHub API calls through AgentCore Gateway (with the GitHub
 
 4. **User message.** The free-text task description provided by the user (via CLI `--task` flag or equivalent). May supplement or replace the issue context.
 
-5. **Memory context (Iteration 3+).** Query long-term memory (e.g. AgentCore Memory) for relevant past context: insights from previous tasks on this repo, failure summaries, learned patterns. See [MEMORY.md](/design/memory) for how insights and code attribution feed into hydration. Not yet implemented.
+5. **Memory context (Iteration 3b+).** Query long-term memory (AgentCore Memory) for relevant past context: repository knowledge (semantic search) and past task episodes (episodic search). Memory is loaded during context hydration via two parallel `RetrieveMemoryRecordsCommand` calls with a 5-second timeout and 2,000-token budget. See [MEMORY.md](/design/memory) for how insights and code attribution feed into hydration. Tier 1 (repo knowledge + task episodes) is operational since Iteration 3b. Tier 2 (review feedback rules) is planned for Iteration 3d.
 
 6. **Attachments.** Images or files provided by the user (multi-modal input). Passed through to the agent prompt as base64 or URLs.
 
@@ -399,7 +401,7 @@ The orchestrator records the `(task_id, session_id)` mapping in the task record 
 
 ### Invocation model: synchronous vs. asynchronous
 
-**Iteration 1 (current).** `invoke_agent_runtime` is called synchronously with a long read timeout. The call blocks until the agent finishes. This is simple but limits concurrency: one orchestrator process per task.
+**Iteration 1 (historical).** `invoke_agent_runtime` was called synchronously with a long read timeout. The call blocked until the agent finished. This was simple but limited concurrency: one orchestrator process per task.
 
 **Target state.** The orchestrator uses AgentCore's **asynchronous processing model** ([Runtime async docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-long-run.html)). The key capabilities:
 
@@ -424,9 +426,15 @@ The orchestrator needs to know whether the session is still running. Two complem
 
 2. **Re-invocation on the same session (target state).** The orchestrator calls `invoke_agent_runtime` with the same `runtimeSessionId`. Sticky routing ensures the request reaches the same instance. The agent's entrypoint can detect this is a poll (e.g., via a `poll: true` field in the payload or by tracking the initial task) and return the current status without starting a new task. This is a fast, lightweight call that returns immediately.
 
-**Iteration 1.** The `invoke_agent_runtime` call blocks; when it returns, the session is over. No explicit liveness check needed.
+**Iteration 1 (historical).** The `invoke_agent_runtime` call blocked; when it returned, the session was over. No explicit liveness check was needed.
 
-**Fallback: DynamoDB heartbeat (optional enhancement).** As defense in depth, the agent can write a heartbeat timestamp to DynamoDB every N minutes. The orchestrator reads it during its poll cycle. A missing heartbeat (e.g. none in the last 10 minutes while `/ping` reports `HealthyBusy`) could indicate the agent is stuck but not idle — triggering investigation or forced termination.
+**DynamoDB heartbeat (implemented).** The agent writes an `agent_heartbeat_at` timestamp to DynamoDB every 45 seconds via a daemon thread in `server.py`. The heartbeat worker is resilient to transient DynamoDB errors (each write is wrapped in try/except with a retry on the next interval). The orchestrator's `pollTaskStatus` reads this timestamp during each poll cycle and applies two thresholds:
+
+- **Grace period** (`AGENT_HEARTBEAT_GRACE_SEC = 120s`): After transitioning to RUNNING, the orchestrator waits this long before expecting heartbeats. This covers container startup and pipeline initialization.
+- **Stale threshold** (`AGENT_HEARTBEAT_STALE_SEC = 240s`): If `agent_heartbeat_at` exists and is older than this, the session is treated as lost (crash, OOM, or stuck).
+- **Early crash detection**: If `agent_heartbeat_at` is never set and the task has been RUNNING past the combined grace + stale window (360s), the orchestrator treats this as an early crash (agent died before the pipeline started).
+
+When either condition is met, `pollTaskStatus` sets `sessionUnhealthy = true` in the poll state. The `finalizeTask` function then transitions the task to FAILED with the reason `"Agent session lost: no recent heartbeat from the runtime"`. The pipeline also writes an initial heartbeat at the very start of `run_task()` to minimize the window between session start and first heartbeat.
 
 ### The 15-minute idle timeout problem
 
@@ -434,7 +442,7 @@ AgentCore Runtime terminates sessions after 15 minutes of inactivity (no `/ping`
 
 **Mitigation (async model).** In the target state, the agent uses the AgentCore SDK's async task management: `add_async_task` registers a background task, and the SDK automatically reports `HealthyBusy` via `/ping` while any async task is active. AgentCore polls `/ping` and sees the agent is busy, preventing idle termination. When the agent calls `complete_async_task`, the status reverts to `Healthy`. The `/ping` endpoint runs on the main thread (or async event loop) while the coding task runs in a separate thread, so `/ping` remains responsive.
 
-**Mitigation (Iteration 1 / current).** The agent container's FastAPI server defines `/ping` as a separate async endpoint. Because the agent task runs in a threadpool worker (not in the asyncio event loop), the `/ping` endpoint remains responsive while the agent works. AgentCore calls `/ping` periodically and the server responds, preventing idle timeout.
+**Mitigation (current).** The agent container's FastAPI server defines `/ping` as a separate async endpoint. Because the agent task runs in a threadpool worker (not in the asyncio event loop), the `/ping` endpoint remains responsive while the agent works. AgentCore calls `/ping` periodically and the server responds, preventing idle timeout.
 
 **Risk.** If the agent's computation blocks the entire process (not just a thread) — e.g. due to a subprocess that consumes all resources, or the server becomes unresponsive — the `/ping` response may be delayed, triggering idle termination. This risk applies to both models. The defense is to ensure the coding task runs in a separate thread or process and does not starve the main thread.
 
@@ -442,8 +450,8 @@ AgentCore Runtime terminates sessions after 15 minutes of inactivity (no `/ping`
 
 When the session ends (agent finishes, crashes, or is terminated), the orchestrator detects this:
 
-- **Iteration 1:** The `invoke_agent_runtime` call returns (it blocks). The response body contains the agent's output (status, PR URL, cost, etc.).
-- **Target state:** The orchestrator polls the agent via re-invocation on the same session (see Invocation model above). Completion is detected when: (a) the agent responds with a "completed" or "failed" status in the poll response, or (b) the re-invocation fails because the session was terminated (idle timeout, crash, or 8-hour limit reached). In the durable orchestrator, a `waitForCondition` evaluates the poll result at each interval and resumes the pipeline when the condition is met. See the session monitoring pattern in the Implementation options section.
+- **Iteration 1 (historical):** The `invoke_agent_runtime` call returned (it blocked). The response body contained the agent's output (status, PR URL, cost, etc.).
+- **Target state:** The orchestrator polls the agent via re-invocation on the same session (see Invocation model above). Completion is detected when: (a) the agent responds with a "completed" or "failed" status in the poll response, (b) the re-invocation fails because the session was terminated (idle timeout, crash, or 8-hour limit reached), or (c) the DynamoDB heartbeat check detects the session is unhealthy (stale or missing `agent_heartbeat_at` — see DynamoDB heartbeat above). In the durable orchestrator, a `waitForCondition` evaluates the poll result at each interval and resumes the pipeline when the condition is met. See the session monitoring pattern in the Implementation options section.
 
 ### External termination (cancellation)
 
@@ -541,7 +549,8 @@ This section uses an FMEA (Failure Mode and Effects Analysis) approach: for each
 
 | Failure mode | Impact | Recovery |
 |---|---|---|
-| Agent crashes mid-task (unhandled exception) | Partial branch may exist on GitHub | Orchestrator detects session end. Finalization inspects GitHub state. If commits exist, may mark as partial completion. Task transitions to `FAILED` or `COMPLETED` with partial flag. |
+| Agent crashes mid-task (unhandled exception) | Partial branch may exist on GitHub | Orchestrator detects session end via DynamoDB heartbeat staleness check (see Liveness monitoring). Finalization inspects GitHub state. If commits exist, may mark as partial completion. Task transitions to `FAILED` or `COMPLETED` with partial flag. |
+| Agent crashes before pipeline starts (early crash: OOM during startup, import error, container failure) | `agent_heartbeat_at` is never set in DynamoDB | `pollTaskStatus` detects missing heartbeat after the combined grace + stale window (360s). Task transitions to `FAILED` with reason "Agent session lost". |
 | Agent runs out of turns (max_turns limit) | Agent stopped by SDK, not by crash | Session ends normally with status `end_turn`. Orchestrator finalizes; if PR exists, task is `COMPLETED`. |
 | Agent exceeds cost budget (max_budget_usd limit) | Agent stopped by SDK when budget is reached | Session ends normally. Orchestrator finalizes; if PR exists, task is `COMPLETED`. |
 | Agent is idle for 15 min (AgentCore kills session) | Work in progress may be lost if not committed | Task transitions to `TIMED_OUT`. Partial work may be on the branch if the agent committed before going idle. |
@@ -560,7 +569,7 @@ This section uses an FMEA (Failure Mode and Effects Analysis) approach: for each
 |---|---|---|
 | Orchestrator crashes during `HYDRATING` | Task stuck in `HYDRATING` | Durable execution (Lambda Durable Functions) automatically replays from the last checkpoint, skipping completed steps. Without durable orchestration, a recovery process detects stuck tasks (in `HYDRATING` for > N minutes) and restarts them. |
 | Orchestrator crashes during `RUNNING` | Task stuck in `RUNNING`, session may still be alive | Recovery process detects task is in `RUNNING` but orchestrator is not managing it. It resumes monitoring the session (using the stored session ID). When the session ends, it runs finalization. |
-| Orchestrator crashes during `FINALIZING` | Task stuck in `FINALIZING` | Recovery process detects and restarts finalization. Finalization steps must be idempotent (decrementing a counter twice should be detected and handled). |
+| Orchestrator crashes during `FINALIZING` | Task stuck in `FINALIZING` | Recovery process detects and restarts finalization. Finalization steps are idempotent. The heartbeat-detected crash finalization path avoids double-decrement by only emitting events and releasing concurrency after a successful `transitionTask`; if the transition fails (task already terminal), it re-reads the task and handles accordingly. |
 | DynamoDB unavailable during state transition | State not persisted | Retry with backoff. If the state transition cannot be persisted, the orchestrator must not proceed (risk of inconsistency). After retries are exhausted, alert operators. |
 
 ### Recovery mechanisms summary
@@ -605,7 +614,7 @@ Concurrency is tracked using atomic counters:
 - **UserConcurrency.** A DynamoDB item per user: `{ user_id, active_count }`. Incremented atomically (conditional update: `active_count < max`) during admission. Decremented during finalization.
 - **SystemConcurrency.** A single DynamoDB item: `{ pk: "SYSTEM", active_count }`. Same pattern.
 
-**Counter drift.** If the orchestrator crashes after starting a session but before persisting the session-to-task mapping, or after a session ends but before decrementing the counter, the counter drifts. Mitigation:
+**Counter drift.** If the orchestrator crashes after starting a session but before persisting the session-to-task mapping, or after a session ends but before decrementing the counter, the counter drifts. The heartbeat-detected crash finalization path (`finalizeTask` sessionUnhealthy branch) guards against double-decrement: it only decrements after a successful state transition, and re-reads the task if the transition fails to determine the correct action. Mitigation:
 
 - Always persist the task state transition **before** taking the action (write-ahead pattern). For example, persist the task as `RUNNING` and record the session ID before calling `invoke_agent_runtime`.
 - Run a **reconciliation Lambda** every 5 minutes (EventBridge schedule): query the Tasks table for tasks in `RUNNING` + `HYDRATING` state per user (GSI on `user_id` + `status`), compare the count to `UserConcurrency.active_count`, and correct via `UpdateItem` if different. The Lambda emits a `counter_drift_corrected` CloudWatch metric (dimensions: `user_id`, `drift_amount`) when it corrects a value, and a `counter_reconciliation_run` metric on every execution for health monitoring.
@@ -875,6 +884,7 @@ The primary table for task state. DynamoDB.
 | `cost_usd` | Number (optional) | Agent cost from the SDK result. |
 | `duration_s` | Number (optional) | Total task duration in seconds. |
 | `build_passed` | Boolean (optional) | Post-agent build verification result. |
+| `lint_passed` | Boolean (optional) | Post-agent lint verification result. Recorded alongside `build_passed` during finalization; surfaced as a span attribute (`lint.passed`) and included in the PR body's verification section. |
 | `max_turns` | Number (optional) | Maximum agent turns for this task. Set during task creation — either the user-specified value (1–500) or the platform default (100). Included in the orchestrator payload and consumed by the agent SDK's `ClaudeAgentOptions(max_turns=...)`. |
 | `max_budget_usd` | Number (optional) | Maximum cost budget in USD for this task. Set during task creation — either the user-specified value ($0.01–$100) or the per-repo Blueprint default. When reached, the agent stops regardless of remaining turns. If neither the task nor the Blueprint specifies a value, no budget limit is applied (turn limit and session timeout still apply). Included in the orchestrator payload and consumed by the agent SDK's `ClaudeAgentOptions(max_budget_usd=...)`. |
 | `blueprint_config` | Map (optional) | Snapshot of the `RepoConfig` record at task creation time (or a reference to it). This ensures tasks are not affected by mid-flight config changes. The schema follows the `RepoConfig` interface defined in [REPO_ONBOARDING.md](/design/repo-onboarding#repoconfig-schema). Includes `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `system_prompt_overrides`, `github_token_secret_arn`, `poll_interval_ms`, `custom_steps`, `step_sequence`, and `egress_allowlist`. The `max_turns` value from `blueprint_config` serves as the per-repo default; per-task `max_turns` (from the API request) takes higher priority. `max_budget_usd` follows the same 2-tier override pattern: per-task value takes priority over `blueprint_config.max_budget_usd`; if neither is specified, no budget limit is applied. |

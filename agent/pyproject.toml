@@ -11,6 +11,7 @@ dependencies = [
     "uvicorn==0.42.0",
     "aws-opentelemetry-distro~=0.15.0",
     "mcp==1.23.0",
+    "cedarpy>=4.8.0",
 ]
 
 [tool.bandit]
@@ -55,13 +56,15 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"system_prompt.py" = ["E501"]  # long prompt strings
-"prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106"]  # assert in tests is fine; hardcoded test tokens are not secrets
+"src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
+"src/system_prompt.py" = ["E501"]  # long prompt strings
+"src/prompts/*.py" = ["E501"]  # long prompt strings
+"tests/**" = ["S101", "S106", "S108", "E402"]  # assert; test tokens; /tmp paths; importorskip
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src"]
 
 [tool.ty.environment]
 python-version = "3.13"
+extra-paths = ["src"]

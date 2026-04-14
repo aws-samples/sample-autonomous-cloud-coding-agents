@@ -31,6 +31,7 @@ const mockAgentCoreSend = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
   InvokeAgentRuntimeCommand: jest.fn((input: unknown) => ({ _type: 'InvokeAgentRuntime', input })),
+  StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
 }));
 
 const mockHydrateContext = jest.fn();
@@ -75,7 +76,6 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
-  startSession,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
 
@@ -235,24 +235,13 @@ describe('hydrateAndTransition', () => {
   });
 });
 
-describe('startSession', () => {
-  test('invokes agent runtime and transitions to RUNNING', async () => {
-    mockAgentCoreSend.mockResolvedValueOnce({}); // InvokeAgentRuntime
-    mockDdbSend.mockResolvedValue({}); // transitionTask + emitTaskEvent
-
-    const sessionId = await startSession(baseTask as any, { repo_url: 'org/repo', task_id: 'TASK001' });
-    // Session ID is a UUID v4 (36 chars), not a ULID
-    expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('pollTaskStatus', () => {
   test('increments attempt count and reads status', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
     const result = await pollTaskStatus('TASK001', { attempts: 5 });
     expect(result.attempts).toBe(6);
     expect(result.lastStatus).toBe('RUNNING');
+    expect(result.sessionUnhealthy).toBe(false);
   });
 
   test('handles missing item gracefully', async () => {
@@ -260,6 +249,59 @@ describe('pollTaskStatus', () => {
     const result = await pollTaskStatus('TASK001', { attempts: 0 });
     expect(result.attempts).toBe(1);
     expect(result.lastStatus).toBeUndefined();
+  });
+
+  test('sets sessionUnhealthy when agent heartbeat is stale (RUNNING)', async () => {
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('does not set sessionUnhealthy when heartbeat is fresh', async () => {
+    const started = new Date(Date.now() - 200_000).toISOString();
+    const hb = new Date(Date.now() - 30_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: started,
+        agent_heartbeat_at: hb,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('does not set sessionUnhealthy when agent_heartbeat_at is absent but within grace period', async () => {
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: new Date(Date.now() - 60_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('sets sessionUnhealthy when agent_heartbeat_at is absent and past grace + stale window', async () => {
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: new Date(Date.now() - 400_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    expect(result.sessionUnhealthy).toBe(true);
   });
 });
 
@@ -347,6 +389,30 @@ describe('loadBlueprintConfig', () => {
     const config = await loadBlueprintConfig(baseTask as any);
     expect(config.poll_interval_ms).toBeUndefined();
   });
+
+  test('passes cedar_policies from repo config', async () => {
+    const policies = ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'];
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      cedar_policies: policies,
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.cedar_policies).toEqual(policies);
+  });
+
+  test('returns undefined cedar_policies when repo config has none', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.cedar_policies).toBeUndefined();
+  });
 });
 
 describe('hydrateAndTransition with blueprint config', () => {
@@ -426,20 +492,38 @@ describe('hydrateAndTransition with blueprint config', () => {
       expect.objectContaining({ githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:per-repo-token' }),
     );
   });
-});
 
-describe('startSession with blueprint config', () => {
-  test('uses blueprint runtime ARN override', async () => {
-    mockAgentCoreSend.mockResolvedValueOnce({});
+  test('includes cedar_policies in payload when blueprint config has them', async () => {
     mockDdbSend.mockResolvedValue({});
-
-    await startSession(baseTask as any, { repo_url: 'org/repo', task_id: 'TASK001' }, {
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const policies = ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'];
+    const payload = await hydrateAndTransition(baseTask as any, {
       compute_type: 'agentcore',
-      runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
+      runtime_arn: 'arn:test',
+      cedar_policies: policies,
     });
+    expect(payload.cedar_policies).toEqual(policies);
+  });
 
-    const invokeCall = mockAgentCoreSend.mock.calls[0][0];
-    expect(invokeCall.input.agentRuntimeArn).toBe('arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom');
+  test('omits cedar_policies from payload when blueprint config has none', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+    });
+    expect(payload.cedar_policies).toBeUndefined();
+  });
+
+  test('omits cedar_policies from payload when array is empty', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: [],
+    });
+    expect(payload.cedar_policies).toBeUndefined();
   });
 });
 
@@ -451,6 +535,23 @@ describe('finalizeTask', () => {
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     // Verify emitTaskEvent was called (PutCommand)
     expect(mockDdbSend).toHaveBeenCalled();
+  });
+
+  test('transitions RUNNING to FAILED when pollState.sessionUnhealthy', async () => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING' } }) // loadTask
+      .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+    const transitionCall = mockDdbSend.mock.calls[1][0];
+    expect(transitionCall.input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
+    expect(transitionCall.input.ExpressionAttributeValues[':fromStatus']).toBe('RUNNING');
+    const eventCall = mockDdbSend.mock.calls[2][0];
+    expect(eventCall.input.Item.event_type).toBe('task_failed');
+    expect(eventCall.input.Item.metadata.reason).toBe('agent_heartbeat_stale');
   });
 
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {

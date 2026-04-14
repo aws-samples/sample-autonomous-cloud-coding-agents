@@ -25,12 +25,14 @@ import { logger } from './logger';
  * Per-repository configuration written by the Blueprint CDK construct
  * and read at runtime by the task API gate and the orchestrator.
  */
+export type ComputeType = 'agentcore' | 'ecs';
+
 export interface RepoConfig {
   readonly repo: string;
   readonly status: 'active' | 'removed';
   readonly onboarded_at: string;
   readonly updated_at: string;
-  readonly compute_type?: string;
+  readonly compute_type?: ComputeType;
   readonly runtime_arn?: string;
   readonly model_id?: string;
   readonly max_turns?: number;
@@ -39,6 +41,7 @@ export interface RepoConfig {
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
+  readonly cedar_policies?: string[];
 }
 
 /**
@@ -46,7 +49,7 @@ export interface RepoConfig {
  * settings with platform defaults.
  */
 export interface BlueprintConfig {
-  readonly compute_type: string;
+  readonly compute_type: ComputeType;
   readonly runtime_arn: string;
   readonly model_id?: string;
   readonly max_turns?: number;
@@ -55,6 +58,7 @@ export interface BlueprintConfig {
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
+  readonly cedar_policies?: string[];
 }
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));

@@ -19,7 +19,7 @@ Use this routing before editing so the right package and tests get updated:
 | REST API, Lambdas, task validation, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | Matching tests under `cdk/test/` |
 | Shared API request/response shapes | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** (must stay in sync) |
 | `bgagent` CLI commands and HTTP client | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API types change |
-| Agent runtime (clone, tools, prompts, container) | `agent/` (`entrypoint.py`, `prompts/`, `Dockerfile`, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
+| Agent runtime (clone, tools, prompts, container) | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `policy.py`, `prompts/`, Dockerfile, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
 | User-facing or design prose | `docs/guides/`, `docs/design/` | Run **`mise //docs:sync`** or **`mise //docs:build`** (do not edit `docs/src/content/docs/` by hand) |
 | Monorepo tasks, CI glue | Root `mise.toml`, `scripts/`, `.github/workflows/` | — |
 
@@ -104,8 +104,9 @@ Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common co
 - **`mise run security:secrets`** — Gitleaks at repo root.
 - **`mise run security:sast`** — Semgrep on the repo (root; includes **`agent/`** Python among paths).
 - **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
-- **`mise run security`** — Runs **`security:secrets`** then **`security:sast`**.
+- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
 - **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.
+- **`mise run security:gh-actions`** — Static analysis of GitHub Actions under **`.github/`** ([zizmor](https://github.com/zizmorcore/zizmor)).
 - **`mise run hooks:install`** — Re-install **[prek](https://github.com/j178/prek)** git hooks (also run automatically at the end of **`mise run install`** inside a Git checkout). See [CONTRIBUTING.md](./CONTRIBUTING.md) if `core.hooksPath` blocks install.
 - **`mise run hooks:run`** — Run the same **pre-commit** and **pre-push** hook stages on all files (local verification).
 

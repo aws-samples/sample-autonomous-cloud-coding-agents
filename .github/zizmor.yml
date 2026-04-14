@@ -1,0 +1,11 @@
+# zizmor: https://docs.zizmor.sh/configuration/
+rules:
+  # Default since v1.20 is hash-pin for all actions; we require tag/branch/SHA pins.
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin
+  # Minimal pull_request_target job (PR title only); trigger is intentional for forks.
+  dangerous-triggers:
+    ignore:
+      - pull-request-lint.yml
