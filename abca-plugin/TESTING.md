@@ -1,58 +1,11 @@
-# ABCA Plugin — Testing Strategy & Results
+# ABCA Plugin — Test Results
 
-> Testing report for the Claude Code plugin at `abca-plugin/`.
+> Test report for the Claude Code plugin at `abca-plugin/`.
 > Generated: 2026-04-14
+>
+> For the testing strategy and how to run these checks, see [`README.md`](./README.md#testing).
 
-## Testing Strategy
-
-Since this plugin is a **markdown/config-based Claude Code plugin** (no executable code — only SKILL.md files, agent profiles, hooks.json, and plugin.json), traditional unit tests don't apply. Instead, we use a **multi-layer validation approach**:
-
-### Layer 1: Structural Validation
-Verify the plugin manifest, file organization, and component discovery.
-
-| Check | Description |
-|-------|-------------|
-| Manifest validity | `plugin.json` has required fields (`name`, `version`, `description`, `author`) |
-| Component discovery | All agents, skills, and hooks are in correct directories |
-| No orphaned files | Every file belongs to a recognized plugin component |
-| Valid JSON | `plugin.json` and `hooks.json` parse without errors |
-| Valid YAML frontmatter | All `.md` components have parseable frontmatter |
-
-### Layer 2: Agent Configuration Validation
-Verify agent definitions are well-formed and reference valid resources.
-
-| Check | Description |
-|-------|-------------|
-| Required frontmatter | Each agent has `model`, `description`, `tools` |
-| Valid model values | Model is `opus`, `sonnet`, or `haiku` |
-| Valid tool names | All tools are recognized Claude Code tools |
-| File path accuracy | Paths in system prompts exist in the repo |
-| Capability alignment | Examples match declared tools (e.g., debug agent has no Edit/Write) |
-
-### Layer 3: Content Integrity Verification
-Verify that all commands, paths, and cross-references in skill content are accurate.
-
-| Check | Description |
-|-------|-------------|
-| File path references | All referenced repo paths exist |
-| Mise task references | All `mise run` commands map to valid tasks |
-| CLI command accuracy | All `bgagent` commands/flags match the actual CLI |
-| Skill cross-references | Skills referencing other skills point to ones that exist |
-| AWS CLI syntax | AWS CLI commands use valid subcommands |
-
-### Layer 4: Hook Validation
-Verify hook configuration is correct and content is accurate.
-
-| Check | Description |
-|-------|-------------|
-| JSON structure | `hooks.json` has valid structure |
-| Event names | Hook events are supported by Claude Code |
-| Content accuracy | Skills and agents listed in hook prompt all exist |
-| No sensitive data | No credentials or secrets in hook prompts |
-
----
-
-## Test Results
+## Results
 
 ### Layer 1: Structural Validation — PASS
 
