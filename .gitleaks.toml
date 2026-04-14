@@ -1,0 +1,12 @@
+title = "sample-autonomous-cloud-coding-agents"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "PEM-shaped fixtures for output_scanner / hook tests (not real keys)."
+targetRules = ["private-key"]
+paths = [
+    "^agent/tests/test_hooks\\.py$",
+    "^agent/tests/test_output_scanner\\.py$",
+]

@@ -1,7 +1,8 @@
-"""PreToolUse hook callback for Cedar policy enforcement.
+"""PreToolUse and PostToolUse hook callbacks for policy enforcement.
 
-Integrates the PolicyEngine with the Claude Agent SDK's hook system
-to enforce tool-use policies at runtime.
+Integrates the PolicyEngine (Cedar, pre-execution) and the output scanner
+(regex, post-execution) with the Claude Agent SDK's hook system to enforce
+tool-use policies at runtime.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from output_scanner import scan_tool_output
 from shell import log
 
 if TYPE_CHECKING:
@@ -82,6 +84,70 @@ async def pre_tool_use_hook(
     }
 
 
+async def post_tool_use_hook(
+    hook_input: Any,
+    tool_use_id: str | None,
+    hook_context: Any,
+    *,
+    trajectory: _TrajectoryWriter | None = None,
+) -> dict:
+    """PostToolUse hook: screen tool output for secrets/PII.
+
+    Returns a dict with hookSpecificOutput.  When sensitive content is
+    detected the response includes ``updatedMCPToolOutput`` containing the
+    redacted version (steered enforcement — content is sanitized, not
+    blocked).
+    """
+    _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
+    _FAIL_CLOSED: dict = {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "updatedMCPToolOutput": "[Output redacted: screening error — fail-closed]",
+        }
+    }
+
+    if not isinstance(hook_input, dict):
+        log("WARN", "PostToolUse hook received non-dict input — passing through")
+        return _PASS_THROUGH
+
+    tool_name = hook_input.get("tool_name", "unknown")
+
+    if "tool_response" not in hook_input:
+        log("WARN", f"PostToolUse hook: missing 'tool_response' key for {tool_name}")
+        return _PASS_THROUGH
+
+    tool_response = hook_input["tool_response"]
+
+    # Normalise non-string responses
+    if not isinstance(tool_response, str):
+        tool_response = str(tool_response)
+
+    try:
+        result = scan_tool_output(tool_response)
+    except Exception as exc:
+        log("ERROR", f"Output scanner failed for {tool_name}: {type(exc).__name__}: {exc}")
+        if trajectory:
+            trajectory.write_output_screening_decision(
+                tool_name, [f"SCANNER_ERROR: {type(exc).__name__}"], redacted=True, duration_ms=0.0
+            )
+        return _FAIL_CLOSED
+
+    if result.has_sensitive_content:
+        if trajectory:
+            trajectory.write_output_screening_decision(
+                tool_name, result.findings, redacted=True, duration_ms=result.duration_ms
+            )
+        log("POLICY", f"OUTPUT REDACTED: {tool_name} — {', '.join(result.findings)}")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "updatedMCPToolOutput": result.redacted_content,
+            }
+        }
+
+    return _PASS_THROUGH
+
+
 def build_hook_matchers(
     engine: PolicyEngine,
     trajectory: _TrajectoryWriter | None = None,
@@ -99,6 +165,7 @@ def build_hook_matchers(
         HookInput,
         HookJSONOutput,
         HookMatcher,
+        PostToolUseHookSpecificOutput,
         SyncHookJSONOutput,
     )
 
@@ -110,8 +177,23 @@ def build_hook_matchers(
         result = await pre_tool_use_hook(
             hook_input, tool_use_id, ctx, engine=engine, trajectory=trajectory
         )
-        return SyncHookJSONOutput(**result)  # type: ignore[typeddict-item]
+        return SyncHookJSONOutput(**result)
+
+    async def _post(
+        hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
+    ) -> HookJSONOutput:
+        try:
+            result = await post_tool_use_hook(hook_input, tool_use_id, ctx, trajectory=trajectory)
+            return SyncHookJSONOutput(**result)
+        except Exception as exc:
+            log("ERROR", f"PostToolUse wrapper crashed: {type(exc).__name__}: {exc}")
+            fail_closed: PostToolUseHookSpecificOutput = {
+                "hookEventName": "PostToolUse",
+                "updatedMCPToolOutput": "[Output redacted: hook error — fail-closed]",
+            }
+            return SyncHookJSONOutput(hookSpecificOutput=fail_closed)
 
     return {
         "PreToolUse": [HookMatcher(matcher=None, hooks=[_pre])],
+        "PostToolUse": [HookMatcher(matcher=None, hooks=[_post])],
     }
