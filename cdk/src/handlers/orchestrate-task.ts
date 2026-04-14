@@ -231,7 +231,10 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
       }
 
-      return { ...ddbState, consecutiveComputePollFailures, consecutiveComputeCompletedPolls };
+      // For ECS/EC2 tasks, suppress heartbeat-based sessionUnhealthy since those
+      // backends have compute-level crash detection and may not send heartbeats.
+      const suppressHeartbeat = computeStrategy ? { sessionUnhealthy: false } : {};
+      return { ...ddbState, ...suppressHeartbeat, consecutiveComputePollFailures, consecutiveComputeCompletedPolls };
     },
     {
       initialState: { attempts: 0 },
@@ -239,7 +242,11 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         if (state.lastStatus && TERMINAL_STATUSES.includes(state.lastStatus)) {
           return { shouldContinue: false };
         }
-        if (state.sessionUnhealthy) {
+        // Heartbeat-based health checks only apply to AgentCore tasks.
+        // ECS/EC2 tasks have compute-level crash detection (pollSession) in the
+        // poll callback, so stale heartbeats should not terminate polling early
+        // — the agent entrypoint on those backends may not send continuous heartbeats.
+        if (state.sessionUnhealthy && !computeStrategy) {
           return { shouldContinue: false };
         }
         if (state.attempts >= MAX_POLL_ATTEMPTS) {

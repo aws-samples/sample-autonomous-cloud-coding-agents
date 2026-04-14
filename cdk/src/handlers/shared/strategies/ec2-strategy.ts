@@ -80,7 +80,10 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       ContentType: 'application/json',
     }));
 
-    // 2. Find an idle instance
+    // 2. Find an idle instance and claim it atomically via tag-then-verify.
+    // Multiple orchestrators may race for the same instance, so after tagging
+    // we re-describe to confirm our task-id stuck. If another invocation
+    // overwrote the tag, we try the next candidate.
     const describeResult = await getEc2Client().send(new DescribeInstancesCommand({
       Filters: [
         { Name: `tag:${EC2_FLEET_TAG_KEY}`, Values: [EC2_FLEET_TAG_VALUE] },
@@ -89,21 +92,47 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       ],
     }));
 
-    const instances = (describeResult.Reservations ?? []).flatMap(r => r.Instances ?? []);
-    if (instances.length === 0 || !instances[0]?.InstanceId) {
+    const candidates = (describeResult.Reservations ?? []).flatMap(r => r.Instances ?? []);
+    if (candidates.length === 0) {
       throw new Error('No idle EC2 instances available in fleet');
     }
 
-    const instanceId = instances[0].InstanceId;
+    let instanceId: string | undefined;
+    for (const candidate of candidates) {
+      const candidateId = candidate.InstanceId;
+      if (!candidateId) continue;
 
-    // 3. Tag instance as busy
-    await getEc2Client().send(new CreateTagsCommand({
-      Resources: [instanceId],
-      Tags: [
-        { Key: 'bgagent:status', Value: 'busy' },
-        { Key: 'bgagent:task-id', Value: taskId },
-      ],
-    }));
+      // 3a. Tag instance as busy with our task-id
+      await getEc2Client().send(new CreateTagsCommand({
+        Resources: [candidateId],
+        Tags: [
+          { Key: 'bgagent:status', Value: 'busy' },
+          { Key: 'bgagent:task-id', Value: taskId },
+        ],
+      }));
+
+      // 3b. Re-describe to verify we won the race
+      const verifyResult = await getEc2Client().send(new DescribeInstancesCommand({
+        InstanceIds: [candidateId],
+      }));
+      const verifiedInstance = verifyResult.Reservations?.[0]?.Instances?.[0];
+      const taskIdTag = verifiedInstance?.Tags?.find(t => t.Key === 'bgagent:task-id');
+
+      if (taskIdTag?.Value === taskId) {
+        instanceId = candidateId;
+        break;
+      }
+
+      logger.warn('Lost instance claim race, trying next candidate', {
+        task_id: taskId,
+        instance_id: candidateId,
+        claimed_by: taskIdTag?.Value,
+      });
+    }
+
+    if (!instanceId) {
+      throw new Error('No idle EC2 instances available in fleet (all candidates claimed by other tasks)');
+    }
 
     // 4. Build the boot script
     // All task data is read from the S3 payload at runtime to avoid shell
@@ -209,13 +238,13 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
         case 'InProgress':
         case 'Pending':
         case 'Delayed':
+        case 'Cancelling': // transient — command still running while cancel propagates
           return { status: 'running' };
         case 'Success':
           return { status: 'completed' };
         case 'Failed':
         case 'Cancelled':
         case 'TimedOut':
-        case 'Cancelling':
           return { status: 'failed', error: result.StatusDetails ?? `SSM command ${status}` };
         default:
           // Covers any unexpected status values — treat as running to avoid

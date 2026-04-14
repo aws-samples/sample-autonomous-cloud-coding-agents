@@ -33,23 +33,23 @@ process.env.ECR_IMAGE_URI = ECR_IMAGE;
 const mockEc2Send = jest.fn();
 jest.mock('@aws-sdk/client-ec2', () => ({
   EC2Client: jest.fn(() => ({ send: mockEc2Send })),
-  DescribeInstancesCommand: jest.fn((input: unknown) => ({ _type: 'DescribeInstances', input })),
-  CreateTagsCommand: jest.fn((input: unknown) => ({ _type: 'CreateTags', input })),
-  DeleteTagsCommand: jest.fn((input: unknown) => ({ _type: 'DeleteTags', input })),
+  DescribeInstancesCommand: jest.fn((input) => ({ _type: 'DescribeInstances', input })),
+  CreateTagsCommand: jest.fn((input) => ({ _type: 'CreateTags', input })),
+  DeleteTagsCommand: jest.fn((input) => ({ _type: 'DeleteTags', input })),
 }));
 
 const mockSsmSend = jest.fn();
 jest.mock('@aws-sdk/client-ssm', () => ({
   SSMClient: jest.fn(() => ({ send: mockSsmSend })),
-  SendCommandCommand: jest.fn((input: unknown) => ({ _type: 'SendCommand', input })),
-  GetCommandInvocationCommand: jest.fn((input: unknown) => ({ _type: 'GetCommandInvocation', input })),
-  CancelCommandCommand: jest.fn((input: unknown) => ({ _type: 'CancelCommand', input })),
+  SendCommandCommand: jest.fn((input) => ({ _type: 'SendCommand', input })),
+  GetCommandInvocationCommand: jest.fn((input) => ({ _type: 'GetCommandInvocation', input })),
+  CancelCommandCommand: jest.fn((input) => ({ _type: 'CancelCommand', input })),
 }));
 
 const mockS3Send = jest.fn();
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: mockS3Send })),
-  PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
+  PutObjectCommand: jest.fn((input) => ({ _type: 'PutObject', input })),
 }));
 
 import { Ec2ComputeStrategy } from '../../../../src/handlers/shared/strategies/ec2-strategy';
@@ -65,7 +65,7 @@ describe('Ec2ComputeStrategy', () => {
   });
 
   describe('startSession', () => {
-    test('finds idle instance, tags as busy, uploads to S3, sends SSM command, returns handle', async () => {
+    test('finds idle instance, tags as busy, verifies claim, uploads to S3, sends SSM command, returns handle', async () => {
       // S3 upload
       mockS3Send.mockResolvedValueOnce({});
       // DescribeInstances — return one idle instance
@@ -74,6 +74,10 @@ describe('Ec2ComputeStrategy', () => {
       });
       // CreateTags (mark busy)
       mockEc2Send.mockResolvedValueOnce({});
+      // DescribeInstances — verify claim (tag matches our task-id)
+      mockEc2Send.mockResolvedValueOnce({
+        Reservations: [{ Instances: [{ InstanceId: INSTANCE_ID, Tags: [{ Key: 'bgagent:task-id', Value: 'TASK001' }] }] }],
+      });
       // SSM SendCommand
       mockSsmSend.mockResolvedValueOnce({
         Command: { CommandId: COMMAND_ID },
@@ -98,8 +102,8 @@ describe('Ec2ComputeStrategy', () => {
       expect(s3Call.input.Bucket).toBe(PAYLOAD_BUCKET);
       expect(s3Call.input.Key).toBe('tasks/TASK001/payload.json');
 
-      // Verify DescribeInstances filter
-      expect(mockEc2Send).toHaveBeenCalledTimes(2);
+      // Verify EC2 calls: DescribeInstances (find idle), CreateTags (claim), DescribeInstances (verify)
+      expect(mockEc2Send).toHaveBeenCalledTimes(3);
       const describeCall = mockEc2Send.mock.calls[0][0];
       expect(describeCall.input.Filters).toEqual(expect.arrayContaining([
         expect.objectContaining({ Name: `tag:${FLEET_TAG_KEY}`, Values: [FLEET_TAG_VALUE] }),
@@ -121,6 +125,43 @@ describe('Ec2ComputeStrategy', () => {
       expect(ssmCall.input.DocumentName).toBe('AWS-RunShellScript');
       expect(ssmCall.input.InstanceIds).toEqual([INSTANCE_ID]);
       expect(ssmCall.input.TimeoutSeconds).toBe(32400);
+    });
+
+    test('tries next candidate when race is lost on first instance', async () => {
+      const INSTANCE_ID_2 = 'i-0987654321fedcba0';
+      // S3 upload
+      mockS3Send.mockResolvedValueOnce({});
+      // DescribeInstances — return two idle instances
+      mockEc2Send.mockResolvedValueOnce({
+        Reservations: [{ Instances: [{ InstanceId: INSTANCE_ID }, { InstanceId: INSTANCE_ID_2 }] }],
+      });
+      // CreateTags on first instance
+      mockEc2Send.mockResolvedValueOnce({});
+      // Verify first instance — another task claimed it
+      mockEc2Send.mockResolvedValueOnce({
+        Reservations: [{ Instances: [{ InstanceId: INSTANCE_ID, Tags: [{ Key: 'bgagent:task-id', Value: 'OTHER_TASK' }] }] }],
+      });
+      // CreateTags on second instance
+      mockEc2Send.mockResolvedValueOnce({});
+      // Verify second instance — our task-id stuck
+      mockEc2Send.mockResolvedValueOnce({
+        Reservations: [{ Instances: [{ InstanceId: INSTANCE_ID_2, Tags: [{ Key: 'bgagent:task-id', Value: 'TASK001' }] }] }],
+      });
+      // SSM SendCommand
+      mockSsmSend.mockResolvedValueOnce({
+        Command: { CommandId: COMMAND_ID },
+      });
+
+      const strategy = new Ec2ComputeStrategy();
+      const handle = await strategy.startSession({
+        taskId: 'TASK001',
+        payload: { repo_url: 'org/repo' },
+        blueprintConfig: { compute_type: 'ec2', runtime_arn: '' },
+      });
+
+      const ec2Handle = handle as Extract<typeof handle, { strategyType: 'ec2' }>;
+      expect(ec2Handle.instanceId).toBe(INSTANCE_ID_2);
+      expect(mockEc2Send).toHaveBeenCalledTimes(5); // describe + 2*(tag + verify)
     });
 
     test('throws when no idle instances available', async () => {
@@ -148,6 +189,10 @@ describe('Ec2ComputeStrategy', () => {
       });
       // CreateTags
       mockEc2Send.mockResolvedValueOnce({});
+      // DescribeInstances — verify claim
+      mockEc2Send.mockResolvedValueOnce({
+        Reservations: [{ Instances: [{ InstanceId: INSTANCE_ID, Tags: [{ Key: 'bgagent:task-id', Value: 'TASK001' }] }] }],
+      });
       // SSM SendCommand — return no CommandId
       mockSsmSend.mockResolvedValueOnce({ Command: {} });
 
@@ -226,12 +271,12 @@ describe('Ec2ComputeStrategy', () => {
       expect(result).toEqual({ status: 'failed', error: 'Command timed out' });
     });
 
-    test('returns failed for Cancelling status', async () => {
+    test('returns running for Cancelling status (transient)', async () => {
       mockSsmSend.mockResolvedValueOnce({ Status: 'Cancelling', StatusDetails: 'Command is being cancelled' });
 
       const strategy = new Ec2ComputeStrategy();
       const result = await strategy.pollSession(makeHandle());
-      expect(result).toEqual({ status: 'failed', error: 'Command is being cancelled' });
+      expect(result).toEqual({ status: 'running' });
     });
 
     test('returns running for unknown status (default case)', async () => {
