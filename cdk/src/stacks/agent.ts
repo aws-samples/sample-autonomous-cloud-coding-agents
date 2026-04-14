@@ -67,7 +67,15 @@ export class AgentStack extends Stack {
       repoTable: repoTable.table,
     });
 
-    const blueprints = [agentPluginsBlueprint];
+    const personalSiteBlueprint = new Blueprint(this, 'PersonalSiteBlueprint', {
+      repo: 'rsmets/personal-site',
+      repoTable: repoTable.table,
+      agent: {
+        modelId: 'anthropic.claude-opus-4-20250514-v1:0',
+      },
+    });
+
+    const blueprints = [agentPluginsBlueprint, personalSiteBlueprint];
 
     // The AwsCustomResource singleton Lambda used by Blueprint constructs
     NagSuppressions.addResourceSuppressionsByPath(this, [
