@@ -130,7 +130,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // Build compute metadata for the task record so cancel-task can stop the right backend
       const computeMetadata: Record<string, string> = handle.strategyType === 'ecs'
         ? { clusterArn: handle.clusterArn, taskArn: handle.taskArn }
-        : { runtimeArn: handle.runtimeArn };
+        : handle.strategyType === 'ec2'
+          ? { instanceId: handle.instanceId, commandId: handle.commandId }
+          : { runtimeArn: handle.runtimeArn };
 
       await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
         session_id: handle.sessionId,
@@ -159,7 +161,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
   // Resolve the compute strategy once and reuse it across poll iterations
   // instead of constructing a new instance on every cycle.
-  const computeStrategy = blueprintConfig.compute_type === 'ecs'
+  const computeStrategy = (blueprintConfig.compute_type === 'ecs' || blueprintConfig.compute_type === 'ec2')
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
 
