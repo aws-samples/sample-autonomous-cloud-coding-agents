@@ -50,7 +50,8 @@ export interface AgentVpcProps {
  * VPC with restricted egress for the AgentCore Runtime.
  *
  * Provides HTTPS-only outbound access, VPC endpoints for AWS services,
- * and NAT for GitHub API access. Flow logs are enabled for audit.
+ * and NAT for internet egress (GitHub and package registries).
+ * Flow logs are enabled for audit.
  */
 export class AgentVpc extends Construct {
   /** The VPC where the Runtime will be deployed. */
@@ -113,7 +114,7 @@ export class AgentVpc extends Construct {
     this.runtimeSecurityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
-      'Allow HTTPS egress (GitHub API via NAT, AWS services via endpoints)',
+      'Allow HTTPS egress (GitHub + package registries via NAT, AWS services via endpoints)',
     );
 
     // --- Gateway endpoints (free, no ENI cost) ---

@@ -22,7 +22,7 @@ repos:
 
   - repo: local
     hooks:
-      - id: gitleaks-staged
+      - id: gitleaks
         name: gitleaks (staged)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run security:secrets:staged'
         language: system

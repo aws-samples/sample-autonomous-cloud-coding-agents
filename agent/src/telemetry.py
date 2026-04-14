@@ -271,6 +271,21 @@ class _TrajectoryWriter:
             }
         )
 
+    def write_output_screening_decision(
+        self, tool_name: str, findings: list[str], redacted: bool, duration_ms: float
+    ) -> None:
+        """Write an OUTPUT_SCREENING event for a post-tool-use output scan."""
+        self._put_event(
+            {
+                "event": "OUTPUT_SCREENING",
+                "task_id": self._task_id,
+                "tool_name": tool_name,
+                "findings": findings,
+                "redacted": redacted,
+                "duration_ms": duration_ms,
+            }
+        )
+
 
 # Values under these keys may contain tool stderr, paths, or incidental secrets.
 _METRICS_REDACT_KEYS = frozenset({"error"})
