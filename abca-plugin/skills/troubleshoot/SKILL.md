@@ -96,10 +96,24 @@ node lib/bin/bgagent.js events <TASK_ID> --output json
 - Check event `reason` and `detail` fields for specifics
 - Verify PAT: fine-grained token must include the target repository with Contents (read/write), Pull Requests (read/write), Issues (read)
 
-**`task_failed`:**
+**`task_failed` / task completes with 0 tokens and no PR:**
 - Agent encountered an error during execution
-- Check CloudWatch logs for the session
+- Check CloudWatch logs for the session:
+  ```bash
+  aws logs filter-log-events \
+    --log-group-name "/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/jean_cloude" \
+    --filter-pattern "<TASK_ID>" \
+    --region us-west-2 --query 'events[*].message' --output text
+  ```
 - Common: repo build/test commands not documented in CLAUDE.md
+
+**403 "not authorized to perform bedrock:InvokeModelWithResponseStream":**
+- The Blueprint specifies a model that the runtime IAM role doesn't have permissions for
+- Fix: add `grantInvoke` for the model and its cross-region inference profile in `cdk/src/stacks/agent.ts`, then redeploy
+
+**400 "Invocation with on-demand throughput isn't supported":**
+- The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-20250514-v1:0`)
+- Fix: change to the inference profile ID (e.g. `us.anthropic.claude-opus-4-20250514-v1:0`), update DynamoDB via redeploy
 
 **`task_timed_out`:**
 - 9-hour maximum exceeded

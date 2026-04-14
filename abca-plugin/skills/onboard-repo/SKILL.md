@@ -16,7 +16,7 @@ You are guiding the user through onboarding a new GitHub repository to ABCA. Rep
 Use AskUserQuestion to collect:
 - **Repository**: GitHub `owner/repo` format
 - **Compute type**: `agentcore` (default) or `ecs`
-- **Model preference**: Claude Sonnet 4 (default), Claude Opus 4 (complex repos), or Claude Haiku (lightweight)
+- **Model preference**: Claude Sonnet 4 (default), Claude Opus 4 (complex repos), or Claude Haiku (lightweight). **Important:** Models must be specified using their cross-region inference profile ID (e.g. `us.anthropic.claude-opus-4-20250514-v1:0`), not the raw foundation model ID. On-demand invocation of raw model IDs is not supported for most models.
 - **Max turns**: Default 100 (range: 1-500)
 - **Max budget**: USD cost ceiling per task (optional)
 - **Custom GitHub PAT**: If this repo needs a different token than the platform default
@@ -44,7 +44,7 @@ new Blueprint(this, 'MyRepoBlueprint', {
   repoTable: repoTable,
   // Optional overrides:
   // computeType: 'agentcore',
-  // modelId: 'anthropic.claude-sonnet-4-20250514-v1:0',
+  // modelId: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
   // maxTurns: 100,
   // maxBudgetUsd: 50,
   // runtimeArn: runtime.runtimeArn,
@@ -53,6 +53,30 @@ new Blueprint(this, 'MyRepoBlueprint', {
 ```
 
 Use a descriptive construct ID derived from the repo name.
+
+### Model ID and IAM Permissions
+
+When specifying a non-default model via `agent.modelId`, two things are required:
+
+1. **Use the inference profile ID, not the raw model ID.** Bedrock does not support on-demand invocation of raw foundation model IDs for most models. Use the cross-region inference profile ID instead:
+   - Sonnet 4: `us.anthropic.claude-sonnet-4-20250514-v1:0`
+   - Opus 4: `us.anthropic.claude-opus-4-20250514-v1:0`
+   - Haiku 4.5: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (on-demand works for Haiku)
+
+2. **Grant the runtime IAM permissions for the model.** The Blueprint construct does not automatically grant `bedrock:InvokeModel*` — this is by design (least privilege). You must add a `grantInvoke` block in the stack for each model used:
+   ```typescript
+   const opusModel = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-20250514-v1:0', {
+     supportsAgents: true,
+     supportsCrossRegion: true,
+   });
+   opusModel.grantInvoke(runtime);
+
+   const opusProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
+     geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+     model: opusModel,
+   });
+   opusProfile.grantInvoke(runtime);
+   ```
 
 ## Step 4: Deploy
 
@@ -100,4 +124,6 @@ Task-level parameters override Blueprint defaults. If neither specifies a value,
 ## Common Issues
 
 - **422 "Repository not onboarded"** — Blueprint hasn't been deployed yet. Add the construct and redeploy.
-- **Preflight failures after onboarding** — GitHub PAT may lack permissions for the new repo. Check the PAT's fine-grained access includes the target repository.
+- **Preflight failures after onboarding** — GitHub PAT may lack permissions for the new repo. Check the PAT's fine-grained access includes the target repository with Contents (read/write) and Pull requests (read/write) permissions.
+- **400 "Invocation with on-demand throughput isn't supported"** — The Blueprint `modelId` is using a raw foundation model ID instead of an inference profile ID. Change e.g. `anthropic.claude-opus-4-20250514-v1:0` to `us.anthropic.claude-opus-4-20250514-v1:0`.
+- **403 "not authorized to perform bedrock:InvokeModelWithResponseStream"** — The runtime IAM role lacks permissions for the model specified in the Blueprint. Add `grantInvoke` for both the model and its cross-region inference profile in `agent.ts`.
