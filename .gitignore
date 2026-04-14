@@ -1,19 +1,36 @@
+# ──────────────────────────────────────────────
+# Logs
+# ──────────────────────────────────────────────
 logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
-report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# ──────────────────────────────────────────────
+# Runtime / process
+# ──────────────────────────────────────────────
 pids
 *.pid
 *.seed
 *.pid.lock
-lib-cov
+
+# ──────────────────────────────────────────────
+# Coverage & test reports
+# ──────────────────────────────────────────────
 coverage
 *.lcov
 .nyc_output
-build/Release
+lib-cov
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+/test-reports/
+junit.xml
+/coverage/
+
+# ──────────────────────────────────────────────
+# Node / JS
+# ──────────────────────────────────────────────
 node_modules/
 jspm_packages/
 *.tsbuildinfo
@@ -21,37 +38,76 @@ jspm_packages/
 *.tgz
 .yarn-integrity
 .cache
-cdk.out/
-*.DS_STORE
-!.node-version
+.parcel-cache/
+
+# ──────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────
 *.pyc
 __pycache__/
-!.ort.yml
+agent/.venv/
+
+# ──────────────────────────────────────────────
+# CDK / CloudFormation outputs
+# ──────────────────────────────────────────────
+cdk.out/
+/cdk/cdk.out*/
+.cdk.staging/
+cdk.context.json
+/assets/
+
+# ──────────────────────────────────────────────
+# Build outputs (compiled TS → JS)
+# ──────────────────────────────────────────────
+/cdk/lib/
+/cli/lib/
+/dist/
+build/Release
+
+# ──────────────────────────────────────────────
+# Docs build
+# ──────────────────────────────────────────────
+/docs/dist/
+local-docs/
+
+# ──────────────────────────────────────────────
+# IDE / editor
+# ──────────────────────────────────────────────
 .idea
 .vscode
-cdk.context.json
-*.bkp
+*.DS_STORE
+
+# ──────────────────────────────────────────────
+# Security scan outputs
+# ──────────────────────────────────────────────
 gitleaks-*.json
 agent/gitleaks-report.json
+
+# ──────────────────────────────────────────────
+# Environment / secrets
+# ──────────────────────────────────────────────
+.env
+.env.*
 .claude/settings.local.json
-/test-reports/
-junit.xml
-/coverage/
+
+# ──────────────────────────────────────────────
+# Misc
+# ──────────────────────────────────────────────
+*.bkp
+Plans/
+
+# ──────────────────────────────────────────────
+# Explicit keeps (override ignores above)
+# ──────────────────────────────────────────────
+!.node-version
+!.ort.yml
 !/.github/workflows/build.yml
-!/.mergify.yml
+!/.github/workflows/docs.yml
 !/.github/pull_request_template.md
+!/.mergify.yml
 !/cdk/test/
 !/cdk/tsconfig.json
 !/cdk/tsconfig.dev.json
 !/cdk/src/
-/cdk/lib
-/dist/
 !/cdk/.eslintrc.json
-/assets/
 !/cdk/cdk.json
-/cdk/cdk.out/
-.cdk.staging/
-.parcel-cache/
-!/.github/workflows/docs.yml
-local-docs/
-Plans/
