@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration, Stack } from 'aws-cdk-lib';
+import { Aws, Duration, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -127,6 +127,18 @@ export interface TaskOrchestratorProps {
     readonly taskRoleArn: string;
     readonly executionRoleArn: string;
   };
+
+  /**
+   * EC2 fleet compute strategy configuration.
+   * When provided, EC2-related env vars and IAM policies are added to the orchestrator.
+   */
+  readonly ec2Config?: {
+    readonly fleetTagKey: string;
+    readonly fleetTagValue: string;
+    readonly payloadBucketName: string;
+    readonly ecrImageUri: string;
+    readonly instanceRoleArn: string;
+  };
 }
 
 /**
@@ -195,6 +207,12 @@ export class TaskOrchestrator extends Construct {
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
         }),
+        ...(props.ec2Config && {
+          EC2_FLEET_TAG_KEY: props.ec2Config.fleetTagKey,
+          EC2_FLEET_TAG_VALUE: props.ec2Config.fleetTagValue,
+          EC2_PAYLOAD_BUCKET: props.ec2Config.payloadBucketName,
+          ECR_IMAGE_URI: props.ec2Config.ecrImageUri,
+        }),
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -257,6 +275,41 @@ export class TaskOrchestrator extends Construct {
         conditions: {
           StringEquals: {
             'iam:PassedToService': 'ecs-tasks.amazonaws.com',
+          },
+        },
+      }));
+    }
+
+    // EC2 fleet compute strategy permissions (only when EC2 is configured)
+    if (props.ec2Config) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'ec2:DescribeInstances',
+          'ec2:CreateTags',
+        ],
+        resources: ['*'],
+      }));
+
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'ssm:SendCommand',
+          'ssm:GetCommandInvocation',
+          'ssm:CancelCommand',
+        ],
+        resources: ['*'],
+      }));
+
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['s3:PutObject'],
+        resources: [`arn:${Aws.PARTITION}:s3:::${props.ec2Config.payloadBucketName}/*`],
+      }));
+
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        resources: [props.ec2Config.instanceRoleArn],
+        conditions: {
+          StringEquals: {
+            'iam:PassedToService': 'ec2.amazonaws.com',
           },
         },
       }));

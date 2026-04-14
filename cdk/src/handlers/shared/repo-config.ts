@@ -25,7 +25,7 @@ import { logger } from './logger';
  * Per-repository configuration written by the Blueprint CDK construct
  * and read at runtime by the task API gate and the orchestrator.
  */
-export type ComputeType = 'agentcore' | 'ecs';
+export type ComputeType = 'agentcore' | 'ecs' | 'ec2';
 
 export interface RepoConfig {
   readonly repo: string;
@@ -34,6 +34,7 @@ export interface RepoConfig {
   readonly updated_at: string;
   readonly compute_type?: ComputeType;
   readonly runtime_arn?: string;
+  readonly instance_type?: string;
   readonly model_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
@@ -51,6 +52,7 @@ export interface RepoConfig {
 export interface BlueprintConfig {
   readonly compute_type: ComputeType;
   readonly runtime_arn: string;
+  readonly instance_type?: string;
   readonly model_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;

@@ -238,6 +238,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     max_budget_usd: repoConfig?.max_budget_usd,
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
+    instance_type: repoConfig?.instance_type,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
   };

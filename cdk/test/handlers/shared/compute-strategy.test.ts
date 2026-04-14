@@ -30,8 +30,28 @@ jest.mock('@aws-sdk/client-ecs', () => ({
   StopTaskCommand: jest.fn(),
 }));
 
+jest.mock('@aws-sdk/client-ec2', () => ({
+  EC2Client: jest.fn(() => ({ send: jest.fn() })),
+  DescribeInstancesCommand: jest.fn(),
+  CreateTagsCommand: jest.fn(),
+  DeleteTagsCommand: jest.fn(),
+}));
+
+jest.mock('@aws-sdk/client-ssm', () => ({
+  SSMClient: jest.fn(() => ({ send: jest.fn() })),
+  SendCommandCommand: jest.fn(),
+  GetCommandInvocationCommand: jest.fn(),
+  CancelCommandCommand: jest.fn(),
+}));
+
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({ send: jest.fn() })),
+  PutObjectCommand: jest.fn(),
+}));
+
 import { resolveComputeStrategy } from '../../../src/handlers/shared/compute-strategy';
 import { AgentCoreComputeStrategy } from '../../../src/handlers/shared/strategies/agentcore-strategy';
+import { Ec2ComputeStrategy } from '../../../src/handlers/shared/strategies/ec2-strategy';
 import { EcsComputeStrategy } from '../../../src/handlers/shared/strategies/ecs-strategy';
 
 describe('resolveComputeStrategy', () => {
@@ -51,5 +71,14 @@ describe('resolveComputeStrategy', () => {
     });
     expect(strategy).toBeInstanceOf(EcsComputeStrategy);
     expect(strategy.type).toBe('ecs');
+  });
+
+  test('returns Ec2ComputeStrategy for compute_type ec2', () => {
+    const strategy = resolveComputeStrategy({
+      compute_type: 'ec2',
+      runtime_arn: 'arn:test',
+    });
+    expect(strategy).toBeInstanceOf(Ec2ComputeStrategy);
+    expect(strategy.type).toBe('ec2');
   });
 });
