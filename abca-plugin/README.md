@@ -101,8 +101,6 @@ MISE_EXPERIMENTAL=1 mise tasks --all 2>/dev/null | grep -E '(build|install|compi
 cd cli && node lib/bin/bgagent.js submit --help && node lib/bin/bgagent.js list --help
 ```
 
-Full test results are documented in [`TESTING.md`](./TESTING.md).
-
 ## Development
 
 To modify the plugin:
