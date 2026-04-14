@@ -68,7 +68,7 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       );
     }
 
-    const { taskId, payload, blueprintConfig } = input;
+    const { taskId, payload } = input;
     const payloadJson = JSON.stringify(payload);
 
     // 1. Upload payload to S3
@@ -114,7 +114,7 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       'set -euo pipefail',
       '',
       '# Derive region from IMDS (SSM does not always set AWS_REGION)',
-      'export AWS_REGION=$(ec2-metadata --availability-zone | cut -d" " -f2 | sed \'s/.$/\'\'/)\'',
+      "export AWS_REGION=$(ec2-metadata --availability-zone | cut -d' ' -f2 | sed 's/.$//')",
       'export AWS_DEFAULT_REGION="$AWS_REGION"',
       '',
       '# Resolve instance ID for tag cleanup',

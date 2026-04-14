@@ -281,17 +281,45 @@ export class TaskOrchestrator extends Construct {
 
     // EC2 fleet compute strategy permissions (only when EC2 is configured)
     if (props.ec2Config) {
+      // DescribeInstances does not support resource-level permissions
       this.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: [
-          'ec2:DescribeInstances',
-          'ec2:CreateTags',
-        ],
+        actions: ['ec2:DescribeInstances'],
         resources: ['*'],
+      }));
+
+      // CreateTags/DeleteTags scoped to fleet instances only
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['ec2:CreateTags', 'ec2:DeleteTags'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            [`ec2:ResourceTag/${props.ec2Config.fleetTagKey}`]: props.ec2Config.fleetTagValue,
+          },
+        },
+      }));
+
+      // SSM SendCommand scoped to fleet-tagged instances; Get/Cancel scoped to all commands
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['ssm:SendCommand'],
+        resources: [
+          `arn:${Aws.PARTITION}:ec2:*:*:instance/*`,
+        ],
+        conditions: {
+          StringEquals: {
+            [`ssm:resourceTag/${props.ec2Config.fleetTagKey}`]: props.ec2Config.fleetTagValue,
+          },
+        },
+      }));
+
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['ssm:SendCommand'],
+        resources: [
+          `arn:${Aws.PARTITION}:ssm:*::document/AWS-RunShellScript`,
+        ],
       }));
 
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         actions: [
-          'ssm:SendCommand',
           'ssm:GetCommandInvocation',
           'ssm:CancelCommand',
         ],
