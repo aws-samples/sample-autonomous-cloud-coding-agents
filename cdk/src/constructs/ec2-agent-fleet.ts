@@ -125,6 +125,7 @@ export class Ec2AgentFleet extends Construct {
     this.instanceRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'ecr:BatchGetImage',
+        'ecr:BatchCheckLayerAvailability',
         'ecr:GetDownloadUrlForLayer',
       ],
       resources: [props.agentImageAsset.repository.repositoryArn],

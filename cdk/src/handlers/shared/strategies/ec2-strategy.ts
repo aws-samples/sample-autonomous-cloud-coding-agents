@@ -111,14 +111,35 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
         ],
       }));
 
-      // 3b. Re-describe to verify we won the race
-      const verifyResult = await getEc2Client().send(new DescribeInstancesCommand({
-        InstanceIds: [candidateId],
-      }));
-      const verifiedInstance = verifyResult.Reservations?.[0]?.Instances?.[0];
-      const taskIdTag = verifiedInstance?.Tags?.find(t => t.Key === 'bgagent:task-id');
+      // 3b. Re-describe to verify we won the race. If the verify call itself
+      // fails (throttle, network), roll back the tags so the instance isn't
+      // stuck as busy, then propagate the error.
+      let verified = false;
+      try {
+        const verifyResult = await getEc2Client().send(new DescribeInstancesCommand({
+          InstanceIds: [candidateId],
+        }));
+        const verifiedInstance = verifyResult.Reservations?.[0]?.Instances?.[0];
+        const taskIdTag = verifiedInstance?.Tags?.find(t => t.Key === 'bgagent:task-id');
+        verified = taskIdTag?.Value === taskId;
+      } catch (verifyErr) {
+        // Best-effort rollback before propagating
+        try {
+          await getEc2Client().send(new CreateTagsCommand({
+            Resources: [candidateId],
+            Tags: [{ Key: 'bgagent:status', Value: 'idle' }],
+          }));
+          await getEc2Client().send(new DeleteTagsCommand({
+            Resources: [candidateId],
+            Tags: [{ Key: 'bgagent:task-id' }],
+          }));
+        } catch {
+          logger.warn('Failed to rollback instance tags after verify failure', { instance_id: candidateId, task_id: taskId });
+        }
+        throw verifyErr;
+      }
 
-      if (taskIdTag?.Value === taskId) {
+      if (verified) {
         instanceId = candidateId;
         break;
       }
@@ -126,7 +147,6 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       logger.warn('Lost instance claim race, trying next candidate', {
         task_id: taskId,
         instance_id: candidateId,
-        claimed_by: taskIdTag?.Value,
       });
     }
 
@@ -151,7 +171,7 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       '',
       '# Cleanup trap — always retag instance as idle on exit (success, error, or signal)',
       'cleanup() {',
-      '  docker system prune -f || true',
+      '  docker container prune -f || true',
       '  rm -f /tmp/payload.json',
       '  aws ec2 create-tags --resources "$INSTANCE_ID" --region "$AWS_REGION" --tags Key=bgagent:status,Value=idle || true',
       '  aws ec2 delete-tags --resources "$INSTANCE_ID" --region "$AWS_REGION" --tags Key=bgagent:task-id || true',
@@ -252,10 +272,11 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
           return { status: 'running' };
       }
     } catch (err) {
-      const errName = err instanceof Error ? err.name : undefined;
-      if (errName === 'InvocationDoesNotExist') {
-        return { status: 'failed', error: 'SSM command invocation not found' };
-      }
+      // InvocationDoesNotExist can occur transiently while the command is
+      // still propagating to the instance. Rethrow so the orchestrator's
+      // consecutiveComputePollFailures counter handles it — the command
+      // will be retried on the next poll cycle and only failed after 3
+      // consecutive errors.
       throw err;
     }
   }

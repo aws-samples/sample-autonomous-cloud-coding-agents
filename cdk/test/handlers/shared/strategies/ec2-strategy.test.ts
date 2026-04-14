@@ -287,14 +287,13 @@ describe('Ec2ComputeStrategy', () => {
       expect(result).toEqual({ status: 'running' });
     });
 
-    test('returns failed when InvocationDoesNotExist', async () => {
+    test('throws InvocationDoesNotExist so orchestrator retry counter handles it', async () => {
       const err = new Error('Invocation does not exist');
       err.name = 'InvocationDoesNotExist';
       mockSsmSend.mockRejectedValueOnce(err);
 
       const strategy = new Ec2ComputeStrategy();
-      const result = await strategy.pollSession(makeHandle());
-      expect(result).toEqual({ status: 'failed', error: 'SSM command invocation not found' });
+      await expect(strategy.pollSession(makeHandle())).rejects.toThrow('Invocation does not exist');
     });
 
     test('throws when handle is not ec2 type', async () => {
