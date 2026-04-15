@@ -93,7 +93,7 @@ class TestSanitizeMemoryContent:
 
     def test_strips_misplaced_bom(self):
         # BOM in middle should be stripped
-        assert sanitize_memory_content("hel\uFEFFlo") == "hello"
+        assert sanitize_memory_content("hel\ufefflo") == "hello"
 
     def test_passes_clean_text_unchanged(self):
         clean = "This repo uses Jest for testing and CDK for infrastructure."
