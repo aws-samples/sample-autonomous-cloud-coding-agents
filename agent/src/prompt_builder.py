@@ -34,7 +34,7 @@ _BIDI_CHARS = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _MISPLACED_BOM = re.compile(r"(?!^)\ufeff")
 
 
-def sanitize_memory_content(text: str) -> str:
+def sanitize_memory_content(text: str | None) -> str:
     """Sanitize memory content before injecting into the agent's system prompt.
 
     Mirrors the TypeScript sanitizeExternalContent() in sanitization.ts.
