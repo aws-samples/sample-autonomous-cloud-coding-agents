@@ -154,6 +154,10 @@ cd ..
 
 Before deploying to AWS, you can build and run the agent Docker container locally. The `agent/run.sh` script handles building the image, resolving AWS credentials, and applying AgentCore-matching resource constraints (2 vCPU, 8 GB RAM) so the local environment closely mirrors production.
 
+:::tip
+The script validates AWS credentials **before** starting the Docker build, so problems like an expired SSO session surface immediately — not after a lengthy image build.
+:::
+
 #### Prerequisites
 
 The `owner/repo` you pass to `run.sh` must match an onboarded Blueprint and be a repository your `GITHUB_TOKEN` can **push to and open PRs on** (same rules as **Repository preparation** at the start of this guide). If you have not changed the Blueprint, fork `awslabs/agent-plugins`, set **`repo`** to your fork, and use a PAT scoped to that fork—then pass the same **`owner/repo`** here.
@@ -165,7 +169,29 @@ export GITHUB_TOKEN="ghp_..."     # Fine-grained PAT (see agent/README.md for re
 export AWS_REGION="us-east-1"     # Region where Bedrock models are enabled
 ```
 
-For AWS credentials, either export `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` directly, or have the AWS CLI configured (the script will resolve credentials from your active profile or SSO session automatically).
+#### AWS credential resolution
+
+The script resolves AWS credentials in priority order:
+
+1. **Explicit environment variables** — If `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set, they are passed directly to the container. Include `AWS_SESSION_TOKEN` when using temporary credentials (e.g. from `aws sts assume-role`).
+
+   ```bash
+   export AWS_ACCESS_KEY_ID="AKIA..."
+   export AWS_SECRET_ACCESS_KEY="..."
+   export AWS_SESSION_TOKEN="..."   # required for temporary credentials
+   ```
+
+2. **AWS CLI resolution** — If the CLI is installed, the script runs `aws configure export-credentials` to resolve credentials from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile.
+
+   ```bash
+   export AWS_PROFILE="my-dev-profile"   # optional — defaults to the CLI default profile
+   ```
+
+3. **`~/.aws` directory mount** — If neither of the above is available but `~/.aws` exists, the directory is bind-mounted read-only into the container. This works for static credential files but **not for SSO tokens**, which don't resolve well inside the container.
+
+:::caution
+If none of these methods succeeds, the script prints a warning and continues without AWS credentials. The container will start but any AWS API call (Bedrock, DynamoDB, etc.) will fail at runtime. Make sure at least one credential source is configured before running a real task.
+:::
 
 #### Running a task locally
 
@@ -201,6 +227,8 @@ curl -X POST http://localhost:8080/invocations \
   -d '{"input":{"prompt":"Fix the login bug","repo_url":"owner/repo"}}'
 ```
 
+In server mode, `repo_url`, `prompt`, and other task parameters can be sent via the `/invocations` JSON payload instead of environment variables.
+
 #### Monitoring a running container
 
 The container runs with a fixed name (`bgagent-run`). In a second terminal:
@@ -218,11 +246,21 @@ docker exec -it bgagent-run bash                  # shell into the container
 |---|---|---|
 | `ANTHROPIC_MODEL` | `us.anthropic.claude-sonnet-4-6` | Bedrock model ID |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
+| `MAX_BUDGET_USD` | | Cost ceiling for local batch runs (USD). Not used in production — see below |
 | `DRY_RUN` | | Set to `1` to validate config and print prompt without running the agent |
 
 **Cost budget** is not configured here for production tasks: set **`max_budget_usd`** when creating a task (REST API, CLI `--max-budget`, or per-repo Blueprint). The orchestrator passes it in the runtime invocation payload. The optional env var `MAX_BUDGET_USD` applies only to **local batch** runs; see `agent/README.md`.
 
 For the full list of environment variables and GitHub PAT permissions, see `agent/README.md`.
+
+#### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ERROR: Failed to resolve AWS credentials via AWS CLI` | SSO session expired or profile misconfigured | Run `aws sso login --profile <your-profile>` if using SSO, or `aws configure` to set up a profile, or export `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` directly |
+| `ERROR: GITHUB_TOKEN is not set` | Missing PAT | Export `GITHUB_TOKEN` (see `agent/README.md` for required scopes) |
+| `WARNING: No AWS credentials detected` | No env vars, no AWS CLI, no `~/.aws` directory | Configure one of the three credential methods above |
+| `WARNING: Image exceeds AgentCore 2 GB limit!` | Agent image too large for production | Reduce dependencies or use multi-stage Docker build |
 
 ### Deployment
 

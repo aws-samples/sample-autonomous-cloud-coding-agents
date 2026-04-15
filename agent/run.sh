@@ -112,6 +112,56 @@ if [[ -z "${AWS_REGION:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Resolve AWS credentials (before Docker build to fail fast)
+# ---------------------------------------------------------------------------
+# Store resolved credentials in variables so they can be applied to DOCKER_ARGS
+# after the image is built. This avoids a lengthy Docker build only to discover
+# that AWS credentials are missing or expired.
+AWS_CRED_MODE=""
+RESOLVED_KEY=""
+RESOLVED_SECRET=""
+RESOLVED_TOKEN=""
+
+if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
+    AWS_CRED_MODE="explicit"
+    RESOLVED_KEY="${AWS_ACCESS_KEY_ID}"
+    RESOLVED_SECRET="${AWS_SECRET_ACCESS_KEY}"
+    RESOLVED_TOKEN="${AWS_SESSION_TOKEN:-}"
+    echo "  AWS:       using explicit credentials (AWS_ACCESS_KEY_ID)"
+elif command -v aws &>/dev/null; then
+    # Resolve credentials from the AWS CLI (handles SSO, profiles, credential files).
+    # This avoids the need to mount ~/.aws and replicate the full credential chain
+    # inside the container — SSO tokens in particular don't resolve well there.
+    echo "  AWS:       resolving credentials via AWS CLI${AWS_PROFILE:+ (profile '${AWS_PROFILE}')}..."
+    EXPORT_CMD=(aws configure export-credentials --format process)
+    [[ -n "${AWS_PROFILE:-}" ]] && EXPORT_CMD+=(--profile "${AWS_PROFILE}")
+
+    CREDS_JSON=$("${EXPORT_CMD[@]}" 2>/dev/null) || {
+        echo "ERROR: Failed to resolve AWS credentials via AWS CLI." >&2
+        echo "  Possible fixes:" >&2
+        echo "    - Run 'aws sso login${AWS_PROFILE:+ --profile ${AWS_PROFILE}}' if using SSO" >&2
+        echo "    - Run 'aws configure${AWS_PROFILE:+ --profile ${AWS_PROFILE}}' to set up a profile" >&2
+        echo "    - Export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY directly" >&2
+        exit 1
+    }
+
+    AWS_CRED_MODE="resolved"
+    RESOLVED_KEY=$(echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['AccessKeyId'])")
+    RESOLVED_SECRET=$(echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['SecretAccessKey'])")
+    RESOLVED_TOKEN=$(echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('SessionToken',''))")
+    echo "  AWS:       resolved temporary credentials (AccessKeyId: ${RESOLVED_KEY:0:8}...)"
+elif [[ -d "${HOME}/.aws" ]]; then
+    AWS_CRED_MODE="mount"
+    if [[ -n "${AWS_PROFILE:-}" ]]; then
+        echo "  AWS:       mounting ~/.aws with profile '${AWS_PROFILE}' (SSO may not work)"
+    else
+        echo "  AWS:       mounting ~/.aws (using default profile)"
+    fi
+else
+    echo "WARNING: No AWS credentials detected. Set AWS_ACCESS_KEY_ID or AWS_PROFILE, or ensure ~/.aws exists." >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 echo "Building Docker image..."
@@ -161,49 +211,17 @@ if [[ "$MODE" == "server" ]]; then
     DOCKER_ARGS+=(-p 8080:8080)
 fi
 
-# AWS credentials: prefer explicit env vars, then resolve from profile/SSO
-if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
-    DOCKER_ARGS+=(
-        -e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
-        -e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
-    )
-    [[ -n "${AWS_SESSION_TOKEN:-}" ]] && DOCKER_ARGS+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
-    echo "  AWS:       using explicit credentials (AWS_ACCESS_KEY_ID)"
-elif command -v aws &>/dev/null; then
-    # Resolve credentials from the AWS CLI (handles SSO, profiles, credential files).
-    # This avoids the need to mount ~/.aws and replicate the full credential chain
-    # inside the container — SSO tokens in particular don't resolve well there.
-    PROFILE_ARG=()
-    [[ -n "${AWS_PROFILE:-}" ]] && PROFILE_ARG=(--profile "${AWS_PROFILE}")
-
-    echo "  AWS:       resolving credentials via AWS CLI${AWS_PROFILE:+ (profile '${AWS_PROFILE}')}..."
-    CREDS_JSON=$(aws configure export-credentials "${PROFILE_ARG[@]}" --format process 2>/dev/null) || {
-        echo "ERROR: Failed to resolve AWS credentials. Make sure you are logged in:" >&2
-        echo "  aws sso login${AWS_PROFILE:+ --profile ${AWS_PROFILE}}" >&2
-        exit 1
-    }
-
-    RESOLVED_KEY=$(echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['AccessKeyId'])")
-    RESOLVED_SECRET=$(echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['SecretAccessKey'])")
-    RESOLVED_TOKEN=$(echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('SessionToken',''))")
-
+# Apply previously resolved AWS credentials to DOCKER_ARGS
+if [[ "$AWS_CRED_MODE" == "explicit" || "$AWS_CRED_MODE" == "resolved" ]]; then
     DOCKER_ARGS+=(
         -e "AWS_ACCESS_KEY_ID=${RESOLVED_KEY}"
         -e "AWS_SECRET_ACCESS_KEY=${RESOLVED_SECRET}"
     )
     [[ -n "${RESOLVED_TOKEN}" ]] && DOCKER_ARGS+=(-e "AWS_SESSION_TOKEN=${RESOLVED_TOKEN}")
-    echo "  AWS:       resolved temporary credentials (AccessKeyId: ${RESOLVED_KEY:0:8}...)"
-elif [[ -d "${HOME}/.aws" ]]; then
+elif [[ "$AWS_CRED_MODE" == "mount" ]]; then
     # Fallback: mount ~/.aws directly (works for static credential files, not SSO)
     DOCKER_ARGS+=(-v "${HOME}/.aws:/home/agent/.aws:ro")
-    if [[ -n "${AWS_PROFILE:-}" ]]; then
-        DOCKER_ARGS+=(-e "AWS_PROFILE=${AWS_PROFILE}")
-        echo "  AWS:       mounting ~/.aws with profile '${AWS_PROFILE}' (SSO may not work)"
-    else
-        echo "  AWS:       mounting ~/.aws (using default profile)"
-    fi
-else
-    echo "WARNING: No AWS credentials detected. Set AWS_ACCESS_KEY_ID or AWS_PROFILE, or ensure ~/.aws exists." >&2
+    [[ -n "${AWS_PROFILE:-}" ]] && DOCKER_ARGS+=(-e "AWS_PROFILE=${AWS_PROFILE}")
 fi
 
 echo ""
