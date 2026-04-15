@@ -39,6 +39,25 @@ describe('sanitizeExternalContent', () => {
     expect(sanitizeExternalContent('a<iframe/>b')).toBe('ab');
   });
 
+  test('strips <form> and <input> tags with content', () => {
+    expect(sanitizeExternalContent('a<form action="x">fields</form>b')).toBe('ab');
+    expect(sanitizeExternalContent('a<input type="text" value="x"/>b')).toBe('ab');
+  });
+
+  test('strips nested same-name dangerous tags', () => {
+    // Outer tag should still be stripped even if inner tag appears
+    const input = '<script><script>inner</script></script>safe';
+    const result = sanitizeExternalContent(input);
+    expect(result).not.toContain('<script>');
+    expect(result).toContain('safe');
+  });
+
+  test('strips unclosed dangerous tags', () => {
+    const input = 'before<script>alert("xss")after';
+    const result = sanitizeExternalContent(input);
+    expect(result).not.toContain('<script>');
+  });
+
   test('strips HTML tags but preserves inner text', () => {
     const input = 'Use <b>strong</b> and <a href="x">link text</a> here';
     expect(sanitizeExternalContent(input)).toBe('Use strong and link text here');
@@ -120,11 +139,11 @@ describe('sanitizeExternalContent', () => {
     expect(sanitizeExternalContent('')).toBe('');
   });
 
-  test('returns undefined/null-ish input unchanged', () => {
+  test('returns empty string for undefined/null input', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect(sanitizeExternalContent(undefined as any)).toBeUndefined();
+    expect(sanitizeExternalContent(undefined as any)).toBe('');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect(sanitizeExternalContent(null as any)).toBeNull();
+    expect(sanitizeExternalContent(null as any)).toBe('');
   });
 
   test('passes clean text through unchanged', () => {

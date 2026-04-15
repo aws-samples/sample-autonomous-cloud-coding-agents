@@ -51,7 +51,7 @@ const MISPLACED_BOM = /(?!^)\uFEFF/g;
  * NOT applied to: task IDs, repo names, or other platform-controlled fields.
  */
 export function sanitizeExternalContent(text: string): string {
-  if (!text) return text;
+  if (!text) return text || '';
 
   let sanitized = text;
 

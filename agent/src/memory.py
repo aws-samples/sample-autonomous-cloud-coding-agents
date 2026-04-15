@@ -17,8 +17,10 @@ _client = None
 # Validates "owner/repo" format — must match the TypeScript-side isValidRepo pattern.
 _REPO_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
-# Current event schema version — used to distinguish records written under
-# different namespace schemes (v1 = repos/ prefix, v2 = namespace templates).
+# Current event schema version:
+#   v1 = repos/ prefix
+#   v2 = namespace templates (/{actorId}/...)
+#   v3 = adds source_type provenance + content_sha256 integrity hash
 _SCHEMA_VERSION = "3"
 
 
@@ -51,7 +53,8 @@ def _log_error(func_name: str, err: Exception, memory_id: str, task_id: str) -> 
     level = "ERROR" if is_programming_error else "WARN"
     label = "unexpected error" if is_programming_error else "infra failure"
     print(
-        f"[memory] [{level}] {func_name} {label}: {type(err).__name__}",
+        f"[memory] [{level}] {func_name} {label}: {type(err).__name__}: {err}"
+        f" (memory_id={memory_id}, task_id={task_id})",
         flush=True,
     )
 
@@ -75,6 +78,9 @@ def write_task_episode(
     Uses actorId=repo and sessionId=task_id so the extraction strategy
     namespace templates (/{actorId}/episodes/{sessionId}/) place records
     into the correct per-repo, per-task namespace.
+
+    Metadata includes source_type='agent_episode' for provenance tracking
+    and content_sha256 for integrity verification on read (schema v3).
 
     Returns True on success, False on failure (fail-open).
     """
@@ -145,6 +151,11 @@ def write_repo_learnings(
     Uses actorId=repo and sessionId=task_id so the extraction strategy
     namespace templates (/{actorId}/knowledge/) place records into
     the correct per-repo namespace.
+
+    Metadata includes source_type='agent_learning' for provenance tracking
+    and content_sha256 for integrity verification on read (schema v3).
+    Note: hash verification only happens on the TS orchestrator read path
+    (loadMemoryContext in memory.ts), not on the Python side.
 
     Returns True on success, False on failure (fail-open).
     """

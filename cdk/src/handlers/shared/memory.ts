@@ -53,7 +53,7 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-/** Compute SHA-256 hash of text content. */
+/** Compute SHA-256 hash of text content (UTF-8 encoded; must match agent/src/memory.py). */
 function hashContent(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
@@ -68,7 +68,18 @@ function verifyContentIntegrity(
   metadata?: Record<string, { stringValue?: string }>,
 ): boolean {
   const expected = metadata?.content_sha256?.stringValue;
-  if (!expected) return true; // No hash stored — skip verification
+  if (!expected) {
+    // Schema v3 records should always have a hash — log if missing
+    const schemaVersion = metadata?.schema_version?.stringValue;
+    if (schemaVersion && parseInt(schemaVersion, 10) >= 3) {
+      logger.warn('Schema v3 record missing content_sha256 — possible corrupted write', {
+        schema_version: schemaVersion,
+        source_type: metadata?.source_type?.stringValue ?? '(unknown)',
+        metric_type: 'memory_integrity_missing_hash',
+      });
+    }
+    return true;
+  }
   return hashContent(text) === expected;
 }
 
@@ -96,7 +107,8 @@ function getClient(): BedrockAgentCoreClient {
  *   - Semantic: `/{actorId}/knowledge/`  (actorId = repo)
  *   - Episodic: `/{actorId}/episodes/`   (prefix matches all sessions)
  *
- * Results are trimmed to a 2000-token budget (oldest entries dropped first).
+ * Results are trimmed to a 2000-token budget (knowledge is prioritized before episodes;
+ * entries beyond the budget are dropped).
  * Returns `undefined` on any error (fail-open).
  *
  * @param memoryId - the AgentCore Memory resource ID.
@@ -160,7 +172,16 @@ export async function loadMemoryContext(
         const text = record.content?.text;
         if (text) {
           if (!verifyContentIntegrity(text, record.metadata)) {
-            logger.warn('Memory record content integrity check failed', { repo, namespace: semanticNamespace });
+            logger.warn('Memory record content integrity check failed — using content anyway (fail-open)', {
+              repo,
+              namespace: semanticNamespace,
+              record_type: 'repo_knowledge',
+              expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
+              actual_hash: hashContent(text),
+              source_type: record.metadata?.source_type?.stringValue ?? '(unknown)',
+              content_length: text.length,
+              metric_type: 'memory_integrity_mismatch',
+            });
           }
           repoKnowledge.push(sanitizeExternalContent(text));
         }
@@ -172,7 +193,16 @@ export async function loadMemoryContext(
         const text = record.content?.text;
         if (text) {
           if (!verifyContentIntegrity(text, record.metadata)) {
-            logger.warn('Memory record content integrity check failed', { repo, namespace: episodicNamespace });
+            logger.warn('Memory record content integrity check failed — using content anyway (fail-open)', {
+              repo,
+              namespace: episodicNamespace,
+              record_type: 'past_episode',
+              expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
+              actual_hash: hashContent(text),
+              source_type: record.metadata?.source_type?.stringValue ?? '(unknown)',
+              content_length: text.length,
+              metric_type: 'memory_integrity_mismatch',
+            });
           }
           pastEpisodes.push(sanitizeExternalContent(text));
         }

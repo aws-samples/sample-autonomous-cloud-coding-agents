@@ -40,7 +40,7 @@ def sanitize_memory_content(text: str) -> str:
     Mirrors the TypeScript sanitizeExternalContent() in sanitization.ts.
     """
     if not text:
-        return text
+        return text or ""
     s = _DANGEROUS_TAGS.sub("", text)
     s = _HTML_TAGS.sub("", s)
     s = _INSTRUCTION_PREFIXES.sub(r"[SANITIZED_PREFIX] \1:", s)

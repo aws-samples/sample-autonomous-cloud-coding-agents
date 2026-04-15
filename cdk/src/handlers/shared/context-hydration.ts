@@ -298,7 +298,7 @@ export function clearTokenCache(): void {
 /**
  * Fetch a GitHub issue's title, body, and comments via the REST API.
  * Returns null on any error (logged).
- * Mirrors agent/entrypoint.py:fetch_github_issue.
+ * Mirrors agent/src/context.py:fetch_github_issue.
  * @param repo - the "owner/repo" string.
  * @param issueNumber - the issue number.
  * @param token - the GitHub PAT.
@@ -709,7 +709,7 @@ export function enforceTokenBudget(
 
 /**
  * Assemble the user prompt from issue context and task description.
- * Mirrors agent/entrypoint.py:assemble_prompt exactly.
+ * Mirrors agent/src/context.py:assemble_prompt.
  * @param taskId - the task ID.
  * @param repo - the "owner/repo" string.
  * @param issue - the GitHub issue context (optional).
@@ -808,6 +808,8 @@ export function assemblePrIterationPrompt(
       const location = root.path ? `\`${root.path}${root.line ? `:${root.line}` : ''}\`` : 'general';
       parts.push(`**Thread on ${location}** (reply with comment_id: ${rootId})`);
       parts.push(`> **@${sanitizeExternalContent(root.author)}**: ${sanitizeExternalContent(root.body)}`);
+      // diff_hunk and path are not sanitized: they contain code content inside markdown
+      // code blocks, and sanitizing them could corrupt legitimate code snippets.
       if (root.diff_hunk) {
         parts.push(`> \`\`\`diff\n> ${root.diff_hunk}\n> \`\`\``);
       }

@@ -25,6 +25,15 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   CreateEventCommand: jest.fn((input: unknown) => ({ _type: 'CreateEvent', input })),
 }));
 
+const mockLoggerWarn = jest.fn();
+jest.mock('../../../src/handlers/shared/logger', () => ({
+  logger: {
+    info: jest.fn(),
+    warn: mockLoggerWarn,
+    error: jest.fn(),
+  },
+}));
+
 import { loadMemoryContext, writeMinimalEpisode } from '../../../src/handlers/shared/memory';
 
 beforeEach(() => {
@@ -166,7 +175,10 @@ describe('loadMemoryContext', () => {
         memoryRecordSummaries: [
           {
             content: { text: 'Actual content' },
-            metadata: { content_sha256: { stringValue: wrongHash } },
+            metadata: {
+              content_sha256: { stringValue: wrongHash },
+              source_type: { stringValue: 'agent_learning' },
+            },
           },
         ],
       })
@@ -176,6 +188,17 @@ describe('loadMemoryContext', () => {
     // Fail-open: content still returned despite hash mismatch
     expect(result).toBeDefined();
     expect(result!.repo_knowledge[0]).toContain('Actual content');
+    // Verify warning was logged with sufficient context for investigation
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.stringContaining('integrity check failed'),
+      expect.objectContaining({
+        repo: 'owner/repo',
+        record_type: 'repo_knowledge',
+        expected_hash: wrongHash,
+        source_type: 'agent_learning',
+        metric_type: 'memory_integrity_mismatch',
+      }),
+    );
   });
 
   test('sanitizes retrieved memory content', async () => {
