@@ -68,8 +68,9 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       );
     }
 
-    const { taskId, payload } = input;
+    const { taskId, payload, blueprintConfig } = input;
     const payloadJson = JSON.stringify(payload);
+    const githubTokenSecretArn = blueprintConfig.github_token_secret_arn ?? '';
 
     // 1. Upload payload to S3
     const payloadKey = `tasks/${taskId}/payload.json`;
@@ -182,14 +183,15 @@ export class Ec2ComputeStrategy implements ComputeStrategy {
       `aws s3 cp "s3://${EC2_PAYLOAD_BUCKET}/${payloadKey}" /tmp/payload.json`,
       'export AGENT_PAYLOAD=$(cat /tmp/payload.json)',
       'export CLAUDE_CODE_USE_BEDROCK=1',
+      `export GITHUB_TOKEN_SECRET_ARN='${githubTokenSecretArn}'`,
       '',
       '# ECR login and pull',
       `aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin $(echo '${ECR_IMAGE_URI}' | cut -d/ -f1)`,
       `docker pull '${ECR_IMAGE_URI}'`,
       '',
       '# Run the agent container — all config is read from AGENT_PAYLOAD inside the container',
-      `docker run --rm -e AGENT_PAYLOAD -e CLAUDE_CODE_USE_BEDROCK -e AWS_REGION -e AWS_DEFAULT_REGION '${ECR_IMAGE_URI}' \\`,
-      '  python -c \'import json, os, sys; sys.path.insert(0, "/app"); from entrypoint import run_task; p = json.loads(os.environ["AGENT_PAYLOAD"]); r = run_task(repo_url=p.get("repo_url",""), task_description=p.get("prompt",""), issue_number=str(p.get("issue_number","")), github_token=p.get("github_token",""), anthropic_model=p.get("model_id",""), max_turns=int(p.get("max_turns",100)), max_budget_usd=p.get("max_budget_usd"), aws_region=os.environ.get("AWS_REGION",""), task_id=p.get("task_id",""), hydrated_context=p.get("hydrated_context"), system_prompt_overrides=p.get("system_prompt_overrides",""), prompt_version=p.get("prompt_version",""), memory_id=p.get("memory_id",""), task_type=p.get("task_type","new_task"), branch_name=p.get("branch_name",""), pr_number=str(p.get("pr_number",""))); sys.exit(0 if r.get("status")=="success" else 1)\'',
+      `docker run --rm -e AGENT_PAYLOAD -e CLAUDE_CODE_USE_BEDROCK -e AWS_REGION -e AWS_DEFAULT_REGION -e GITHUB_TOKEN_SECRET_ARN '${ECR_IMAGE_URI}' \\`,
+      '  python -c \'import json, os, sys; sys.path.insert(0, "/app/src"); from entrypoint import run_task; p = json.loads(os.environ["AGENT_PAYLOAD"]); r = run_task(repo_url=p.get("repo_url",""), task_description=p.get("prompt",""), issue_number=str(p.get("issue_number","")), github_token=p.get("github_token",""), anthropic_model=p.get("model_id",""), max_turns=int(p.get("max_turns",100)), max_budget_usd=p.get("max_budget_usd"), aws_region=os.environ.get("AWS_REGION",""), task_id=p.get("task_id",""), hydrated_context=p.get("hydrated_context"), system_prompt_overrides=p.get("system_prompt_overrides",""), prompt_version=p.get("prompt_version",""), memory_id=p.get("memory_id",""), task_type=p.get("task_type","new_task"), branch_name=p.get("branch_name",""), pr_number=str(p.get("pr_number",""))); sys.exit(0 if r.get("status")=="success" else 1)\'',
     ].join('\n');
 
     // 5. Send SSM Run Command — rollback instance tags on failure
