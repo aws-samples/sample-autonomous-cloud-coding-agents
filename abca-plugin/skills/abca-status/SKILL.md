@@ -22,12 +22,12 @@ Run these in parallel where possible:
 
 2. **Running tasks:**
    ```bash
-   cd cli && node lib/bin/bgagent.js list --status RUNNING,SUBMITTED,HYDRATING --output json 2>/dev/null || echo "CLI not configured"
+   node cli/lib/bin/bgagent.js list --status RUNNING,SUBMITTED,HYDRATING --output json 2>/dev/null || echo "CLI not configured"
    ```
 
 3. **Recent completed tasks:**
    ```bash
-   cd cli && node lib/bin/bgagent.js list --limit 5 --output json 2>/dev/null || echo "CLI not configured"
+   node cli/lib/bin/bgagent.js list --limit 5 --output json 2>/dev/null || echo "CLI not configured"
    ```
 
 4. **Local build health:**

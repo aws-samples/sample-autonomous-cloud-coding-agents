@@ -98,7 +98,7 @@ python3 -c "import json; json.load(open('abca-plugin/hooks/hooks.json')); print(
 MISE_EXPERIMENTAL=1 mise tasks --all 2>/dev/null | grep -E '(build|install|compile|test|deploy|destroy|diff|synth|bootstrap)'
 
 # Layer 3: Content — CLI flags match
-cd cli && node lib/bin/bgagent.js submit --help && node lib/bin/bgagent.js list --help
+node cli/lib/bin/bgagent.js submit --help && node cli/lib/bin/bgagent.js list --help
 ```
 
 ## Development

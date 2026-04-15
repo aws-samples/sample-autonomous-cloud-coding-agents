@@ -27,7 +27,7 @@ Parse the description to infer the type:
 ## Submit
 
 ```bash
-cd cli && node lib/bin/bgagent.js submit \
+node cli/lib/bin/bgagent.js submit \
   --repo $REPO \
   $FLAGS \
   --max-turns 100 \

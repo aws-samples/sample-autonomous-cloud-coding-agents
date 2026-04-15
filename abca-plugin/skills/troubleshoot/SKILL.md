@@ -87,7 +87,7 @@ aws cognito-idp admin-get-user \
 
 ```bash
 # Check task events for details
-node lib/bin/bgagent.js events <TASK_ID> --output json
+node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 ```
 
 **`preflight_failed`:**
@@ -114,6 +114,34 @@ node lib/bin/bgagent.js events <TASK_ID> --output json
 **400 "Invocation with on-demand throughput isn't supported":**
 - The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-20250514-v1:0`)
 - Fix: change to the inference profile ID (e.g. `us.anthropic.claude-opus-4-20250514-v1:0`), update DynamoDB via redeploy
+
+**503 "Too many connections" / task completes with 0 tokens after long duration:**
+- Bedrock is throttling model invocations. The agent retries for minutes then gives up.
+- Symptoms: task runs for 10-15 minutes, completes with `COMPLETED` status but 0 tokens, 0 cost, no PR, `disk_delta: 0 B`
+- Diagnosis:
+  1. Check application logs for `"text": "API Error: 503 Too many connections"`
+  2. **Check what model_id is actually being passed** — the DynamoDB record may have a stale model override:
+     ```bash
+     aws dynamodb get-item \
+       --table-name <RepoTableName> \
+       --key '{"repo": {"S": "owner/repo"}}' \
+       --query 'Item.model_id' --output text
+     ```
+- Causes:
+  - **Stale model_id in DynamoDB** (most common) — the Blueprint `onUpdate` only sets fields present in props; removing a `modelId` prop does NOT remove the field from DynamoDB. The task keeps using the old model.
+  - Bedrock service-level throttling for the specific model (especially Opus 4 which has limited availability)
+  - Account quota limits reached
+- Fix:
+  1. **Check and fix the DynamoDB record first** — remove stale `model_id` if present:
+     ```bash
+     aws dynamodb update-item \
+       --table-name <RepoTableName> \
+       --key '{"repo": {"S": "owner/repo"}}' \
+       --update-expression "REMOVE model_id"
+     ```
+  2. If model_id is correct, wait and retry — throttling is often transient
+  3. Switch to a model with higher availability (Sonnet 4.6 > Opus 4 > Haiku)
+  4. Request a Bedrock quota increase for `InvokeModel` RPM on your model
 
 **`task_timed_out`:**
 - 9-hour maximum exceeded
@@ -149,11 +177,11 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Sta
 aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table
 
 # Task status
-node lib/bin/bgagent.js status <TASK_ID>
-node lib/bin/bgagent.js events <TASK_ID> --output json
+node cli/lib/bin/bgagent.js status <TASK_ID>
+node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 
 # List running tasks
-node lib/bin/bgagent.js list --status RUNNING
+node cli/lib/bin/bgagent.js list --status RUNNING
 
 # Build health
 mise run build

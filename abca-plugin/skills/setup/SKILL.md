@@ -84,11 +84,11 @@ Guide through:
 2. Test the API: `curl -s -H "Authorization: $TOKEN" $API_URL/tasks`
 3. Configure the CLI:
    ```bash
-   cd cli && mise run build
-   node lib/bin/bgagent.js configure \
+   mise //cli:build
+   node cli/lib/bin/bgagent.js configure \
      --api-url $API_URL --region $REGION \
      --user-pool-id $USER_POOL_ID --client-id $APP_CLIENT_ID
-   node lib/bin/bgagent.js login --username user@example.com
+   node cli/lib/bin/bgagent.js login --username user@example.com
    ```
 
 ## Completion

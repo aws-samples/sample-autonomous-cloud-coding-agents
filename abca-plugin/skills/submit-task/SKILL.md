@@ -77,8 +77,8 @@ Recommend appropriate limits based on task complexity:
 
 **Via CLI (preferred):**
 ```bash
-# From the cli/ directory after building
-node lib/bin/bgagent.js submit \
+# From the repo root
+node cli/lib/bin/bgagent.js submit \
   --repo owner/repo \
   --issue 42 \
   --max-turns 100 \
@@ -118,9 +118,9 @@ curl -X POST "$API_URL/tasks" \
 
 After submission, show how to check status:
 ```bash
-node lib/bin/bgagent.js status <TASK_ID>
-node lib/bin/bgagent.js events <TASK_ID>
-node lib/bin/bgagent.js list --status RUNNING
+node cli/lib/bin/bgagent.js status <TASK_ID>
+node cli/lib/bin/bgagent.js events <TASK_ID>
+node cli/lib/bin/bgagent.js list --status RUNNING
 ```
 
 Task states: SUBMITTED -> HYDRATING -> RUNNING -> COMPLETED/FAILED/CANCELLED/TIMED_OUT
