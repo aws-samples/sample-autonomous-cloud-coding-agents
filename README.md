@@ -78,12 +78,12 @@ This repository ships a [Claude Code plugin](https://docs.anthropic.com/en/docs/
 ```bash
 git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
 cd sample-autonomous-cloud-coding-agents
-claude --plugin-dir abca-plugin
+claude --plugin-dir docs/abca-plugin
 ```
 
-The `--plugin-dir` flag tells Claude Code to load the local plugin from the `abca-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
+The `--plugin-dir` flag tells Claude Code to load the local plugin from the `docs/abca-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
 
-> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir abca-plugin` to the extension's CLI arguments setting.
+> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir docs/abca-plugin` to the extension's CLI arguments setting.
 
 #### What the plugin provides
 
@@ -106,16 +106,12 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `abc
 | `cdk-expert` | CDK architecture, construct design, handler implementation, stack modifications |
 | `agent-debugger` | Task failure investigation, CloudWatch log analysis, agent runtime debugging |
 
-**Hook** (runs automatically):
-
-A `SessionStart` hook injects ABCA project context (key directories, commands, conventions) into every Claude Code session.
-
 #### Local plugin development
 
 If you're modifying the plugin itself, here's the file layout:
 
 ```
-abca-plugin/
+docs/abca-plugin/
   plugin.json                    # Plugin manifest (name, version, description)
   skills/
     setup/SKILL.md               # First-time setup workflow
@@ -128,17 +124,14 @@ abca-plugin/
   agents/
     cdk-expert.md                # CDK infrastructure specialist
     agent-debugger.md            # Task failure debugger
-  hooks/
-    hooks.json                   # SessionStart hook configuration
 ```
 
 **Key conventions:**
-- All plugin components live inside `abca-plugin/` alongside the manifest
+- The plugin lives under `docs/` to keep documentation and plugin content colocated
 - Skills live in subdirectories with a `SKILL.md` file (not flat `.md` files)
 - Agents are flat `.md` files with YAML frontmatter
-- Hooks use JSON configuration in `hooks/hooks.json`
 
-**After editing plugin files**, restart Claude Code with `claude --plugin-dir abca-plugin` to pick up changes.
+**After editing plugin files**, restart Claude Code with `claude --plugin-dir docs/abca-plugin` to pick up changes.
 
 ### Manual installation and deployment
 
