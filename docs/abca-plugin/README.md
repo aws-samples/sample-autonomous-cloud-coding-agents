@@ -37,6 +37,10 @@ Or add to your project's `.claude/settings.json`:
 | `cdk-expert` | Sonnet | AWS CDK infrastructure expert for construct design, handler implementation, and stack modifications |
 | `agent-debugger` | Sonnet | Read-only debugging specialist for task failures, preflight errors, and CloudWatch log analysis |
 
+### Hook
+
+- **SessionStart** — Advertises available skills and agents so Claude can proactively suggest them when your request matches.
+
 ## Plugin Structure
 
 ```
@@ -45,6 +49,8 @@ docs/abca-plugin/
   agents/
     cdk-expert.md          # CDK infrastructure agent
     agent-debugger.md      # Runtime debugging agent
+  hooks/
+    hooks.json             # SessionStart capability advertisement
   skills/
     setup/SKILL.md         # First-time setup workflow
     deploy/SKILL.md        # CDK deployment management

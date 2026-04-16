@@ -106,6 +106,10 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `doc
 | `cdk-expert` | CDK architecture, construct design, handler implementation, stack modifications |
 | `agent-debugger` | Task failure investigation, CloudWatch log analysis, agent runtime debugging |
 
+**Hook** (runs automatically):
+
+A `SessionStart` hook advertises available skills and agents so Claude can proactively suggest them when your request matches.
+
 #### Local plugin development
 
 If you're modifying the plugin itself, here's the file layout:
@@ -124,12 +128,15 @@ docs/abca-plugin/
   agents/
     cdk-expert.md                # CDK infrastructure specialist
     agent-debugger.md            # Task failure debugger
+  hooks/
+    hooks.json                   # SessionStart capability advertisement
 ```
 
 **Key conventions:**
 - The plugin lives under `docs/` to keep documentation and plugin content colocated
 - Skills live in subdirectories with a `SKILL.md` file (not flat `.md` files)
 - Agents are flat `.md` files with YAML frontmatter
+- The hook advertises plugin capabilities only (no project-specific content)
 
 **After editing plugin files**, restart Claude Code with `claude --plugin-dir docs/abca-plugin` to pick up changes.
 
