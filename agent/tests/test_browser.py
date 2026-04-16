@@ -22,11 +22,13 @@ class TestCaptureScreenshot:
         monkeypatch.setenv("BROWSER_TOOL_FUNCTION_NAME", "my-browser-fn")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        response_payload = json.dumps({
-            "status": "success",
-            "screenshotS3Key": "screenshots/abc123.png",
-            "presignedUrl": "https://s3.amazonaws.com/bucket/screenshots/abc123.png",
-        }).encode()
+        response_payload = json.dumps(
+            {
+                "status": "success",
+                "screenshotS3Key": "screenshots/abc123.png",
+                "presignedUrl": "https://s3.amazonaws.com/bucket/screenshots/abc123.png",
+            }
+        ).encode()
 
         mock_client = MagicMock()
         mock_client.invoke.return_value = {
@@ -43,10 +45,12 @@ class TestCaptureScreenshot:
         monkeypatch.setenv("BROWSER_TOOL_FUNCTION_NAME", "my-browser-fn")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        response_payload = json.dumps({
-            "status": "error",
-            "error": "page not found",
-        }).encode()
+        response_payload = json.dumps(
+            {
+                "status": "error",
+                "error": "page not found",
+            }
+        ).encode()
 
         mock_client = MagicMock()
         mock_client.invoke.return_value = {
