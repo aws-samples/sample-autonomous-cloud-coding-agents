@@ -201,6 +201,47 @@ class TestHydratedContext:
                 }
             )
 
+    def test_content_trust_none_by_default(self):
+        hc = HydratedContext(user_prompt="Fix bug")
+        assert hc.content_trust is None
+
+    def test_content_trust_accepted(self):
+        hc = HydratedContext(
+            user_prompt="Fix bug",
+            content_trust={"issue": "untrusted-external", "task_description": "trusted"},
+        )
+        assert hc.content_trust == {"issue": "untrusted-external", "task_description": "trusted"}
+
+    def test_content_trust_with_memory(self):
+        hc = HydratedContext(
+            user_prompt="Fix bug",
+            content_trust={"memory": "memory", "task_description": "trusted"},
+        )
+        assert hc.content_trust is not None
+        assert hc.content_trust["memory"] == "memory"
+
+    def test_content_trust_round_trip(self):
+        data = {
+            "version": 1,
+            "user_prompt": "Do the thing",
+            "sources": ["issue", "memory"],
+            "content_trust": {
+                "issue": "untrusted-external",
+                "memory": "memory",
+            },
+        }
+        hc = HydratedContext.model_validate(data)
+        assert hc.content_trust == {"issue": "untrusted-external", "memory": "memory"}
+
+    def test_content_trust_invalid_value_rejected(self):
+        with pytest.raises(ValidationError):
+            HydratedContext.model_validate(
+                {
+                    "user_prompt": "Fix bug",
+                    "content_trust": {"issue": "invalid-trust-level"},
+                }
+            )
+
 
 class TestTaskConfig:
     def test_required_fields(self):

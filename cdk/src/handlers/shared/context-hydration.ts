@@ -90,6 +90,19 @@ export interface GitHubPullRequestContext {
 }
 
 /**
+ * Trust classification for content sources in the hydrated context.
+ * - 'trusted': authenticated user input (task_description — screened by guardrail at
+ *   submission, additionally sanitized during prompt assembly). Lower risk than external
+ *   sources but not exempt from defense-in-depth sanitization.
+ * - 'untrusted-external': GitHub issues, PR bodies/comments (attacker-controllable,
+ *   sanitized + guardrail screened). Some PR sub-fields are not sanitized:
+ *   diff_hunk and diff_summary (code/patch content in markdown code blocks),
+ *   path (file paths), head_ref and base_ref (branch names).
+ * - 'memory': memory records (sanitized, integrity-hashed)
+ */
+export type ContentTrustLevel = 'trusted' | 'untrusted-external' | 'memory';
+
+/**
  * The result of the context hydration pipeline.
  */
 export interface HydratedContext {
@@ -104,6 +117,7 @@ export interface HydratedContext {
   readonly guardrail_blocked?: string;
   readonly resolved_branch_name?: string;
   readonly resolved_base_branch?: string;
+  readonly content_trust?: Readonly<Record<string, ContentTrustLevel>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +875,44 @@ export function assemblePrIterationPrompt(
 }
 
 // ---------------------------------------------------------------------------
+// Content trust classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the content_trust record from the sources list.
+ * Maps each source to its trust classification:
+ * - 'issue', 'pull_request' → 'untrusted-external'
+ * - 'memory' → 'memory'
+ * - 'task_description' → 'trusted'
+ * Unknown sources default to 'untrusted-external' (fail-safe).
+ */
+export function buildContentTrust(sources: string[]): Record<string, ContentTrustLevel> {
+  const trust: Record<string, ContentTrustLevel> = {};
+  for (const source of sources) {
+    switch (source) {
+      case 'issue':
+      case 'pull_request':
+        trust[source] = 'untrusted-external';
+        break;
+      case 'memory':
+        trust[source] = 'memory';
+        break;
+      case 'task_description':
+        trust[source] = 'trusted';
+        break;
+      default:
+        logger.warn('Unknown content source — defaulting to untrusted-external', {
+          source,
+          metric_type: 'unknown_content_source',
+        });
+        trust[source] = 'untrusted-external';
+        break;
+    }
+  }
+  return trust;
+}
+
+// ---------------------------------------------------------------------------
 // Main hydration pipeline
 // ---------------------------------------------------------------------------
 
@@ -964,13 +1016,15 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
           task_id: task.task_id, pr_number: task.pr_number, task_type: task.task_type,
         });
         const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
+        const fallbackSources = task.task_description ? ['task_description'] : [];
         return {
           version: 1,
           user_prompt: fallbackPrompt,
-          sources: task.task_description ? ['task_description'] : [],
+          sources: fallbackSources,
           token_estimate: estimateTokens(fallbackPrompt),
           truncated: false,
           fallback_error: `Failed to fetch PR #${task.pr_number} context from GitHub`,
+          content_trust: buildContentTrust(fallbackSources),
         };
       }
 
@@ -1067,6 +1121,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         sources,
         token_estimate: estimateTokens(userPrompt),
         truncated,
+        content_trust: buildContentTrust(sources),
         ...(guardrailBlocked && { guardrail_blocked: guardrailBlocked }),
       };
 
@@ -1096,6 +1151,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       sources,
       token_estimate: tokenEstimate,
       truncated: budgetResult.truncated,
+      content_trust: buildContentTrust(sources),
       ...(guardrailBlocked && { guardrail_blocked: guardrailBlocked }),
     };
   } catch (err) {
@@ -1120,13 +1176,15 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       metric_type: 'hydration_infra_failure',
     });
     const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
+    const fallbackSources = task.task_description ? ['task_description'] : [];
     return {
       version: 1,
       user_prompt: fallbackPrompt,
-      sources: task.task_description ? ['task_description'] : [],
+      sources: fallbackSources,
       token_estimate: estimateTokens(fallbackPrompt),
       truncated: false,
       fallback_error: err instanceof Error ? err.message : String(err),
+      content_trust: buildContentTrust(fallbackSources),
     };
   }
 }
