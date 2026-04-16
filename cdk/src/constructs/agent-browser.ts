@@ -45,6 +45,7 @@ export class AgentBrowser extends Construct {
     this.screenshotBucket = new s3.Bucket(this, 'ScreenshotBucket', {
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
       removalPolicy: RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       lifecycleRules: [
@@ -173,6 +174,10 @@ export class AgentBrowser extends Construct {
       {
         id: 'AwsSolutions-COG2',
         reason: 'Gateway default Cognito user pool uses M2M client credentials flow — MFA not applicable',
+      },
+      {
+        id: 'AwsSolutions-COG3',
+        reason: 'Gateway default Cognito user pool uses M2M client credentials flow — advanced security not required',
       },
     ], true);
 
