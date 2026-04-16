@@ -12,6 +12,8 @@ import os
 import re
 import time
 
+from sanitization import sanitize_external_content
+
 _client = None
 
 # Validates "owner/repo" format — must match the TypeScript-side isValidRepo pattern.
@@ -22,6 +24,10 @@ _REPO_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 #   v2 = namespace templates (/{actorId}/...)
 #   v3 = adds source_type provenance + content_sha256 integrity hash
 _SCHEMA_VERSION = "3"
+
+# Valid source_type values for provenance tracking (schema v3).
+# Must stay in sync with MemorySourceType in cdk/src/handlers/shared/memory.ts.
+MEMORY_SOURCE_TYPES = frozenset({"agent_episode", "agent_learning", "orchestrator_fallback"})
 
 
 def _get_client():
@@ -80,7 +86,7 @@ def write_task_episode(
     into the correct per-repo, per-task namespace.
 
     Metadata includes source_type='agent_episode' for provenance tracking
-    and content_sha256 for integrity verification on read (schema v3).
+    and content_sha256 for integrity auditing on read (schema v3).
 
     Returns True on success, False on failure (fail-open).
     """
@@ -101,7 +107,10 @@ def write_task_episode(
             parts.append(f"Agent notes: {self_feedback}")
 
         episode_text = " ".join(parts)
-        content_hash = hashlib.sha256(episode_text.encode("utf-8")).hexdigest()
+        # Hash the sanitized form; store the original. The read path re-sanitizes
+        # and checks against this hash: sanitize(original) at write == sanitize(stored) at read.
+        sanitized_text = sanitize_external_content(episode_text)
+        content_hash = hashlib.sha256(sanitized_text.encode("utf-8")).hexdigest()
 
         metadata = {
             "task_id": {"stringValue": task_id},
@@ -153,9 +162,10 @@ def write_repo_learnings(
     the correct per-repo namespace.
 
     Metadata includes source_type='agent_learning' for provenance tracking
-    and content_sha256 for integrity verification on read (schema v3).
-    Note: hash verification only happens on the TS orchestrator read path
-    (loadMemoryContext in memory.ts), not on the Python side.
+    and content_sha256 for integrity auditing on read (schema v3).
+    Note: hash auditing only happens on the TS orchestrator read path
+    (loadMemoryContext in memory.ts) where mismatches are logged but
+    records are kept — the Python side does not independently check hashes.
 
     Returns True on success, False on failure (fail-open).
     """
@@ -164,7 +174,10 @@ def write_repo_learnings(
         client = _get_client()
 
         learnings_text = f"Repository learnings: {learnings}"
-        content_hash = hashlib.sha256(learnings_text.encode("utf-8")).hexdigest()
+        # Hash the sanitized form; store the original. The read path re-sanitizes
+        # and checks against this hash: sanitize(original) at write == sanitize(stored) at read.
+        sanitized_text = sanitize_external_content(learnings_text)
+        content_hash = hashlib.sha256(sanitized_text.encode("utf-8")).hexdigest()
 
         client.create_event(
             memoryId=memory_id,

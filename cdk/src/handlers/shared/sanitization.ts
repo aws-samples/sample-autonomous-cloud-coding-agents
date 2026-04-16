@@ -28,7 +28,7 @@ const DANGEROUS_TAGS = /(<(script|style|iframe|object|embed|form|input)[^>]*>[\s
 const HTML_TAGS = /<\/?[a-z][^>]*>/gi;
 
 /** Instruction-like prefixes at the start of a line (case-insensitive). */
-const INSTRUCTION_PREFIXES = /^(SYSTEM|ASSISTANT|Human|Assistant)\s*:/gim;
+const INSTRUCTION_PREFIXES = /^(SYSTEM|ASSISTANT|Human)\s*:/gim;
 
 /** Phrases commonly used in prompt injection attempts (case-insensitive). */
 const INJECTION_PHRASES = /(?:ignore previous instructions|disregard (?:above|previous|all)|new instructions\s*:)/gi;
@@ -39,6 +39,21 @@ const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
 /** Unicode bidirectional formatting characters and misplaced BOM. */
 const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 const MISPLACED_BOM = /(?!^)\uFEFF/g;
+
+/**
+ * Apply a regex replacement repeatedly until the string stops changing.
+ *
+ * A single pass can be bypassed by nesting fragments
+ * (e.g. "<scrip<script></script>t>" reassembles after inner tag removal).
+ */
+function stripUntilStable(s: string, pattern: RegExp): string {
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(pattern, '');
+  } while (s !== prev);
+  return s;
+}
 
 /**
  * Sanitize external content before it enters the agent's context.
@@ -53,13 +68,11 @@ const MISPLACED_BOM = /(?!^)\uFEFF/g;
 export function sanitizeExternalContent(text: string): string {
   if (!text) return text || '';
 
-  let sanitized = text;
-
   // 1. Strip dangerous HTML tags with their content
-  sanitized = sanitized.replace(DANGEROUS_TAGS, '');
+  let sanitized = stripUntilStable(text, DANGEROUS_TAGS);
 
   // 2. Strip remaining HTML tags (preserve inner text)
-  sanitized = sanitized.replace(HTML_TAGS, '');
+  sanitized = stripUntilStable(sanitized, HTML_TAGS);
 
   // 3. Neutralize embedded instruction patterns
   sanitized = sanitized.replace(INSTRUCTION_PREFIXES, '[SANITIZED_PREFIX] $1:');

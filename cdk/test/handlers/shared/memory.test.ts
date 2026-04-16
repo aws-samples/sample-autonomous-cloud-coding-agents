@@ -25,10 +25,11 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   CreateEventCommand: jest.fn((input: unknown) => ({ _type: 'CreateEvent', input })),
 }));
 
+const mockLoggerInfo = jest.fn();
 const mockLoggerWarn = jest.fn();
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: {
-    info: jest.fn(),
+    info: mockLoggerInfo,
     warn: mockLoggerWarn,
     error: jest.fn(),
   },
@@ -166,15 +167,24 @@ describe('loadMemoryContext', () => {
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
     expect(result).toBeDefined();
     expect(result!.repo_knowledge[0]).toContain('Old v2 record');
+    // v2 records (no schema_version) should not trigger any integrity warnings
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('hash mismatch'),
+      expect.anything(),
+    );
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('missing content_sha256'),
+      expect.anything(),
+    );
   });
 
-  test('logs warning on integrity check failure but still returns content', async () => {
-    const wrongHash = 'a'.repeat(64); // Invalid hash — will not match any content
+  test('keeps semantic records with hash mismatch (audit-only) and logs WARN', async () => {
+    const wrongHash = 'a'.repeat(64); // Hash won't match — expected for extracted records
     mockAgentCoreSend
       .mockResolvedValueOnce({
         memoryRecordSummaries: [
           {
-            content: { text: 'Actual content' },
+            content: { text: 'Extracted summary (differs from original)' },
             metadata: {
               content_sha256: { stringValue: wrongHash },
               source_type: { stringValue: 'agent_learning' },
@@ -185,19 +195,120 @@ describe('loadMemoryContext', () => {
       .mockResolvedValueOnce({ memoryRecordSummaries: [] });
 
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
-    // Fail-open: content still returned despite hash mismatch
+    // Audit-only: record is kept despite hash mismatch
     expect(result).toBeDefined();
-    expect(result!.repo_knowledge[0]).toContain('Actual content');
-    // Verify warning was logged with sufficient context for investigation
+    expect(result!.repo_knowledge[0]).toContain('Extracted summary');
+    // Verify WARN audit log with context for investigation
     expect(mockLoggerWarn).toHaveBeenCalledWith(
-      expect.stringContaining('integrity check failed'),
+      expect.stringContaining('hash mismatch'),
       expect.objectContaining({
         repo: 'owner/repo',
+        namespace: '/owner/repo/knowledge/',
         record_type: 'repo_knowledge',
         expected_hash: wrongHash,
         source_type: 'agent_learning',
-        metric_type: 'memory_integrity_mismatch',
+        metric_type: 'memory_integrity_audit',
       }),
+    );
+  });
+
+  test('keeps episodic records with hash mismatch (audit-only) and logs WARN', async () => {
+    const wrongHash = 'b'.repeat(64);
+    mockAgentCoreSend
+      .mockResolvedValueOnce({ memoryRecordSummaries: [] })
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          {
+            content: { text: 'Summarized episode (differs from original)' },
+            metadata: {
+              content_sha256: { stringValue: wrongHash },
+              source_type: { stringValue: 'agent_episode' },
+            },
+          },
+        ],
+      });
+
+    const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
+    expect(result).toBeDefined();
+    expect(result!.past_episodes[0]).toContain('Summarized episode');
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.stringContaining('hash mismatch'),
+      expect.objectContaining({
+        repo: 'owner/repo',
+        namespace: '/owner/repo/episodes/',
+        record_type: 'past_episode',
+        expected_hash: wrongHash,
+        source_type: 'agent_episode',
+        metric_type: 'memory_integrity_audit',
+      }),
+    );
+  });
+
+  test('logs WARN when schema v3 record is missing content_sha256', async () => {
+    mockAgentCoreSend
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          {
+            content: { text: 'v3 record but hash was lost' },
+            metadata: {
+              schema_version: { stringValue: '3' },
+              source_type: { stringValue: 'agent_learning' },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ memoryRecordSummaries: [] });
+
+    const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
+    // Record is still kept (backward compat)
+    expect(result).toBeDefined();
+    expect(result!.repo_knowledge[0]).toContain('v3 record but hash was lost');
+    // But a warning about the missing hash should be logged
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.stringContaining('missing content_sha256'),
+      expect.objectContaining({
+        schema_version: '3',
+        metric_type: 'memory_integrity_missing_hash',
+      }),
+    );
+  });
+
+  test('returns record when hash matches sanitized content (no audit log)', async () => {
+    const { createHash } = jest.requireActual('crypto') as typeof import('crypto');
+    // Compute hash of the sanitized version (clean text is unchanged by sanitization)
+    const cleanText = 'This repo uses Jest for testing';
+    const correctHash = createHash('sha256').update(cleanText).digest('hex');
+    const mockLoggerError = jest.requireMock('../../../src/handlers/shared/logger').logger.error;
+    mockAgentCoreSend
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          {
+            content: { text: cleanText },
+            metadata: {
+              content_sha256: { stringValue: correctHash },
+              source_type: { stringValue: 'agent_learning' },
+              schema_version: { stringValue: '3' },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ memoryRecordSummaries: [] });
+
+    const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
+    expect(result).toBeDefined();
+    expect(result!.repo_knowledge[0]).toBe(cleanText);
+    // No mismatch or integrity log should fire for matching records
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('hash mismatch'),
+      expect.anything(),
+    );
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('missing content_sha256'),
+      expect.anything(),
+    );
+    expect(mockLoggerError).not.toHaveBeenCalledWith(
+      expect.stringContaining('integrity'),
+      expect.anything(),
     );
   });
 
@@ -287,8 +398,9 @@ describe('writeMinimalEpisode', () => {
     expect(result).toBe(false);
   });
 
-  test('includes content_sha256 in metadata', async () => {
+  test('includes content_sha256 matching sanitized content', async () => {
     const { CreateEventCommand } = jest.requireMock('@aws-sdk/client-bedrock-agentcore');
+    const { createHash } = jest.requireActual('crypto') as typeof import('crypto');
     mockAgentCoreSend.mockResolvedValueOnce({});
 
     await writeMinimalEpisode('mem-123', 'owner/repo', 'task-abc', 'COMPLETED', 60, 1.0);
@@ -296,6 +408,11 @@ describe('writeMinimalEpisode', () => {
     const metadata = CreateEventCommand.mock.calls[0][0].metadata;
     expect(metadata.content_sha256).toBeDefined();
     expect(metadata.content_sha256.stringValue).toMatch(/^[a-f0-9]{64}$/);
+
+    // Verify the hash matches the actual sanitized episode text
+    const payload = CreateEventCommand.mock.calls[0][0].payload[0].conversational.content.text;
+    const expectedHash = createHash('sha256').update(payload).digest('hex');
+    expect(metadata.content_sha256.stringValue).toBe(expectedHash);
   });
 
   test('includes duration and cost when provided', async () => {
@@ -307,5 +424,20 @@ describe('writeMinimalEpisode', () => {
 
     const call = mockAgentCoreSend.mock.calls[0][0];
     expect(call.input).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-language hash parity (shared fixture)
+// ---------------------------------------------------------------------------
+
+describe('cross-language hash parity', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const vectors = require('../../../../contracts/memory-hash-vectors.json').vectors;
+
+  test.each<{ input: string; sha256: string; note: string }>(vectors)('SHA-256 matches fixture: $note', ({ input, sha256 }) => {
+    const { createHash } = jest.requireActual('crypto') as typeof import('crypto');
+    const actual = createHash('sha256').update(input).digest('hex');
+    expect(actual).toBe(sha256);
   });
 });

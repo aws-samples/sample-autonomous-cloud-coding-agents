@@ -52,6 +52,19 @@ describe('sanitizeExternalContent', () => {
     expect(result).toContain('safe');
   });
 
+  test('strips nested fragment bypass (CodeQL incomplete multi-char sanitization)', () => {
+    // Fragments that reassemble into a dangerous tag after inner tag removal
+    expect(sanitizeExternalContent('<scrip<script></script>t>alert(1)</script>')).toBe('');
+    expect(sanitizeExternalContent('<ifra<iframe></iframe>me src=x>')).toBe('');
+    // Double-nested — outermost <sc prefix survives (not a valid tag)
+    expect(sanitizeExternalContent('<sc<scr<script></script>ipt>ript>xss</script>')).toBe('<sc');
+  });
+
+  test('strips nested fragment bypass for HTML tags', () => {
+    // Regex greedily matches <di<b> as one tag, so <div> never reassembles
+    expect(sanitizeExternalContent('<di<b></b>v>text</div>')).toBe('v>text');
+  });
+
   test('strips unclosed dangerous tags', () => {
     const input = 'before<script>alert("xss")after';
     const result = sanitizeExternalContent(input);
