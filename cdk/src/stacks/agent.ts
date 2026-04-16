@@ -31,6 +31,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { AgentBrowser } from '../constructs/agent-browser';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { Blueprint } from '../constructs/blueprint';
@@ -126,6 +127,9 @@ export class AgentStack extends Stack {
     // --- AgentCore Memory (cross-task learning) ---
     const agentMemory = new AgentMemory(this, 'AgentMemory');
 
+    // --- AgentCore Browser (web screenshot tool) ---
+    const agentBrowser = new AgentBrowser(this, 'AgentBrowser');
+
     const runtime = new agentcore.Runtime(this, 'Runtime', {
       runtimeName,
       agentRuntimeArtifact: artifact,
@@ -145,6 +149,8 @@ export class AgentStack extends Stack {
         USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
         LOG_GROUP_NAME: applicationLogGroup.logGroupName,
         MEMORY_ID: agentMemory.memory.memoryId,
+        BROWSER_TOOL_FUNCTION_NAME: agentBrowser.browserToolFn.functionName,
+        SCREENSHOT_BUCKET_NAME: agentBrowser.screenshotBucket.bucketName,
         MAX_TURNS: '100',
         // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
         // support flock(). Only caches whose tools never call flock() go there.
@@ -181,6 +187,8 @@ export class AgentStack extends Stack {
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
+    agentBrowser.grantInvokeBrowserTool(runtime);
+    agentBrowser.grantReadScreenshots(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -274,6 +282,28 @@ export class AgentStack extends Stack {
       value: githubTokenSecret.secretArn,
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
+
+    new CfnOutput(this, 'BrowserGatewayUrl', {
+      value: agentBrowser.gateway.gatewayUrl ?? '',
+      description: 'URL of the Browser Gateway',
+    });
+
+    new CfnOutput(this, 'BrowserGatewayTokenEndpoint', {
+      value: agentBrowser.gateway.tokenEndpointUrl ?? '',
+      description: 'OAuth2 token endpoint for the Browser Gateway',
+    });
+
+    new CfnOutput(this, 'BrowserId', {
+      value: agentBrowser.browser.browserId,
+      description: 'ID of the AgentCore Browser',
+    });
+
+    NagSuppressions.addResourceSuppressions(agentBrowser, [
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'Browser tool Lambda grants and S3 grantRead generate wildcard permissions — required by L2 construct grants',
+      },
+    ], true);
 
     // --- Bedrock Guardrail for prompt injection detection ---
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {

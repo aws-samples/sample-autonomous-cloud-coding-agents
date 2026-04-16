@@ -19,6 +19,8 @@
     "@aws-sdk/client-bedrock-agentcore": "^3.1021.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1021.0",
     "@aws-sdk/client-ecs": "^3.1021.0",
+    "@aws-sdk/client-s3": "^3.1021.0",
+    "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@aws-sdk/client-dynamodb": "^3.1021.0",
     "@aws-sdk/client-lambda": "^3.1021.0",
     "@aws-sdk/client-secrets-manager": "^3.1021.0",
@@ -27,7 +29,8 @@
     "aws-cdk-lib": "^2.238.0",
     "cdk-nag": "^2.37.55",
     "constructs": "^10.3.0",
-    "ulid": "^3.0.2"
+    "ulid": "^3.0.2",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@cdklabs/eslint-plugin": "^1.5.10",
@@ -35,6 +38,7 @@
     "@types/aws-lambda": "^8.10.161",
     "@types/jest": "^30.0.0",
     "@types/node": "^20",
+    "@types/ws": "^8.18.0",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "aws-cdk": "^2",

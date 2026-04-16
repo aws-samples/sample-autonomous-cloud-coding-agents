@@ -98,8 +98,9 @@ describe('AgentStack', () => {
     template.resourceCountIs('AWS::ApiGateway::RestApi', 1);
   });
 
-  test('creates Cognito User Pool', () => {
-    template.resourceCountIs('AWS::Cognito::UserPool', 1);
+  test('creates Cognito User Pools', () => {
+    // TaskApi Cognito + Gateway (BrowserCustom) Cognito
+    template.resourceCountIs('AWS::Cognito::UserPool', 2);
   });
 
   test('sets 90-day retention on runtime log groups', () => {

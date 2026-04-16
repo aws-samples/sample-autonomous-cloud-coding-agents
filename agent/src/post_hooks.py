@@ -327,6 +327,50 @@ def ensure_pr(
         return None
 
 
+def capture_pr_screenshots(pr_url: str, task_id: str = "") -> list[str]:
+    """Capture screenshot of PR page. Returns list of pre-signed URLs (fail-open)."""
+    from browser import capture_screenshot
+
+    if not pr_url or not pr_url.startswith("https://github.com/"):
+        return []
+    try:
+        url = capture_screenshot(pr_url, task_id)
+        return [url] if url else []
+    except Exception as e:
+        log("WARN", f"PR screenshot capture failed (non-fatal): {type(e).__name__}: {e}")
+        return []
+
+
+def _append_screenshots_to_pr(config: TaskConfig, setup: RepoSetup, screenshot_urls: list[str]) -> None:
+    """Append ## Screenshots section to PR body via gh pr edit."""
+    if not screenshot_urls:
+        return
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", setup.branch, "--repo", config.repo_url,
+             "--json", "body", "-q", ".body"],
+            cwd=setup.repo_dir,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            log("WARN", "Could not read PR body for screenshot append")
+            return
+
+        current_body = result.stdout.strip()
+        images_md = "\n".join(f"![Screenshot {i+1}]({url})" for i, url in enumerate(screenshot_urls))
+        updated_body = f"{current_body}\n\n## Screenshots\n\n{images_md}"
+
+        subprocess.run(
+            ["gh", "pr", "edit", setup.branch, "--repo", config.repo_url,
+             "--body", updated_body],
+            cwd=setup.repo_dir,
+            capture_output=True, text=True, timeout=30,
+        )
+        log("POST", f"Appended {len(screenshot_urls)} screenshot(s) to PR body")
+    except Exception as e:
+        log("WARN", f"Failed to append screenshots to PR: {type(e).__name__}: {e}")
+
+
 def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str | None:
     """Extract the "## Agent notes" section from the PR body.
 
