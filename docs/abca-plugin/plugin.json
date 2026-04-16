@@ -1,0 +1,7 @@
+{
+  "name": "abca-getting-started",
+  "version": "1.0.0",
+  "description": "Getting started guide and developer toolkit for ABCA (Autonomous Background Coding Agents on AWS). Provides guided setup, deployment, task submission, repository onboarding, and troubleshooting workflows.",
+  "author": "aws-samples",
+  "homepage": "https://github.com/aws-samples/sample-autonomous-cloud-coding-agents"
+}
