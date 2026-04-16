@@ -341,7 +341,9 @@ def capture_pr_screenshots(pr_url: str, task_id: str = "") -> list[str]:
         return []
 
 
-def _append_screenshots_to_pr(config: TaskConfig, setup: RepoSetup, screenshot_urls: list[str]) -> None:
+def _append_screenshots_to_pr(
+    config: TaskConfig, setup: RepoSetup, screenshot_urls: list[str],
+) -> None:
     """Append ## Screenshots section to PR body via gh pr edit."""
     if not screenshot_urls:
         return
@@ -357,7 +359,10 @@ def _append_screenshots_to_pr(config: TaskConfig, setup: RepoSetup, screenshot_u
             return
 
         current_body = result.stdout.strip()
-        images_md = "\n".join(f"![Screenshot {i+1}]({url})" for i, url in enumerate(screenshot_urls))
+        images_md = "\n".join(
+            f"![Screenshot {i+1}]({url})"
+            for i, url in enumerate(screenshot_urls)
+        )
         updated_body = f"{current_body}\n\n## Screenshots\n\n{images_md}"
 
         subprocess.run(
