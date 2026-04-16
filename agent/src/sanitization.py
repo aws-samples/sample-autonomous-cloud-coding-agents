@@ -28,6 +28,19 @@ _BIDI_CHARS = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _MISPLACED_BOM = re.compile(r"(?!^)\ufeff")
 
 
+def _strip_until_stable(s: str, pattern: re.Pattern[str]) -> str:
+    """Apply *pattern* repeatedly until the string stops changing.
+
+    A single pass can be bypassed by nesting fragments
+    (e.g. "<scrip<script></script>t>" reassembles after inner tag removal).
+    """
+    while True:
+        prev = s
+        s = pattern.sub("", s)
+        if s == prev:
+            return s
+
+
 def sanitize_external_content(text: str | None) -> str:
     """Sanitize external content before it enters the agent's context.
 
@@ -37,8 +50,8 @@ def sanitize_external_content(text: str | None) -> str:
     """
     if not text:
         return text or ""
-    s = _DANGEROUS_TAGS.sub("", text)
-    s = _HTML_TAGS.sub("", s)
+    s = _strip_until_stable(text, _DANGEROUS_TAGS)
+    s = _strip_until_stable(s, _HTML_TAGS)
     s = _INSTRUCTION_PREFIXES.sub(r"[SANITIZED_PREFIX] \1:", s)
     s = _INJECTION_PHRASES.sub("[SANITIZED_INSTRUCTION]", s)
     s = _CONTROL_CHARS.sub("", s)

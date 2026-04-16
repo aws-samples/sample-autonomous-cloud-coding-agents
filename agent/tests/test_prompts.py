@@ -144,6 +144,17 @@ class TestSanitizeMemoryContent:
         assert sanitize_memory_content("a<script/>b") == "ab"
         assert sanitize_memory_content("a<iframe/>b") == "ab"
 
+    def test_nested_fragment_bypass(self):
+        # Fragments that reassemble into a dangerous tag after inner tag removal
+        assert sanitize_memory_content("<scrip<script></script>t>alert(1)</script>") == ""
+        assert sanitize_memory_content("<ifra<iframe></iframe>me src=x>") == ""
+        # Double-nested — outermost <sc prefix survives (not a valid tag)
+        assert sanitize_memory_content("<sc<scr<script></script>ipt>ript>xss</script>") == "<sc"
+
+    def test_nested_fragment_bypass_html_tags(self):
+        # Regex greedily matches <di<b> as one tag, so <div> never reassembles
+        assert sanitize_memory_content("<di<b></b>v>text</div>") == "v>text"
+
     def test_preserves_tabs_and_newlines(self):
         result = sanitize_memory_content("hello\tworld\nfoo")
         assert result == "hello\tworld\nfoo"
