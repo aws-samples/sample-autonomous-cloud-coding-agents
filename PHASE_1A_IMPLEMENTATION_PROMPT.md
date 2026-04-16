@@ -8,6 +8,33 @@ A comprehensive design document has been completed and committed at `docs/design
 
 Read `AGENTS.md` for repo conventions, build commands (`mise`), and testing patterns. Read `CLAUDE.md` for project instructions.
 
+## How to work
+
+### Use subagents to parallelize and manage context
+
+- **Research phase:** Before writing code, spawn parallel subagents to read all the "Key files to read" listed below. Do not read them all sequentially in the main context — use subagents to gather summaries and key patterns, then synthesize.
+- **Implementation phase:** The agent-side work (`progress_writer.py`, `entrypoint.py` changes, Python tests) and CLI-side work (`watch.ts`, CLI tests, `bgagent.ts` registration) are independent. Implement them in parallel using subagents or worktrees where possible.
+- **Testing phase:** Run agent tests and CLI tests in parallel. If one fails, keep working on fixing it while the other suite runs.
+- **Keep the main context clean.** Delegate file reading, code exploration, and web research to subagents. Reserve the main context for writing code and making decisions.
+
+### CRITICAL: Do not deviate from the design
+
+The design document (`docs/design/INTERACTIVE_AGENTS.md`) was produced through extensive research, review, and iteration with the project owner. It is the source of truth.
+
+**If you encounter an error, test failure, or technical blocker during implementation:**
+
+1. **DO NOT take shortcuts or change the design to make it work.** Do not silently simplify, skip features, weaken error handling, or alter the architecture to work around a problem.
+2. **First, research the problem.** Use the `web-researcher` subagent to search for solutions, check SDK documentation, look for known issues or workarounds that are compatible with the design.
+3. **If the design truly cannot work as specified** (e.g., an SDK limitation, a DDB constraint, a Python/TypeScript incompatibility), **surface the blocker explicitly.** Describe:
+   - What you tried
+   - What failed and why
+   - What research you did
+   - What the design says vs what reality requires
+   - Proposed alternatives (if any) — but do NOT implement them
+4. **Wait for explicit approval before changing any design decision.** The project owner will decide whether to amend the design or find a different solution.
+
+This rule applies to ALL aspects: error handling patterns (fail-open/fail-closed), event types, field names, DDB schema, CLI behavior, test patterns. The design was carefully considered — if something seems wrong, it's more likely a misunderstanding than a design error. Ask before changing.
+
 ## What to build
 
 Phase 1a is the foundation for interactive agents: the agent writes structured progress events to DynamoDB during execution, and the CLI can display them in near-real-time via polling.
