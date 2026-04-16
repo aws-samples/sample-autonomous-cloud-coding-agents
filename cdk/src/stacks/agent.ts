@@ -198,6 +198,20 @@ export class AgentStack extends Stack {
     // Grant the runtime permissions to invoke the inference profile
     inferenceProfile.grantInvoke(runtime);
 
+    const model3 = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-20250514-v1:0', {
+      supportsAgents: true,
+      supportsCrossRegion: true,
+    });
+
+    model3.grantInvoke(runtime);
+
+    const inferenceProfile3 = bedrock.CrossRegionInferenceProfile.fromConfig({
+      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+      model: model3,
+    });
+
+    inferenceProfile3.grantInvoke(runtime);
+
     const model2 = new bedrock.BedrockFoundationModel('anthropic.claude-haiku-4-5-20251001-v1:0', {
       supportsAgents: true,
       supportsCrossRegion: true,

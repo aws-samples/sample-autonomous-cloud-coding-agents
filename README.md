@@ -69,7 +69,76 @@ See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on each iteration.
 
 ## Getting started
 
-### Installation and deployment
+### Claude Code plugin (recommended)
+
+This repository ships a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) that provides guided workflows for setup, deployment, task submission, and troubleshooting.
+
+#### Installing the plugin
+
+```bash
+git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
+cd sample-autonomous-cloud-coding-agents
+claude --plugin-dir docs/abca-plugin
+```
+
+The `--plugin-dir` flag tells Claude Code to load the local plugin from the `docs/abca-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
+
+> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir docs/abca-plugin` to the extension's CLI arguments setting.
+
+#### What the plugin provides
+
+**Skills** (guided multi-step workflows — Claude activates these automatically based on your request):
+
+| Skill | Triggers on | What it does |
+|-------|------------|--------------|
+| `setup` | "get started", "install", "first time setup" | Full guided setup: prerequisites, toolchain, deploy, smoke test |
+| `deploy` | "deploy", "cdk diff", "destroy" | Deploy, diff, or destroy the CDK stack with pre-checks |
+| `onboard-repo` | "add a repo", "onboard", 422 errors | Add a new GitHub repository via Blueprint construct |
+| `submit-task` | "submit task", "run agent", "review PR", "quick submit" | Submit a coding task with prompt quality coaching (supports quick mode) |
+| `troubleshoot` | "debug", "error", "not working", "failed" | Diagnose deployment, auth, or task execution issues |
+| `status` | "status", "health check", "is ABCA running" | Platform health check: stack status, running tasks, build health |
+
+**Agents** (specialized subagents, spawned automatically or via the Agent tool):
+
+| Agent | When it's used |
+|-------|---------------|
+| `cdk-expert` | CDK architecture, construct design, handler implementation, stack modifications |
+| `agent-debugger` | Task failure investigation, CloudWatch log analysis, agent runtime debugging |
+
+**Hook** (runs automatically):
+
+A `SessionStart` hook advertises available skills and agents so Claude can proactively suggest them when your request matches.
+
+#### Local plugin development
+
+If you're modifying the plugin itself, here's the file layout:
+
+```
+docs/abca-plugin/
+  plugin.json                    # Plugin manifest (name, version, description)
+  skills/
+    setup/SKILL.md               # First-time setup workflow
+    deploy/SKILL.md              # CDK deployment workflow
+    onboard-repo/SKILL.md        # Repository onboarding workflow
+    submit-task/SKILL.md         # Task submission (guided + quick mode)
+    troubleshoot/SKILL.md        # Diagnostic workflow
+    status/SKILL.md              # Platform health check
+  agents/
+    cdk-expert.md                # CDK infrastructure specialist
+    agent-debugger.md            # Task failure debugger
+  hooks/
+    hooks.json                   # SessionStart capability advertisement
+```
+
+**Key conventions:**
+- The plugin lives under `docs/` to keep documentation and plugin content colocated
+- Skills live in subdirectories with a `SKILL.md` file (not flat `.md` files)
+- Agents are flat `.md` files with YAML frontmatter
+- The hook advertises plugin capabilities only (no project-specific content)
+
+**After editing plugin files**, restart Claude Code with `claude --plugin-dir docs/abca-plugin` to pick up changes.
+
+### Manual installation and deployment
 
 Install [mise](https://mise.jdx.dev/getting-started.html) if you want to use repo tasks (`mise run install`, `mise run build`). For monorepo-prefixed tasks (`mise //cdk:build`, etc.), set **`MISE_EXPERIMENTAL=1`** — see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
