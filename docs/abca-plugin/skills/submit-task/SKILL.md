@@ -4,12 +4,20 @@ description: >-
   Submit a coding task to the ABCA platform via CLI or REST API. Guides prompt
   quality, task type selection, and cost controls. Use when the user says "submit a task",
   "create a task", "run the agent", "send task to agent", "bgagent submit",
-  "new_task", "pr_iteration", "pr_review", "review a PR", or wants to automate coding work.
+  "new_task", "pr_iteration", "pr_review", "review a PR", "quick submit",
+  "submit to ABCA", or wants to automate coding work.
+argument-hint: <repo> [description]
 ---
 
 # Submit a Coding Task
 
 You are helping the user submit a well-crafted coding task to the ABCA platform. Good prompts are critical — the agent works autonomously without asking clarifying questions.
+
+**Quick mode:** If the user provided a repo and description inline (e.g. "submit task to owner/repo: fix the login bug"), auto-detect the task type from the description and skip to Step 5. Infer the type:
+- PR number or "review PR" → `--review-pr`
+- "iterate on PR" or "fix PR feedback" → `--pr`
+- Just a number → `--issue`
+- Otherwise → `--task` with the text description
 
 ## Step 1: Determine Task Type
 

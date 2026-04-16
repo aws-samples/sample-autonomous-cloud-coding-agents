@@ -94,10 +94,9 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `doc
 | `setup` | "get started", "install", "first time setup" | Full guided setup: prerequisites, toolchain, deploy, smoke test |
 | `deploy` | "deploy", "cdk diff", "destroy" | Deploy, diff, or destroy the CDK stack with pre-checks |
 | `onboard-repo` | "add a repo", "onboard", 422 errors | Add a new GitHub repository via Blueprint construct |
-| `submit-task` | "submit task", "run agent", "review PR" | Submit a coding task with prompt quality coaching |
+| `submit-task` | "submit task", "run agent", "review PR", "quick submit" | Submit a coding task with prompt quality coaching (supports quick mode) |
 | `troubleshoot` | "debug", "error", "not working", "failed" | Diagnose deployment, auth, or task execution issues |
-| `abca-status` | "status", "health check", "is ABCA running" | Quick platform health check: stack status, running tasks, build health |
-| `abca-submit` | "submit task", "quick submit" | Shortcut for task submission with auto-detected task type |
+| `status` | "status", "health check", "is ABCA running" | Platform health check: stack status, running tasks, build health |
 
 **Agents** (specialized subagents, spawned automatically or via the Agent tool):
 
@@ -121,10 +120,9 @@ docs/abca-plugin/
     setup/SKILL.md               # First-time setup workflow
     deploy/SKILL.md              # CDK deployment workflow
     onboard-repo/SKILL.md        # Repository onboarding workflow
-    submit-task/SKILL.md         # Task submission with prompt coaching
+    submit-task/SKILL.md         # Task submission (guided + quick mode)
     troubleshoot/SKILL.md        # Diagnostic workflow
-    abca-status/SKILL.md         # Quick platform health check
-    abca-submit/SKILL.md         # Quick task submission shortcut
+    status/SKILL.md              # Platform health check
   agents/
     cdk-expert.md                # CDK infrastructure specialist
     agent-debugger.md            # Task failure debugger

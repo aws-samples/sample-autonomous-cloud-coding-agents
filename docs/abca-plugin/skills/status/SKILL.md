@@ -1,5 +1,5 @@
 ---
-name: abca-status
+name: status
 description: Check ABCA platform status — stack health, running tasks, and recent task history. Use when the user says "status", "health check", "is ABCA running", "check platform", or "what's the state".
 allowed-tools:
   - Bash

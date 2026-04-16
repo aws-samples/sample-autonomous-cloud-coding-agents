@@ -25,10 +25,9 @@ Or add to your project's `.claude/settings.json`:
 | `/setup` | First-time setup, prerequisites | Walk through prerequisites, toolchain, and first deployment |
 | `/deploy` | Deploy, diff, destroy | Deploy, diff, or destroy the CDK stack |
 | `/onboard-repo` | Add a repository | Onboard a GitHub repo via Blueprint CDK construct |
-| `/submit-task` | Submit a coding task | Submit tasks with prompt quality guidance and cost controls |
+| `/submit-task` | Submit a coding task | Submit tasks with prompt quality guidance and cost controls (supports quick mode) |
 | `/troubleshoot` | Debug, errors, failures | Diagnose build, deployment, auth, and task execution issues |
-| `/abca-status` | Status, health check | Check stack health, running tasks, and recent history |
-| `/abca-submit` | Quick submit | Shortcut for rapid task submission |
+| `/status` | Status, health check | Check stack health, running tasks, and recent history |
 
 ### Agents
 
@@ -55,10 +54,9 @@ docs/abca-plugin/
     setup/SKILL.md         # First-time setup workflow
     deploy/SKILL.md        # CDK deployment management
     onboard-repo/SKILL.md  # Repository onboarding
-    submit-task/SKILL.md   # Task submission workflow
+    submit-task/SKILL.md   # Task submission workflow (guided + quick mode)
     troubleshoot/SKILL.md  # Troubleshooting guide
-    abca-status/SKILL.md   # Platform status checks
-    abca-submit/SKILL.md   # Quick task submission
+    status/SKILL.md        # Platform status checks
 ```
 
 ## Testing
