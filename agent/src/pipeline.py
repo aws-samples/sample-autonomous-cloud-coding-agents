@@ -331,7 +331,7 @@ def run_task(
                 # Screenshot capture (fail-open)
                 screenshot_urls: list[str] = []
                 if pr_url:
-                    from post_hooks import capture_pr_screenshots, _append_screenshots_to_pr
+                    from post_hooks import _append_screenshots_to_pr, capture_pr_screenshots
 
                     try:
                         screenshot_urls = capture_pr_screenshots(pr_url, config.task_id)
