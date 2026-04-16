@@ -739,7 +739,7 @@ export function assembleUserPrompt(
   }
 
   if (taskDescription) {
-    parts.push(`\n## Task\n\n${taskDescription}`);
+    parts.push(`\n## Task\n\n${sanitizeExternalContent(taskDescription)}`);
   } else if (issue) {
     parts.push(
       '\n## Task\n\nResolve the GitHub issue described above. '
@@ -849,7 +849,7 @@ export function assemblePrIterationPrompt(
   }
 
   if (taskDescription) {
-    parts.push(`\n## Additional Instructions\n\n${taskDescription}`);
+    parts.push(`\n## Additional Instructions\n\n${sanitizeExternalContent(taskDescription)}`);
   } else {
     parts.push(
       '\n## Task\n\nAddress the review feedback on this pull request. '
@@ -1103,9 +1103,21 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     if (err instanceof GuardrailScreeningError) {
       throw err;
     }
-    // Fallback: minimal context from task_description only
-    logger.error('Unexpected error during context hydration', {
-      task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+    // Programming errors (bugs) should fail the task, not silently degrade context
+    if (err instanceof TypeError || err instanceof RangeError || err instanceof ReferenceError) {
+      logger.error('Programming error during context hydration — failing task', {
+        task_id: task.task_id,
+        error: err instanceof Error ? err.message : String(err),
+        error_type: err.constructor.name,
+        metric_type: 'hydration_bug',
+      });
+      throw err;
+    }
+    // Infrastructure failures — fallback to minimal context from task_description only
+    logger.error('Infrastructure error during context hydration — falling back to minimal context', {
+      task_id: task.task_id,
+      error: err instanceof Error ? err.message : String(err),
+      metric_type: 'hydration_infra_failure',
     });
     const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
     return {

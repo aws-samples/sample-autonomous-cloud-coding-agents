@@ -1,0 +1,35 @@
+{
+  "_comment": "Cross-language SHA-256 test vectors for memory content integrity. Both the TypeScript (cdk/test/) and Python (agent/tests/) test suites consume this file to guarantee hash parity across the language boundary. All hashes are computed on UTF-8 encoded input.",
+  "vectors": [
+    {
+      "input": "This repo uses Jest for testing and CDK for infrastructure.",
+      "note": "clean ASCII text",
+      "sha256": "6f3482090fd0f5bc5d5424c42a8f94b38f2dff4048145c3b842c8f1cae57bca5"
+    },
+    {
+      "input": "Task task-001 completed with status: COMPLETED. Duration: 120s. Cost: $0.0345.",
+      "note": "typical episode text",
+      "sha256": "58ef182190ec574a37ed3e25bc937f0957e8795ab72d385d35fcb99af3292589"
+    },
+    {
+      "input": "Repository learnings: Use TypeScript strict mode",
+      "note": "typical learnings text",
+      "sha256": "6e783b591a9ea9b7e6885ff9df9fb39c84e47591857b2e07a1d7e5b5f920e66b"
+    },
+    {
+      "input": "\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8 \u2014 CJK characters with em-dash",
+      "note": "CJK and Unicode punctuation",
+      "sha256": "4ea1ef7b05c7a87170ea66c7ff1a30ce0efd64f48357f90920fd12e450dced4b"
+    },
+    {
+      "input": "Emoji test: \ud83d\ude80\ud83c\udf89 rocket and party",
+      "note": "emoji content",
+      "sha256": "c6fe33e4a441553bfb599dde1d07276398dd8953c33040c167bf61cf47ad2dea"
+    },
+    {
+      "input": "Trailing whitespace   \n  and newlines\n",
+      "note": "whitespace edge case",
+      "sha256": "ea30e88c5e90820aacf3b95379908f94717239a40a345b3d95d1d14f469bb196"
+    }
+  ]
+}

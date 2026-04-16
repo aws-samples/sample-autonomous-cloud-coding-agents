@@ -28,7 +28,7 @@ const DANGEROUS_TAGS = /(<(script|style|iframe|object|embed|form|input)[^>]*>[\s
 const HTML_TAGS = /<\/?[a-z][^>]*>/gi;
 
 /** Instruction-like prefixes at the start of a line (case-insensitive). */
-const INSTRUCTION_PREFIXES = /^(SYSTEM|ASSISTANT|Human|Assistant)\s*:/gim;
+const INSTRUCTION_PREFIXES = /^(SYSTEM|ASSISTANT|Human)\s*:/gim;
 
 /** Phrases commonly used in prompt injection attempts (case-insensitive). */
 const INJECTION_PHRASES = /(?:ignore previous instructions|disregard (?:above|previous|all)|new instructions\s*:)/gi;
