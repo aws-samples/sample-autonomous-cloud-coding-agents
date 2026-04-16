@@ -57,12 +57,12 @@ jest.mock('ws', () => {
         const msg = JSON.parse(data);
         setTimeout(() => {
           if (msg.method === 'Page.enable') {
-            handlers['message']?.forEach(h => h(JSON.stringify({ id: msg.id, result: {} })));
+            handlers.message?.forEach(h => h(JSON.stringify({ id: msg.id, result: {} })));
           } else if (msg.method === 'Page.navigate') {
-            handlers['message']?.forEach(h => h(JSON.stringify({ id: msg.id, result: { frameId: '1' } })));
-            handlers['message']?.forEach(h => h(JSON.stringify({ method: 'Page.loadEventFired' })));
+            handlers.message?.forEach(h => h(JSON.stringify({ id: msg.id, result: { frameId: '1' } })));
+            handlers.message?.forEach(h => h(JSON.stringify({ method: 'Page.loadEventFired' })));
           } else if (msg.method === 'Page.captureScreenshot') {
-            handlers['message']?.forEach(h => h(JSON.stringify({ id: msg.id, result: { data: 'base64png' } })));
+            handlers.message?.forEach(h => h(JSON.stringify({ id: msg.id, result: { data: 'base64png' } })));
           }
         }, 0);
       }),
@@ -73,6 +73,7 @@ jest.mock('ws', () => {
   });
 });
 
+import { StopBrowserSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { handler } from '../../src/handlers/browser-tool';
 
 describe('browser-tool handler', () => {
@@ -115,7 +116,6 @@ describe('browser-tool handler', () => {
     );
 
     // Verify StopBrowserSession was called
-    const { StopBrowserSessionCommand } = require('@aws-sdk/client-bedrock-agentcore');
     expect(StopBrowserSessionCommand).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'session-123' }),
     );
@@ -158,7 +158,6 @@ describe('browser-tool handler', () => {
     });
 
     // Session should still be stopped even though S3 failed
-    const { StopBrowserSessionCommand } = require('@aws-sdk/client-bedrock-agentcore');
     expect(StopBrowserSessionCommand).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'session-456' }),
     );
