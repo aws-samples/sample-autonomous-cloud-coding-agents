@@ -342,17 +342,31 @@ def capture_pr_screenshots(pr_url: str, task_id: str = "") -> list[str]:
 
 
 def _append_screenshots_to_pr(
-    config: TaskConfig, setup: RepoSetup, screenshot_urls: list[str],
+    config: TaskConfig,
+    setup: RepoSetup,
+    screenshot_urls: list[str],
 ) -> None:
     """Append ## Screenshots section to PR body via gh pr edit."""
     if not screenshot_urls:
         return
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", setup.branch, "--repo", config.repo_url,
-             "--json", "body", "-q", ".body"],
+            [
+                "gh",
+                "pr",
+                "view",
+                setup.branch,
+                "--repo",
+                config.repo_url,
+                "--json",
+                "body",
+                "-q",
+                ".body",
+            ],
             cwd=setup.repo_dir,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             log("WARN", "Could not read PR body for screenshot append")
@@ -360,16 +374,16 @@ def _append_screenshots_to_pr(
 
         current_body = result.stdout.strip()
         images_md = "\n".join(
-            f"![Screenshot {i+1}]({url})"
-            for i, url in enumerate(screenshot_urls)
+            f"![Screenshot {i + 1}]({url})" for i, url in enumerate(screenshot_urls)
         )
         updated_body = f"{current_body}\n\n## Screenshots\n\n{images_md}"
 
         subprocess.run(
-            ["gh", "pr", "edit", setup.branch, "--repo", config.repo_url,
-             "--body", updated_body],
+            ["gh", "pr", "edit", setup.branch, "--repo", config.repo_url, "--body", updated_body],
             cwd=setup.repo_dir,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         log("POST", f"Appended {len(screenshot_urls)} screenshot(s) to PR body")
     except Exception as e:
