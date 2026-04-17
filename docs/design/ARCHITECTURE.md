@@ -144,7 +144,7 @@ Cost efficiency is a design principle. The following estimates are based on **50
 | **AgentCore Memory** (events, records, retrieval) | TBD | Pricing not fully public; proportional to usage |
 | **CloudWatch** (logs, metrics, traces, Transaction Search) | ~$20–50 | Log ingestion + storage |
 | **Secrets Manager** (GitHub token or App private key, webhook secrets) | ~$5–10 | Per-secret/month + API calls |
-| **AgentCore Identity** (planned — WorkloadIdentity, Token Vault credential provider) | TBD | Token vending API calls; replaces per-task Secrets Manager reads for GitHub tokens |
+| **AgentCore Identity** (available when configured — WorkloadIdentity, Token Vault credential provider) | TBD | Token vending API calls; replaces per-task Secrets Manager reads for GitHub tokens |
 | **S3** (artifacts, memory backups) | ~$1–5 | Storage + requests |
 | **Total** | **~$700–1,600/month** | |
 

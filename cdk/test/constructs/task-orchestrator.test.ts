@@ -17,9 +17,10 @@
  *  SOFTWARE.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
+import { App, SecretValue, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import { AgentCoreIdentity } from '../../src/constructs/agentcore-identity';
 import { TaskOrchestrator } from '../../src/constructs/task-orchestrator';
 
 interface StackOverrides {
@@ -32,6 +33,7 @@ interface StackOverrides {
   memoryId?: string;
   guardrailId?: string;
   guardrailVersion?: string;
+  includeAgentCoreIdentity?: boolean;
   ecsConfig?: {
     clusterArn: string;
     taskDefinitionArn: string;
@@ -68,6 +70,7 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
 
   const {
     includeRepoTable: _,
+    includeAgentCoreIdentity,
     additionalRuntimeArns,
     additionalSecretArns,
     memoryId,
@@ -76,6 +79,17 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     ecsConfig,
     ...rest
   } = overrides ?? {};
+
+  const agentCoreIdentity = includeAgentCoreIdentity
+    ? new AgentCoreIdentity(stack, 'AgentCoreIdentity', {
+      workloadIdentityName: 'test-agent',
+      githubOAuth: {
+        credentialProviderName: 'test-github',
+        clientId: 'Iv1.test123',
+        clientSecret: SecretValue.unsafePlainText('test-secret'),
+      },
+    })
+    : undefined;
 
   new TaskOrchestrator(stack, 'TaskOrchestrator', {
     taskTable,
@@ -88,6 +102,7 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
     ...(memoryId && { memoryId }),
     ...(guardrailId && { guardrailId }),
     ...(guardrailVersion && { guardrailVersion }),
+    ...(agentCoreIdentity && { agentCoreIdentity }),
     ...(ecsConfig && { ecsConfig }),
     ...rest,
   });
@@ -233,6 +248,46 @@ describe('TaskOrchestrator construct', () => {
           expect(stmt.Action).not.toContain('secretsmanager:GetSecretValue');
         }
       }
+    }
+  });
+
+  test('includes Token Vault env vars when agentCoreIdentity is provided', () => {
+    const { template } = createStack({ includeAgentCoreIdentity: true });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          WORKLOAD_IDENTITY_NAME: 'test-agent',
+          GITHUB_OAUTH2_PROVIDER_NAME: 'test-github',
+        }),
+      },
+    });
+  });
+
+  test('grants Token Vault IAM permissions when agentCoreIdentity is provided', () => {
+    const { template } = createStack({ includeAgentCoreIdentity: true });
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: [
+              'bedrock-agentcore:GetWorkloadAccessToken',
+              'bedrock-agentcore:GetResourceOauth2Token',
+            ],
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('does not include Token Vault env vars when agentCoreIdentity is not provided', () => {
+    const { template } = createStack();
+    // Verify Lambda function exists but doesn't have Token Vault env vars
+    const functions = template.findResources('AWS::Lambda::Function');
+    for (const [, fn] of Object.entries(functions)) {
+      const envVars = (fn as any).Properties?.Environment?.Variables ?? {};
+      expect(envVars).not.toHaveProperty('WORKLOAD_IDENTITY_NAME');
+      expect(envVars).not.toHaveProperty('GITHUB_OAUTH2_PROVIDER_NAME');
     }
   });
 

@@ -407,4 +407,58 @@ describe('Blueprint validation', () => {
 
     expect(() => app.synth()).not.toThrow();
   });
+
+  test('rejects partial Token Vault config (workloadIdentityName without provider)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'my-org/my-repo',
+      repoTable,
+      credentials: { workloadIdentityName: 'agent' },
+    });
+
+    expect(() => app.synth()).toThrow(/githubOAuth2CredentialProviderName is required/);
+  });
+
+  test('rejects partial Token Vault config (provider without workloadIdentityName)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'my-org/my-repo',
+      repoTable,
+      credentials: { githubOAuth2CredentialProviderName: 'github' },
+    });
+
+    expect(() => app.synth()).toThrow(/workloadIdentityName is required/);
+  });
+
+  test('accepts complete Token Vault config', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'my-org/my-repo',
+      repoTable,
+      credentials: {
+        workloadIdentityName: 'agent',
+        githubOAuth2CredentialProviderName: 'github',
+      },
+    });
+
+    expect(() => app.synth()).not.toThrow();
+  });
 });

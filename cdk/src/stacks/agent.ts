@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, SecretValue } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -33,6 +33,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { AgentCoreIdentity } from '../constructs/agentcore-identity';
 import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
@@ -182,6 +183,84 @@ export class AgentStack extends Stack {
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
 
+    // --- AgentCore Identity / Token Vault (preferred over static PAT) ---
+    // When GitHub App OAuth credentials are provided via CDK context, create
+    // a WorkloadIdentity + OAuth2 credential provider for dynamic token vending.
+    // Falls back to the static PAT in GitHubTokenSecret when not configured.
+    //
+    // Accepts either:
+    //   -c githubOAuthClientId=... -c githubOAuthClientSecret=...  (simple: CDK manages the SM secret)
+    //   -c githubOAuthClientId=... -c githubOAuthClientSecretArn=... (bring-your-own SM secret)
+    const githubOAuthClientId = this.node.tryGetContext('githubOAuthClientId') as string | undefined;
+    const githubOAuthClientSecret = this.node.tryGetContext('githubOAuthClientSecret') as string | undefined;
+    const githubOAuthClientSecretArn = this.node.tryGetContext('githubOAuthClientSecretArn') as string | undefined;
+
+    let resolvedClientSecret: SecretValue | undefined;
+    if (githubOAuthClientId && githubOAuthClientSecret) {
+      // Simple path: CDK creates and manages a Secrets Manager secret for the client secret
+      const oauthSecret = new secretsmanager.Secret(this, 'GitHubOAuthClientSecret', {
+        description: 'GitHub App client secret for AgentCore Token Vault',
+        removalPolicy: RemovalPolicy.DESTROY,
+      });
+      // Seed the secret with the provided value — subsequent rotations are handled externally.
+      // The CDK custom resource overwrites any existing value, so re-deploying with a new
+      // context value updates the secret.
+      new cr.AwsCustomResource(this, 'SeedOAuthClientSecret', {
+        onCreate: {
+          service: 'SecretsManager',
+          action: 'putSecretValue',
+          parameters: {
+            SecretId: oauthSecret.secretArn,
+            SecretString: githubOAuthClientSecret,
+          },
+          physicalResourceId: cr.PhysicalResourceId.of('seed-oauth-client-secret'),
+        },
+        onUpdate: {
+          service: 'SecretsManager',
+          action: 'putSecretValue',
+          parameters: {
+            SecretId: oauthSecret.secretArn,
+            SecretString: githubOAuthClientSecret,
+          },
+          physicalResourceId: cr.PhysicalResourceId.of('seed-oauth-client-secret'),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['secretsmanager:PutSecretValue'],
+            resources: [oauthSecret.secretArn],
+          }),
+        ]),
+      });
+      NagSuppressions.addResourceSuppressions(oauthSecret, [
+        {
+          id: 'AwsSolutions-SMG4',
+          reason: 'GitHub OAuth client secret is managed externally — automatic rotation is not applicable',
+        },
+      ]);
+      resolvedClientSecret = oauthSecret.secretValue;
+    } else if (githubOAuthClientId && githubOAuthClientSecretArn) {
+      // Bring-your-own secret path
+      resolvedClientSecret = SecretValue.secretsManager(githubOAuthClientSecretArn);
+    }
+
+    let agentCoreIdentity: AgentCoreIdentity | undefined;
+    if (githubOAuthClientId && resolvedClientSecret) {
+      agentCoreIdentity = new AgentCoreIdentity(this, 'AgentCoreIdentity', {
+        workloadIdentityName: 'abca-agent',
+        githubOAuth: {
+          credentialProviderName: 'abca-github',
+          clientId: githubOAuthClientId,
+          clientSecret: resolvedClientSecret,
+        },
+      });
+      agentCoreIdentity.grantTokenVaultAccess(runtime);
+
+      // Inject Token Vault env vars into the runtime container via CFN escape hatch.
+      // The L2 construct does not support addEnvironment post-construction.
+      cfnRuntime.addPropertyOverride('EnvironmentVariables.WORKLOAD_IDENTITY_NAME', agentCoreIdentity.workloadIdentityName);
+      cfnRuntime.addPropertyOverride('EnvironmentVariables.GITHUB_OAUTH2_PROVIDER_NAME', agentCoreIdentity.credentialProviderName);
+    }
+
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
       supportsCrossRegion: true,
@@ -321,6 +400,7 @@ export class AgentStack extends Stack {
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      agentCoreIdentity,
       // To wire ECS, uncomment the ecsCluster block above and add:
       // ecsConfig: {
       //   clusterArn: ecsCluster.cluster.clusterArn,

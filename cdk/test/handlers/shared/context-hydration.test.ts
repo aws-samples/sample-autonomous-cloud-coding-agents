@@ -24,6 +24,13 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
 }));
 
+const mockAgentCoreSend = jest.fn();
+jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
+  BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
+  GetWorkloadAccessTokenCommand: jest.fn((input: unknown) => ({ _type: 'GetWorkloadAccessToken', input })),
+  GetResourceOauth2TokenCommand: jest.fn((input: unknown) => ({ _type: 'GetResourceOauth2Token', input })),
+}));
+
 const mockBedrockSend = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
   BedrockRuntimeClient: jest.fn(() => ({ send: mockBedrockSend })),
@@ -137,6 +144,73 @@ describe('resolveGitHubToken', () => {
     expect(tokenA).toBe('ghp_repo_a');
     expect(tokenB).toBe('ghp_repo_b');
     expect(mockSmSend).toHaveBeenCalledTimes(2);
+  });
+
+  test('prefers Token Vault when tokenVaultConfig is provided', async () => {
+    mockAgentCoreSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-opaque-123' })
+      .mockResolvedValueOnce({ accessToken: 'gho_tokenvault_token' });
+
+    const token = await resolveGitHubToken(
+      'arn:aws:secretsmanager:us-east-1:123:secret:test',
+      { workloadIdentityName: 'test-agent', credentialProviderName: 'test-github' },
+    );
+
+    expect(token).toBe('gho_tokenvault_token');
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(2);
+    expect(mockSmSend).not.toHaveBeenCalled();
+  });
+
+  test('Token Vault: caches token across calls', async () => {
+    mockAgentCoreSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-123' })
+      .mockResolvedValueOnce({ accessToken: 'gho_cached_tv' });
+
+    const config = { workloadIdentityName: 'agent', credentialProviderName: 'github' };
+    const token1 = await resolveGitHubToken(undefined, config);
+    const token2 = await resolveGitHubToken(undefined, config);
+
+    expect(token1).toBe('gho_cached_tv');
+    expect(token2).toBe('gho_cached_tv');
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(2); // Only first call
+  });
+
+  test('Token Vault: throws when workload access token is empty', async () => {
+    mockAgentCoreSend.mockResolvedValueOnce({ workloadAccessToken: undefined });
+
+    await expect(
+      resolveGitHubToken(undefined, { workloadIdentityName: 'agent', credentialProviderName: 'github' }),
+    ).rejects.toThrow('empty workload access token');
+  });
+
+  test('Token Vault: throws when GitHub access token is empty', async () => {
+    mockAgentCoreSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-123' })
+      .mockResolvedValueOnce({ accessToken: undefined });
+
+    await expect(
+      resolveGitHubToken(undefined, { workloadIdentityName: 'agent', credentialProviderName: 'github' }),
+    ).rejects.toThrow('empty GitHub access token');
+  });
+
+  test('throws when neither Token Vault nor Secrets Manager is configured', async () => {
+    await expect(resolveGitHubToken(undefined, undefined)).rejects.toThrow(
+      'No GitHub credential source configured',
+    );
+  });
+
+  test('falls back to Secrets Manager when tokenVaultConfig is partial', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_fallback' });
+
+    // Only workloadIdentityName set, no credentialProviderName
+    const token = await resolveGitHubToken(
+      'arn:aws:secretsmanager:us-east-1:123:secret:test',
+      { workloadIdentityName: 'agent', credentialProviderName: '' },
+    );
+
+    expect(token).toBe('ghp_fallback');
+    expect(mockSmSend).toHaveBeenCalledTimes(1);
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
   });
 });
 

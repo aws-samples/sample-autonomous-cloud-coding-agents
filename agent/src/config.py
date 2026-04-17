@@ -12,17 +12,76 @@ AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 PR_TASK_TYPES = frozenset(("pr_iteration", "pr_review"))
 
 
-def resolve_github_token() -> str:
-    """Resolve GitHub token from Secrets Manager or environment variable.
+def _resolve_github_token_via_token_vault(
+    workload_identity_name: str,
+    credential_provider_name: str,
+) -> str:
+    """Resolve GitHub token via AgentCore Token Vault (M2M OAuth2 flow)."""
+    import boto3
 
-    In deployed mode, GITHUB_TOKEN_SECRET_ARN is set and the token is fetched
-    from Secrets Manager on first call, then cached in os.environ.
-    For local development, falls back to GITHUB_TOKEN.
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    client = boto3.client("bedrock-agentcore", region_name=region)
+
+    # Step 1: obtain a workload access token (represents the agent's identity)
+    try:
+        wat_response = client.get_workload_access_token(
+            workloadName=workload_identity_name,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Token Vault: failed to get workload access token "
+            f"for '{workload_identity_name}': {exc}"
+        ) from exc
+
+    workload_access_token = wat_response.get("workloadAccessToken")
+    if not workload_access_token:
+        raise RuntimeError("Token Vault returned empty workload access token")
+
+    # Step 2: exchange for a GitHub OAuth token via M2M flow
+    try:
+        token_response = client.get_resource_oauth2_token(
+            workloadIdentityToken=workload_access_token,
+            resourceCredentialProviderName=credential_provider_name,
+            scopes=["repo"],
+            oauth2Flow="M2M",
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Token Vault: failed to exchange for GitHub OAuth token via provider "
+            f"'{credential_provider_name}': {exc}"
+        ) from exc
+
+    access_token = token_response.get("accessToken")
+    if not access_token:
+        raise RuntimeError("Token Vault returned empty GitHub access token")
+
+    return access_token
+
+
+def resolve_github_token() -> str:
+    """Resolve GitHub token from Token Vault, Secrets Manager, or environment variable.
+
+    Resolution order (first match wins):
+    1. GITHUB_TOKEN env var (set externally or cached from a prior resolution)
+    2. AgentCore Token Vault (preferred) — when WORKLOAD_IDENTITY_NAME and
+       GITHUB_OAUTH2_PROVIDER_NAME are set
+    3. Secrets Manager PAT — when GITHUB_TOKEN_SECRET_ARN is set
+    4. Empty string (no credential configured)
     """
     # Return cached value if already resolved
     cached = os.environ.get("GITHUB_TOKEN", "")
     if cached:
         return cached
+
+    # Prefer Token Vault if configured
+    workload_name = os.environ.get("WORKLOAD_IDENTITY_NAME")
+    provider_name = os.environ.get("GITHUB_OAUTH2_PROVIDER_NAME")
+    if workload_name and provider_name:
+        token = _resolve_github_token_via_token_vault(workload_name, provider_name)
+        os.environ["GITHUB_TOKEN"] = token
+        return token
+
+    # Fall back to Secrets Manager PAT
     secret_arn = os.environ.get("GITHUB_TOKEN_SECRET_ARN")
     if secret_arn:
         import boto3
@@ -30,7 +89,12 @@ def resolve_github_token() -> str:
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = boto3.client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=secret_arn)
-        token = resp["SecretString"]
+        token = resp.get("SecretString")
+        if not token:
+            raise RuntimeError(
+                f"GitHub token secret '{secret_arn}' is empty or stored as binary "
+                "— ensure the secret contains a plaintext PAT string"
+            )
         # Cache in env so downstream tools (git, gh CLI) work unchanged
         os.environ["GITHUB_TOKEN"] = token
         return token

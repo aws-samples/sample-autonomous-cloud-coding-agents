@@ -196,7 +196,7 @@ export function computeTtlEpoch(retentionDays: number): number {
 /** Valid task type values. Compile-time check ensures this stays in sync with TaskType. */
 const TASK_TYPE_LIST = ['new_task', 'pr_iteration', 'pr_review'] as const satisfies readonly TaskType[];
 type _AssertExhaustive = Exclude<TaskType, (typeof TASK_TYPE_LIST)[number]> extends never ? true : never;
-const _exhaustiveCheck: _AssertExhaustive = true; // eslint-disable-line @typescript-eslint/no-unused-vars
+const _exhaustiveCheck: _AssertExhaustive = true;
 export const VALID_TASK_TYPES = new Set<string>(TASK_TYPE_LIST);
 
 /**

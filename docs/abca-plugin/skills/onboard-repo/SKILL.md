@@ -19,7 +19,7 @@ Use AskUserQuestion to collect:
 - **Model preference**: Claude Sonnet 4 (default), Claude Opus 4 (complex repos), or Claude Haiku (lightweight). **Important:** Models must be specified using their cross-region inference profile ID (e.g. `us.anthropic.claude-opus-4-20250514-v1:0`), not the raw foundation model ID. On-demand invocation of raw model IDs is not supported for most models.
 - **Max turns**: Default 100 (range: 1-500)
 - **Max budget**: USD cost ceiling per task (optional)
-- **Custom GitHub PAT**: If this repo needs a different token than the platform default
+- **Custom GitHub credentials**: If this repo needs a different token than the platform default (per-repo PAT via `credentials.githubTokenSecretArn`, or per-repo Token Vault via `credentials.workloadIdentityName` + `credentials.githubOAuth2CredentialProviderName`)
 
 ## Step 2: Read the Current Stack
 
@@ -48,7 +48,12 @@ new Blueprint(this, 'MyRepoBlueprint', {
   // maxTurns: 100,
   // maxBudgetUsd: 50,
   // runtimeArn: runtime.runtimeArn,
-  // githubTokenSecretArn: 'arn:aws:secretsmanager:...',
+  // credentials: {
+  //   githubTokenSecretArn: 'arn:aws:secretsmanager:...',        // PAT path
+  //   // OR Token Vault path (preferred):
+  //   // workloadIdentityName: 'my-identity',
+  //   // githubOAuth2CredentialProviderName: 'my-github-provider',
+  // },
 });
 ```
 
@@ -116,7 +121,9 @@ aws dynamodb scan --table-name <RepoTableName> \
 | `max_turns` | Turn limit per task | 100 |
 | `max_budget_usd` | Cost ceiling per task | Unlimited |
 | `system_prompt_overrides` | Custom system instructions | None |
-| `github_token_secret_arn` | Repo-specific GitHub token | Platform default |
+| `github_token_secret_arn` | Repo-specific GitHub token (PAT path) | Platform default |
+| `workload_identity_name` | Token Vault workload identity (preferred) | Platform default |
+| `github_oauth2_provider_name` | Token Vault credential provider (required with above) | Platform default |
 | `poll_interval_ms` | Completion polling frequency | 30000ms |
 
 Task-level parameters override Blueprint defaults. If neither specifies a value, platform defaults apply.
@@ -124,6 +131,6 @@ Task-level parameters override Blueprint defaults. If neither specifies a value,
 ## Common Issues
 
 - **422 "Repository not onboarded"** — Blueprint hasn't been deployed yet. Add the construct and redeploy.
-- **Preflight failures after onboarding** — GitHub PAT may lack permissions for the new repo. Check the PAT's fine-grained access includes the target repository with Contents (read/write) and Pull requests (read/write) permissions.
+- **Preflight failures after onboarding** — GitHub credentials may lack permissions for the new repo. For PAT: check the fine-grained token includes the target repository with Contents (read/write) and Pull requests (read/write) permissions. For Token Vault: verify the GitHub App is installed on the target repo (GitHub → Settings → Developer settings → GitHub Apps → your app → Install App) and the callback URL is registered.
 - **400 "Invocation with on-demand throughput isn't supported"** — The Blueprint `modelId` is using a raw foundation model ID instead of an inference profile ID. Change e.g. `anthropic.claude-opus-4-20250514-v1:0` to `us.anthropic.claude-opus-4-20250514-v1:0`.
 - **403 "not authorized to perform bedrock:InvokeModelWithResponseStream"** — The runtime IAM role lacks permissions for the model specified in the Blueprint. Add `grantInvoke` for both the model and its cross-region inference profile in `agent.ts`.

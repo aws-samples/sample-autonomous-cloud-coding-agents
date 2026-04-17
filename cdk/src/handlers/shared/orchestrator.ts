@@ -238,6 +238,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     max_budget_usd: repoConfig?.max_budget_usd,
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
+    workload_identity_name: repoConfig?.workload_identity_name ?? process.env.WORKLOAD_IDENTITY_NAME,
+    github_oauth2_provider_name: repoConfig?.github_oauth2_provider_name ?? process.env.GITHUB_OAUTH2_PROVIDER_NAME,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
   };
@@ -255,6 +257,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn: blueprintConfig?.github_token_secret_arn,
+    workloadIdentityName: blueprintConfig?.workload_identity_name,
+    githubOAuth2ProviderName: blueprintConfig?.github_oauth2_provider_name,
     memoryId: MEMORY_ID,
   });
 

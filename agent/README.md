@@ -11,11 +11,11 @@ The Docker image is built for `linux/arm64` to match AgentCore Runtime requireme
 
 - Docker (with buildx for ARM64 cross-compilation if on x86)
 - AWS credentials with Bedrock access (Claude Sonnet)
-- GitHub fine-grained Personal Access Token
+- GitHub fine-grained Personal Access Token (for local runs), or a GitHub App with AgentCore Token Vault (preferred for production — see [Developer Guide step 4](../docs/guides/DEVELOPER_GUIDE.md))
 
-### GitHub PAT — Minimal Permissions
+### GitHub PAT — Minimal Permissions (local runs)
 
-Create a **fine-grained PAT** at GitHub > Settings > Developer settings > Personal access tokens > Fine-grained tokens.
+Create a **fine-grained PAT** at GitHub > Settings > Developer settings > Personal access tokens > Fine-grained tokens. In deployed (AgentCore) mode, the token is resolved by the orchestrator — from Token Vault (preferred) or Secrets Manager. See the [Developer Guide](../docs/guides/DEVELOPER_GUIDE.md) for setup.
 
 **Repository access**: Select only the specific repo(s) the agent will work on.
 
@@ -87,7 +87,7 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GITHUB_TOKEN` | Yes | | Fine-grained PAT (see permissions above) |
+| `GITHUB_TOKEN` | Local runs | | Fine-grained PAT (see permissions above). In deployed mode, resolved from Token Vault or Secrets Manager by the orchestrator. |
 | `AWS_REGION` | Yes | | AWS region for Bedrock (e.g., `us-east-1`) |
 | `AWS_ACCESS_KEY_ID` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
 | `AWS_SECRET_ACCESS_KEY` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
@@ -160,7 +160,7 @@ Request payload (representative fields — the API orchestrator sends a fuller o
 - `model_id` — Preferred key from the orchestrator; `anthropic_model` is also accepted.
 - Optional platform fields (when using the full stack) include `hydrated_context`, `system_prompt_overrides`, `prompt_version`, and `memory_id`.
 
-All fields in `input` fall back to container environment variables when omitted. Secrets like `GITHUB_TOKEN` should be set as runtime environment variables via the CDK stack — not sent in the payload, since AgentCore logs the full request payload in plain text.
+All fields in `input` fall back to container environment variables when omitted. Secrets like `GITHUB_TOKEN` should be set as runtime environment variables via the CDK stack — not sent in the payload, since AgentCore logs the full request payload in plain text. In production, Token Vault is the preferred credential source: the agent calls `GetWorkloadAccessToken` + `GetResourceOauth2Token` to obtain a short-lived GitHub OAuth token at runtime (see [Developer Guide step 4](../docs/guides/DEVELOPER_GUIDE.md)).
 
 Immediate response (acceptance):
 

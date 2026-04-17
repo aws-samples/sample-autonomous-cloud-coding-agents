@@ -59,7 +59,7 @@ ignore = [
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 "src/system_prompt.py" = ["E501"]  # long prompt strings
 "src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "E402"]  # assert; test tokens; /tmp paths; importorskip
+"tests/**" = ["S101", "S105", "S106", "S108", "E402"]  # assert; test tokens/passwords; /tmp paths; importorskip
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

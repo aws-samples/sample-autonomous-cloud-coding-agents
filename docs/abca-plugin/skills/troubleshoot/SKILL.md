@@ -91,10 +91,11 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 ```
 
 **`preflight_failed`:**
-- GitHub PAT lacks permissions for the repo
+- GitHub credentials lack permissions for the repo
 - Repository doesn't exist or is private without proper token scope
 - Check event `reason` and `detail` fields for specifics
-- Verify PAT: fine-grained token must include the target repository with Contents (read/write), Pull Requests (read/write), Issues (read)
+- **PAT path:** verify the fine-grained token includes the target repository with Contents (read/write), Pull Requests (read/write), Issues (read)
+- **Token Vault path:** verify the GitHub App is installed on the target repo (GitHub → Settings → Developer settings → GitHub Apps → your app → Install App), the callback URL (`AgentCoreIdentityGitHubOAuthCallbackUrl` stack output) is registered in the GitHub App settings, and the CDK context params (`githubOAuthClientId`, `githubOAuthClientSecret`) were provided at deploy time
 
 **`task_failed` / task completes with 0 tokens and no PR:**
 - Agent encountered an error during execution

@@ -20,7 +20,7 @@
 // Admission / pre-invoke checks before orchestration. See docs/design/ORCHESTRATOR.md (admission control).
 // Tests: cdk/test/handlers/shared/preflight.test.ts
 
-import { resolveGitHubToken } from './context-hydration';
+import { resolveGitHubToken, type TokenVaultConfig } from './context-hydration';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
 import type { TaskType } from './types';
@@ -326,12 +326,20 @@ export async function runPreflightChecks(
 ): Promise<PreflightResult> {
   const checks: PreflightCheckResult[] = [];
 
-  if (blueprintConfig.github_token_secret_arn) {
+  const tokenVaultConfig: TokenVaultConfig | undefined =
+    blueprintConfig.workload_identity_name && blueprintConfig.github_oauth2_provider_name
+      ? {
+        workloadIdentityName: blueprintConfig.workload_identity_name,
+        credentialProviderName: blueprintConfig.github_oauth2_provider_name,
+      }
+      : undefined;
+
+  if (tokenVaultConfig || blueprintConfig.github_token_secret_arn) {
     // Resolve token — fail immediately if token resolution fails
     let token: string;
     const tokenStart = Date.now();
     try {
-      token = await resolveGitHubToken(blueprintConfig.github_token_secret_arn);
+      token = await resolveGitHubToken(blueprintConfig.github_token_secret_arn, tokenVaultConfig);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       logger.error('GitHub token resolution failed', { repo, error: detail });
@@ -351,7 +359,7 @@ export async function runPreflightChecks(
     }
 
     // Run reachability + repo access checks in parallel
-    // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
+
     const results = await Promise.allSettled([
       checkGitHubReachability(token),
       checkRepoAccess(repo, token, taskType),
@@ -375,7 +383,7 @@ export async function runPreflightChecks(
       }
     }
   } else {
-    logger.warn('No GitHub token configured — skipping GitHub pre-flight checks', { repo });
+    logger.warn('No GitHub credential source configured — skipping GitHub pre-flight checks', { repo });
   }
 
   // Runtime check (behind feature flag — read at call time so tests can toggle)

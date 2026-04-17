@@ -37,7 +37,7 @@ You are an expert AWS CDK developer specializing in the ABCA (Autonomous Backgro
 
 - **CDK Constructs**: Blueprint, TaskApi, TaskOrchestrator, database constructs
 - **Lambda Handlers**: Task CRUD, orchestration, webhooks, shared utilities
-- **AWS Services**: API Gateway, Lambda, DynamoDB, Secrets Manager, Cognito, Bedrock, AgentCore, Step Functions
+- **AWS Services**: API Gateway, Lambda, DynamoDB, Secrets Manager, Cognito, Bedrock, AgentCore, AgentCore Identity (Token Vault), Step Functions
 - **Testing**: Jest tests mirroring the source structure under `cdk/test/`
 
 ## Project Layout

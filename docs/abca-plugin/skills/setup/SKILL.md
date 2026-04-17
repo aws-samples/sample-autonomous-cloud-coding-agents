@@ -32,7 +32,7 @@ yarn --version 2>/dev/null
 - Node.js 22.x (managed by mise)
 - Yarn Classic 1.22.x (via Corepack)
 - AWS CDK CLI >= 2.233.0
-- GitHub fine-grained PAT with repository access
+- GitHub fine-grained PAT with repository access (simplest), or a GitHub App for Token Vault (preferred for production — see [Developer Guide step 4](../../../guides/DEVELOPER_GUIDE.md))
 
 For any missing tool, provide the specific installation command for the user's platform. Do NOT proceed until all prerequisites are met.
 
@@ -69,7 +69,7 @@ Guide through:
    aws cloudformation describe-stacks --stack-name backgroundagent-dev \
      --query 'Stacks[0].Outputs' --output table
    ```
-4. Store the GitHub PAT in Secrets Manager using the `GitHubTokenSecretArn` output
+4. Store the GitHub PAT in Secrets Manager using the `GitHubTokenSecretArn` output. Alternatively, deploy with Token Vault for auto-refreshed tokens: `mise run //cdk:deploy -- -c githubOAuthClientId="..." -c githubOAuthClientSecret="..."` (see [Developer Guide step 4](../../../guides/DEVELOPER_GUIDE.md))
 5. Create a Cognito user (self-signup is disabled):
    ```bash
    aws cognito-idp admin-create-user --user-pool-id $USER_POOL_ID \

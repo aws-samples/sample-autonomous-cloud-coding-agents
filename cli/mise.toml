@@ -21,4 +21,4 @@ run = "yarn jest --passWithNoTests --updateSnapshot"
 
 [tasks.eslint]
 description = "Run ESLint"
-run = "ESLINT_USE_FLAT_CONFIG=false ../node_modules/.bin/eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test build-tools"
+run = "../node_modules/.bin/eslint --fix --no-error-on-unmatched-pattern src test build-tools"

@@ -17,6 +17,11 @@
  *  SOFTWARE.
  */
 
+import {
+  BedrockAgentCoreClient,
+  GetWorkloadAccessTokenCommand,
+  GetResourceOauth2TokenCommand,
+} from '@aws-sdk/client-bedrock-agentcore';
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { logger } from './logger';
@@ -125,6 +130,8 @@ export interface HydratedContext {
 // ---------------------------------------------------------------------------
 
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN;
+const WORKLOAD_IDENTITY_NAME = process.env.WORKLOAD_IDENTITY_NAME;
+const GITHUB_OAUTH2_PROVIDER_NAME = process.env.GITHUB_OAUTH2_PROVIDER_NAME;
 const USER_PROMPT_TOKEN_BUDGET = Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? '100000');
 const GITHUB_API_TIMEOUT_MS = 30_000;
 const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
@@ -270,21 +277,23 @@ export async function screenWithGuardrail(text: string, taskId: string): Promise
 }
 
 // ---------------------------------------------------------------------------
-// GitHub token resolution (Secrets Manager with caching)
+// GitHub token resolution (Token Vault preferred, Secrets Manager fallback)
 // ---------------------------------------------------------------------------
 
-const tokenCache = new Map<string, { token: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+/** Configuration for Token Vault credential resolution. */
+export interface TokenVaultConfig {
+  readonly workloadIdentityName: string;
+  readonly credentialProviderName: string;
+}
 
+// --- Secrets Manager path (PAT fallback) ---
+
+const smTokenCache = new Map<string, { token: string; expiresAt: number }>();
+const SM_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const smClient = new SecretsManagerClient({});
 
-/**
- * Resolve the GitHub token from Secrets Manager with per-ARN caching.
- * @param secretArn - the ARN of the secret.
- * @returns the secret string.
- */
-export async function resolveGitHubToken(secretArn: string): Promise<string> {
-  const cached = tokenCache.get(secretArn);
+async function resolveGitHubTokenViaSecretsManager(secretArn: string): Promise<string> {
+  const cached = smTokenCache.get(secretArn);
   if (cached && Date.now() < cached.expiresAt) {
     return cached.token;
   }
@@ -294,15 +303,86 @@ export async function resolveGitHubToken(secretArn: string): Promise<string> {
     throw new Error('GitHub token secret is empty');
   }
 
-  tokenCache.set(secretArn, { token: result.SecretString, expiresAt: Date.now() + CACHE_TTL_MS });
+  smTokenCache.set(secretArn, { token: result.SecretString, expiresAt: Date.now() + SM_CACHE_TTL_MS });
   return result.SecretString;
 }
 
+// --- Token Vault path (preferred) ---
+
+const tvTokenCache = new Map<string, { token: string; expiresAt: number }>();
+// Token Vault OAuth2 tokens are typically valid for 1 hour; 30 min cache avoids
+// re-fetching while staying well within token lifetime.
+const TV_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+let agentCoreClient: BedrockAgentCoreClient | undefined;
+
+async function resolveGitHubTokenViaTokenVault(config: TokenVaultConfig): Promise<string> {
+  const cacheKey = `${config.workloadIdentityName}:${config.credentialProviderName}`;
+  const cached = tvTokenCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.token;
+  }
+
+  if (!agentCoreClient) {
+    agentCoreClient = new BedrockAgentCoreClient({});
+  }
+
+  // Step 1: obtain a workload access token (represents the agent's identity)
+  const watResponse = await agentCoreClient.send(
+    new GetWorkloadAccessTokenCommand({ workloadName: config.workloadIdentityName }),
+  );
+  if (!watResponse.workloadAccessToken) {
+    throw new Error('Token Vault returned empty workload access token');
+  }
+
+  // Step 2: exchange for a GitHub OAuth token via M2M flow
+  const tokenResponse = await agentCoreClient.send(
+    new GetResourceOauth2TokenCommand({
+      workloadIdentityToken: watResponse.workloadAccessToken,
+      resourceCredentialProviderName: config.credentialProviderName,
+      scopes: ['repo'],
+      oauth2Flow: 'M2M',
+    }),
+  );
+  if (!tokenResponse.accessToken) {
+    throw new Error('Token Vault returned empty GitHub access token');
+  }
+
+  tvTokenCache.set(cacheKey, { token: tokenResponse.accessToken, expiresAt: Date.now() + TV_CACHE_TTL_MS });
+  return tokenResponse.accessToken;
+}
+
+// --- Unified entry point ---
+
 /**
- * Clear the cached tokens (for testing).
+ * Resolve a GitHub token. Prefers Token Vault when configured, falls back
+ * to Secrets Manager PAT.
+ *
+ * @param secretArn - ARN of the Secrets Manager secret (PAT path).
+ * @param tokenVaultConfig - Token Vault workload identity + provider name.
+ * @returns the GitHub access token.
+ */
+export async function resolveGitHubToken(
+  secretArn?: string,
+  tokenVaultConfig?: TokenVaultConfig,
+): Promise<string> {
+  // Prefer Token Vault if configured
+  if (tokenVaultConfig?.workloadIdentityName && tokenVaultConfig?.credentialProviderName) {
+    return resolveGitHubTokenViaTokenVault(tokenVaultConfig);
+  }
+  // Fall back to Secrets Manager PAT
+  if (secretArn) {
+    return resolveGitHubTokenViaSecretsManager(secretArn);
+  }
+  throw new Error('No GitHub credential source configured (neither Token Vault nor Secrets Manager)');
+}
+
+/**
+ * Clear all cached tokens (for testing).
  */
 export function clearTokenCache(): void {
-  tokenCache.clear();
+  smTokenCache.clear();
+  tvTokenCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +395,7 @@ export function clearTokenCache(): void {
  * Mirrors agent/src/context.py:fetch_github_issue.
  * @param repo - the "owner/repo" string.
  * @param issueNumber - the issue number.
- * @param token - the GitHub PAT.
+ * @param token - the GitHub access token (PAT or OAuth2 token).
  * @returns the issue context or null on failure.
  */
 export async function fetchGitHubIssue(
@@ -429,7 +509,6 @@ async function fetchReviewCommentsGraphQL(
   let cursor: string | null = null;
 
   try {
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const resp = await fetch('https://api.github.com/graphql', {
         method: 'POST',
@@ -539,7 +618,7 @@ async function fetchReviewCommentsGraphQL(
  * Returns null on any error (logged).
  * @param repo - the "owner/repo" string.
  * @param prNumber - the PR number.
- * @param token - the GitHub PAT.
+ * @param token - the GitHub access token (PAT or OAuth2 token).
  * @returns the PR context or null on failure.
  */
 export async function fetchGitHubPullRequest(
@@ -922,6 +1001,10 @@ export function buildContentTrust(sources: string[]): Record<string, ContentTrus
 export interface HydrateContextOptions {
   /** Override the GitHub token secret ARN (from per-repo Blueprint config). */
   readonly githubTokenSecretArn?: string;
+  /** AgentCore WorkloadIdentity name for Token Vault credential resolution. */
+  readonly workloadIdentityName?: string;
+  /** AgentCore OAuth2 credential provider name for Token Vault GitHub tokens. */
+  readonly githubOAuth2ProviderName?: string;
   /** AgentCore Memory ID for loading cross-task memory context. */
   readonly memoryId?: string;
 }
@@ -946,6 +1029,12 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     // Fetch GitHub issue, memory context, and PR context in parallel
     const memoryId = options?.memoryId ?? process.env.MEMORY_ID;
     const tokenSecretArn = options?.githubTokenSecretArn ?? GITHUB_TOKEN_SECRET_ARN;
+    const workloadIdentityName = options?.workloadIdentityName ?? WORKLOAD_IDENTITY_NAME;
+    const oauthProviderName = options?.githubOAuth2ProviderName ?? GITHUB_OAUTH2_PROVIDER_NAME;
+    const tokenVaultConfig: TokenVaultConfig | undefined =
+      workloadIdentityName && oauthProviderName
+        ? { workloadIdentityName, credentialProviderName: oauthProviderName }
+        : undefined;
 
     const isPrTask = isPrTaskType(task.task_type as TaskType);
 
@@ -954,9 +1043,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       // Issue fetch (skip for PR task types)
       (async () => {
         if (isPrTask) return undefined;
-        if (task.issue_number !== undefined && tokenSecretArn) {
+        if (task.issue_number !== undefined && (tokenVaultConfig || tokenSecretArn)) {
           try {
-            const token = await resolveGitHubToken(tokenSecretArn);
+            const token = await resolveGitHubToken(tokenSecretArn, tokenVaultConfig);
             return await fetchGitHubIssue(task.repo, task.issue_number, token) ?? undefined;
           } catch (err) {
             logger.warn('Failed to resolve GitHub token or fetch issue', {
@@ -972,9 +1061,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         : Promise.resolve(undefined),
       // PR fetch (only for PR task types)
       (async () => {
-        if (isPrTask && task.pr_number !== undefined && tokenSecretArn) {
+        if (isPrTask && task.pr_number !== undefined && (tokenVaultConfig || tokenSecretArn)) {
           try {
-            const token = await resolveGitHubToken(tokenSecretArn);
+            const token = await resolveGitHubToken(tokenSecretArn, tokenVaultConfig);
             return await fetchGitHubPullRequest(task.repo, task.pr_number, token) ?? undefined;
           } catch (err) {
             logger.warn('Failed to fetch PR context', {

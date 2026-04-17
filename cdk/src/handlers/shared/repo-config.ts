@@ -39,6 +39,8 @@ export interface RepoConfig {
   readonly max_budget_usd?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
+  readonly workload_identity_name?: string;
+  readonly github_oauth2_provider_name?: string;
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
@@ -56,6 +58,8 @@ export interface BlueprintConfig {
   readonly max_budget_usd?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
+  readonly workload_identity_name?: string;
+  readonly github_oauth2_provider_name?: string;
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];

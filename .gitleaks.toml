@@ -10,3 +10,11 @@ paths = [
     "^agent/tests/test_hooks\\.py$",
     "^agent/tests/test_output_scanner\\.py$",
 ]
+
+[[allowlists]]
+description = "Mock/fake tokens in CDK and agent test fixtures (not real credentials)."
+targetRules = ["generic-api-key"]
+paths = [
+    "^cdk/test/",
+    "^agent/tests/",
+]

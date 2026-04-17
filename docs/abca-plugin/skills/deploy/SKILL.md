@@ -46,7 +46,7 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `GitHubTokenSecretArn`.
+Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `GitHubTokenSecretArn`. If Token Vault is configured, also highlight `AgentCoreIdentityGitHubOAuthCallbackUrl` — the user must register it in their GitHub App settings.
 
 ## Diff Workflow
 
@@ -78,6 +78,6 @@ Output goes to `cdk/cdk.out/`. Useful for reviewing generated CloudFormation tem
 ## Post-Deployment
 
 After a successful deploy, remind the user to:
-- Store/update the GitHub PAT in Secrets Manager if this is a fresh deployment
+- Store/update the GitHub PAT in Secrets Manager if this is a fresh deployment (PAT path), or register the `AgentCoreIdentityGitHubOAuthCallbackUrl` in the GitHub App settings (Token Vault path — see [Developer Guide step 4](../../../guides/DEVELOPER_GUIDE.md))
 - Onboard repositories via Blueprint constructs if needed
 - Run a smoke test: `curl -s -H "Authorization: $TOKEN" $API_URL/tasks`

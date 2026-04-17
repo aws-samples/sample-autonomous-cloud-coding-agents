@@ -1,8 +1,10 @@
-"""Unit tests for config.py — build_config and constants."""
+"""Unit tests for config.py — build_config, constants, and token resolution."""
+
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import PR_TASK_TYPES, build_config
+from config import PR_TASK_TYPES, build_config, resolve_github_token
 from models import TaskConfig
 
 
@@ -85,3 +87,155 @@ class TestBuildConfig:
         )
         assert config.task_id
         assert len(config.task_id) == 12
+
+
+class TestResolveGitHubToken:
+    def test_returns_cached_env_var(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_cached")
+        monkeypatch.delenv("WORKLOAD_IDENTITY_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN_SECRET_ARN", raising=False)
+        assert resolve_github_token() == "ghp_cached"
+
+    def test_returns_empty_when_nothing_configured(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("WORKLOAD_IDENTITY_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_OAUTH2_PROVIDER_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN_SECRET_ARN", raising=False)
+        assert resolve_github_token() == ""
+
+    @patch("boto3.client")
+    def test_token_vault_preferred_over_secrets_manager(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("WORKLOAD_IDENTITY_NAME", "test-agent")
+        monkeypatch.setenv("GITHUB_OAUTH2_PROVIDER_NAME", "test-github")
+        secret_arn = "arn:aws:secretsmanager:us-east-1:123:secret:pat"
+        monkeypatch.setenv("GITHUB_TOKEN_SECRET_ARN", secret_arn)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_workload_access_token.return_value = {
+            "workloadAccessToken": "wat-123",
+        }
+        mock_client.get_resource_oauth2_token.return_value = {
+            "accessToken": "gho_tokenvault",
+        }
+
+        token = resolve_github_token()
+
+        assert token == "gho_tokenvault"
+        mock_boto3_client.assert_called_once_with("bedrock-agentcore", region_name="us-east-1")
+        mock_client.get_workload_access_token.assert_called_once_with(workloadName="test-agent")
+        mock_client.get_resource_oauth2_token.assert_called_once_with(
+            workloadIdentityToken="wat-123",
+            resourceCredentialProviderName="test-github",
+            scopes=["repo"],
+            oauth2Flow="M2M",
+        )
+        # Token Vault used — Secrets Manager should NOT be called
+        mock_client.get_secret_value.assert_not_called()
+
+    @patch("boto3.client")
+    def test_falls_back_to_secrets_manager(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("WORKLOAD_IDENTITY_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_OAUTH2_PROVIDER_NAME", raising=False)
+        secret_arn = "arn:aws:secretsmanager:us-east-1:123:secret:pat"
+        monkeypatch.setenv("GITHUB_TOKEN_SECRET_ARN", secret_arn)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_secret_value.return_value = {"SecretString": "ghp_pat123"}
+
+        token = resolve_github_token()
+
+        assert token == "ghp_pat123"
+        mock_boto3_client.assert_called_once_with("secretsmanager", region_name="us-east-1")
+
+    @patch("boto3.client")
+    def test_token_vault_caches_in_env(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("WORKLOAD_IDENTITY_NAME", "agent")
+        monkeypatch.setenv("GITHUB_OAUTH2_PROVIDER_NAME", "github")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_workload_access_token.return_value = {"workloadAccessToken": "wat"}
+        mock_client.get_resource_oauth2_token.return_value = {"accessToken": "gho_cached"}
+
+        token = resolve_github_token()
+        assert token == "gho_cached"
+
+        # Verify it was cached in os.environ
+        import os
+
+        assert os.environ.get("GITHUB_TOKEN") == "gho_cached"
+
+    @patch("boto3.client")
+    def test_token_vault_get_workload_token_error(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("WORKLOAD_IDENTITY_NAME", "agent")
+        monkeypatch.setenv("GITHUB_OAUTH2_PROVIDER_NAME", "github")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_workload_access_token.side_effect = Exception("AccessDenied")
+
+        with pytest.raises(RuntimeError, match="failed to get workload access token"):
+            resolve_github_token()
+
+    @patch("boto3.client")
+    def test_token_vault_empty_workload_token(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("WORKLOAD_IDENTITY_NAME", "agent")
+        monkeypatch.setenv("GITHUB_OAUTH2_PROVIDER_NAME", "github")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_workload_access_token.return_value = {"workloadAccessToken": ""}
+
+        with pytest.raises(RuntimeError, match="empty workload access token"):
+            resolve_github_token()
+
+    @patch("boto3.client")
+    def test_token_vault_empty_github_token(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("WORKLOAD_IDENTITY_NAME", "agent")
+        monkeypatch.setenv("GITHUB_OAUTH2_PROVIDER_NAME", "github")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_workload_access_token.return_value = {"workloadAccessToken": "wat"}
+        mock_client.get_resource_oauth2_token.return_value = {"accessToken": ""}
+
+        with pytest.raises(RuntimeError, match="empty GitHub access token"):
+            resolve_github_token()
+
+    def test_partial_token_vault_falls_back_to_pat(self, monkeypatch):
+        """Only WORKLOAD_IDENTITY_NAME set — should skip Token Vault."""
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("WORKLOAD_IDENTITY_NAME", "agent")
+        monkeypatch.delenv("GITHUB_OAUTH2_PROVIDER_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN_SECRET_ARN", raising=False)
+        assert resolve_github_token() == ""
+
+    @patch("boto3.client")
+    def test_secrets_manager_empty_secret_raises(self, mock_boto3_client, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("WORKLOAD_IDENTITY_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_OAUTH2_PROVIDER_NAME", raising=False)
+        secret_arn = "arn:aws:secretsmanager:us-east-1:123:secret:pat"
+        monkeypatch.setenv("GITHUB_TOKEN_SECRET_ARN", secret_arn)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.get_secret_value.return_value = {"SecretString": ""}
+
+        with pytest.raises(RuntimeError, match="empty or stored as binary"):
+            resolve_github_token()

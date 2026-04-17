@@ -60,8 +60,9 @@ interface BlueprintProps {
   };
   // Credentials
   credentials?: {
-    githubTokenSecretArn?: string;     // per-repo GitHub token
-    // optional: githubAppInstallationId
+    githubTokenSecretArn?: string;                    // per-repo GitHub token (PAT path)
+    workloadIdentityName?: string;                    // AgentCore Token Vault identity (preferred)
+    githubOAuth2CredentialProviderName?: string;      // Token Vault credential provider (required with workloadIdentityName)
   };
   // Networking
   networking?: {
@@ -118,6 +119,8 @@ interface RepoConfig {
   system_prompt_overrides?: string;
   // Credentials
   github_token_secret_arn?: string;
+  workload_identity_name?: string;
+  github_oauth2_provider_name?: string;
   // Networking
   egress_allowlist?: string[];
   // Pipeline
@@ -177,10 +180,10 @@ This section defines how a `Blueprint` integrates with the rest of the system. E
 | **Gate** (`createTaskCore`) | `repo` (PK) + `status` in RepoTable | `GetItem` by `repo`. If not found or `status !== 'active'`, return 422 `REPO_NOT_ONBOARDED`. |
 | **Orchestrator: load config** | Full `RepoConfig` record | `GetItem` by `repo` after `load-task`. Merged with platform defaults. Stored as `blueprint_config` snapshot on the task record. |
 | **Step execution** | `compute_type`, `custom_steps`, `step_sequence` | The orchestrator framework resolves each step in the blueprint: built-in steps use the strategy selected by `compute_type` and pipeline config; custom steps invoke the Lambda ARN from `custom_steps`; step order follows `step_sequence` if provided, otherwise the default sequence. Each step is wrapped with state transitions, event emission, and cancellation checks. |
-| **Context hydration** | `github_token_secret_arn`, `system_prompt_overrides` | `resolveGitHubToken()` uses per-repo ARN instead of global. System prompt = platform default + `system_prompt_overrides` (appended). |
+| **Context hydration** | `github_token_secret_arn`, `workload_identity_name`, `github_oauth2_provider_name`, `system_prompt_overrides` | `resolveGitHubToken()` uses Token Vault (preferred) or per-repo Secrets Manager ARN instead of global. System prompt = platform default + `system_prompt_overrides` (appended). |
 | **Session start** | `compute_type`, `runtime_arn`, `model_id`, `max_turns` | The compute strategy (resolved from `compute_type`) determines how the session is started. For `agentcore`: `InvokeAgentRuntimeCommand` uses per-repo runtime ARN. Model and turns passed in payload. |
 | **Polling** | `poll_interval_ms` | `waitStrategy` uses per-repo interval (default: 30s). |
-| **Credentials** | `github_token_secret_arn` | Secrets Manager ARN for per-repo token. Orchestrator Lambda needs `secretsmanager:GetSecretValue` on this ARN. |
+| **Credentials** | `github_token_secret_arn`, `workload_identity_name`, `github_oauth2_provider_name` | Token Vault (preferred) or Secrets Manager ARN for per-repo token. Orchestrator Lambda needs `bedrock-agentcore:GetWorkloadAccessToken` + `GetResourceOauth2Token` for Token Vault, or `secretsmanager:GetSecretValue` for PAT. |
 | **Networking** | `egress_allowlist` | VPC security group / NAT rules configured at CDK time. |
 
 ### Platform defaults
@@ -196,6 +199,8 @@ Used when a `RepoConfig` field is absent:
 | `max_budget_usd` | None (no budget limit) | — |
 | `memory_token_budget` | 2000 | Platform constant |
 | `github_token_secret_arn` | Stack-level `GITHUB_TOKEN_SECRET_ARN` | CDK stack props |
+| `workload_identity_name` | Stack-level `WORKLOAD_IDENTITY_NAME` | CDK stack props (when Token Vault configured) |
+| `github_oauth2_provider_name` | Stack-level `GITHUB_OAUTH2_PROVIDER_NAME` | CDK stack props (when Token Vault configured) |
 | `poll_interval_ms` | 30000 | Orchestrator constant |
 | `system_prompt_overrides` | None | — |
 | `custom_steps` | None (no custom steps) | — |
@@ -219,8 +224,8 @@ The orchestrator loads the `RepoConfig` in the first step (after `load-task`) an
 |---|---|
 | `load-blueprint` | `compute_type`, `custom_steps`, `step_sequence` (resolves the full step pipeline) |
 | `admission-control` | `status` (defense-in-depth; already checked at API level) |
-| `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides` |
-| `pre-flight` | `github_token_secret_arn` (verifies GitHub API reachability and repo access) |
+| `hydrate-context` | `github_token_secret_arn`, `workload_identity_name`, `github_oauth2_provider_name`, `system_prompt_overrides` |
+| `pre-flight` | `github_token_secret_arn`, `workload_identity_name`, `github_oauth2_provider_name` (verifies GitHub API reachability and repo access) |
 | `start-session` | `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd` |
 | `await-agent-completion` | `poll_interval_ms` |
 | `finalize` | (custom post-agent steps run before finalize if configured) |

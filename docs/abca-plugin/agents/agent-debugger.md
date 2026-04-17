@@ -74,7 +74,7 @@ You are a debugging specialist for the ABCA agent runtime. You diagnose task exe
 
 ## Common Failure Patterns
 
-- **PAT scope too narrow**: Preflight fails because fine-grained token doesn't include the target repo
+- **GitHub credential scope too narrow**: Preflight fails because the token (PAT or OAuth) doesn't have sufficient permissions for the target repo. For Token Vault: verify the GitHub App is installed on the repo and the callback URL is registered
 - **Missing CLAUDE.md**: Agent can't find build/test commands, wastes turns exploring
 - **Stuck in test loop**: Agent repeatedly fails tests without making progress — reduce max_turns
 - **Memory/compute limits**: 2 vCPU, 8 GB RAM — large monorepos may need optimization

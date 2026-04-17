@@ -80,9 +80,21 @@ export interface BlueprintProps {
    */
   readonly credentials?: {
     /**
-     * ARN of the Secrets Manager secret containing a per-repo GitHub token.
+     * ARN of the Secrets Manager secret containing a per-repo GitHub token (PAT path).
      */
     readonly githubTokenSecretArn?: string;
+
+    /**
+     * AgentCore WorkloadIdentity name for Token Vault credential resolution (preferred path).
+     * Requires `githubOAuth2CredentialProviderName` to also be set.
+     */
+    readonly workloadIdentityName?: string;
+
+    /**
+     * AgentCore OAuth2 credential provider name for Token Vault GitHub tokens (preferred path).
+     * Requires `workloadIdentityName` to also be set.
+     */
+    readonly githubOAuth2CredentialProviderName?: string;
   };
 
   /**
@@ -150,9 +162,10 @@ export class Blueprint extends Construct {
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
 
-    // Validate repo format at construct time
+    // Validate at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
+    this.node.addValidation(new TokenVaultPairingValidation(props.credentials));
 
     const now = new Date().toISOString();
 
@@ -181,6 +194,12 @@ export class Blueprint extends Construct {
     }
     if (props.credentials?.githubTokenSecretArn) {
       item.github_token_secret_arn = { S: props.credentials.githubTokenSecretArn };
+    }
+    if (props.credentials?.workloadIdentityName) {
+      item.workload_identity_name = { S: props.credentials.workloadIdentityName };
+    }
+    if (props.credentials?.githubOAuth2CredentialProviderName) {
+      item.github_oauth2_provider_name = { S: props.credentials.githubOAuth2CredentialProviderName };
     }
     if (props.pipeline?.pollIntervalMs !== undefined) {
       item.poll_interval_ms = { N: String(props.pipeline.pollIntervalMs) };
@@ -258,6 +277,8 @@ export class Blueprint extends Construct {
     if (props.agent?.maxTurns !== undefined) fields.push(', #max_turns = :max_turns');
     if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
+    if (props.credentials?.workloadIdentityName) fields.push(', #workload_identity_name = :workload_identity_name');
+    if (props.credentials?.githubOAuth2CredentialProviderName) fields.push(', #github_oauth2_provider_name = :github_oauth2_provider_name');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
@@ -272,6 +293,8 @@ export class Blueprint extends Construct {
     if (props.agent?.maxTurns !== undefined) names['#max_turns'] = 'max_turns';
     if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
+    if (props.credentials?.workloadIdentityName) names['#workload_identity_name'] = 'workload_identity_name';
+    if (props.credentials?.githubOAuth2CredentialProviderName) names['#github_oauth2_provider_name'] = 'github_oauth2_provider_name';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
@@ -286,6 +309,8 @@ export class Blueprint extends Construct {
     if (props.agent?.maxTurns !== undefined) values[':max_turns'] = { N: String(props.agent.maxTurns) };
     if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
+    if (props.credentials?.workloadIdentityName) values[':workload_identity_name'] = { S: props.credentials.workloadIdentityName };
+    if (props.credentials?.githubOAuth2CredentialProviderName) values[':github_oauth2_provider_name'] = { S: props.credentials.githubOAuth2CredentialProviderName };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
@@ -321,5 +346,23 @@ class DomainFormatValidation implements IValidation {
       }
     }
     return errors;
+  }
+}
+
+/**
+ * Validates that Token Vault credential fields are set as a pair.
+ */
+class TokenVaultPairingValidation implements IValidation {
+  constructor(private readonly credentials: BlueprintProps['credentials']) {}
+
+  public validate(): string[] {
+    const c = this.credentials;
+    if (c?.workloadIdentityName && !c?.githubOAuth2CredentialProviderName) {
+      return ['credentials.githubOAuth2CredentialProviderName is required when credentials.workloadIdentityName is set'];
+    }
+    if (!c?.workloadIdentityName && c?.githubOAuth2CredentialProviderName) {
+      return ['credentials.workloadIdentityName is required when credentials.githubOAuth2CredentialProviderName is set'];
+    }
+    return [];
   }
 }

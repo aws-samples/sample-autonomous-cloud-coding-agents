@@ -30,7 +30,7 @@ export async function waitForTask(client: ApiClient, taskId: string): Promise<Ta
   const startTime = Date.now();
   let task: TaskDetail;
 
-  // eslint-disable-next-line no-constant-condition
+
   while (true) {
     task = await client.getTask(taskId);
 

@@ -59,6 +59,64 @@ aws secretsmanager put-secret-value \
 
 If you use a **per-repo** secret (`githubTokenSecretArn` on a Blueprint), put the PAT in that secret instead; the orchestrator reads whichever ARN is configured for the repo.
 
+#### 4. GitHub App via Token Vault (preferred, optional)
+
+> **Recommended for production.** Using a [GitHub App](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps) with AgentCore Token Vault produces short-lived, automatically-refreshed tokens with fine-grained, per-repository permissions — eliminating static, long-lived PATs. The PAT path above remains the simplest way to get started.
+>
+> **Why a GitHub App (not an OAuth App)?** GitHub Apps are GitHub's [recommended integration type](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps). They support installation-level, per-repository permissions (the app only sees repos it is installed on), act as their own identity (commits are attributed to the app), and produce short-lived tokens. Token Vault uses the app's OAuth2 client credentials (Client ID + Client secret) for the M2M token exchange.
+
+**Setup:**
+
+1. **Create a GitHub App.** Go to GitHub → **Settings** → **Developer settings** → **GitHub Apps** → **New GitHub App** and configure it:
+
+   | Field | Value |
+   |-------|-------|
+   | **GitHub App name** | A unique name, e.g. `my-org-abca-agent` |
+   | **Homepage URL** | Your org URL or `https://github.com/your-org` |
+   | **Callback URL** | Leave blank — you'll fill this after deploy (step 3) |
+   | **Webhook → Active** | Uncheck (not needed) |
+
+   Under **Permissions → Repository permissions**, grant:
+
+   | Permission | Access |
+   |------------|--------|
+   | **Contents** | Read and write (clone, push, create branches) |
+   | **Pull requests** | Read and write (create and update PRs) |
+   | **Issues** | Read-only (read issue context for tasks) |
+   | **Metadata** | Read-only (always required) |
+
+   Click **Create GitHub App**. On the app's settings page, note the **Client ID** (starts with `Iv...`). Under **Client secrets**, click **Generate a new client secret** and copy it.
+
+2. **Install the app on your repositories.** On the app's settings page, click **Install App** in the left sidebar. Choose your organization (or personal account), then select either **All repositories** or **Only select repositories** (pick the repos the agent should access). Click **Install**.
+
+3. **Deploy with Token Vault context parameters:**
+
+   ```bash
+   cd cdk && npx cdk deploy \
+     -c githubOAuthClientId="Iv1.your_client_id" \
+     -c githubOAuthClientSecret="your_github_app_client_secret"
+   ```
+
+   CDK creates a Secrets Manager secret for the client secret automatically, along with a `WorkloadIdentity` and an `OAuth2CredentialProvider` in AgentCore Identity. When these context parameters are absent, no Token Vault resources are created and the stack uses the PAT path (step 3 above).
+
+   > **Bring-your-own secret:** If you prefer to manage the Secrets Manager secret yourself (e.g. for rotation), use `-c githubOAuthClientSecretArn="arn:..."` instead of `-c githubOAuthClientSecret`.
+
+4. **Register the callback URL.** The deploy output prints the `AgentCoreIdentityGitHubOAuthCallbackUrl`. Copy it and paste it into the **Callback URL** field in your GitHub App settings (GitHub → **Settings** → **Developer settings** → **GitHub Apps** → your app → **General** → **Callback URL**).
+
+   To retrieve it later:
+
+   ```bash
+   aws cloudformation describe-stacks \
+     --stack-name backgroundagent-dev \
+     --region "$REGION" \
+     --query 'Stacks[0].Outputs[?OutputKey==`AgentCoreIdentityGitHubOAuthCallbackUrl`].OutputValue | [0]' \
+     --output text
+   ```
+
+**How it works at runtime:** The orchestrator and agent call `GetWorkloadAccessToken` (using the agent's identity) followed by `GetResourceOauth2Token` (M2M flow) to obtain a GitHub access token. Token Vault handles the OAuth2 exchange and token refresh automatically. When Token Vault env vars (`WORKLOAD_IDENTITY_NAME`, `GITHUB_OAUTH2_PROVIDER_NAME`) are present, they are preferred over the Secrets Manager PAT.
+
+**Per-repo overrides:** Blueprints accept `credentials.workloadIdentityName` and `credentials.githubOAuth2CredentialProviderName` for per-repo Token Vault configuration, alongside the existing `credentials.githubTokenSecretArn` for per-repo PATs.
+
 ### Optional customization
 
 #### Agent image (`agent/Dockerfile`)
