@@ -27,6 +27,7 @@ import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
+import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
 import { ApiError, CliError } from '../errors';
@@ -53,6 +54,7 @@ program.addCommand(makeListCommand());
 program.addCommand(makeStatusCommand());
 program.addCommand(makeCancelCommand());
 program.addCommand(makeEventsCommand());
+program.addCommand(makeWatchCommand());
 program.addCommand(makeWebhookCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {
