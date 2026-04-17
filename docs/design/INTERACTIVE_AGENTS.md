@@ -891,6 +891,10 @@ Upgrade:   Client ←WS→ AgentCore /ws              (bidirectional, mid-turn c
 
 ### 9.3 HITL approval gates: 3-tier configurable model
 
+> **⚠️ Pending design update (rev 4, tracked 2026-04-17):** This section describes the Phase 3 HITL design as of rev 3. A team discussion (Sam ↔ Alain, 2026-04-17) agreed to replace the hardcoded 3-tier model below with **Cedar policy-driven HITL**, reusing the existing in-process Cedar engine (`agent/src/policy.py` on branch `fix/validate-aws-before-docker-build`, soon to land on main). The existing Cedar decision model (`ALLOW`/`DENY` for tool governance) will be extended with a `REQUIRE_APPROVAL` outcome — same policy language, broader semantics. This enables workflows like AI-DLC where users gate per phase and relax over time.
+>
+> **Do not implement Phase 3 from the text below.** The design is being revised. Phase 1a and Phase 1b are unaffected and can proceed.
+
 **Decision:** Approval gates are optional. Three modes configurable per-task or per-Blueprint:
 
 | Mode | Behavior | `ClaudeAgentOptions` setting |
