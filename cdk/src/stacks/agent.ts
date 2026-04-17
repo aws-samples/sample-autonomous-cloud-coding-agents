@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Lazy } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -126,68 +126,179 @@ export class AgentStack extends Stack {
     // --- AgentCore Memory (cross-task learning) ---
     const agentMemory = new AgentMemory(this, 'AgentMemory');
 
-    const runtime = new agentcore.Runtime(this, 'Runtime', {
-      runtimeName,
-      agentRuntimeArtifact: artifact,
-      networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
-        vpc: agentVpc.vpc,
-        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        securityGroups: [agentVpc.runtimeSecurityGroup],
-      }),
-      environmentVariables: {
-        GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
-        AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
-        CLAUDE_CODE_USE_BEDROCK: '1',
-        ANTHROPIC_LOG: 'debug',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
-        TASK_TABLE_NAME: taskTable.table.tableName,
-        TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
-        USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
-        LOG_GROUP_NAME: applicationLogGroup.logGroupName,
-        MEMORY_ID: agentMemory.memory.memoryId,
-        MAX_TURNS: '100',
-        // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
-        // support flock(). Only caches whose tools never call flock() go there.
-        // Everything else stays on local ephemeral disk.
-        //
-        // Local disk (tools use flock):
-        //   AGENT_WORKSPACE — omitted, defaults to /workspace
-        //   MISE_DATA_DIR — mise's pipx backend sets UV_TOOL_DIR inside installs/,
-        //     and uv flocks that directory → must be local.
-        MISE_DATA_DIR: '/tmp/mise-data',
-        UV_CACHE_DIR: '/tmp/uv-cache',
-        // Persistent mount (no flock):
-        CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
-        npm_config_cache: '/mnt/workspace/.npm-cache',
-        // ENABLE_CLI_TELEMETRY: '1',
+    // --- Bedrock Guardrail for prompt injection detection ---
+    // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
+    const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
+      guardrailName: 'task-input-guardrail',
+      description: 'Screens task submissions for prompt injection attacks',
+      contentFilters: [
+        {
+          type: bedrock.ContentFilterType.PROMPT_ATTACK,
+          inputStrength: bedrock.ContentFilterStrength.HIGH,
+          outputStrength: bedrock.ContentFilterStrength.NONE,
+        },
+      ],
+    });
+
+    inputGuardrail.createVersion('Initial version');
+
+    // --- Runtime-JWT needs the Cognito User Pool + App Client owned by TaskApi.
+    // TaskApi in turn needs the orchestrator ARN (not yet available). We break
+    // the cycle with Lazy strings: TaskApi is constructed first with lazy refs
+    // to the orchestrator alias ARN, which is set once the orchestrator exists.
+    // At synth time the Lazy resolves to a CloudFormation token — no runtime
+    // ordering issue because the stack deploys both resources together.
+    let orchestratorArnHolder: string | undefined;
+    const lazyOrchestratorArn = Lazy.string({
+      produce: () => {
+        if (!orchestratorArnHolder) {
+          throw new Error('Orchestrator ARN was accessed before the TaskOrchestrator was created');
+        }
+        return orchestratorArnHolder;
       },
     });
 
-    // --- Session storage (preview) ---
-    // The L2 construct does not yet expose filesystemConfigurations.
-    // Use a CFN escape hatch until the L2 adds native support.
-    const cfnRuntime = runtime.node.defaultChild as CfnResource;
-    cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
-      {
-        SessionStorage: {
-          MountPath: '/mnt/workspace',
-        },
+    // Two Runtime ARN placeholders — the runtimes are created AFTER TaskApi
+    // because Runtime-JWT needs the Cognito pool owned by TaskApi.
+    let runtimeIamArnHolder: string | undefined;
+    const lazyRuntimeIamArn = Lazy.string({
+      produce: () => {
+        if (!runtimeIamArnHolder) {
+          throw new Error('Runtime-IAM ARN was accessed before RuntimeIam was created');
+        }
+        return runtimeIamArnHolder;
       },
-    ]);
+    });
 
-    taskTable.table.grantReadWriteData(runtime);
-    taskEventsTable.table.grantReadWriteData(runtime);
-    userConcurrencyTable.table.grantReadWriteData(runtime);
-    githubTokenSecret.grantRead(runtime);
-    applicationLogGroup.grantWrite(runtime);
-    agentMemory.grantReadWrite(runtime);
+    // --- Task API (REST API + Cognito + Lambda handlers) ---
+    // Created early so the Cognito User Pool is available for Runtime-JWT below.
+    const taskApi = new TaskApi(this, 'TaskApi', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      webhookTable: webhookTable.table,
+      orchestratorFunctionArn: lazyOrchestratorArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+      agentCoreStopSessionRuntimeArns: [lazyRuntimeIamArn],
+    });
+
+    // --- Two AgentCore Runtimes (same artifact, different authorizer) ---
+    //
+    // Runtime-IAM: invoked by the OrchestratorFn Lambda via SigV4.
+    // Runtime-JWT: invoked directly by CLI/SPA clients with a Cognito ID token.
+    //
+    // Sessions are scoped to a single runtime ARN (cannot be transferred across
+    // runtimes) but ProgressWriter writes to TaskEventsTable from inside the
+    // container regardless of invocation path, so cross-path observation works.
+    //
+    // Both runtimes share the same execution role requirements, VPC, secrets,
+    // memory, models, and env vars — factor them into shared constants first.
+    const runtimeEnvironmentVariables = {
+      GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
+      AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      ANTHROPIC_LOG: 'debug',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+      TASK_TABLE_NAME: taskTable.table.tableName,
+      TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
+      USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
+      LOG_GROUP_NAME: applicationLogGroup.logGroupName,
+      MEMORY_ID: agentMemory.memory.memoryId,
+      MAX_TURNS: '100',
+      // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
+      // support flock(). Only caches whose tools never call flock() go there.
+      // Everything else stays on local ephemeral disk.
+      //
+      // Local disk (tools use flock):
+      //   AGENT_WORKSPACE — omitted, defaults to /workspace
+      //   MISE_DATA_DIR — mise's pipx backend sets UV_TOOL_DIR inside installs/,
+      //     and uv flocks that directory → must be local.
+      MISE_DATA_DIR: '/tmp/mise-data',
+      UV_CACHE_DIR: '/tmp/uv-cache',
+      // Persistent mount (no flock):
+      CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
+      npm_config_cache: '/mnt/workspace/.npm-cache',
+      // ENABLE_CLI_TELEMETRY: '1',
+    };
+
+    const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
+      vpc: agentVpc.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [agentVpc.runtimeSecurityGroup],
+    });
+
+    // LifecycleConfiguration — see design doc §9.12.
+    // Defaults (idle=900s, max=28800s) are too aggressive: a 15-minute idle
+    // window will recycle the microVM while a user is reconnecting, losing the
+    // session. Raise idle to match maxLifetime (both capped at 8h by the
+    // AgentCore service quota). maxLifetime remains 8h (service maximum).
+    const sharedLifecycleConfiguration: agentcore.LifecycleConfiguration = {
+      idleRuntimeSessionTimeout: Duration.hours(8),
+      maxLifetime: Duration.hours(8),
+    };
+
+    // --- Runtime-IAM (orchestrator path) ---
+    // Uses default IAM authorizer. Consumed by OrchestratorFn.
+    const runtimeIam = new agentcore.Runtime(this, 'RuntimeIam', {
+      runtimeName,
+      agentRuntimeArtifact: artifact,
+      networkConfiguration: runtimeNetworkConfig,
+      environmentVariables: runtimeEnvironmentVariables,
+      lifecycleConfiguration: sharedLifecycleConfiguration,
+    });
+
+    // --- Runtime-JWT (interactive CLI/SPA path) ---
+    // Uses Cognito User Pool JWT authorizer. Consumed directly by clients over
+    // streaming InvokeAgentRuntime (SSE). Phase 1b direct-to-AgentCore path.
+    //
+    // Runtime name must match the AgentCore pattern ^[a-zA-Z][a-zA-Z0-9_]{0,47}$
+    // and must be globally unique per-runtime within the account/region.
+    const runtimeJwtName = `${runtimeName}_jwt`;
+    const runtimeJwt = new agentcore.Runtime(this, 'RuntimeJwt', {
+      runtimeName: runtimeJwtName,
+      agentRuntimeArtifact: artifact,
+      networkConfiguration: runtimeNetworkConfig,
+      environmentVariables: runtimeEnvironmentVariables,
+      lifecycleConfiguration: sharedLifecycleConfiguration,
+      authorizerConfiguration: agentcore.RuntimeAuthorizerConfiguration.usingCognito(
+        taskApi.userPool,
+        [taskApi.appClient],
+      ),
+    });
+
+    runtimeIamArnHolder = runtimeIam.agentRuntimeArn;
+
+    // --- Session storage (preview) on BOTH runtimes ---
+    // The L2 construct does not yet expose filesystemConfigurations; use the
+    // CFN escape hatch. Same /mnt/workspace mount on both runtimes so an
+    // interactive task can share the persistent cache with orchestrator-path
+    // tasks in the same repo.
+    for (const rt of [runtimeIam, runtimeJwt]) {
+      const cfnRuntime = rt.node.defaultChild as CfnResource;
+      cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
+        {
+          SessionStorage: {
+            MountPath: '/mnt/workspace',
+          },
+        },
+      ]);
+    }
+
+    // --- Shared IAM grants on BOTH runtimes ---
+    for (const rt of [runtimeIam, runtimeJwt]) {
+      taskTable.table.grantReadWriteData(rt);
+      taskEventsTable.table.grantReadWriteData(rt);
+      userConcurrencyTable.table.grantReadWriteData(rt);
+      githubTokenSecret.grantRead(rt);
+      applicationLogGroup.grantWrite(rt);
+      agentMemory.grantReadWrite(rt);
+    }
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
       supportsCrossRegion: true,
     });
-
-    model.grantInvoke(runtime);
 
     // Create a cross-region inference profile for Claude Sonnet 4.6
     const inferenceProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
@@ -195,29 +306,20 @@ export class AgentStack extends Stack {
       model: model,
     });
 
-    // Grant the runtime permissions to invoke the inference profile
-    inferenceProfile.grantInvoke(runtime);
-
     const model3 = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-20250514-v1:0', {
       supportsAgents: true,
       supportsCrossRegion: true,
     });
-
-    model3.grantInvoke(runtime);
 
     const inferenceProfile3 = bedrock.CrossRegionInferenceProfile.fromConfig({
       geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
       model: model3,
     });
 
-    inferenceProfile3.grantInvoke(runtime);
-
     const model2 = new bedrock.BedrockFoundationModel('anthropic.claude-haiku-4-5-20251001-v1:0', {
       supportsAgents: true,
       supportsCrossRegion: true,
     });
-
-    model2.grantInvoke(runtime);
 
     // Create a cross-region inference profile for Claude Haiku 4.5
     const inferenceProfile2 = bedrock.CrossRegionInferenceProfile.fromConfig({
@@ -225,24 +327,42 @@ export class AgentStack extends Stack {
       model: model2,
     });
 
-    // Grant the runtime permissions to invoke the inference profile
-    inferenceProfile2.grantInvoke(runtime);
+    for (const rt of [runtimeIam, runtimeJwt]) {
+      model.grantInvoke(rt);
+      inferenceProfile.grantInvoke(rt);
+      model3.grantInvoke(rt);
+      inferenceProfile3.grantInvoke(rt);
+      model2.grantInvoke(rt);
+      inferenceProfile2.grantInvoke(rt);
 
-    // Runtime logs and traces
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
+      // Runtime logs and traces (same config for both)
+      rt.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
+      rt.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+      rt.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
 
-    NagSuppressions.addResourceSuppressions(runtime, [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
-      },
-    ], true);
+      NagSuppressions.addResourceSuppressions(rt, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
+        },
+      ], true);
+    }
 
+    new CfnOutput(this, 'RuntimeIamArn', {
+      value: runtimeIam.agentRuntimeArn,
+      description: 'ARN of the AgentCore runtime with IAM authorizer (orchestrator path)',
+    });
+
+    new CfnOutput(this, 'RuntimeJwtArn', {
+      value: runtimeJwt.agentRuntimeArn,
+      description: 'ARN of the AgentCore runtime with Cognito JWT authorizer (interactive CLI/SPA path)',
+    });
+
+    // Backward-compatible alias — existing consumers (dashboards, scripts) that
+    // previously read `RuntimeArn` continue to work; defaults to Runtime-IAM.
     new CfnOutput(this, 'RuntimeArn', {
-      value: runtime.agentRuntimeArn,
-      description: 'ARN of the AgentCore runtime',
+      value: runtimeIam.agentRuntimeArn,
+      description: 'Deprecated alias for RuntimeIamArn — the IAM-auth runtime ARN',
     });
 
     new CfnOutput(this, 'TaskTableName', {
@@ -275,21 +395,6 @@ export class AgentStack extends Stack {
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
-    // --- Bedrock Guardrail for prompt injection detection ---
-    const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: 'task-input-guardrail',
-      description: 'Screens task submissions for prompt injection attacks',
-      contentFilters: [
-        {
-          type: bedrock.ContentFilterType.PROMPT_ATTACK,
-          inputStrength: bedrock.ContentFilterStrength.HIGH,
-          outputStrength: bedrock.ContentFilterStrength.NONE,
-        },
-      ],
-    });
-
-    inputGuardrail.createVersion('Initial version');
-
     // --- ECS Fargate compute backend (optional) ---
     // To enable ECS as an alternative compute backend, uncomment the block below
     // and the EcsAgentCluster import at the top of this file. Repos can then use
@@ -311,12 +416,14 @@ export class AgentStack extends Stack {
     // });
 
     // --- Task Orchestrator (durable Lambda function) ---
+    // runtimeArn points to Runtime-IAM only — the orchestrator must NOT invoke
+    // Runtime-JWT (which requires a Cognito ID token from a real user).
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
       repoTable: repoTable.table,
-      runtimeArn: runtime.agentRuntimeArn,
+      runtimeArn: runtimeIam.agentRuntimeArn,
       githubTokenSecretArn: githubTokenSecret.secretArn,
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
@@ -333,6 +440,9 @@ export class AgentStack extends Stack {
       // },
     });
 
+    // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
+    orchestratorArnHolder = orchestrator.alias.functionArn;
+
     // Grant the orchestrator Lambda read+write access to memory
     // (reads during context hydration, writes for fallback episodes)
     agentMemory.grantReadWrite(orchestrator.fn);
@@ -343,24 +453,12 @@ export class AgentStack extends Stack {
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
-    // --- Task API (REST API + Cognito + Lambda handlers) ---
-    const taskApi = new TaskApi(this, 'TaskApi', {
-      taskTable: taskTable.table,
-      taskEventsTable: taskEventsTable.table,
-      repoTable: repoTable.table,
-      webhookTable: webhookTable.table,
-      orchestratorFunctionArn: orchestrator.alias.functionArn,
-      guardrailId: inputGuardrail.guardrailId,
-      guardrailVersion: inputGuardrail.guardrailVersion,
-      agentCoreStopSessionRuntimeArns: [runtime.agentRuntimeArn],
-      // To allow cancel-task to stop ECS-backed tasks, uncomment:
-      // ecsClusterArn: ecsCluster.cluster.clusterArn,
-    });
-
     // --- Operator dashboard ---
+    // Dashboards the orchestrator-path runtime (Runtime-IAM). Runtime-JWT
+    // metrics can be added in a later phase when interactive telemetry matures.
     new TaskDashboard(this, 'TaskDashboard', {
       applicationLogGroup,
-      runtimeArn: runtime.agentRuntimeArn,
+      runtimeArn: runtimeIam.agentRuntimeArn,
     });
 
     // --- Bedrock model invocation logging (account-level) ---

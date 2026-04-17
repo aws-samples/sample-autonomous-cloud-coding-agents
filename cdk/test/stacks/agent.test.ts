@@ -70,10 +70,85 @@ describe('AgentStack', () => {
     });
   });
 
-  test('outputs RuntimeArn', () => {
+  test('outputs RuntimeArn (backward-compatible alias for RuntimeIamArn)', () => {
     template.hasOutput('RuntimeArn', {
-      Description: 'ARN of the AgentCore runtime',
+      Description: 'Deprecated alias for RuntimeIamArn — the IAM-auth runtime ARN',
     });
+  });
+
+  test('outputs RuntimeIamArn for the IAM-auth runtime (orchestrator path)', () => {
+    template.hasOutput('RuntimeIamArn', {
+      Description: 'ARN of the AgentCore runtime with IAM authorizer (orchestrator path)',
+    });
+  });
+
+  test('outputs RuntimeJwtArn for the Cognito-JWT-auth runtime (interactive path)', () => {
+    template.hasOutput('RuntimeJwtArn', {
+      Description: 'ARN of the AgentCore runtime with Cognito JWT authorizer (interactive CLI/SPA path)',
+    });
+  });
+
+  test('creates exactly two AgentCore Runtimes (Runtime-IAM and Runtime-JWT)', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 2);
+  });
+
+  test('Runtime-JWT has a Cognito JWT authorizer pointing at the TaskApi User Pool', () => {
+    // Find the JWT-auth runtime — it has an AuthorizerConfiguration with CustomJWTAuthorizer.
+    // The other runtime uses default IAM auth (no AuthorizerConfiguration present).
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const jwtRuntimes = Object.values(runtimes).filter(r => r.Properties?.AuthorizerConfiguration);
+    expect(jwtRuntimes).toHaveLength(1);
+    const jwtAuth = jwtRuntimes[0]!.Properties.AuthorizerConfiguration.CustomJWTAuthorizer;
+    expect(jwtAuth).toBeDefined();
+    // Cognito issuer URL embeds the UserPool id — validated by checking for
+    // cognito-idp in the DiscoveryUrl and presence of AllowedClients.
+    const discoveryUrl = JSON.stringify(jwtAuth.DiscoveryUrl);
+    expect(discoveryUrl).toContain('cognito-idp');
+    expect(discoveryUrl).toContain('.well-known/openid-configuration');
+    expect(jwtAuth.AllowedClients).toBeDefined();
+  });
+
+  test('both runtimes have 8-hour lifecycle limits (idle + max)', () => {
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const runtimeList = Object.values(runtimes);
+    expect(runtimeList).toHaveLength(2);
+    for (const rt of runtimeList) {
+      expect(rt.Properties?.LifecycleConfiguration).toEqual({
+        IdleRuntimeSessionTimeout: 28800,
+        MaxLifetime: 28800,
+      });
+    }
+  });
+
+  test('TaskEventsTable has DynamoDB Streams enabled with NEW_IMAGE', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      KeySchema: [
+        { AttributeName: 'task_id', KeyType: 'HASH' },
+        { AttributeName: 'event_id', KeyType: 'RANGE' },
+      ],
+      StreamSpecification: {
+        StreamViewType: 'NEW_IMAGE',
+      },
+    });
+  });
+
+  test('orchestrator IAM policy grants InvokeAgentRuntime on Runtime-IAM only (NOT Runtime-JWT)', () => {
+    // Find the orchestrator's IAM policy that contains InvokeAgentRuntime.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const invokePolicies = Object.values(policies).filter(p => {
+      const statements = p.Properties?.PolicyDocument?.Statement ?? [];
+      return statements.some((s: { Action?: string | string[] }) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes('bedrock-agentcore:InvokeAgentRuntime');
+      });
+    });
+    expect(invokePolicies.length).toBeGreaterThanOrEqual(1);
+
+    // The policy must reference Runtime-IAM's ARN (via Fn::GetAtt on RuntimeIam*)
+    // and must NOT reference Runtime-JWT's ARN.
+    const serialized = JSON.stringify(invokePolicies);
+    expect(serialized).toContain('RuntimeIam');
+    expect(serialized).not.toContain('RuntimeJwt');
   });
 
   test('outputs ApiUrl', () => {

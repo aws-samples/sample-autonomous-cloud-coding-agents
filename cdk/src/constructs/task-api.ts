@@ -135,6 +135,13 @@ export class TaskApi extends Construct {
   public readonly userPool: cognito.UserPool;
 
   /**
+   * The Cognito User Pool App Client.
+   * Exposed so other stacks/resources (e.g. AgentCore Runtime-JWT) can reference
+   * the same pool + client for Cognito-backed authorization.
+   */
+  public readonly appClient: cognito.UserPoolClient;
+
+  /**
    * The Cognito User Pool App Client ID.
    */
   public readonly appClientId: string;
@@ -159,14 +166,14 @@ export class TaskApi extends Construct {
       removalPolicy,
     });
 
-    const appClient = this.userPool.addClient('AppClient', {
+    this.appClient = this.userPool.addClient('AppClient', {
       authFlows: {
         userPassword: true,
         userSrp: true,
       },
       generateSecret: false,
     });
-    this.appClientId = appClient.userPoolClientId;
+    this.appClientId = this.appClient.userPoolClientId;
 
     // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
