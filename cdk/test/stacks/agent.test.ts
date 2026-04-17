@@ -144,10 +144,11 @@ describe('AgentStack', () => {
     });
     expect(invokePolicies.length).toBeGreaterThanOrEqual(1);
 
-    // The policy must reference Runtime-IAM's ARN (via Fn::GetAtt on RuntimeIam*)
+    // The policy must reference Runtime-IAM's ARN (via Fn::GetAtt on the
+    // Runtime* logical id — kept as 'Runtime' to avoid resource replacement)
     // and must NOT reference Runtime-JWT's ARN.
     const serialized = JSON.stringify(invokePolicies);
-    expect(serialized).toContain('RuntimeIam');
+    expect(serialized).toMatch(/"Fn::GetAtt":\["Runtime[0-9A-F]+","AgentRuntimeArn"\]/);
     expect(serialized).not.toContain('RuntimeJwt');
   });
 

@@ -240,7 +240,14 @@ export class AgentStack extends Stack {
 
     // --- Runtime-IAM (orchestrator path) ---
     // Uses default IAM authorizer. Consumed by OrchestratorFn.
-    const runtimeIam = new agentcore.Runtime(this, 'RuntimeIam', {
+    //
+    // Construct id kept as 'Runtime' (not renamed to 'RuntimeIam') so CFN
+    // updates the existing deployed resource in place. Renaming would force
+    // CFN to CREATE a new AgentCore Runtime before DELETING the old one —
+    // both carrying runtimeName 'jean_cloude', which violates AgentCore's
+    // account-level name uniqueness and triggers an UPDATE_ROLLBACK. The TS
+    // variable name `runtimeIam` documents its Phase 1b role.
+    const runtimeIam = new agentcore.Runtime(this, 'Runtime', {
       runtimeName,
       agentRuntimeArtifact: artifact,
       networkConfiguration: runtimeNetworkConfig,
