@@ -24,6 +24,7 @@ from post_hooks import (
     verify_build,
     verify_lint,
 )
+from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
 from runner import run_agent
 from shell import log
@@ -203,6 +204,7 @@ def run_task(
         task_state.write_heartbeat(config.task_id)
 
         agent_result: AgentResult | None = None
+        progress = _ProgressWriter(config.task_id)
         try:
             # Context hydration
             with task_span("task.context_hydration"):
@@ -275,6 +277,10 @@ def run_task(
             with task_span("task.repo_setup") as setup_span:
                 setup = setup_repo(config)
                 setup_span.set_attribute("build.before", setup.build_before)
+            progress.write_agent_milestone(
+                "repo_setup_complete",
+                f"branch={setup.branch} build_before={setup.build_before}",
+            )
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
@@ -313,6 +319,10 @@ def run_task(
                     agent_span.set_status(StatusCode.ERROR, str(e))
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))
+            progress.write_agent_milestone(
+                "agent_execution_complete",
+                f"status={agent_result.status} turns={agent_result.turns}",
+            )
 
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
@@ -331,6 +341,8 @@ def run_task(
                 post_span.set_attribute("build.passed", build_passed)
                 post_span.set_attribute("lint.passed", lint_passed)
                 post_span.set_attribute("pr.url", pr_url or "")
+            if pr_url:
+                progress.write_agent_milestone("pr_created", pr_url)
 
             # Memory write — capture task episode and repo learnings
             memory_written = False
