@@ -479,6 +479,20 @@ node lib/bin/bgagent.js events <TASK_ID> --output json
 
 Use **`--output json`** to see the full payload for **`preflight_failed`** (`reason`, `detail`, and per-check metadata). See **Task events** under **Task lifecycle** for how to interpret common `reason` values.
 
+### Watching a task in real time
+
+Stream progress events (turns, tool calls, tool results, milestones, cost updates) from a running task and exit automatically when it reaches a terminal state.
+
+```bash
+node lib/bin/bgagent.js watch <TASK_ID>
+
+# JSON output (one event per line) — useful for scripting
+node lib/bin/bgagent.js watch <TASK_ID> --output json
+```
+
+Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`. Press Ctrl+C to exit early without affecting the task.
+
+
 ### Cancelling a task
 
 ```bash

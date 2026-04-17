@@ -1,3 +1,7 @@
+---
+title: Interactive agents
+---
+
 # Interactive Agents: Bidirectional Communication Design
 
 > **Status:** Draft — research phase
