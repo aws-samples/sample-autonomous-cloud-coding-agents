@@ -1,9 +1,13 @@
+---
+title: Security
+---
+
 # Security
 
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 
 - **Use this doc for:** understanding the security boundaries, what can go wrong, and how the platform mitigates each threat.
-- **Related docs:** [COMPUTE.md](./COMPUTE.md) for runtime isolation details, [MEMORY.md](./MEMORY.md) for memory threat analysis, [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for per-repo security configuration, [INPUT_GATEWAY.md](./INPUT_GATEWAY.md) for authentication flows.
+- **Related docs:** [COMPUTE.md](/architecture/compute) for runtime isolation details, [MEMORY.md](/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/architecture/input-gateway) for authentication flows.
 
 ## Design principle
 
@@ -36,7 +40,7 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 **Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](../guides/ROADMAP.md)).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/roadmap/roadmap)).
 
 ## Input validation and guardrails
 
@@ -67,7 +71,7 @@ Per-repo tool profiles are stored in onboarding config and loaded during context
 
 ## Blueprint custom steps
 
-The blueprint framework ([REPO_ONBOARDING.md](./REPO_ONBOARDING.md)) allows per-repo custom Lambda steps in the orchestrator pipeline. These are a trust boundary that requires specific attention.
+The blueprint framework ([REPO_ONBOARDING.md](/architecture/repo-onboarding)) allows per-repo custom Lambda steps in the orchestrator pipeline. These are a trust boundary that requires specific attention.
 
 **Deployment control** - Custom steps are defined in the `Blueprint` CDK construct and deployed via `cdk deploy`. Only principals with CDK deployment permissions can add or modify them. There is no runtime API for custom step CRUD.
 
@@ -99,11 +103,11 @@ The platform is self-hosted in the customer's AWS account. No code or repo data 
 | Audit | Bedrock model invocation logging (90-day retention) | Prompt injection investigation, compliance |
 | Deployment | CDK infrastructure as code | Consistent, auditable deployments |
 
-**DNS Firewall note:** Currently in observation mode (non-allowlisted domains are logged as ALERT but not blocked). Per-repo `egressAllowlist` entries are aggregated into the platform-wide policy. DNS Firewall does not block direct IP connections, which is acceptable for the "confused agent" threat model but not for sophisticated adversaries. See [COMPUTE.md](./COMPUTE.md) for the enforcement rollout process.
+**DNS Firewall note:** Currently in observation mode (non-allowlisted domains are logged as ALERT but not blocked). Per-repo `egressAllowlist` entries are aggregated into the platform-wide policy. DNS Firewall does not block direct IP connections, which is acceptable for the "confused agent" threat model but not for sophisticated adversaries. See [COMPUTE.md](/architecture/compute) for the enforcement rollout process.
 
 ## Policy enforcement
 
-The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [ROADMAP.md](../guides/ROADMAP.md)).
+The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [ROADMAP.md](/roadmap/roadmap)).
 
 ### Current enforcement map
 
@@ -144,7 +148,7 @@ flowchart LR
 | Finalization | Build/lint verification | `agent/src/post_hooks.py` | Task record and PR body |
 | Infrastructure | DNS Firewall, WAF | CDK constructs | CloudWatch logs |
 
-**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [ROADMAP.md](../guides/ROADMAP.md)).
+**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [ROADMAP.md](/roadmap/roadmap)).
 
 ### Mid-execution enforcement
 
@@ -159,7 +163,7 @@ Once an agent session starts, two mechanisms enforce policy without requiring an
 
 ## Memory threats
 
-The platform's memory system ([MEMORY.md](./MEMORY.md)) faces threats from both intentional attacks and emergent corruption. OWASP classifies memory poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications, recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: poisoned entries influence every subsequent interaction.
+The platform's memory system ([MEMORY.md](/architecture/memory)) faces threats from both intentional attacks and emergent corruption. OWASP classifies memory poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications, recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: poisoned entries influence every subsequent interaction.
 
 ### Attack vectors
 
@@ -181,7 +185,7 @@ The platform's memory system ([MEMORY.md](./MEMORY.md)) faces threats from both 
 5. **Review feedback quorum** - Only promote feedback to persistent rules if the same pattern appears from multiple trusted reviewers across multiple PRs. Single review comments never become permanent rules.
 6. **Blast radius containment** - Even if poisoned rules get through, the agent cannot modify CI/CD pipelines, change branch protection, access secrets beyond its scoped token, or push to protected branches.
 
-**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [ROADMAP.md](../guides/ROADMAP.md)).
+**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [ROADMAP.md](/roadmap/roadmap)).
 
 ## Data protection
 

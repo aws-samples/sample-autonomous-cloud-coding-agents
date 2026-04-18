@@ -4,7 +4,7 @@ title: Using the CLI
 
 The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.
 
-**This repository** builds the CLI under `cli/`; after compile, run the entrypoint as `node lib/bin/bgagent.js` from the `cli` directory (the path `package.json` exposes as `bin`). If you install a published package or link `bgagent` onto your `PATH`, you can call `bgagent` directly — the subcommands are the same.
+**This repository** builds the CLI under `cli/`; after compile, run the entrypoint as `node lib/bin/bgagent.js` from the `cli` directory (the path `package.json` exposes as `bin`). If you install a published package or link `bgagent` onto your `PATH`, you can call `bgagent` directly  - the subcommands are the same.
 
 ### Setup
 
@@ -26,7 +26,7 @@ node lib/bin/bgagent.js login --username user@example.com
 ### Submitting a task
 
 ```bash
-# From cli/ — from a GitHub issue
+# From cli/  - from a GitHub issue
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42
 
 # From a text description
@@ -38,7 +38,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --pr 42
 # Iterate on a PR with additional instructions
 node lib/bin/bgagent.js submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged"
 
-# Review an existing pull request (read-only — posts structured review comments)
+# Review an existing pull request (read-only  - posts structured review comments)
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 
 # Review a PR with a specific focus area
@@ -48,7 +48,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
 
-**Example** (default `text` output immediately after a successful submit — task is `SUBMITTED`, branch name reserved):
+**Example** (default `text` output immediately after a successful submit  - task is `SUBMITTED`, branch name reserved):
 
 ```bash
 node lib/bin/bgagent.js submit --repo krokoko/agent-plugins --task "add codeowners field to RFC issue template"
@@ -93,7 +93,7 @@ node lib/bin/bgagent.js status <TASK_ID>
 node lib/bin/bgagent.js status <TASK_ID> --wait
 ```
 
-**Example** (default `text` output once the task has finished — `COMPLETED`, with session id, PR link, duration, and cost):
+**Example** (default `text` output once the task has finished  - `COMPLETED`, with session id, PR link, duration, and cost):
 
 ```bash
 node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X

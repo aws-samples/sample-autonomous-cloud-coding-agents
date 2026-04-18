@@ -37,10 +37,11 @@ function rewriteDocsLinkTarget(target) {
   const anchorSuffix = anchor ? `#${anchor}` : '';
 
   const explicitGuideRoutes = {
-    PROMPT_GUIDE: '/user-guide/prompt-guide',
+    PROMPT_GUIDE: '/customizing/prompt-engineering',
+    QUICK_START: '/getting-started/quick-start',
     ROADMAP: '/roadmap/roadmap',
     DEVELOPER_GUIDE: '/developer-guide/introduction',
-    USER_GUIDE: '/user-guide/introduction',
+    USER_GUIDE: '/using/overview',
     CONTRIBUTING: '/developer-guide/contributing',
   };
 
@@ -55,6 +56,19 @@ function rewriteDocsLinkTarget(target) {
     }
   }
 
+  /** Map USER_GUIDE anchors to the new `using/` directory. */
+  const userGuideAnchorRoutes = {
+    authentication: '/using/authentication',
+    'repository-onboarding': '/using/repository-onboarding',
+    'task-lifecycle': '/using/task-lifecycle',
+  };
+  if (stem === 'USER_GUIDE' && anchor) {
+    const splitRoute = userGuideAnchorRoutes[anchor.toLowerCase()];
+    if (splitRoute) {
+      return splitRoute;
+    }
+  }
+
   if (explicitGuideRoutes[stem]) {
     return `${explicitGuideRoutes[stem]}${anchorSuffix}`;
   }
@@ -62,7 +76,7 @@ function rewriteDocsLinkTarget(target) {
   if (normalizedPath.includes('/guides/') || normalizedPath.startsWith('../guides/')) {
     return undefined;
   }
-  return `/design/${slug}${anchorSuffix}`;
+  return `/architecture/${slug}${anchorSuffix}`;
 }
 
 function ensureFrontmatter(content, title) {
@@ -148,29 +162,46 @@ function splitGuide(sourcePath, targetDirRelative, introTitle) {
   }
 }
 
+// --- Developer Guide: split by ## into developer-guide/ ---
 splitGuide(
   path.join(docsRoot, 'guides', 'DEVELOPER_GUIDE.md'),
   path.join('src', 'content', 'docs', 'developer-guide'),
   'Developer guide introduction',
 );
+
+// --- User Guide: split by ## into using/ ---
 splitGuide(
   path.join(docsRoot, 'guides', 'USER_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'user-guide'),
-  'User guide introduction',
+  path.join('src', 'content', 'docs', 'using'),
+  'Using the platform',
 );
+
+// --- Quick Start: mirror to getting-started/ ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'QUICK_START.md'),
+  path.join('src', 'content', 'docs', 'getting-started', 'Quick-start.md'),
+);
+
+// --- Prompt Guide: mirror to customizing/ ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'PROMPT_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'user-guide', 'Prompt-guide.md'),
+  path.join('src', 'content', 'docs', 'customizing', 'Prompt-engineering.md'),
 );
+
+// --- Roadmap: mirror to roadmap/ ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'ROADMAP.md'),
   path.join('src', 'content', 'docs', 'roadmap', 'Roadmap.md'),
 );
+
+// --- Contributing: mirror to developer-guide/ ---
 mirrorMarkdownFile(
   path.join(repoRoot, 'CONTRIBUTING.md'),
   path.join('src', 'content', 'docs', 'developer-guide', 'Contributing.md'),
 );
-mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs', 'design'));
+
+// --- Design docs: mirror to architecture/ ---
+mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs', 'architecture'));
 
 // Guardrail: ensure target tree exists when running in a clean checkout.
 fs.mkdirSync(targetRoot, { recursive: true });
