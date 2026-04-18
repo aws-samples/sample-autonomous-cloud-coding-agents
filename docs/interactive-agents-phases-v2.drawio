@@ -259,7 +259,7 @@
         <mxCell id="p2-agent" parent="p2-cloud" style="rounded=1;fillColor=light-dark(#F5F5F5,#2a2a2a);strokeColor=#01A88D;strokeWidth=2;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontFamily=Helvetica;fontColor=#01A88D;container=1;collapsible=0;spacingLeft=10;spacingTop=6;" value="Agent container (shared by both runtimes)" vertex="1">
           <mxGeometry height="852" width="492" x="1120" y="210" as="geometry" />
         </mxCell>
-        <mxCell id="p2-srv" parent="p2-agent" style="rounded=1;fillColor=#E0F2F1;strokeColor=#01A88D;html=1;align=left;verticalAlign=top;fontSize=10;fontStyle=1;fontColor=#01A88D;fontFamily=Helvetica;spacing=8;" value="&lt;b&gt;server.py&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-weight:normal&quot;&gt;POST /invocations (sync, 1a)&lt;/span&gt;&lt;div&gt;&lt;span style=&quot;font-weight:normal&quot;&gt;&lt;br&gt;POST /invocations/stream (SSE, NEW)&lt;br&gt;holds response open; drains Queue&lt;br&gt;: ping\n\n keepalive every 15s&lt;/span&gt;&lt;/div&gt;" vertex="1">
+        <mxCell id="p2-srv" parent="p2-agent" style="rounded=1;fillColor=#E0F2F1;strokeColor=#01A88D;html=1;align=left;verticalAlign=top;fontSize=10;fontStyle=1;fontColor=#01A88D;fontFamily=Helvetica;spacing=8;" value="&lt;b&gt;server.py&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-weight:normal&quot;&gt;POST /invocations&lt;br&gt;(content-type negotiation)&lt;/span&gt;&lt;div&gt;&lt;span style=&quot;font-weight:normal&quot;&gt;&lt;br&gt;Accept: application/json → sync (1a)&lt;br&gt;Accept: text/event-stream → SSE (NEW)&lt;br&gt;SSE holds response open; drains Queue&lt;br&gt;: ping\n\n keepalive every 15s&lt;/span&gt;&lt;/div&gt;" vertex="1">
           <mxGeometry height="110" width="460" x="15" y="40" as="geometry" />
         </mxCell>
         <mxCell id="p2-pipe" parent="p2-agent" style="rounded=1;fillColor=#E0F2F1;strokeColor=#01A88D;html=1;align=left;verticalAlign=top;fontSize=10;fontStyle=1;fontColor=#01A88D;fontFamily=Helvetica;spacing=8;" value="&lt;b&gt;pipeline.py + runner.py&lt;/b&gt;&lt;br&gt;&lt;span style=&#39;font-weight:normal&#39;&gt;Sync run_task in BACKGROUND THREAD&lt;br&gt;No Phase 1a regression; no async refactor&lt;br&gt;Both emission paths called at every event point&lt;/span&gt;" vertex="1">
@@ -410,7 +410,7 @@
         <mxCell id="p2-e11" edge="1" parent="p2-1" source="p2-rtj" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontFamily=Helvetica;strokeColor=#2E7D32;strokeWidth=2;jumpStyle=arc;jumpSize=12;" target="p2-agent">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2-e11l" connectable="0" parent="p2-e11" style="edgeLabel;html=1;fontSize=10;fontFamily=Helvetica;fontColor=#2E7D32;" value="proxy →&amp;nbsp;&lt;div&gt;/invocations/stream&lt;/div&gt;" vertex="1">
+        <mxCell id="p2-e11l" connectable="0" parent="p2-e11" style="edgeLabel;html=1;fontSize=10;fontFamily=Helvetica;fontColor=#2E7D32;" value="proxy →&amp;nbsp;&lt;div&gt;/invocations&lt;br&gt;(Accept: text/event-stream)&lt;/div&gt;" vertex="1">
           <mxGeometry relative="1" as="geometry">
             <mxPoint x="-93" y="-82" as="offset" />
           </mxGeometry>
@@ -588,7 +588,7 @@
         <mxCell id="p3-stream-web" parent="p3-stream" style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;html=1;align=center;verticalAlign=middle;fontSize=11;fontStyle=1;fontFamily=Helvetica;fontColor=#2E7D32;strokeWidth=2;" value="Web SPA (live watch)" vertex="1">
           <mxGeometry height="60" width="180" x="220" y="150" as="geometry" />
         </mxCell>
-        <mxCell id="p3-stream-rtj" parent="p3-stream" style="rounded=1;fillColor=light-dark(#e8f5e9, #1c361d);strokeColor=#2E7D32;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontFamily=Helvetica;fontColor=#2E7D32;strokeWidth=2;" value="Runtime-JWT&#xa;direct SSE to /invocations/stream" vertex="1">
+        <mxCell id="p3-stream-rtj" parent="p3-stream" style="rounded=1;fillColor=light-dark(#e8f5e9, #1c361d);strokeColor=#2E7D32;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontFamily=Helvetica;fontColor=#2E7D32;strokeWidth=2;" value="Runtime-JWT&#xa;direct SSE to /invocations&#xa;(Accept: text/event-stream)" vertex="1">
           <mxGeometry height="60" width="500" x="1230" y="150" as="geometry" />
         </mxCell>
         <mxCell id="p3-stream-e1" edge="1" parent="p3-stream" source="p3-stream-cli" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontFamily=Helvetica;strokeColor=#2E7D32;strokeWidth=2;" target="p3-stream-rtj">
@@ -998,7 +998,7 @@
         <mxCell id="p5-m-async" parent="p5-1" style="text;html=1;fontSize=9;fontFamily=Helvetica;fontColor=#666;align=left;" value="(orchestrator invokes Runtime-IAM in parallel for legacy path — not shown)" vertex="1">
           <mxGeometry height="20" width="500" x="480" y="410" as="geometry" />
         </mxCell>
-        <mxCell id="p5-m7" edge="1" parent="p5-1" style="endArrow=classic;html=1;fontSize=10;fontFamily=Helvetica;labelBackgroundColor=#FFFFFF;strokeColor=#2E7D32;strokeWidth=2;" value="4. SSE connect: POST /invocations/stream (JWT)">
+        <mxCell id="p5-m7" edge="1" parent="p5-1" style="endArrow=classic;html=1;fontSize=10;fontFamily=Helvetica;labelBackgroundColor=#FFFFFF;strokeColor=#2E7D32;strokeWidth=2;" value="4. SSE connect: POST /invocations (Accept: text/event-stream, JWT)">
           <mxGeometry relative="1" as="geometry">
             <mxPoint x="110" y="460" as="sourcePoint" />
             <mxPoint x="930" y="460" as="targetPoint" />
@@ -1010,7 +1010,7 @@
             <mxPoint x="270" y="490" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="p5-m9" edge="1" parent="p5-1" style="endArrow=classic;html=1;fontSize=10;fontFamily=Helvetica;labelBackgroundColor=#FFFFFF;" value="5. proxy to agent container /invocations/stream">
+        <mxCell id="p5-m9" edge="1" parent="p5-1" style="endArrow=classic;html=1;fontSize=10;fontFamily=Helvetica;labelBackgroundColor=#FFFFFF;" value="5. proxy to agent container /invocations (SSE)">
           <mxGeometry relative="1" as="geometry">
             <mxPoint x="930" y="525" as="sourcePoint" />
             <mxPoint x="1790" y="525" as="targetPoint" />
@@ -1469,7 +1469,7 @@
         <mxCell id="p8-rtj-i" parent="p8-rtj" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.bedrock_agentcore;fillColor=#01A88D;strokeColor=#ffffff;aspect=fixed;html=1;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=10;fontFamily=Helvetica;" value="customJWT" vertex="1">
           <mxGeometry height="48" width="48" x="186" y="35" as="geometry" />
         </mxCell>
-        <mxCell id="p8-sse-ep" parent="p8-rtj" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;strokeWidth=2;html=1;align=left;verticalAlign=top;fontSize=11;fontStyle=1;fontColor=#2E7D32;fontFamily=Helvetica;spacing=8;" value="/invocations/stream (SSE, 1b)&#xa;&lt;span style=&#39;font-weight:normal;font-size:10px&#39;&gt;existing Phase 1b endpoint&lt;br&gt;server→client only&lt;br&gt;17 AG-UI events&lt;/span&gt;" vertex="1">
+        <mxCell id="p8-sse-ep" parent="p8-rtj" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;strokeWidth=2;html=1;align=left;verticalAlign=top;fontSize=11;fontStyle=1;fontColor=#2E7D32;fontFamily=Helvetica;spacing=8;" value="/invocations SSE (1b)&#xa;&lt;span style=&#39;font-weight:normal;font-size:10px&#39;&gt;Accept: text/event-stream&lt;br&gt;existing Phase 1b path&lt;br&gt;server→client only&lt;br&gt;17 AG-UI events&lt;/span&gt;" vertex="1">
           <mxGeometry height="100" width="380" x="20" y="120" as="geometry" />
         </mxCell>
         <mxCell id="p8-ws-ep" parent="p8-rtj" style="rounded=1;fillColor=light-dark(#FFFFFF,#2a2a2a);strokeColor=#ED7100;strokeDasharray=8 4;strokeWidth=3;html=1;align=left;verticalAlign=top;fontSize=11;fontStyle=1;fontColor=#BF5700;fontFamily=Helvetica;spacing=8;" value="/ws (WebSocket, NEW 1c+)&#xa;&lt;span style=&#39;font-weight:normal;font-size:10px&#39;&gt;bidirectional frames&lt;br&gt;server→client: same 17 AG-UI events&lt;br&gt;client→server: USER_NUDGE, TOOL_USE_APPROVAL_RESPONSE, CANCEL&lt;/span&gt;" vertex="1">
@@ -1478,7 +1478,7 @@
         <mxCell id="p8-agent" parent="p8-cloud" style="rounded=1;fillColor=light-dark(#F5F5F5,#2a2a2a);strokeColor=#01A88D;strokeWidth=2;strokeDasharray=8 4;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontFamily=Helvetica;fontColor=#01A88D;container=1;collapsible=0;spacingLeft=10;spacingTop=6;" value="Agent container (1c+)" vertex="1">
           <mxGeometry height="500" width="500" x="950" y="200" as="geometry" />
         </mxCell>
-        <mxCell id="p8-1b-kept" parent="p8-agent" style="rounded=1;fillColor=#E0F2F1;strokeColor=#01A88D;html=1;align=left;verticalAlign=top;fontSize=10;fontStyle=1;fontColor=#01A88D;fontFamily=Helvetica;spacing=8;" value="&lt;b&gt;Everything from Phase 1b kept:&lt;/b&gt;&lt;br&gt;&lt;span style=&#39;font-weight:normal&#39;&gt;server.py, pipeline.py, runner.py&lt;br&gt;ProgressWriter → DDB&lt;br&gt;SSEAdapter → asyncio.Queue&lt;br&gt;/invocations/stream SSE endpoint&lt;/span&gt;" vertex="1">
+        <mxCell id="p8-1b-kept" parent="p8-agent" style="rounded=1;fillColor=#E0F2F1;strokeColor=#01A88D;html=1;align=left;verticalAlign=top;fontSize=10;fontStyle=1;fontColor=#01A88D;fontFamily=Helvetica;spacing=8;" value="&lt;b&gt;Everything from Phase 1b kept:&lt;/b&gt;&lt;br&gt;&lt;span style=&#39;font-weight:normal&#39;&gt;server.py, pipeline.py, runner.py&lt;br&gt;ProgressWriter → DDB&lt;br&gt;SSEAdapter → asyncio.Queue&lt;br&gt;/invocations SSE (Accept: text/event-stream)&lt;/span&gt;" vertex="1">
           <mxGeometry height="110" width="470" x="15" y="40" as="geometry" />
         </mxCell>
         <mxCell id="p8-new-inbox" parent="p8-agent" style="rounded=1;fillColor=light-dark(#FFFFFF,#2a2a2a);strokeColor=#ED7100;strokeDasharray=8 4;strokeWidth=2;html=1;align=left;verticalAlign=top;fontSize=11;fontStyle=1;fontColor=#BF5700;fontFamily=Helvetica;spacing=8;" value="&lt;b&gt;NudgeInbox (NEW, 1c+)&lt;/b&gt;&lt;br&gt;&lt;span style=&#39;font-weight:normal;font-size:10px&#39;&gt;per-session asyncio.Queue of inbound frames&lt;br&gt;WebSocket handler decodes client frames, validates via Cedar policy, pushes to inbox&lt;br&gt;runner.py polls inbox between turns; injects USER_NUDGE into next Claude SDK prompt&lt;/span&gt;" vertex="1">

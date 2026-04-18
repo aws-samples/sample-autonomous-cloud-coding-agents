@@ -1138,7 +1138,7 @@ The synchronous `run_task` is not a Phase 1a oversight — it is required by the
 
 Until one of those triggers fires, Option B stands.
 
-**SSE handler endpoint choice.** Whether the handler lives at a new `/invocations/stream` endpoint or at the existing `/invocations` via content-type negotiation is a tactical implementation decision deferred to the PR. Both are compatible with Runtime-JWT's `customJWTAuthorizer`.
+**SSE handler endpoint choice (resolved 2026-04-17).** The handler lives at the existing `/invocations` endpoint via content-type negotiation: `Accept: text/event-stream` (anywhere in the header, case-insensitive) routes the request to the SSE flow; any other value (including `application/json`, `*/*`, or a missing header) preserves the existing sync behavior byte-for-byte. One endpoint, one contract, matches AgentCore's documented AG-UI pattern. The orchestrator's existing `InvokeAgentRuntime` calls are unaffected because they do not send `text/event-stream` in `Accept`.
 
 ### 9.11 CLI SSE client (D3 resolved, 2026-04-17): hybrid
 
@@ -1271,7 +1271,8 @@ Phase 4:  Pause/Resume           → Lifecycle control (leverages 8-hour timeout
 | `cdk/` | `src/handlers/get-task-events.ts` | Accept **`?after=<event_id>`** query parameter for catch-up reconnection. Current code only supports `next_token`; AG-UI has no Last-Event-ID and AgentCore has no SSE-native resume (§9.12), so DDB catch-up is the only reconnection mechanism. |
 | `cdk/` | `src/stacks/agent.ts` | Ensure DynamoDB Streams are enabled on `TaskEventsTable` (prerequisite for the Phase 1b+ fan-out plane, §8.9). Fan-out Lambda itself can be skeleton / deferred. |
 | `agent/` | `src/sse_adapter.py` | NEW: Sibling of `progress_writer.py`. Pushes events to a per-session `asyncio.Queue` (D2). |
-| `agent/` | `src/server.py` | Add SSE handler that drains the per-session `asyncio.Queue`, emits AG-UI `data: <json>\n\n` frames, injects `: ping\n\n` keepalive every ~15 s. Endpoint placement (new `/invocations/stream` vs content-type negotiated `/invocations`) deferred to PR. |
+| `agent/` | `src/server.py` | Content-type-negotiated `/invocations`: `Accept: text/event-stream` routes to new SSE handler (drains the per-session `asyncio.Queue`, emits AG-UI `data: <json>\n\n` frames, injects `: ping\n\n` keepalive every 15 s); any other `Accept` preserves the existing sync path byte-for-byte. |
+| `agent/` | `src/sse_wire.py` | NEW: Pure-function translator from semantic events (SSEAdapter dicts) to AG-UI wire-format frames (TEXT_MESSAGE_*, TOOL_CALL_*, STEP_*, CUSTOM for cost, RUN_ERROR / RUN_FINISHED). Kept separate from transport for testability. |
 | `agent/` | `src/pipeline.py` | Add `SSEAdapter.emit()` call at the existing `ProgressWriter.write_event()` call sites (sibling pattern, §5). |
 | `agent/` | `src/runner.py` | Same as `pipeline.py`: `SSEAdapter.emit()` alongside `ProgressWriter.write_event()` at existing call sites. |
 | `agent/` | `tests/test_sse_adapter.py` | NEW: Unit tests for the adapter (queue semantics, backpressure, no-clients-attached case). |
