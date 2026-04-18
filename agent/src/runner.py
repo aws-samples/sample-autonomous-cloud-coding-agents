@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from config import AGENT_WORKSPACE
@@ -12,6 +12,9 @@ from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
 from shell import log, truncate
 from telemetry import _TrajectoryWriter
+
+if TYPE_CHECKING:
+    from sse_adapter import _SSEAdapter
 
 
 def _format_tool_result(block) -> tuple[str, str]:
@@ -153,7 +156,11 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
 
 
 async def run_agent(
-    prompt: str, system_prompt: str, config: TaskConfig, cwd: str = AGENT_WORKSPACE
+    prompt: str,
+    system_prompt: str,
+    config: TaskConfig,
+    cwd: str = AGENT_WORKSPACE,
+    sse_adapter: _SSEAdapter | None = None,
 ) -> AgentResult:
     """Invoke the Claude Agent SDK and stream output."""
     from claude_agent_sdk import (
@@ -290,9 +297,7 @@ async def run_agent(
                             log("TOOL", f"{block.name}: {truncate(str(tool_input))}")
                         turn_tool_calls.append({"name": block.name, "input": tool_input})
                         # Track for later correlation with ToolResultBlocks in UserMessages
-                        tool_use_id = getattr(block, "id", "") or getattr(
-                            block, "tool_use_id", ""
-                        )
+                        tool_use_id = getattr(block, "id", "") or getattr(block, "tool_use_id", "")
                         if tool_use_id:
                             tool_use_id_to_name[tool_use_id] = block.name
                     elif isinstance(block, ToolResultBlock):
@@ -324,12 +329,26 @@ async def run_agent(
                     text=turn_text.strip(),
                     tool_calls_count=len(turn_tool_calls),
                 )
+                if sse_adapter is not None:
+                    sse_adapter.write_agent_turn(
+                        turn=result.turns,
+                        model=message.model,
+                        thinking=turn_thinking.strip(),
+                        text=turn_text.strip(),
+                        tool_calls_count=len(turn_tool_calls),
+                    )
                 for tc in turn_tool_calls:
                     progress.write_agent_tool_call(
                         tool_name=tc["name"],
                         tool_input=str(tc.get("input", "")),
                         turn=result.turns,
                     )
+                    if sse_adapter is not None:
+                        sse_adapter.write_agent_tool_call(
+                            tool_name=tc["name"],
+                            tool_input=str(tc.get("input", "")),
+                            turn=result.turns,
+                        )
                 # Tool result events are written from the UserMessage branch
                 # (ToolResultBlocks arrive as UserMessage content, not in
                 # AssistantMessage content).
@@ -394,6 +413,13 @@ async def run_agent(
                     output_tokens=output_toks,
                     turn=getattr(message, "num_turns", 0),
                 )
+                if sse_adapter is not None:
+                    sse_adapter.write_agent_cost_update(
+                        cost_usd=getattr(message, "total_cost_usd", None),
+                        input_tokens=input_toks,
+                        output_tokens=output_toks,
+                        turn=getattr(message, "num_turns", 0),
+                    )
 
             elif isinstance(message, UserMessage):
                 message_counts["other"] += 1
@@ -414,6 +440,13 @@ async def run_agent(
                                 content=content,
                                 turn=result.turns,
                             )
+                            if sse_adapter is not None:
+                                sse_adapter.write_agent_tool_result(
+                                    tool_name=tool_name,
+                                    is_error=bool(block.is_error),
+                                    content=content,
+                                    turn=result.turns,
+                                )
                 elif isinstance(message.content, str):
                     log("USER", truncate(message.content))
 
@@ -428,6 +461,8 @@ async def run_agent(
     except Exception as e:
         log("ERROR", f"Exception during receive_response(): {type(e).__name__}: {e}")
         progress.write_agent_error(error_type=type(e).__name__, message=str(e))
+        if sse_adapter is not None:
+            sse_adapter.write_agent_error(error_type=type(e).__name__, message=str(e))
         if result.status == "unknown":
             result.status = "error"
             result.error = f"receive_response() failed: {e}"
