@@ -14,9 +14,22 @@ After deployment, the orchestrator **pre-flight** step calls the GitHub API to v
 
 The Task API only accepts tasks for repositories that are **onboarded** — each one is a `Blueprint` construct in `cdk/src/stacks/agent.ts` that writes a `RepoConfig` row to DynamoDB.
 
+**Quick method** — pass the repo as a CDK context variable or environment variable (no code edits needed):
+
+```bash
+# Context variable (preferred)
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
+
+# Or environment variable
+BLUEPRINT_REPO=your-org/your-repo MISE_EXPERIMENTAL=1 mise //cdk:deploy
+```
+
+The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (e.g. `-c blueprintRepo=jane-doe/agent-plugins`).
+
+**Multiple repositories** — edit `cdk/src/stacks/agent.ts` directly:
+
 1. Open **`cdk/src/stacks/agent.ts`** and locate the `Blueprint` block (for example `AgentPluginsBlueprint`).
-2. Set **`repo`** to your repository in **`owner/repo`** form. For a quick end-to-end test, use your **fork** of the sample plugin repo (e.g. `jane-doe/agent-plugins` after forking `awslabs/agent-plugins`). For your own services, use something like `acme/my-service`. This must match the `repo` field users pass in the CLI or API.
-3. **Multiple repositories:** add another `new Blueprint(this, 'YourBlueprintId', { repo: 'owner/other-repo', repoTable: repoTable.table, ... })` and append it to the **`blueprints`** array. That array is used to aggregate per-repo **DNS egress** allowlists; skipping it can block the agent from reaching domains your Blueprint declares.
+2. Add another `new Blueprint(this, 'YourBlueprintId', { repo: 'owner/other-repo', repoTable: repoTable.table, ... })` and append it to the **`blueprints`** array. That array is used to aggregate per-repo **DNS egress** allowlists; skipping it can block the agent from reaching domains your Blueprint declares.
 
 Optional per-repo overrides (same file / `Blueprint` props) include a different AgentCore **`runtimeArn`**, **`modelId`**, **`maxTurns`**, **`systemPromptOverrides`**, or a **`githubTokenSecretArn`** for a dedicated PAT. If you use a custom `runtimeArn` or secret per repo, you must also pass the corresponding ARNs into **`TaskOrchestrator`** via **`additionalRuntimeArns`** and **`additionalSecretArns`** so the orchestrator Lambda’s IAM policy allows them (see [Repo onboarding](/design/repo-onboarding) for the full model).
 

@@ -39,7 +39,7 @@ import { TaskStatus } from '../../constructs/task-status';
  */
 export interface TaskCreationContext {
   readonly userId: string;
-  readonly channelSource: 'api' | 'webhook';
+  readonly channelSource: 'api' | 'webhook' | 'slack';
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
 }

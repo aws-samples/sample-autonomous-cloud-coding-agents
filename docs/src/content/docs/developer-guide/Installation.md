@@ -37,13 +37,43 @@ You do **not** need standalone installs of Node or Yarn from nodejs.org or the Y
 
 #### One-time AWS account setup
 
-The stack routes AgentCore Runtime traces to X-Ray, which requires CloudWatch Logs as a trace segment destination. Run this **once per account** before your first deployment:
+The stack routes AgentCore Runtime traces to X-Ray, which requires CloudWatch Logs as a trace segment destination. Run these commands **once per account** before your first deployment:
+
+**1. Grant X-Ray permission to write to the `aws/spans` log group** via a CloudWatch Logs resource policy. The log group doesn't need to exist yet — X-Ray creates it automatically in step 2:
 
 ```bash
-aws xray update-trace-segment-destination --destination CloudWatchLogs
+aws logs put-resource-policy \
+  --policy-name xray-spans-policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "xray.amazonaws.com"
+        },
+        "Action": [
+          "logs:PutLogEvents",
+          "logs:CreateLogStream"
+        ],
+        "Resource": "arn:aws:logs:us-east-1:*:log-group:aws/spans:*"
+      }
+    ]
+  }' \
+  --region us-east-1
 ```
 
-Without this, `cdk deploy` will fail with: *"X-Ray Delivery Destination is supported with CloudWatch Logs as a Trace Segment Destination."*
+Replace `us-east-1` with your deployment Region if different.
+
+**2. Set CloudWatch Logs as the trace segment destination** (this also creates the `aws/spans` log group):
+
+```bash
+aws xray update-trace-segment-destination --destination CloudWatchLogs --region us-east-1
+```
+
+Without step 1, step 2 will fail with: *"XRay does not have permission to call PutLogEvents on the aws/spans Log Group."* Without step 2, `cdk deploy` will fail with: *"X-Ray Delivery Destination is supported with CloudWatch Logs as a Trace Segment Destination."*
+
+> **Note:** Do not try to create the `aws/spans` log group manually — log group names starting with `aws/` are reserved and AWS will reject the call. X-Ray creates it automatically when you run step 2.
 
 ### Set up your toolchain
 
