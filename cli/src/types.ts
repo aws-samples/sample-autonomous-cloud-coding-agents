@@ -134,6 +134,13 @@ export interface CreateWebhookResponse {
   readonly created_at: string;
 }
 
+/** Slack link response from POST /v1/slack/link. */
+export interface SlackLinkResponse {
+  readonly slack_team_id: string;
+  readonly slack_user_id: string;
+  readonly linked_at: string;
+}
+
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;

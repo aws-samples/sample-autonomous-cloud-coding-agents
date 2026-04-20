@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Fn } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -38,6 +38,7 @@ import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { RepoTable } from '../constructs/repo-table';
+import { SlackIntegration } from '../constructs/slack-integration';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
 import { TaskEventsTable } from '../constructs/task-events-table';
@@ -62,8 +63,9 @@ export class AgentStack extends Stack {
     const repoTable = new RepoTable(this, 'RepoTable');
 
     // --- Repository onboarding ---
+    const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
-      repo: 'krokoko/agent-plugins',
+      repo: blueprintRepo,
       repoTable: repoTable.table,
     });
 
@@ -230,7 +232,9 @@ export class AgentStack extends Stack {
 
     // Runtime logs and traces
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+    // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
+    // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
+    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
 
     NagSuppressions.addResourceSuppressions(runtime, [
@@ -361,6 +365,69 @@ export class AgentStack extends Stack {
     new TaskDashboard(this, 'TaskDashboard', {
       applicationLogGroup,
       runtimeArn: runtime.agentRuntimeArn,
+    });
+
+    // --- Slack integration (always deployed — secrets populated post-deploy) ---
+    const slackIntegration = new SlackIntegration(this, 'SlackIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    // --- Slack App setup outputs ---
+    // Pre-filled manifest URL: opens Slack's "Create New App" page with all
+    // URLs, scopes, and events pre-configured. User just clicks Create.
+    const apiHost = Fn.select(2, Fn.split('/', taskApi.api.url));
+    const apiStage = Fn.select(3, Fn.split('/', taskApi.api.url));
+    const apiBase = Fn.join('', ['https://', apiHost, '/', apiStage]);
+
+    // Build the YAML manifest as a string using Fn.join (API URL tokens resolve at deploy time).
+    // Slack's ?new_app=1&manifest_json= endpoint accepts URL-encoded JSON.
+    const manifestJson = Fn.join('', [
+      '{"_metadata":{"major_version":1,"minor_version":1},',
+      '"display_information":{"name":"Shoof","description":"Submit coding tasks to autonomous background agents","background_color":"#1a1a2e"},',
+      '"features":{"app_home":{"messages_tab_enabled":true,"messages_tab_read_only_enabled":false},"bot_user":{"display_name":"Shoof","always_online":true},',
+      '"slash_commands":[{"command":"/bgagent","url":"', apiBase, '/slack/commands","description":"Link your account or get help with Shoof","usage_hint":"link | help","should_escape":false}]},',
+      '"oauth_config":{"scopes":{"bot":["app_mentions:read","commands","chat:write","chat:write.public","channels:read","groups:read","im:history","im:write","users:read","reactions:write"]},',
+      '"redirect_urls":["', apiBase, '/slack/oauth/callback"]},',
+      '"settings":{"event_subscriptions":{"request_url":"', apiBase, '/slack/events","bot_events":["app_mention","message.im","app_uninstalled","tokens_revoked"]},',
+      '"interactivity":{"is_enabled":true,"request_url":"', apiBase, '/slack/interactions"},',
+      '"org_deploy_enabled":false,"socket_mode_enabled":false,"token_rotation_enabled":false}}',
+    ]);
+
+    new CfnOutput(this, 'SlackAppManifestJson', {
+      value: manifestJson,
+      description: 'Slack App manifest JSON — the CLI URL-encodes this into the create URL',
+    });
+
+    new CfnOutput(this, 'SlackSigningSecretArn', {
+      value: slackIntegration.signingSecret.secretArn,
+      description: 'Secrets Manager ARN for the Slack signing secret — populate after creating the Slack App',
+    });
+
+    new CfnOutput(this, 'SlackClientSecretArn', {
+      value: slackIntegration.clientSecret.secretArn,
+      description: 'Secrets Manager ARN for the Slack client secret — populate after creating the Slack App',
+    });
+
+    new CfnOutput(this, 'SlackClientIdSecretArn', {
+      value: slackIntegration.clientIdSecret.secretArn,
+      description: 'Secrets Manager ARN for the Slack client ID — populate after creating the Slack App',
+    });
+
+    new CfnOutput(this, 'SlackInstallationTableName', {
+      value: slackIntegration.installationTable.tableName,
+      description: 'Name of the DynamoDB Slack installation table',
+    });
+
+    new CfnOutput(this, 'SlackUserMappingTableName', {
+      value: slackIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Slack user mapping table',
     });
 
     // --- Bedrock model invocation logging (account-level) ---

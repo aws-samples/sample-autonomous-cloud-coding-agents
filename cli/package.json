@@ -30,7 +30,9 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudformation": "3.1024.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1021.0",
+    "@aws-sdk/client-secrets-manager": "3.1024.0",
     "commander": "^14.0.3"
   },
   "resolutions": {
