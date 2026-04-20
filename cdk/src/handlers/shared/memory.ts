@@ -32,6 +32,15 @@ import type { TaskStatusType } from '../../constructs/task-status';
 // ---------------------------------------------------------------------------
 
 /**
+ * Provenance tag indicating who wrote a memory record.
+ * Must stay in sync with Python-side MEMORY_SOURCE_TYPES in agent/src/memory.py.
+ */
+export type MemorySourceType =
+  | 'agent_episode'
+  | 'agent_learning'
+  | 'orchestrator_fallback';
+
+/**
  * Memory context loaded from AgentCore Memory for injection into the system prompt.
  */
 export interface MemoryContext {
@@ -58,29 +67,79 @@ function hashContent(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
+/** Result of content integrity check (audit-only — never gates retrieval). */
+type IntegrityResult = 'match' | 'mismatch' | 'no_hash';
+
 /**
- * Verify content integrity against a stored SHA-256 hash.
- * Returns true if no hash is stored (backward compat with schema v2),
- * or if the hash matches. Returns false only on mismatch.
+ * Check content integrity against a stored SHA-256 hash (audit-only).
+ *
+ * AgentCore's extraction pipeline transforms content (summarization,
+ * consolidation), so the hash of extracted records will legitimately
+ * differ from the write-time hash. This check is therefore an audit
+ * signal, not a retrieval gate — callers log the result but never
+ * discard records based on it.
  */
-function verifyContentIntegrity(
+function checkContentIntegrity(
   text: string,
   metadata?: Record<string, { stringValue?: string }>,
-): boolean {
+): IntegrityResult {
   const expected = metadata?.content_sha256?.stringValue;
   if (!expected) {
-    // Schema v3 records should always have a hash — log if missing
+    // v3+ records should always have a hash — missing hash signals a
+    // corrupted write or a write-path regression that stopped emitting hashes.
     const schemaVersion = metadata?.schema_version?.stringValue;
     if (schemaVersion && parseInt(schemaVersion, 10) >= 3) {
-      logger.warn('Schema v3 record missing content_sha256 — possible corrupted write', {
+      logger.warn('Schema v3+ record missing content_sha256 — possible corrupted write', {
         schema_version: schemaVersion,
         source_type: metadata?.source_type?.stringValue ?? '(unknown)',
         metric_type: 'memory_integrity_missing_hash',
       });
     }
-    return true;
+    return 'no_hash';
   }
-  return hashContent(text) === expected;
+  return hashContent(text) === expected ? 'match' : 'mismatch';
+}
+
+/** Record metadata shape returned by AgentCore RetrieveMemoryRecords. */
+interface MemoryRecordSummary {
+  content?: { text?: string };
+  metadata?: Record<string, { stringValue?: string }>;
+}
+
+/**
+ * Sanitize, audit-check, and collect text from memory record summaries.
+ *
+ * Each record is sanitized, integrity-checked (audit-only — mismatches are
+ * logged but never cause records to be discarded), and appended to `out`.
+ */
+function processMemoryRecords(
+  records: MemoryRecordSummary[],
+  out: string[],
+  repo: string,
+  namespace: string,
+  recordType: string,
+): void {
+  for (const record of records) {
+    const text = record.content?.text;
+    if (!text) continue;
+    const sanitized = sanitizeExternalContent(text);
+    if (checkContentIntegrity(sanitized, record.metadata) === 'mismatch') {
+      // Expected for extracted records — AgentCore transforms content
+      // during extraction (summarization, consolidation). Log at WARN so
+      // CloudWatch alarms can detect spikes (genuine tampering or write bugs).
+      logger.warn('Memory record hash mismatch (expected for extracted records)', {
+        repo,
+        namespace,
+        record_type: recordType,
+        expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
+        actual_hash: hashContent(sanitized),
+        source_type: record.metadata?.source_type?.stringValue ?? '(unknown)',
+        content_length: text.length,
+        metric_type: 'memory_integrity_audit',
+      });
+    }
+    out.push(sanitized);
+  }
 }
 
 // Lazy-init client (only created if MEMORY_ID is set)
@@ -168,45 +227,11 @@ export async function loadMemoryContext(
     const pastEpisodes: string[] = [];
 
     if (semanticResult?.memoryRecordSummaries) {
-      for (const record of semanticResult.memoryRecordSummaries) {
-        const text = record.content?.text;
-        if (text) {
-          if (!verifyContentIntegrity(text, record.metadata)) {
-            logger.warn('Memory record content integrity check failed — using content anyway (fail-open)', {
-              repo,
-              namespace: semanticNamespace,
-              record_type: 'repo_knowledge',
-              expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
-              actual_hash: hashContent(text),
-              source_type: record.metadata?.source_type?.stringValue ?? '(unknown)',
-              content_length: text.length,
-              metric_type: 'memory_integrity_mismatch',
-            });
-          }
-          repoKnowledge.push(sanitizeExternalContent(text));
-        }
-      }
+      processMemoryRecords(semanticResult.memoryRecordSummaries, repoKnowledge, repo, semanticNamespace, 'repo_knowledge');
     }
 
     if (episodicResult?.memoryRecordSummaries) {
-      for (const record of episodicResult.memoryRecordSummaries) {
-        const text = record.content?.text;
-        if (text) {
-          if (!verifyContentIntegrity(text, record.metadata)) {
-            logger.warn('Memory record content integrity check failed — using content anyway (fail-open)', {
-              repo,
-              namespace: episodicNamespace,
-              record_type: 'past_episode',
-              expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
-              actual_hash: hashContent(text),
-              source_type: record.metadata?.source_type?.stringValue ?? '(unknown)',
-              content_length: text.length,
-              metric_type: 'memory_integrity_mismatch',
-            });
-          }
-          pastEpisodes.push(sanitizeExternalContent(text));
-        }
-      }
+      processMemoryRecords(episodicResult.memoryRecordSummaries, pastEpisodes, repo, episodicNamespace, 'past_episode');
     }
 
     if (repoKnowledge.length === 0 && pastEpisodes.length === 0) {
@@ -248,10 +273,16 @@ export async function loadMemoryContext(
       past_episodes: budgetedEpisodes,
     };
   } catch (err) {
-    logger.warn('Memory context load failed (fail-open)', {
+    const isProgrammingError = err instanceof TypeError
+      || err instanceof RangeError
+      || err instanceof ReferenceError;
+    const level = isProgrammingError ? 'error' : 'warn';
+    logger[level]('Memory context load failed (fail-open)', {
       memoryId,
       repo,
       error: err instanceof Error ? err.message : String(err),
+      error_type: err instanceof Error ? err.constructor.name : typeof err,
+      metric_type: isProgrammingError ? 'memory_load_bug' : 'memory_load_infra_failure',
     });
     return undefined;
   }
@@ -295,7 +326,10 @@ export async function writeMinimalEpisode(
       'Note: This is a minimal episode written by the orchestrator because the agent did not write memory.',
     ].filter(Boolean).join(' ');
 
-    const contentHash = hashContent(episodeText);
+    // Hash the sanitized form; store the original. The read path re-sanitizes
+    // and checks against this hash: sanitize(original) at write == sanitize(stored) at read.
+    const sanitizedText = sanitizeExternalContent(episodeText);
+    const contentHash = hashContent(sanitizedText);
 
     await client.send(new CreateEventCommand({
       memoryId,
@@ -311,7 +345,7 @@ export async function writeMinimalEpisode(
       metadata: {
         task_id: { stringValue: taskId },
         type: { stringValue: 'orchestrator_fallback_episode' },
-        source_type: { stringValue: 'orchestrator_fallback' },
+        source_type: { stringValue: 'orchestrator_fallback' as MemorySourceType },
         content_sha256: { stringValue: contentHash },
         schema_version: { stringValue: '3' },
       },
@@ -320,10 +354,16 @@ export async function writeMinimalEpisode(
     logger.info('Minimal episode written by orchestrator fallback', { taskId, repo });
     return true;
   } catch (err) {
-    logger.warn('Failed to write minimal episode (fail-open)', {
+    const isProgrammingError = err instanceof TypeError
+      || err instanceof RangeError
+      || err instanceof ReferenceError;
+    const level = isProgrammingError ? 'error' : 'warn';
+    logger[level]('Failed to write minimal episode (fail-open)', {
       memoryId,
       taskId,
       error: err instanceof Error ? err.message : String(err),
+      error_type: err instanceof Error ? err.constructor.name : typeof err,
+      metric_type: isProgrammingError ? 'memory_write_bug' : 'memory_write_infra_failure',
     });
     return false;
   }

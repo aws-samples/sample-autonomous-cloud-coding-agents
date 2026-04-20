@@ -142,6 +142,7 @@ run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:build",
   "MISE_EXPERIMENTAL=1 mise //cli:build",
   "MISE_EXPERIMENTAL=1 mise //docs:build",
+  "MISE_EXPERIMENTAL=1 mise //docs:sync",
 ]
 
 [tasks.default]

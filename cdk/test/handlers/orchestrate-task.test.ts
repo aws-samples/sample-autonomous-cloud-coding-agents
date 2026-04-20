@@ -139,6 +139,7 @@ describe('hydrateAndTransition', () => {
     sources: ['task_description'],
     token_estimate: 20,
     truncated: false,
+    content_trust: { task_description: 'trusted' },
   };
 
   test('transitions to HYDRATING and returns payload with hydrated_context', async () => {
@@ -198,6 +199,7 @@ describe('hydrateAndTransition', () => {
     expect(guardrailEvent.metadata.pr_number).toBe(10);
     expect(guardrailEvent.metadata.sources).toEqual(['task_description']);
     expect(guardrailEvent.metadata.token_estimate).toBe(20);
+    expect(guardrailEvent.metadata.content_trust).toEqual({ task_description: 'trusted' });
   });
 
   test('still throws guardrail error when emitTaskEvent fails during guardrail_blocked handling', async () => {
@@ -232,6 +234,7 @@ describe('hydrateAndTransition', () => {
     expect(metadata.sources).toEqual(['task_description']);
     expect(metadata.token_estimate).toBe(20);
     expect(metadata.truncated).toBe(false);
+    expect(metadata.content_trust).toEqual({ task_description: 'trusted' });
   });
 });
 
@@ -422,6 +425,7 @@ describe('hydrateAndTransition with blueprint config', () => {
     sources: ['task_description'],
     token_estimate: 20,
     truncated: false,
+    content_trust: { task_description: 'trusted' },
   };
 
   test('includes system_prompt_overrides in payload when blueprint config has them', async () => {
@@ -707,6 +711,7 @@ describe('hydrateAndTransition — memory and prompt version', () => {
     sources: ['task_description'],
     token_estimate: 20,
     truncated: false,
+    content_trust: { task_description: 'trusted' },
   };
 
   test('passes memoryId to hydrateContext', async () => {
@@ -733,6 +738,7 @@ describe('hydrateAndTransition — memory and prompt version', () => {
       ...mockHydratedContextBase,
       memory_context: { repo_knowledge: ['test'], past_episodes: [] },
       sources: ['task_description', 'memory'],
+      content_trust: { task_description: 'trusted', memory: 'memory' },
     });
     await hydrateAndTransition(baseTask as any);
 
@@ -743,6 +749,7 @@ describe('hydrateAndTransition — memory and prompt version', () => {
     const metadata = putCalls[0][0].input.Item.metadata;
     expect(metadata.has_memory_context).toBe(true);
     expect(metadata.prompt_version).toBe('abc123def456');
+    expect(metadata.content_trust).toEqual({ task_description: 'trusted', memory: 'memory' });
   });
 
   test('stores prompt_version on task record via DDB UpdateCommand', async () => {

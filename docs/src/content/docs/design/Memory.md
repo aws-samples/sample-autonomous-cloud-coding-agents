@@ -51,7 +51,7 @@ Task end (orchestrator fallback):
 
 ### Design decisions
 
-- **Fail-open with severity-aware logging** — All memory operations are wrapped in try-catch. A Memory API outage never blocks task execution, PR creation, or finalization. Infrastructure errors (network, auth, throttling) are logged at WARN level; programming errors (`TypeError`, `ValueError`, `AttributeError`) are logged at ERROR level to surface bugs quickly. All events include `schema_version: "2"` metadata for migration tracking. The Python agent validates the `repo` parameter matches `owner/repo` format before writing (mirrors TypeScript-side `isValidRepo`).
+- **Fail-open with severity-aware logging** — All memory operations are wrapped in try-catch. A Memory API outage never blocks task execution, PR creation, or finalization. Infrastructure errors (network, auth, throttling) are logged at WARN level; programming errors (`TypeError`, `ValueError`, `AttributeError`) are logged at ERROR level to surface bugs quickly. All events include `schema_version` metadata for migration tracking (currently v3). The Python agent validates the `repo` parameter matches `owner/repo` format before writing (mirrors TypeScript-side `isValidRepo`).
 - **Token budget** — Memory context is capped at 2,000 tokens (~8,000 characters) to avoid consuming too much system prompt space. Oldest entries are dropped first.
 - **Per-repo namespace via template variables** — Namespace isolation is configured on the extraction strategies using `{actorId}` and `{sessionId}` template variables. Events are written with `actorId = "owner/repo"` and `sessionId = taskId`. The extraction pipeline places records at `/{repo}/knowledge/` (semantic) and `/{repo}/episodes/{taskId}/` (episodic). Reads use these paths as namespace prefixes. This is a breaking infrastructure change from the initial implementation — the Memory resource must be recreated on deploy.
 - **Prompt version excludes memory** — The SHA-256 hash is computed from deterministic prompt parts only. Memory context varies per run, so including it would make every prompt version unique and defeat the purpose of tracking prompt changes.
@@ -434,17 +434,17 @@ The memory system faces two categories of corruption:
 
 Analysis of the current implementation identified 9 specific memory security gaps:
 
-| # | Gap | Affected files | Severity |
-|---|---|---|---|
-| 1 | No memory content validation — retrieved records are injected into agent context without sanitization | `memory.ts:loadMemoryContext()` | Critical |
-| 2 | No source provenance tracking — cannot distinguish agent-written memory from externally-influenced content | `memory.ts`, `agent/memory.py` | Critical |
-| 3 | GitHub issue content (attacker-controlled) injected without trust differentiation | `context-hydration.ts` | Critical |
-| 4 | No trust scoring at retrieval — all memories treated equally regardless of age, source, or consistency | `memory.ts:loadMemoryContext()` | High |
-| 5 | No memory integrity checking — no hashing or signatures to detect modification | `memory.ts`, `agent/memory.py` | High |
-| 6 | No anomaly detection on memory write/retrieval patterns | (no implementation) | High |
-| 7 | No memory rollback — 365-day expiration is the only cleanup mechanism | (no implementation) | High |
-| 8 | No write-ahead validation (guardian pattern) for memory commits | (no implementation) | Medium |
-| 9 | No circuit breaker for memory-influenced behavioral anomalies | `orchestrator.ts` | Medium |
+| # | Gap | Affected files | Severity | Status |
+|---|---|---|---|---|
+| 1 | ~~No memory content validation~~ — `sanitizeExternalContent()` strips HTML, injection patterns, control chars, bidi overrides | `sanitization.ts`, `sanitization.py`, `memory.ts`, `prompt_builder.py` | Critical | **Fixed (3e P1)** |
+| 2 | ~~No source provenance tracking~~ — `MemorySourceType` (`agent_episode`, `agent_learning`, `orchestrator_fallback`) on all writes | `memory.ts`, `agent/memory.py` | Critical | **Fixed (3e P1)** |
+| 3 | ~~GitHub issue content injected without trust differentiation~~ — `sanitizeExternalContent()` applied to issue/PR titles, bodies, comments, and task descriptions | `context-hydration.ts` | Critical | **Fixed (3e P1)** |
+| 4 | No trust scoring at retrieval — all memories treated equally regardless of age, source, or consistency | `memory.ts:loadMemoryContext()` | High | Open (3e P2) |
+| 5 | ~~No memory integrity checking~~ — SHA-256 hash on sanitized content at write, audit-only verification at read (AgentCore extraction transforms content, so hash is an audit signal not a retrieval gate; read-path sanitization is the real defense) | `memory.ts`, `agent/memory.py` | High | **Fixed (3e P1)** |
+| 6 | No anomaly detection on memory write/retrieval patterns | (no implementation) | High | Open (3e P3) |
+| 7 | No memory rollback — 365-day expiration is the only cleanup mechanism | (no implementation) | High | Open (3e P3) |
+| 8 | No write-ahead validation (guardian pattern) for memory commits | (no implementation) | Medium | Open (3e P4) |
+| 9 | No circuit breaker for memory-influenced behavioral anomalies | `orchestrator.ts` | Medium | Open (3e P3) |
 
 ### Defense architecture
 

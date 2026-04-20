@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -52,6 +52,11 @@ class MemoryContext(BaseModel):
     past_episodes: list[str] = Field(default_factory=list)
 
 
+# Trust classification for content sources — mirrors ContentTrustLevel in context-hydration.ts.
+# 'trusted': user-supplied input, 'untrusted-external': GitHub-sourced content,
+# 'memory': memory records.
+ContentTrustLevel = Literal["trusted", "untrusted-external", "memory"]
+
 # Bump when this agent supports a new orchestrator HydratedContext shape
 # (see cdk/src/handlers/shared/context-hydration.ts).
 SUPPORTED_HYDRATED_CONTEXT_VERSION = 1
@@ -73,6 +78,7 @@ class HydratedContext(BaseModel):
     guardrail_blocked: str | None = None
     resolved_branch_name: str | None = None
     resolved_base_branch: str | None = None
+    content_trust: dict[str, ContentTrustLevel] | None = None
 
     @model_validator(mode="after")
     def version_supported(self) -> Self:

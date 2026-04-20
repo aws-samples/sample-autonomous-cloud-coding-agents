@@ -269,6 +269,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
         pr_number: task.pr_number,
         sources: hydratedContext.sources,
         token_estimate: hydratedContext.token_estimate,
+        ...(hydratedContext.content_trust && { content_trust: hydratedContext.content_trust }),
       });
     } catch (eventErr) {
       logger.error('Failed to emit guardrail_blocked event', {
@@ -353,6 +354,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     truncated: hydratedContext.truncated,
     prompt_version: promptVersion,
     has_memory_context: !!hydratedContext.memory_context,
+    ...(hydratedContext.content_trust && { content_trust: hydratedContext.content_trust }),
     ...(hydratedContext.fallback_error && { fallback_error: hydratedContext.fallback_error }),
   });
   return payload;
