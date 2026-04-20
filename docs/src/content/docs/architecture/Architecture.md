@@ -1,8 +1,12 @@
+---
+title: Architecture
+---
+
 # Architecture
 
 This document outlines the overall architecture of the platform. Each component has its own deep-dive document in this folder.
 
-![](../imgs/abca-arch.png)
+![](/sample-autonomous-cloud-coding-agents/imgs/abca-arch.png)
 
 ## Design principles
 
@@ -33,13 +37,13 @@ flowchart LR
 
 The orchestrator and agent are deliberately separated. The orchestrator handles everything deterministic (cheap Lambda invocations); the agent handles everything that needs LLM reasoning (expensive compute + tokens). This separation provides reliability (crashed agents don't leave orphaned state), cost efficiency (bookkeeping doesn't burn tokens), security (the agent can't bypass platform invariants), and testability (deterministic steps are unit-tested without LLM calls).
 
-For the full orchestrator design, see [ORCHESTRATOR.md](./ORCHESTRATOR.md). For the API contract, see [API_CONTRACT.md](./API_CONTRACT.md).
+For the full orchestrator design, see [ORCHESTRATOR.md](/architecture/orchestrator). For the API contract, see [API_CONTRACT.md](/architecture/api-contract).
 
 ## Repository onboarding
 
 Onboarding is CDK-based. Each repository is an instance of the `Blueprint` construct in the stack. The construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time.
 
-Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the full design.
+Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](/architecture/repo-onboarding) for the full design.
 
 ## Model selection
 
@@ -62,7 +66,7 @@ The dominant cost is Bedrock inference + compute, not infrastructure. Memory, La
 | Medium (small team) | 200-500 | $500-3,000 |
 | High (org-wide) | 2,000-5,000 | $5,000-30,000 |
 
-For the full breakdown, see [COST_MODEL.md](./COST_MODEL.md).
+For the full breakdown, see [COST_MODEL.md](/architecture/cost-model).
 
 ## Known architectural risks
 

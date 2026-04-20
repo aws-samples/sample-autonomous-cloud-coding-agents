@@ -1,9 +1,13 @@
+---
+title: Compute
+---
+
 # Compute
 
 Every task runs in an isolated cloud compute environment. Nothing runs on the user's machine. The agent clones the repo, writes code, runs tests, and opens a PR inside a MicroVM that is created for the task and destroyed when it ends.
 
 - **Use this doc for:** understanding the compute environment, agent harness, network architecture, and the constraints that shape the platform's design.
-- **Related docs:** [ORCHESTRATOR.md](./ORCHESTRATOR.md) for session management and liveness monitoring, [SECURITY.md](./SECURITY.md) for isolation and egress controls, [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for per-repo compute configuration.
+- **Related docs:** [ORCHESTRATOR.md](/architecture/orchestrator) for session management and liveness monitoring, [SECURITY.md](/architecture/security) for isolation and egress controls, [REPO_ONBOARDING.md](/architecture/repo-onboarding) for per-repo compute configuration.
 
 ## Compute options
 
@@ -21,7 +25,7 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 | **Cost model** | vCPU-hrs + GB-hrs | vCPU + mem/sec | EC2 + EBS | EKS control + EC2 | Underlying compute | Request + duration | EC2 metal + your ops |
 | **Fit** | **Default choice** | Repos > 2 GB image | GPU, heavy toolchains | Max flexibility | Queued batch jobs | **Poor** (15 min cap) | Best potential, highest cost |
 
-The backend is selected per repo via `compute_type` in the Blueprint config. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the `ComputeStrategy` interface.
+The backend is selected per repo via `compute_type` in the Blueprint config. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](/architecture/repo-onboarding) for the `ComputeStrategy` interface.
 
 ## What runs in the session
 
@@ -71,7 +75,7 @@ The platform works around this by splitting storage:
 | Max session duration | 8 hours | Hard limit enforced by AgentCore |
 | Idle timeout | 15 minutes | Agent must report `HealthyBusy` via `/ping` to stay alive |
 
-See [ORCHESTRATOR.md](./ORCHESTRATOR.md) for how the orchestrator handles these timeouts.
+See [ORCHESTRATOR.md](/architecture/orchestrator) for how the orchestrator handles these timeouts.
 
 ## Agent harness
 
@@ -105,7 +109,7 @@ The harness enforces tool-call policy via Cedar-based hooks:
 - **PreToolUse** (`agent/src/hooks.py` + `agent/src/policy.py`) - Evaluates tool calls before execution. `pr_review` agents cannot use `Write`/`Edit`. Writes to `.git/*` are blocked. Destructive bash commands are denied. Fail-closed: if Cedar is unavailable, all calls are denied.
 - **PostToolUse** (`agent/src/hooks.py` + `agent/src/output_scanner.py`) - Screens tool outputs for secrets and redacts before re-entering agent context.
 
-Per-repo custom Cedar policies are supported via Blueprint `security.cedarPolicies`. See [SECURITY.md](./SECURITY.md) for the full policy enforcement model.
+Per-repo custom Cedar policies are supported via Blueprint `security.cedarPolicies`. See [SECURITY.md](/architecture/security) for the full policy enforcement model.
 
 ## Network architecture
 

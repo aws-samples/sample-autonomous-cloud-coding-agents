@@ -2,17 +2,15 @@
 title: Using the REST API
 ---
 
-The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack output.
+The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack output. All endpoints require Cognito JWT authentication (`Authorization: Bearer <token>`).
 
-### Task types
-
-The platform supports three task types:
-
-| Type | Description | Outcome |
+| Method | Endpoint | Description |
 |---|---|---|
-| `new_task` (default) | Create a new branch, implement changes, and open a new PR. | New pull request |
-| `pr_iteration` | Check out an existing PR's branch, read review feedback, address it, and push updates. | Updated pull request |
-| `pr_review` | Check out an existing PR's branch, analyze the changes read-only, and post a structured review. | Review comments on the PR |
+| `POST` | `/tasks` | Create a new task (new_task, pr_iteration, or pr_review) |
+| `GET` | `/tasks` | List your tasks with optional filters (status, repo, pagination) |
+| `GET` | `/tasks/{task_id}` | Get full detail for a specific task |
+| `DELETE` | `/tasks/{task_id}` | Cancel a running or queued task |
+| `GET` | `/tasks/{task_id}/events` | Get the chronological audit log for a task |
 
 ### Create a task
 
@@ -96,7 +94,7 @@ curl -X POST "$API_URL/tasks" \
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
-**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 GUARDRAIL_BLOCKED` error — revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error — retry after a short delay. For PR tasks (`pr_iteration`, `pr_review`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
+**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 GUARDRAIL_BLOCKED` error  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR tasks (`pr_iteration`, `pr_review`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
 
 **Idempotency:** Include an `Idempotency-Key` header (alphanumeric, dashes, underscores, max 128 chars) to prevent duplicate task creation on retries:
 
@@ -138,7 +136,7 @@ curl "$API_URL/tasks/01KJDSS94G3VA55CW1M534EC7Q" -H "Authorization: $TOKEN"
 
 Returns the full task record including status, timestamps, PR URL, cost, and error details.
 
-**Example** (after a successful run — `status` is `COMPLETED`, `pr_url` populated):
+**Example** (after a successful run  - `status` is `COMPLETED`, `pr_url` populated):
 
 ```bash
 curl "$API_URL/tasks/01KN36YGQV6BEPDD7CVMKP1PF3" -H "Authorization: $TOKEN"
