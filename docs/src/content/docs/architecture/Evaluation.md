@@ -1,9 +1,13 @@
+---
+title: Evaluation
+---
+
 # Evaluation
 
 The evaluation pipeline measures agent performance and feeds learnings back into prompts, memory, and configuration. In MVP, evaluation is manual (inspect PRs and logs). Automated evaluation is built incrementally across iterations.
 
 - **Use this doc for:** understanding what gets evaluated, the tiered validation pipeline, memory effectiveness metrics, and the feedback loop.
-- **Related docs:** [MEMORY.md](./MEMORY.md) for how evaluation insights are stored, [OBSERVABILITY.md](./OBSERVABILITY.md) for telemetry data sources, [ORCHESTRATOR.md](./ORCHESTRATOR.md) for prompt versioning in the data model.
+- **Related docs:** [MEMORY.md](/architecture/memory) for how evaluation insights are stored, [OBSERVABILITY.md](/architecture/observability) for telemetry data sources, [ORCHESTRATOR.md](/architecture/orchestrator) for prompt versioning in the data model.
 
 ## What to evaluate
 
@@ -28,7 +32,7 @@ Evaluation consumes the same data that observability and code attribution captur
 | Agent logs and traces | CloudWatch logs, X-Ray spans, tool calls, reasoning steps |
 | Code artifacts | PR description, commits, diff, repo/branch/issue links |
 | PR outcome signals | Merged vs. closed-without-merge (via GitHub webhooks). Positive/negative signal on task episodes. |
-| Review feedback | PR review comments captured via the review feedback memory loop (see [MEMORY.md](./MEMORY.md)) |
+| Review feedback | PR review comments captured via the review feedback memory loop (see [MEMORY.md](/architecture/memory)) |
 
 ## Agent self-feedback
 

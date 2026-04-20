@@ -17,7 +17,7 @@ curl -X POST "$API_URL/webhooks" \
   -d '{"name": "My CI Pipeline"}'
 ```
 
-The response includes a `secret` field — **store it securely, it is only shown once**:
+The response includes a `secret` field  - **store it securely, it is only shown once**:
 
 ```json
 {
@@ -75,7 +75,7 @@ curl -X POST "$API_URL/webhooks/tasks" \
 
 The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `task_type`, `pr_number`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported. You can submit `pr_iteration` tasks via webhook to automate PR feedback loops, or `pr_review` tasks to trigger automated code reviews.
 
-**Example response** (same shape as a successful `POST /tasks` — `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
+**Example response** (same shape as a successful `POST /tasks`  - `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
 
 ```json
 {"data":{"task_id":"01KN38AB1SE79QA4MBNAHFBQAN","status":"SUBMITTED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN38AB1SE79QA4MBNAHFBQAN/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"created_at":"2026-04-01T00:50:25.977Z","updated_at":"2026-04-01T00:50:25.977Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
