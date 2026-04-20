@@ -95,7 +95,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Repository doesn't exist or is private without proper token scope
 - Check event `reason` and `detail` fields for specifics
 - **PAT path:** verify the fine-grained token includes the target repository with Contents (read/write), Pull Requests (read/write), Issues (read)
-- **Token Vault path:** verify the GitHub App is installed on the target repo (GitHub → Settings → Developer settings → GitHub Apps → your app → Install App), the callback URL (`AgentCoreIdentityGitHubOAuthCallbackUrl` stack output) is registered in the GitHub App settings, and the CDK context params (`githubOAuthClientId`, `githubOAuthClientSecret`) were provided at deploy time
+- **Token Vault path:** verify the GitHub App is installed on the target repo (GitHub → Settings → Developer settings → GitHub Apps → your app → Install App), the callback URL (`AgentCoreIdentityGitHubOAuthCallbackUrl` stack output) is registered in the GitHub App settings, the CDK context param `githubApp` was set to true in cdk.json, the real client secret is stored in the credential provider's Secrets Manager secret (retrieve its ARN via `aws bedrock-agent-core get-oauth2-credential-provider`), and the **one-time OAuth consent flow** has been completed (see step 6 in the Developer Guide — GitHub Apps use USER_FEDERATION, not M2M)
 
 **`task_failed` / task completes with 0 tokens and no PR:**
 - Agent encountered an error during execution

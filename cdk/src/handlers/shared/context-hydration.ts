@@ -21,6 +21,7 @@ import {
   BedrockAgentCoreClient,
   GetWorkloadAccessTokenCommand,
   GetResourceOauth2TokenCommand,
+  CompleteResourceTokenAuthCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
@@ -316,6 +317,14 @@ const TV_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 let agentCoreClient: BedrockAgentCoreClient | undefined;
 
+// Return URL for the USER_FEDERATION consent flow. Must be listed in the
+// WorkloadIdentity's allowedResourceOauth2ReturnUrls.
+const OAUTH2_RETURN_URL = 'https://localhost';
+
+// Maximum number of poll attempts when waiting for user consent to complete.
+const CONSENT_POLL_MAX_ATTEMPTS = 3;
+const CONSENT_POLL_DELAY_MS = 2_000;
+
 async function resolveGitHubTokenViaTokenVault(config: TokenVaultConfig): Promise<string> {
   const cacheKey = `${config.workloadIdentityName}:${config.credentialProviderName}`;
   const cached = tvTokenCache.get(cacheKey);
@@ -335,21 +344,69 @@ async function resolveGitHubTokenViaTokenVault(config: TokenVaultConfig): Promis
     throw new Error('Token Vault returned empty workload access token');
   }
 
-  // Step 2: exchange for a GitHub OAuth token via M2M flow
+  // Step 2: exchange for a GitHub OAuth token via USER_FEDERATION flow.
+  // On first call (before consent), the response contains authorizationUrl +
+  // sessionUri instead of an accessToken. After one-time consent is completed,
+  // subsequent calls return accessToken directly.
   const tokenResponse = await agentCoreClient.send(
     new GetResourceOauth2TokenCommand({
       workloadIdentityToken: watResponse.workloadAccessToken,
       resourceCredentialProviderName: config.credentialProviderName,
       scopes: ['repo'],
-      oauth2Flow: 'M2M',
+      oauth2Flow: 'USER_FEDERATION',
+      resourceOauth2ReturnUrl: OAUTH2_RETURN_URL,
     }),
   );
-  if (!tokenResponse.accessToken) {
-    throw new Error('Token Vault returned empty GitHub access token');
+
+  // Happy path: consent already completed, token is returned directly
+  if (tokenResponse.accessToken) {
+    tvTokenCache.set(cacheKey, { token: tokenResponse.accessToken, expiresAt: Date.now() + TV_CACHE_TTL_MS });
+    return tokenResponse.accessToken;
   }
 
-  tvTokenCache.set(cacheKey, { token: tokenResponse.accessToken, expiresAt: Date.now() + TV_CACHE_TTL_MS });
-  return tokenResponse.accessToken;
+  // Consent required: authorizationUrl is returned for user to visit.
+  // In a server-side context (Lambda), the operator must complete the
+  // one-time consent flow before submitting tasks. If we reach here,
+  // it means consent hasn't been done yet.
+  if (tokenResponse.authorizationUrl && tokenResponse.sessionUri) {
+    logger.warn('Token Vault: USER_FEDERATION consent not yet completed — polling session', {
+      session_uri: tokenResponse.sessionUri,
+      authorization_url: tokenResponse.authorizationUrl,
+    });
+
+    // Poll a few times in case consent was just completed moments ago
+    for (let attempt = 0; attempt < CONSENT_POLL_MAX_ATTEMPTS; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, CONSENT_POLL_DELAY_MS));
+
+      const pollResponse = await agentCoreClient.send(
+        new GetResourceOauth2TokenCommand({
+          workloadIdentityToken: watResponse.workloadAccessToken,
+          resourceCredentialProviderName: config.credentialProviderName,
+          scopes: ['repo'],
+          oauth2Flow: 'USER_FEDERATION',
+          sessionUri: tokenResponse.sessionUri,
+          resourceOauth2ReturnUrl: OAUTH2_RETURN_URL,
+        }),
+      );
+
+      if (pollResponse.accessToken) {
+        tvTokenCache.set(cacheKey, { token: pollResponse.accessToken, expiresAt: Date.now() + TV_CACHE_TTL_MS });
+        return pollResponse.accessToken;
+      }
+
+      if (pollResponse.sessionStatus === 'FAILED') {
+        throw new Error('Token Vault: USER_FEDERATION consent session failed');
+      }
+    }
+
+    throw new Error(
+      'Token Vault: GitHub OAuth consent not completed. '
+      + 'Complete the one-time consent flow before submitting tasks. '
+      + `Authorization URL: ${tokenResponse.authorizationUrl}`,
+    );
+  }
+
+  throw new Error('Token Vault returned neither accessToken nor authorizationUrl');
 }
 
 // --- Unified entry point ---

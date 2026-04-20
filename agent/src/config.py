@@ -16,7 +16,13 @@ def _resolve_github_token_via_token_vault(
     workload_identity_name: str,
     credential_provider_name: str,
 ) -> str:
-    """Resolve GitHub token via AgentCore Token Vault (M2M OAuth2 flow)."""
+    """Resolve GitHub token via AgentCore Token Vault (USER_FEDERATION OAuth2 flow).
+
+    GitHub does not support the M2M (client_credentials) grant. The Token Vault
+    USER_FEDERATION flow uses the authorization_code grant with a one-time browser
+    consent. After consent, the Token Vault caches the refresh token and returns
+    access tokens directly on subsequent calls.
+    """
     import boto3
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
@@ -37,13 +43,14 @@ def _resolve_github_token_via_token_vault(
     if not workload_access_token:
         raise RuntimeError("Token Vault returned empty workload access token")
 
-    # Step 2: exchange for a GitHub OAuth token via M2M flow
+    # Step 2: exchange for a GitHub OAuth token via USER_FEDERATION flow
     try:
         token_response = client.get_resource_oauth2_token(
             workloadIdentityToken=workload_access_token,
             resourceCredentialProviderName=credential_provider_name,
             scopes=["repo"],
-            oauth2Flow="M2M",
+            oauth2Flow="USER_FEDERATION",
+            resourceOauth2ReturnUrl="https://localhost",
         )
     except Exception as exc:
         raise RuntimeError(
@@ -52,10 +59,19 @@ def _resolve_github_token_via_token_vault(
         ) from exc
 
     access_token = token_response.get("accessToken")
-    if not access_token:
-        raise RuntimeError("Token Vault returned empty GitHub access token")
+    if access_token:
+        return access_token
 
-    return access_token
+    # If no accessToken, consent hasn't been completed yet
+    authorization_url = token_response.get("authorizationUrl")
+    if authorization_url:
+        raise RuntimeError(
+            "Token Vault: GitHub OAuth consent not completed. "
+            "Complete the one-time consent flow before submitting tasks. "
+            f"Authorization URL: {authorization_url}"
+        )
+
+    raise RuntimeError("Token Vault returned neither accessToken nor authorizationUrl")
 
 
 def resolve_github_token() -> str:

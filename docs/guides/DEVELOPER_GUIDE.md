@@ -89,9 +89,9 @@ If you use a **per-repo** secret (`githubTokenSecretArn` on a Blueprint), put th
 
 #### 4. GitHub App via Token Vault (preferred, optional)
 
-> **Recommended for production.** Using a [GitHub App](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps) with AgentCore Token Vault produces short-lived, automatically-refreshed tokens with fine-grained, per-repository permissions — eliminating static, long-lived PATs. The PAT path above remains the simplest way to get started.
+> **Recommended.** Using a [GitHub App](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps) with AgentCore Token Vault produces short-lived, automatically-refreshed tokens with fine-grained, per-repository permissions — eliminating static, long-lived PATs. The PAT path above remains the simplest way to get started.
 >
-> **Why a GitHub App (not an OAuth App)?** GitHub Apps are GitHub's [recommended integration type](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps). They support installation-level, per-repository permissions (the app only sees repos it is installed on), act as their own identity (commits are attributed to the app), and produce short-lived tokens. Token Vault uses the app's OAuth2 client credentials (Client ID + Client secret) for the M2M token exchange.
+> **Why a GitHub App (not an OAuth App)?** GitHub Apps are GitHub's [recommended integration type](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps). They support installation-level, per-repository permissions (the app only sees repos it is installed on), act as their own identity (commits are attributed to the app), and produce short-lived tokens. Token Vault uses the app's OAuth2 client credentials (Client ID + Client secret) with the USER_FEDERATION flow (authorization code grant + one-time browser consent).
 
 **Setup:**
 
@@ -117,17 +117,15 @@ If you use a **per-repo** secret (`githubTokenSecretArn` on a Blueprint), put th
 
 2. **Install the app on your repositories.** On the app's settings page, click **Install App** in the left sidebar. Choose your organization (or personal account), then select either **All repositories** or **Only select repositories** (pick the repos the agent should access). Click **Install**.
 
-3. **Deploy with Token Vault context parameters:**
+3. **Deploy:**
+
+  set githubApp=true in cdk.json and run mise run deploy
 
    ```bash
-   cd cdk && npx cdk deploy \
-     -c githubOAuthClientId="Iv1.your_client_id" \
-     -c githubOAuthClientSecret="your_github_app_client_secret"
+   cd cdk && mise run deploy
    ```
 
-   CDK creates a Secrets Manager secret for the client secret automatically, along with a `WorkloadIdentity` and an `OAuth2CredentialProvider` in AgentCore Identity. When these context parameters are absent, no Token Vault resources are created and the stack uses the PAT path (step 3 above).
-
-   > **Bring-your-own secret:** If you prefer to manage the Secrets Manager secret yourself (e.g. for rotation), use `-c githubOAuthClientSecretArn="arn:..."` instead of `-c githubOAuthClientSecret`.
+   CDK creates a `WorkloadIdentity` and an `OAuth2CredentialProvider` in AgentCore Identity. The credential provider creates its own Secrets Manager secret for the client secret. When the context parameter is absent, no Token Vault resources are created and the stack uses the PAT path (step 3 above).
 
 4. **Register the callback URL.** The deploy output prints the `AgentCoreIdentityGitHubOAuthCallbackUrl`. Copy it and paste it into the **Callback URL** field in your GitHub App settings (GitHub → **Settings** → **Developer settings** → **GitHub Apps** → your app → **General** → **Callback URL**).
 
@@ -141,7 +139,78 @@ If you use a **per-repo** secret (`githubTokenSecretArn` on a Blueprint), put th
      --output text
    ```
 
-**How it works at runtime:** The orchestrator and agent call `GetWorkloadAccessToken` (using the agent's identity) followed by `GetResourceOauth2Token` (M2M flow) to obtain a GitHub access token. Token Vault handles the OAuth2 exchange and token refresh automatically. When Token Vault env vars (`WORKLOAD_IDENTITY_NAME`, `GITHUB_OAUTH2_PROVIDER_NAME`) are present, they are preferred over the Secrets Manager PAT.
+5. **Store the GitHub App client id and secret.** The credential provider is seeded with placeholder values. Use the code below to store the real client id and secret you copied in step 1 (replace the two placeholders below YOUR_CLIENT_ID and YOUR_CLIENT_SECRET):
+
+   ```bash
+   # Same Region you deployed to (must be non-empty — see Post-deployment setup)
+   REGION=us-east-1
+
+   # The client secret is managed by AgentCore Identity — update it via
+   # the bedrock-agentcore-control API (not yet in the AWS CLI, use boto3).
+   # Replace the clientId and clientSecret values with your GitHub App credentials.
+   python3 << 'PYEOF'
+import boto3
+client = boto3.client('bedrock-agentcore-control', region_name='us-east-1')
+client.update_oauth2_credential_provider(
+    name='abca-github',
+    credentialProviderVendor='GithubOauth2',
+    oauth2ProviderConfigInput={
+        'githubOauth2ProviderConfig': {
+            'clientId': 'YOUR_CLIENT_ID',
+            'clientSecret': 'YOUR_CLIENT_SECRET',
+        }
+    },
+)
+print('Client secret updated successfully')
+PYEOF
+   ```
+
+6. **Complete the one-time OAuth consent flow.** GitHub does not support M2M (client_credentials) OAuth2 — Token Vault uses the USER_FEDERATION flow (authorization code grant). After deploying and storing credentials (step 5), run the consent script **once** to authorize the GitHub App:
+
+   ```bash
+   python3 << 'PYEOF'
+import boto3, webbrowser
+
+REGION = 'us-east-1'  # Same Region you deployed to
+WORKLOAD_IDENTITY_NAME = 'abca-agent'
+CREDENTIAL_PROVIDER_NAME = 'abca-github'
+
+client = boto3.client('bedrock-agentcore', region_name=REGION)
+
+# Step 1: get a workload access token
+wat = client.get_workload_access_token(workloadName=WORKLOAD_IDENTITY_NAME)
+token = wat['workloadAccessToken']
+
+# Step 2: initiate the USER_FEDERATION flow
+resp = client.get_resource_oauth2_token(
+    workloadIdentityToken=token,
+    resourceCredentialProviderName=CREDENTIAL_PROVIDER_NAME,
+    scopes=['repo'],
+    oauth2Flow='USER_FEDERATION',
+    resourceOauth2ReturnUrl='https://localhost',
+)
+
+if resp.get('accessToken'):
+    print('Consent already completed — token available.')
+else:
+    url = resp['authorizationUrl']
+    session_uri = resp['sessionUri']
+    print(f'Open this URL to authorize the GitHub App:\n{url}')
+    webbrowser.open(url)
+    input('\nAfter approving in the browser, press Enter to finalize...')
+
+    # Step 3: complete the consent
+    client.complete_resource_token_auth(
+        userIdentifier={'userToken': token},
+        sessionUri=session_uri,
+    )
+    print('Consent completed successfully.')
+PYEOF
+   ```
+
+   Open the printed URL in a browser, authorize the GitHub App, then press Enter. This is a **one-time** step — Token Vault caches the refresh token and renews access tokens automatically from then on.
+
+**How it works at runtime:** The orchestrator and agent call `GetWorkloadAccessToken` (using the agent's identity) followed by `GetResourceOauth2Token` (USER_FEDERATION flow) to obtain a GitHub access token. After the one-time consent, Token Vault caches the refresh token and returns short-lived access tokens directly — no further browser interaction needed. When Token Vault env vars (`WORKLOAD_IDENTITY_NAME`, `GITHUB_OAUTH2_PROVIDER_NAME`) are present, they are preferred over the Secrets Manager PAT.
 
 **Per-repo overrides:** Blueprints accept `credentials.workloadIdentityName` and `credentials.githubOAuth2CredentialProviderName` for per-repo Token Vault configuration, alongside the existing `credentials.githubTokenSecretArn` for per-repo PATs.
 
@@ -185,7 +254,7 @@ Default output format [None]: json
 - [Docker](https://docs.docker.com/engine/install/) — for local agent runs and CDK asset builds.
 - [mise](https://mise.jdx.dev/getting-started.html) — task runner and version manager for Node, security tools, and (under `agent/`) Python. Install from the official guide; it is **not** installed via npm.
 - **AWS CDK CLI** ≥ 2.233.0 — install globally with npm **after** mise is active so it uses the same Node as this repo (see [Set up your toolchain](#set-up-your-toolchain)): `npm install -g aws-cdk`.
-- A **GitHub personal access token** (PAT) with permission to access every repository you onboard—see **[Repository preparation](#repository-preparation)** (steps 2–3) for required fine-grained permissions and how to store the value in Secrets Manager after deploy. For local agent runs, export `GITHUB_TOKEN` (see **Local testing**). Extra runtime notes live in `agent/README.md`.
+- A **GitHub personal access token** (PAT) with permission to access every repository you onboard—see **[Repository preparation](#repository-preparation)** (steps 2–3) for required fine-grained permissions and how to store the value in Secrets Manager after deploy. For local agent runs, export `GITHUB_TOKEN` (see **Local testing**). Extra runtime notes live in `agent/README.md`. If you prefer you can also use a GitHub app instead of the PAT token.
 
 **Versions this repo pins via mise (no separate Node/Yarn/Python install needed for the standard path):**
 

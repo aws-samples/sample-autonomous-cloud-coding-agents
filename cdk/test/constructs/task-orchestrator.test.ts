@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, SecretValue, Stack } from 'aws-cdk-lib';
+import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { AgentCoreIdentity } from '../../src/constructs/agentcore-identity';
@@ -85,8 +85,6 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
       workloadIdentityName: 'test-agent',
       githubOAuth: {
         credentialProviderName: 'test-github',
-        clientId: 'Iv1.test123',
-        clientSecret: SecretValue.unsafePlainText('test-secret'),
       },
     })
     : undefined;

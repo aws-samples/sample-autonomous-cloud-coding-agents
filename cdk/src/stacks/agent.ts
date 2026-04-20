@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, SecretValue } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -184,73 +184,24 @@ export class AgentStack extends Stack {
     agentMemory.grantReadWrite(runtime);
 
     // --- AgentCore Identity / Token Vault (preferred over static PAT) ---
-    // When GitHub App OAuth credentials are provided via CDK context, create
+    // When a GitHub App OAuth client ID is provided via CDK context, create
     // a WorkloadIdentity + OAuth2 credential provider for dynamic token vending.
     // Falls back to the static PAT in GitHubTokenSecret when not configured.
     //
-    // Accepts either:
-    //   -c githubOAuthClientId=... -c githubOAuthClientSecret=...  (simple: CDK manages the SM secret)
-    //   -c githubOAuthClientId=... -c githubOAuthClientSecretArn=... (bring-your-own SM secret)
-    const githubOAuthClientId = this.node.tryGetContext('githubOAuthClientId') as string | undefined;
-    const githubOAuthClientSecret = this.node.tryGetContext('githubOAuthClientSecret') as string | undefined;
-    const githubOAuthClientSecretArn = this.node.tryGetContext('githubOAuthClientSecretArn') as string | undefined;
-
-    let resolvedClientSecret: SecretValue | undefined;
-    if (githubOAuthClientId && githubOAuthClientSecret) {
-      // Simple path: CDK creates and manages a Secrets Manager secret for the client secret
-      const oauthSecret = new secretsmanager.Secret(this, 'GitHubOAuthClientSecret', {
-        description: 'GitHub App client secret for AgentCore Token Vault',
-        removalPolicy: RemovalPolicy.DESTROY,
-      });
-      // Seed the secret with the provided value — subsequent rotations are handled externally.
-      // The CDK custom resource overwrites any existing value, so re-deploying with a new
-      // context value updates the secret.
-      new cr.AwsCustomResource(this, 'SeedOAuthClientSecret', {
-        onCreate: {
-          service: 'SecretsManager',
-          action: 'putSecretValue',
-          parameters: {
-            SecretId: oauthSecret.secretArn,
-            SecretString: githubOAuthClientSecret,
-          },
-          physicalResourceId: cr.PhysicalResourceId.of('seed-oauth-client-secret'),
-        },
-        onUpdate: {
-          service: 'SecretsManager',
-          action: 'putSecretValue',
-          parameters: {
-            SecretId: oauthSecret.secretArn,
-            SecretString: githubOAuthClientSecret,
-          },
-          physicalResourceId: cr.PhysicalResourceId.of('seed-oauth-client-secret'),
-        },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            actions: ['secretsmanager:PutSecretValue'],
-            resources: [oauthSecret.secretArn],
-          }),
-        ]),
-      });
-      NagSuppressions.addResourceSuppressions(oauthSecret, [
-        {
-          id: 'AwsSolutions-SMG4',
-          reason: 'GitHub OAuth client secret is managed externally — automatic rotation is not applicable',
-        },
-      ]);
-      resolvedClientSecret = oauthSecret.secretValue;
-    } else if (githubOAuthClientId && githubOAuthClientSecretArn) {
-      // Bring-your-own secret path
-      resolvedClientSecret = SecretValue.secretsManager(githubOAuthClientSecretArn);
-    }
+    // Usage:  -c githubOAuthClientId=Iv1.xxx
+    //
+    // CDK creates a Secrets Manager secret for the client secret (like the PAT).
+    // After deploy, store the real client secret via the CLI:
+    //   aws secretsmanager put-secret-value --secret-id <GitHubOAuthClientSecretArn> --secret-string "your_client_secret"
+    const githubApp = this.node.tryGetContext('githubApp');
+    const useGitHubApp = githubApp === true || githubApp === 'true';
 
     let agentCoreIdentity: AgentCoreIdentity | undefined;
-    if (githubOAuthClientId && resolvedClientSecret) {
+    if (useGitHubApp) {
       agentCoreIdentity = new AgentCoreIdentity(this, 'AgentCoreIdentity', {
         workloadIdentityName: 'abca-agent',
         githubOAuth: {
           credentialProviderName: 'abca-github',
-          clientId: githubOAuthClientId,
-          clientSecret: resolvedClientSecret,
         },
       });
       agentCoreIdentity.grantTokenVaultAccess(runtime);
@@ -259,6 +210,15 @@ export class AgentStack extends Stack {
       // The L2 construct does not support addEnvironment post-construction.
       cfnRuntime.addPropertyOverride('EnvironmentVariables.WORKLOAD_IDENTITY_NAME', agentCoreIdentity.workloadIdentityName);
       cfnRuntime.addPropertyOverride('EnvironmentVariables.GITHUB_OAUTH2_PROVIDER_NAME', agentCoreIdentity.credentialProviderName);
+
+      new CfnOutput(this, 'GitHubOAuthCredentialProviderArn', {
+        value: this.formatArn({
+          service: 'bedrock-agentcore',
+          resource: 'token-vault',
+          resourceName: `default/oauth2credentialprovider/${agentCoreIdentity.credentialProviderName}`,
+        }),
+        description: 'ARN of the OAuth2 credential provider — use to look up the client secret ARN after deploy',
+      });
     }
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
@@ -309,7 +269,14 @@ export class AgentStack extends Stack {
 
     // Runtime logs and traces
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+    // X-Ray traces delivery (AWS::Logs::Delivery). Only one delivery per source+destination type is
+    // allowed; stack updates that replace this resource can fail with AlreadyExists. Set context
+    // disableAgentCoreXRayDelivery=true to skip (or delete the stray delivery in the account, then redeploy).
+    const disableXRayCtx = this.node.tryGetContext('disableAgentCoreXRayDelivery');
+    const disableAgentCoreXRayDelivery = disableXRayCtx === true || disableXRayCtx === 'true';
+    if (!disableAgentCoreXRayDelivery) {
+      runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+    }
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
 
     NagSuppressions.addResourceSuppressions(runtime, [

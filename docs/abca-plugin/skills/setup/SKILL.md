@@ -69,7 +69,7 @@ Guide through:
    aws cloudformation describe-stacks --stack-name backgroundagent-dev \
      --query 'Stacks[0].Outputs' --output table
    ```
-4. Store the GitHub PAT in Secrets Manager using the `GitHubTokenSecretArn` output. Alternatively, deploy with Token Vault for auto-refreshed tokens: `mise run //cdk:deploy -- -c githubOAuthClientId="..." -c githubOAuthClientSecret="..."` (see [Developer Guide step 4](../../../guides/DEVELOPER_GUIDE.md))
+4. Store the GitHub PAT in Secrets Manager using the `GitHubTokenSecretArn` output. Alternatively, deploy with Token Vault for auto-refreshed tokens: `mise run //cdk:deploy -- -c githubOAuthClientId="..."`, then retrieve the client secret ARN from the credential provider and store the real secret (see [Developer Guide step 4](../../../guides/DEVELOPER_GUIDE.md))
 5. Create a Cognito user (self-signup is disabled):
    ```bash
    aws cognito-idp admin-create-user --user-pool-id $USER_POOL_ID \

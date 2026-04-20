@@ -17,7 +17,8 @@
  *  SOFTWARE.
  */
 
-import { Stack, CfnOutput, SecretValue } from 'aws-cdk-lib';
+import * as cdk from 'aws-cdk-lib';
+import { Stack, CfnOutput } from 'aws-cdk-lib';
 import * as bedrockagentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
@@ -41,18 +42,15 @@ export interface AgentCoreIdentityProps {
      * Must match `[a-zA-Z0-9-_]+`, 1–128 characters.
      */
     readonly credentialProviderName: string;
-
-    /**
-     * GitHub App client ID (starts with `Iv...`).
-     */
-    readonly clientId: string;
-
-    /**
-     * GitHub App client secret (sensitive).
-     * Use `SecretValue.secretsManager(...)` or `SecretValue.unsafePlainText(...)`.
-     */
-    readonly clientSecret: SecretValue;
   };
+
+  /**
+   * Allowed OAuth2 return URLs for the USER_FEDERATION consent flow.
+   * These URLs are registered on the WorkloadIdentity and must include
+   * the return URL passed in `GetResourceOauth2Token` calls.
+   * @default ['https://localhost']
+   */
+  readonly allowedResourceOauth2ReturnUrls?: string[];
 }
 
 /**
@@ -99,24 +97,24 @@ export class AgentCoreIdentity extends Construct {
     // Lambda), a standalone identity is required regardless.
     const workloadIdentity = new bedrockagentcore.CfnWorkloadIdentity(this, 'WorkloadIdentity', {
       name: props.workloadIdentityName,
+      allowedResourceOauth2ReturnUrls: props.allowedResourceOauth2ReturnUrls ?? ['https://localhost'],
     });
 
     this.workloadIdentityName = props.workloadIdentityName;
     this.workloadIdentityArn = workloadIdentity.attrWorkloadIdentityArn;
 
     // --- OAuth2 Credential Provider (GitHub) ---
-    // The L1 CfnOAuth2CredentialProvider requires a string for clientSecret.
-    // unsafeUnwrap() is safe here when the caller passes SecretValue.secretsManager(),
-    // which produces a CFN dynamic reference resolved at deploy time. Never pass
-    // SecretValue.unsafePlainText() in production — the plaintext would appear in the
-    // synthesized CloudFormation template.
+    // The CfnOAuth2CredentialProvider creates its own Secrets Manager secret
+    // for the client secret (exposed via attrClientSecretArn). We pass a dummy
+    // value at deploy time; the operator stores the real client secret in that
+    // secret after deploy (same pattern as the GitHub PAT).
     const credentialProvider = new bedrockagentcore.CfnOAuth2CredentialProvider(this, 'GitHubOAuth2Provider', {
       name: props.githubOAuth.credentialProviderName,
       credentialProviderVendor: 'GithubOauth2',
       oauth2ProviderConfigInput: {
         githubOauth2ProviderConfig: {
-          clientId: props.githubOAuth.clientId,
-          clientSecret: props.githubOAuth.clientSecret.unsafeUnwrap(),
+          clientId: 'PLACEHOLDER_REPLACE_AFTER_DEPLOY',
+          clientSecret: 'PLACEHOLDER_REPLACE_AFTER_DEPLOY',
         },
       },
     });
@@ -161,6 +159,30 @@ export class AgentCoreIdentity extends Construct {
           service: 'bedrock-agentcore',
           resource: 'workload-identity-directory',
           resourceName: 'default/*',
+        }),
+        stack.formatArn({
+          service: 'bedrock-agentcore',
+          resource: 'token-vault',
+          resourceName: 'default',
+        }),
+        stack.formatArn({
+          service: 'bedrock-agentcore',
+          resource: 'token-vault',
+          resourceName: 'default/*',
+        }),
+      ],
+    }));
+
+    // The Token Vault GetResourceOauth2Token API requires the caller to have
+    // secretsmanager:GetSecretValue on the service-managed credential secret.
+    grantee.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        stack.formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          resourceName: 'bedrock-agentcore-identity!default/oauth2/*',
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
         }),
       ],
     }));

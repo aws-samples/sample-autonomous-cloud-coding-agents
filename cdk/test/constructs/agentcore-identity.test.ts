@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, SecretValue, Stack } from 'aws-cdk-lib';
+import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AgentCoreIdentity } from '../../src/constructs/agentcore-identity';
@@ -30,8 +30,6 @@ function createStack(): { stack: Stack; template: Template; identity: AgentCoreI
     workloadIdentityName: 'test-agent',
     githubOAuth: {
       credentialProviderName: 'test-github',
-      clientId: 'Iv1.test123',
-      clientSecret: SecretValue.unsafePlainText('test-secret'),
     },
   });
 
@@ -40,10 +38,11 @@ function createStack(): { stack: Stack; template: Template; identity: AgentCoreI
 }
 
 describe('AgentCoreIdentity construct', () => {
-  test('creates a CfnWorkloadIdentity with the correct name', () => {
+  test('creates a CfnWorkloadIdentity with the correct name and default return URLs', () => {
     const { template } = createStack();
     template.hasResourceProperties('AWS::BedrockAgentCore::WorkloadIdentity', {
       Name: 'test-agent',
+      AllowedResourceOauth2ReturnUrls: ['https://localhost'],
     });
   });
 
@@ -54,8 +53,8 @@ describe('AgentCoreIdentity construct', () => {
       CredentialProviderVendor: 'GithubOauth2',
       Oauth2ProviderConfigInput: {
         GithubOauth2ProviderConfig: {
-          ClientId: 'Iv1.test123',
-          ClientSecret: 'test-secret',
+          ClientId: 'PLACEHOLDER_REPLACE_AFTER_DEPLOY',
+          ClientSecret: 'PLACEHOLDER_REPLACE_AFTER_DEPLOY',
         },
       },
     });
@@ -75,7 +74,7 @@ describe('AgentCoreIdentity construct', () => {
       ([key]) => key.includes('GitHubOAuthCallbackUrl'),
     );
     expect(callbackOutput).toBeDefined();
-    expect(callbackOutput![1].Description).toMatch(/OAuth callback/);
+    expect(callbackOutput![1].Description).toMatch(/callback URL/);
   });
 
   test('grantTokenVaultAccess adds correct IAM policy', () => {
@@ -86,8 +85,6 @@ describe('AgentCoreIdentity construct', () => {
       workloadIdentityName: 'test-agent',
       githubOAuth: {
         credentialProviderName: 'test-github',
-        clientId: 'Iv1.test123',
-        clientSecret: SecretValue.unsafePlainText('test-secret'),
       },
     });
 
@@ -107,7 +104,7 @@ describe('AgentCoreIdentity construct', () => {
               'bedrock-agentcore:GetResourceOauth2Token',
             ],
             Effect: 'Allow',
-            Resource: [
+            Resource: Match.arrayWith([
               Match.objectLike({
                 'Fn::Join': Match.arrayWith([
                   Match.arrayWith([
@@ -118,11 +115,22 @@ describe('AgentCoreIdentity construct', () => {
               Match.objectLike({
                 'Fn::Join': Match.arrayWith([
                   Match.arrayWith([
-                    Match.stringLikeRegexp('workload-identity-directory/default/\\*'),
+                    Match.stringLikeRegexp('token-vault/default$'),
                   ]),
                 ]),
               }),
-            ],
+            ]),
+          }),
+          Match.objectLike({
+            Action: 'secretsmanager:GetSecretValue',
+            Effect: 'Allow',
+            Resource: Match.objectLike({
+              'Fn::Join': Match.arrayWith([
+                Match.arrayWith([
+                  Match.stringLikeRegexp('bedrock-agentcore-identity!default/oauth2/\\*'),
+                ]),
+              ]),
+            }),
           }),
         ]),
       },

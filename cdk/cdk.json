@@ -1,6 +1,10 @@
 {
   "app": "npx ts-node -P tsconfig.json --prefer-ts-exts src/main.ts",
   "output": "cdk.out",
+  "context": {
+    "disableAgentCoreXRayDelivery": true,
+    "githubApp": true
+  },
   "build": "node -e \"process.exit(0)\"",
   "watch": {
     "include": ["src/**/*.ts", "test/**/*.ts"],

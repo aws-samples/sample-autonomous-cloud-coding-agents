@@ -29,6 +29,7 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
   GetWorkloadAccessTokenCommand: jest.fn((input: unknown) => ({ _type: 'GetWorkloadAccessToken', input })),
   GetResourceOauth2TokenCommand: jest.fn((input: unknown) => ({ _type: 'GetResourceOauth2Token', input })),
+  CompleteResourceTokenAuthCommand: jest.fn((input: unknown) => ({ _type: 'CompleteResourceTokenAuth', input })),
 }));
 
 const mockBedrockSend = jest.fn();
@@ -183,14 +184,32 @@ describe('resolveGitHubToken', () => {
     ).rejects.toThrow('empty workload access token');
   });
 
-  test('Token Vault: throws when GitHub access token is empty', async () => {
+  test('Token Vault: throws when consent not completed (authorizationUrl returned)', async () => {
     mockAgentCoreSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-123' })
-      .mockResolvedValueOnce({ accessToken: undefined });
+      // First call: consent needed
+      .mockResolvedValueOnce({
+        authorizationUrl: 'https://github.com/login/oauth/authorize?...',
+        sessionUri: 'arn:aws:bedrock-agentcore:us-east-1:123:session/abc',
+        sessionStatus: 'IN_PROGRESS',
+      })
+      // Poll attempts: session stays IN_PROGRESS, consent never completed.
+      // Return FAILED on last poll to short-circuit.
+      .mockResolvedValueOnce({ sessionStatus: 'FAILED' });
 
     await expect(
       resolveGitHubToken(undefined, { workloadIdentityName: 'agent', credentialProviderName: 'github' }),
-    ).rejects.toThrow('empty GitHub access token');
+    ).rejects.toThrow('consent session failed');
+  }, 15_000);
+
+  test('Token Vault: throws when response has neither token nor authorizationUrl', async () => {
+    mockAgentCoreSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-123' })
+      .mockResolvedValueOnce({});
+
+    await expect(
+      resolveGitHubToken(undefined, { workloadIdentityName: 'agent', credentialProviderName: 'github' }),
+    ).rejects.toThrow('neither accessToken nor authorizationUrl');
   });
 
   test('throws when neither Token Vault nor Secrets Manager is configured', async () => {
