@@ -1,9 +1,13 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { remarkMermaid } from './plugins/remark-mermaid.mjs';
 
 export default defineConfig({
   site: 'https://aws-samples.github.io',
   base: '/sample-autonomous-cloud-coding-agents',
+  markdown: {
+    remarkPlugins: [remarkMermaid],
+  },
   integrations: [
     starlight({
       title: 'ABCA Docs',
@@ -25,9 +29,41 @@ export default defineConfig({
           content:
             "(function(){try{if(typeof localStorage!=='undefined'){var k='starlight-theme';if(localStorage.getItem(k)===null)localStorage.setItem(k,'dark');}}catch(e){}})();",
         },
+        {
+          tag: 'script',
+          attrs: { type: 'module' },
+          content:
+            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
+        },
       ],
       sidebar: [
         { label: 'Introduction', slug: 'index' },
+        {
+          label: 'Getting Started',
+          items: [{ label: 'Quick Start', slug: 'getting-started/quick-start' }],
+        },
+        {
+          label: 'Using the Platform',
+          items: [
+            { slug: 'using/overview' },
+            { slug: 'using/task-types' },
+            { slug: 'using/authentication' },
+            { slug: 'using/using-the-rest-api' },
+            { slug: 'using/using-the-cli' },
+            { slug: 'using/webhook-integration' },
+            { slug: 'using/task-lifecycle' },
+            { slug: 'using/what-the-agent-does' },
+            { slug: 'using/tips-for-being-a-good-citizen' },
+          ],
+        },
+        {
+          label: 'Customizing',
+          items: [
+            { slug: 'customizing/repository-onboarding' },
+            { slug: 'customizing/per-repo-overrides' },
+            { label: 'Prompt Engineering', slug: 'customizing/prompt-engineering' },
+          ],
+        },
         {
           label: 'Developer Guide',
           items: [
@@ -39,28 +75,26 @@ export default defineConfig({
           ],
         },
         {
-          label: 'User Guide',
+          label: 'Architecture',
+          collapsed: true,
           items: [
-            { slug: 'user-guide/introduction' },
-            { slug: 'user-guide/overview' },
-            { slug: 'user-guide/prerequisites' },
-            { slug: 'user-guide/authentication' },
-            { slug: 'user-guide/repository-onboarding' },
-            { slug: 'user-guide/using-the-rest-api' },
-            { slug: 'user-guide/using-the-cli' },
-            { slug: 'user-guide/webhook-integration' },
-            { slug: 'user-guide/task-lifecycle' },
-            { slug: 'user-guide/what-the-agent-does' },
-            { slug: 'user-guide/viewing-logs' },
-            { slug: 'user-guide/tips' },
-            { label: 'Prompt guide', slug: 'user-guide/prompt-guide' },
+            { slug: 'architecture/architecture' },
+            { slug: 'architecture/orchestrator' },
+            { slug: 'architecture/security' },
+            { slug: 'architecture/memory' },
+            { slug: 'architecture/api-contract' },
+            { slug: 'architecture/compute' },
+            { slug: 'architecture/input-gateway' },
+            { slug: 'architecture/observability' },
+            { slug: 'architecture/cost-model' },
+            { slug: 'architecture/evaluation' },
+            { slug: 'architecture/repo-onboarding' },
           ],
         },
         {
           label: 'Roadmap',
           autogenerate: { directory: 'roadmap' },
         },
-        { label: 'Design', autogenerate: { directory: 'design' } },
       ],
     }),
   ],

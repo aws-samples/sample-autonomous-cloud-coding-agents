@@ -96,4 +96,4 @@ Guide through:
 After all phases pass, summarize:
 - Stack outputs (API URL, User Pool ID, etc.)
 - Next steps: onboard a repository (use the `onboard-repo` skill)
-- Point to the User Guide: https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/user-guide/introduction/
+- Point to the Quick Start: https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/getting-started/quick-start/
