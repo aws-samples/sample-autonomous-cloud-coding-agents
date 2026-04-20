@@ -81,11 +81,6 @@ describe('AgentBrowser construct', () => {
     });
   });
 
-  test('creates a Gateway resource', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
-  });
-
   test('uses default browser name', () => {
     const { template } = createStack();
     template.hasResourceProperties('AWS::BedrockAgentCore::BrowserCustom', {
@@ -100,10 +95,9 @@ describe('AgentBrowser construct', () => {
     });
   });
 
-  test('exposes browser, gateway, browserToolFn, screenshotBucket', () => {
+  test('exposes browser, browserToolFn, screenshotBucket', () => {
     const { agentBrowser } = createStack();
     expect(agentBrowser.browser).toBeDefined();
-    expect(agentBrowser.gateway).toBeDefined();
     expect(agentBrowser.browserToolFn).toBeDefined();
     expect(agentBrowser.screenshotBucket).toBeDefined();
   });

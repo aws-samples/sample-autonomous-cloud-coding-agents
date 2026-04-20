@@ -74,7 +74,7 @@ jest.mock('ws', () => {
 });
 
 import { StopBrowserSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import { handler } from '../../src/handlers/browser-tool';
+import { handler, validateUrl } from '../../src/handlers/browser-tool';
 
 describe('browser-tool handler', () => {
   beforeEach(() => {
@@ -105,7 +105,7 @@ describe('browser-tool handler', () => {
 
     const result = await handler({
       action: 'screenshot',
-      url: 'https://example.com',
+      url: 'https://github.com/owner/repo/pull/1',
     });
 
     expect(result).toEqual(
@@ -126,7 +126,7 @@ describe('browser-tool handler', () => {
 
     const result = await handler({
       action: 'screenshot',
-      url: 'https://example.com',
+      url: 'https://github.com/owner/repo/pull/1',
     });
 
     expect(result).toEqual(
@@ -154,7 +154,7 @@ describe('browser-tool handler', () => {
 
     const result = await handler({
       action: 'screenshot',
-      url: 'https://example.com',
+      url: 'https://github.com/owner/repo/pull/1',
     });
 
     // Session should still be stopped even though S3 failed
@@ -172,7 +172,7 @@ describe('browser-tool handler', () => {
   test('returns error for unknown action', async () => {
     const result = await handler({
       action: 'unknown' as any,
-      url: 'https://example.com',
+      url: 'https://github.com/owner/repo',
     });
 
     expect(result).toEqual(
@@ -180,5 +180,83 @@ describe('browser-tool handler', () => {
         error: expect.stringContaining('unknown'),
       }),
     );
+  });
+
+  test('rejects non-HTTPS URLs', async () => {
+    const result = await handler({
+      action: 'screenshot',
+      url: 'http://github.com/owner/repo',
+    });
+
+    expect(result).toEqual({
+      status: 'error',
+      error: 'URL rejected: Only HTTPS URLs are allowed',
+    });
+  });
+
+  test('rejects IMDS metadata endpoint', async () => {
+    const result = await handler({
+      action: 'screenshot',
+      url: 'https://169.254.169.254/latest/meta-data/',
+    });
+
+    expect(result).toEqual({
+      status: 'error',
+      error: 'URL rejected: Private/internal IP addresses are not allowed',
+    });
+  });
+
+  test('rejects non-github.com domains', async () => {
+    const result = await handler({
+      action: 'screenshot',
+      url: 'https://evil.com/something',
+    });
+
+    expect(result).toEqual({
+      status: 'error',
+      error: 'URL rejected: Only github.com URLs are allowed',
+    });
+  });
+});
+
+describe('validateUrl', () => {
+  test('allows github.com HTTPS URLs', () => {
+    expect(validateUrl('https://github.com/owner/repo/pull/1')).toBeNull();
+  });
+
+  test('rejects http URLs', () => {
+    expect(validateUrl('http://github.com')).toBe('Only HTTPS URLs are allowed');
+  });
+
+  test('rejects file URLs', () => {
+    expect(validateUrl('file:///etc/passwd')).toBe('Only HTTPS URLs are allowed');
+  });
+
+  test('rejects localhost', () => {
+    expect(validateUrl('https://localhost/foo')).toBe('Localhost URLs are not allowed');
+  });
+
+  test('rejects RFC1918 10.x', () => {
+    expect(validateUrl('https://10.0.0.1/')).toBe('Private/internal IP addresses are not allowed');
+  });
+
+  test('rejects RFC1918 172.16.x', () => {
+    expect(validateUrl('https://172.16.0.1/')).toBe('Private/internal IP addresses are not allowed');
+  });
+
+  test('rejects RFC1918 192.168.x', () => {
+    expect(validateUrl('https://192.168.1.1/')).toBe('Private/internal IP addresses are not allowed');
+  });
+
+  test('rejects link-local 169.254.x', () => {
+    expect(validateUrl('https://169.254.169.254/')).toBe('Private/internal IP addresses are not allowed');
+  });
+
+  test('rejects non-allowed domains', () => {
+    expect(validateUrl('https://example.com')).toBe('Only github.com URLs are allowed');
+  });
+
+  test('rejects invalid URLs', () => {
+    expect(validateUrl('not-a-url')).toBe('Invalid URL');
   });
 });

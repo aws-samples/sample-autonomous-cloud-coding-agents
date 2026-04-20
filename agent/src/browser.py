@@ -31,12 +31,24 @@ def capture_screenshot(url: str, task_id: str = "") -> str | None:
         return None
     try:
         client = _get_lambda_client()
+    except ValueError as e:
+        print(f"[browser] [ERROR] Configuration error: {e}", flush=True)
+        return None
+    try:
         payload = json.dumps({"action": "screenshot", "url": url, "taskId": task_id})
         response = client.invoke(
             FunctionName=function_name,
             InvocationType="RequestResponse",
             Payload=payload,
         )
+        if "FunctionError" in response:
+            error_payload = json.loads(response["Payload"].read())
+            print(
+                f"[browser] [ERROR] Lambda function crashed: "
+                f"{response['FunctionError']} — {error_payload}",
+                flush=True,
+            )
+            return None
         result = json.loads(response["Payload"].read())
         if result.get("status") == "success":
             print(f"[browser] Screenshot captured: {result.get('screenshotS3Key')}", flush=True)
@@ -44,5 +56,8 @@ def capture_screenshot(url: str, task_id: str = "") -> str | None:
         print(f"[browser] Screenshot failed: {result.get('error', 'unknown')}", flush=True)
         return None
     except Exception as e:
-        print(f"[browser] [WARN] capture_screenshot failed: {type(e).__name__}: {e}", flush=True)
+        print(
+            f"[browser] [WARN] capture_screenshot failed (transient): {type(e).__name__}: {e}",
+            flush=True,
+        )
         return None

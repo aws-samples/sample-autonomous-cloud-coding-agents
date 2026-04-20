@@ -337,8 +337,11 @@ def run_task(
                         screenshot_urls = capture_pr_screenshots(pr_url, config.task_id)
                         if screenshot_urls:
                             _append_screenshots_to_pr(config, setup, screenshot_urls)
-                    except Exception:
-                        log("WARN", "Screenshot capture failed (non-fatal)")
+                    except Exception as exc:
+                        log(
+                            "WARN",
+                            f"Screenshot capture failed (non-fatal): {type(exc).__name__}: {exc}",
+                        )
 
                 post_span.set_attribute("build.passed", build_passed)
                 post_span.set_attribute("lint.passed", lint_passed)

@@ -376,16 +376,33 @@ def _append_screenshots_to_pr(
         images_md = "\n".join(
             f"![Screenshot {i + 1}]({url})" for i, url in enumerate(screenshot_urls)
         )
-        updated_body = f"{current_body}\n\n## Screenshots\n\n{images_md}"
+        screenshots_section = f"## Screenshots\n\n{images_md}"
 
-        subprocess.run(
+        if re.search(r"## Screenshots", current_body):
+            updated_body = re.sub(
+                r"## Screenshots\n.*?(?=\n## |\Z)",
+                screenshots_section,
+                current_body,
+                flags=re.DOTALL,
+            )
+        else:
+            updated_body = f"{current_body}\n\n{screenshots_section}"
+
+        edit_result = subprocess.run(
             ["gh", "pr", "edit", setup.branch, "--repo", config.repo_url, "--body", updated_body],
             cwd=setup.repo_dir,
             capture_output=True,
             text=True,
             timeout=30,
         )
-        log("POST", f"Appended {len(screenshot_urls)} screenshot(s) to PR body")
+        if edit_result.returncode == 0:
+            log("POST", f"Appended {len(screenshot_urls)} screenshot(s) to PR body")
+        else:
+            log(
+                "WARN",
+                f"gh pr edit failed (rc={edit_result.returncode}): "
+                f"{edit_result.stderr.strip()[:200]}",
+            )
     except Exception as e:
         log("WARN", f"Failed to append screenshots to PR: {type(e).__name__}: {e}")
 

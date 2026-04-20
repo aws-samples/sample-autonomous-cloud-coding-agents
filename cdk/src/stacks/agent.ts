@@ -283,16 +283,6 @@ export class AgentStack extends Stack {
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
-    new CfnOutput(this, 'BrowserGatewayUrl', {
-      value: agentBrowser.gateway.gatewayUrl ?? '',
-      description: 'URL of the Browser Gateway',
-    });
-
-    new CfnOutput(this, 'BrowserGatewayTokenEndpoint', {
-      value: agentBrowser.gateway.tokenEndpointUrl ?? '',
-      description: 'OAuth2 token endpoint for the Browser Gateway',
-    });
-
     new CfnOutput(this, 'BrowserId', {
       value: agentBrowser.browser.browserId,
       description: 'ID of the AgentCore Browser',
