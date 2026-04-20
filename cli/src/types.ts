@@ -80,6 +80,20 @@ export interface TaskEvent {
   readonly metadata: Record<string, unknown>;
 }
 
+/**
+ * Query parameters accepted by GET /v1/tasks/{task_id}/events.
+ *
+ * ``after`` and ``next_token`` are mutually exclusive — if both are sent the
+ * server prefers ``after`` (and logs a warning). ``after`` is a ULID event_id
+ * cursor used by the SSE client to catch up after a disconnect. Keep in sync
+ * with ``cdk/src/handlers/shared/types.ts``.
+ */
+export interface GetTaskEventsQuery {
+  readonly limit?: number;
+  readonly next_token?: string;
+  readonly after?: string;
+}
+
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
   readonly repo: string;

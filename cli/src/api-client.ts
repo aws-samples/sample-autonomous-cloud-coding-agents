@@ -133,18 +133,62 @@ export class ApiClient {
     return res.data;
   }
 
-  /** GET /tasks/{task_id}/events — get task events. */
+  /**
+   * GET /tasks/{task_id}/events — get task events.
+   *
+   * Supports two alternative pagination cursors:
+   *   - ``after`` — a ULID event_id. Server returns events with
+   *     ``event_id > after``. Used by the SSE client to catch up after
+   *     a disconnect.
+   *   - ``nextToken`` — an opaque DynamoDB pagination token for normal
+   *     forward pagination.
+   *
+   * If both are passed, the server prefers ``after`` and logs a warning.
+   * Prefer {@link catchUpEvents} when you want all events after a known id.
+   */
   async getTaskEvents(taskId: string, opts?: {
     limit?: number;
     nextToken?: string;
+    after?: string;
   }): Promise<PaginatedResponse<TaskEvent>> {
     const params = new URLSearchParams();
     if (opts?.limit) params.set('limit', String(opts.limit));
     if (opts?.nextToken) params.set('next_token', opts.nextToken);
+    if (opts?.after) params.set('after', opts.after);
 
     const qs = params.toString();
     const path = `/tasks/${encodeURIComponent(taskId)}/events${qs ? `?${qs}` : ''}`;
     return this.request<PaginatedResponse<TaskEvent>>('GET', path);
+  }
+
+  /**
+   * Fetch every event with ``event_id > afterEventId``, paginating through
+   * the server's ``next_token`` internally.
+   *
+   * Intended for the SSE reconnect path: the CLI tracks the last event_id
+   * it saw on the live stream, and on reconnect calls this helper to fill
+   * the gap before resuming the SSE stream. Returns events in ascending
+   * order (oldest first), matching the server's ``ScanIndexForward: true``.
+   *
+   * @param taskId - the task whose events to fetch.
+   * @param afterEventId - the ULID cursor; events strictly greater than
+   *   this id are returned.
+   * @param pageSize - page size passed to the server (default 100, max 100).
+   * @returns all events after the cursor, in chronological order.
+   */
+  async catchUpEvents(taskId: string, afterEventId: string, pageSize = 100): Promise<TaskEvent[]> {
+    const collected: TaskEvent[] = [];
+    // First page uses ``after``; subsequent pages use the opaque ``next_token``.
+    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: pageSize });
+    collected.push(...page.data);
+    while (page.pagination.has_more && page.pagination.next_token) {
+      page = await this.getTaskEvents(taskId, {
+        nextToken: page.pagination.next_token,
+        limit: pageSize,
+      });
+      collected.push(...page.data);
+    }
+    return collected;
   }
 
   /** POST /webhooks — create a new webhook. */

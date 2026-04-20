@@ -129,6 +129,28 @@ export interface EventRecord {
 }
 
 /**
+ * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
+ *
+ * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
+ * used by the SSE client to catch up after a disconnect) over ``next_token``
+ * (an opaque DynamoDB pagination token). If both are provided, the handler
+ * uses ``after`` and logs a WARN. Neither is required — callers may start
+ * from the beginning of the task's event stream.
+ *
+ * When a page is truncated at ``limit``, the response includes a
+ * ``next_token`` so the caller can continue paginating forward regardless
+ * of which mode they started with.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
+ */
+export interface GetTaskEventsQuery {
+  readonly limit?: number;
+  readonly next_token?: string;
+  /** ULID event_id cursor. Returns events with ``event_id > after``. */
+  readonly after?: string;
+}
+
+/**
  * Create task request body.
  */
 export interface CreateTaskRequest {

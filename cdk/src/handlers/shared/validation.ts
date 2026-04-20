@@ -36,6 +36,9 @@ export const MAX_MAX_BUDGET_USD = 100;
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
+// ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
+// Matches the ``_generate_ulid`` output in ``agent/src/progress_writer.py``.
+const ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const ALL_STATUSES = new Set(Object.values(TaskStatus));
 
 /**
@@ -137,6 +140,20 @@ export function decodePaginationToken(token: string | undefined): Record<string,
 export function encodePaginationToken(lastKey: Record<string, unknown> | undefined): string | null {
   if (!lastKey) return null;
   return Buffer.from(JSON.stringify(lastKey)).toString('base64');
+}
+
+/**
+ * Validate a ULID string (26-char Crockford Base32, case-insensitive).
+ * ULIDs are lexicographically sortable by timestamp prefix, so string comparison
+ * on valid ULIDs behaves correctly for "events after this id" queries. The
+ * canonical alphabet excludes the letters I, L, O, and U to avoid visual
+ * ambiguity — we accept upper- or lower-case callers by uppercasing first.
+ * @param value - the candidate ULID string.
+ * @returns true if the value matches the ULID shape.
+ */
+export function isValidUlid(value: string): boolean {
+  if (typeof value !== 'string' || value.length !== 26) return false;
+  return ULID_PATTERN.test(value.toUpperCase());
 }
 
 /**

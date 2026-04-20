@@ -145,6 +145,134 @@ describe('ApiClient', () => {
         expect.anything(),
       );
     });
+
+    test('passes ?after= when provided', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      const ulid = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+      await client.getTaskEvents('abc', { after: ulid });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('/tasks/abc/events');
+      expect(url).toContain(`after=${ulid}`);
+      // Must not silently send next_token when only after was provided.
+      expect(url).not.toContain('next_token=');
+    });
+
+    test('existing next_token path is preserved', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', { nextToken: 'opaque-token', limit: 25 });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('next_token=opaque-token');
+      expect(url).toContain('limit=25');
+      expect(url).not.toContain('after=');
+    });
+
+    test('both after and nextToken are sent verbatim to the server', async () => {
+      // The client does not arbitrate — the server prefers ``after`` and logs
+      // a warning. This test just locks in the transport behaviour.
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', {
+        after: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        nextToken: 'opaque',
+      });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(url).toContain('next_token=opaque');
+    });
+  });
+
+  describe('catchUpEvents', () => {
+    test('returns first page when server says no more', async () => {
+      const events = [
+        { event_id: '01ARZ3NDEKTSV4RRFFQ69G5FB0', event_type: 'agent_turn', timestamp: 't1', metadata: {} },
+        { event_id: '01ARZ3NDEKTSV4RRFFQ69G5FB1', event_type: 'agent_turn', timestamp: 't2', metadata: {} },
+      ];
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: events,
+          pagination: { next_token: null, has_more: false },
+        }),
+      });
+
+      const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(result).toEqual(events);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
+    });
+
+    test('paginates internally across multiple next_token hops', async () => {
+      const pageA = [
+        { event_id: 'E1', event_type: 'agent_turn', timestamp: 't1', metadata: {} },
+      ];
+      const pageB = [
+        { event_id: 'E2', event_type: 'agent_turn', timestamp: 't2', metadata: {} },
+      ];
+      const pageC = [
+        { event_id: 'E3', event_type: 'agent_turn', timestamp: 't3', metadata: {} },
+      ];
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: pageA, pagination: { next_token: 'tok-1', has_more: true } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: pageB, pagination: { next_token: 'tok-2', has_more: true } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: pageC, pagination: { next_token: null, has_more: false } }),
+        });
+
+      const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(result.map(e => e.event_id)).toEqual(['E1', 'E2', 'E3']);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+
+      // First call: uses after
+      const url1 = mockFetch.mock.calls[0][0] as string;
+      expect(url1).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      // Second and third: use next_token (no after)
+      const url2 = mockFetch.mock.calls[1][0] as string;
+      expect(url2).toContain('next_token=tok-1');
+      expect(url2).not.toContain('after=');
+      const url3 = mockFetch.mock.calls[2][0] as string;
+      expect(url3).toContain('next_token=tok-2');
+      expect(url3).not.toContain('after=');
+    });
+
+    test('returns empty array when server reports no events after cursor', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [],
+          pagination: { next_token: null, has_more: false },
+        }),
+      });
+
+      const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(result).toEqual([]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('createWebhook', () => {
