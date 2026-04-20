@@ -57,4 +57,96 @@ describe('configure command', () => {
     expect(config.client_id).toBe('client-xyz');
     expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
   });
+
+  test('saves runtime_jwt_arn when --runtime-jwt-arn is supplied', async () => {
+    const cmd = makeConfigureCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--api-url', 'https://api.example.com',
+      '--region', 'us-east-1',
+      '--user-pool-id', 'us-east-1_xyz',
+      '--client-id', 'client-123',
+      '--runtime-jwt-arn', 'arn:aws:bedrock-agentcore:us-east-1:111:runtime/abca_agent_jwt-ABC',
+    ]);
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
+    );
+    expect(config.runtime_jwt_arn).toBe(
+      'arn:aws:bedrock-agentcore:us-east-1:111:runtime/abca_agent_jwt-ABC',
+    );
+  });
+
+  test('partial update: --runtime-jwt-arn alone merges onto existing config', async () => {
+    // First: full configure without runtime_jwt_arn.
+    const cmd1 = makeConfigureCommand();
+    await cmd1.parseAsync([
+      'node', 'test',
+      '--api-url', 'https://api.example.com',
+      '--region', 'us-east-1',
+      '--user-pool-id', 'us-east-1_xyz',
+      '--client-id', 'client-123',
+    ]);
+
+    // Second: only --runtime-jwt-arn, no other fields.
+    const cmd2 = makeConfigureCommand();
+    await cmd2.parseAsync([
+      'node', 'test',
+      '--runtime-jwt-arn',
+      'arn:aws:bedrock-agentcore:us-east-1:222:runtime/abca_agent_jwt-DEF',
+    ]);
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
+    );
+    // Existing fields preserved.
+    expect(config.api_url).toBe('https://api.example.com');
+    expect(config.region).toBe('us-east-1');
+    expect(config.user_pool_id).toBe('us-east-1_xyz');
+    expect(config.client_id).toBe('client-123');
+    // New field added.
+    expect(config.runtime_jwt_arn).toBe(
+      'arn:aws:bedrock-agentcore:us-east-1:222:runtime/abca_agent_jwt-DEF',
+    );
+  });
+
+  test('first-time configure without all required fields → CliError', async () => {
+    const cmd = makeConfigureCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--api-url', 'https://api.example.com',
+        // missing --region, --user-pool-id, --client-id
+      ]),
+    ).rejects.toThrow(/Missing required configuration/);
+  });
+
+  test('backward compatibility: existing config.json without runtime_jwt_arn loads cleanly', async () => {
+    // Write a pre-existing config without runtime_jwt_arn (simulating an old install).
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.json'),
+      JSON.stringify({
+        api_url: 'https://api.example.com',
+        region: 'us-east-1',
+        user_pool_id: 'us-east-1_legacy',
+        client_id: 'client-legacy',
+      }, null, 2),
+    );
+
+    const cmd = makeConfigureCommand();
+    // Add runtime_jwt_arn only; should succeed and preserve everything else.
+    await cmd.parseAsync([
+      'node', 'test',
+      '--runtime-jwt-arn',
+      'arn:aws:bedrock-agentcore:us-east-1:333:runtime/abca_agent_jwt-GHI',
+    ]);
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
+    );
+    expect(config.user_pool_id).toBe('us-east-1_legacy');
+    expect(config.runtime_jwt_arn).toBe(
+      'arn:aws:bedrock-agentcore:us-east-1:333:runtime/abca_agent_jwt-GHI',
+    );
+  });
 });

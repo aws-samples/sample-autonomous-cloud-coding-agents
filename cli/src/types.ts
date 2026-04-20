@@ -161,12 +161,19 @@ export interface CreateWebhookResponse {
   readonly created_at: string;
 }
 
-/** CLI config stored in ~/.bgagent/config.json. */
+/** CLI config stored in ~/.bgagent/config.json.
+ *
+ *  ``runtime_jwt_arn`` is optional (introduced by Phase 1b Step 6 for the SSE
+ *  ``bgagent watch`` transport). Old config.json files without this field are
+ *  backward-compatible — `--transport auto` degrades to polling when missing,
+ *  `--transport sse` errors out with a pointer to ``bgagent configure``.
+ */
 export interface CliConfig {
   readonly api_url: string;
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;
+  readonly runtime_jwt_arn?: string;
 }
 
 /** Cached credentials stored in ~/.bgagent/credentials.json. */

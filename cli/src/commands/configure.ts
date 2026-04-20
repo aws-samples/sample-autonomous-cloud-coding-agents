@@ -18,22 +18,57 @@
  */
 
 import { Command } from 'commander';
-import { saveConfig } from '../config';
+import { saveConfig, tryLoadConfig } from '../config';
+import { CliError } from '../errors';
+import { CliConfig } from '../types';
 
+/**
+ * Phase 1b Step 6: ``--runtime-jwt-arn`` is optional. When supplied, it's
+ * persisted so ``bgagent watch --transport sse|auto`` can stream AG-UI events
+ * from the Cognito-JWT-auth AgentCore Runtime (CFN output ``RuntimeJwtArn``).
+ *
+ * All four core fields (api-url, region, user-pool-id, client-id) are required
+ * the first time — subsequent invocations may update a subset (so callers can
+ * run ``bgagent configure --runtime-jwt-arn ...`` after an initial configure).
+ */
 export function makeConfigureCommand(): Command {
   return new Command('configure')
     .description('Configure the CLI with API endpoint and Cognito settings')
-    .requiredOption('--api-url <url>', 'API Gateway base URL')
-    .requiredOption('--region <region>', 'AWS region')
-    .requiredOption('--user-pool-id <id>', 'Cognito User Pool ID')
-    .requiredOption('--client-id <id>', 'Cognito App Client ID')
+    .option('--api-url <url>', 'API Gateway base URL')
+    .option('--region <region>', 'AWS region')
+    .option('--user-pool-id <id>', 'Cognito User Pool ID')
+    .option('--client-id <id>', 'Cognito App Client ID')
+    .option(
+      '--runtime-jwt-arn <arn>',
+      'ARN of the Cognito-JWT-auth AgentCore Runtime (CFN output: RuntimeJwtArn). '
+      + 'Required for `bgagent watch --transport sse|auto`.',
+    )
     .action((opts) => {
-      saveConfig({
-        api_url: opts.apiUrl,
-        region: opts.region,
-        user_pool_id: opts.userPoolId,
-        client_id: opts.clientId,
-      });
+      const existing = tryLoadConfig();
+      const merged: Partial<CliConfig> = {
+        ...(existing ?? {}),
+        ...(opts.apiUrl !== undefined ? { api_url: opts.apiUrl } : {}),
+        ...(opts.region !== undefined ? { region: opts.region } : {}),
+        ...(opts.userPoolId !== undefined ? { user_pool_id: opts.userPoolId } : {}),
+        ...(opts.clientId !== undefined ? { client_id: opts.clientId } : {}),
+        ...(opts.runtimeJwtArn !== undefined ? { runtime_jwt_arn: opts.runtimeJwtArn } : {}),
+      };
+
+      // All four core fields must be present after merge — enforces first-time
+      // configure requires the full quartet while later updates may be partial.
+      const missing: string[] = [];
+      if (!merged.api_url) missing.push('--api-url');
+      if (!merged.region) missing.push('--region');
+      if (!merged.user_pool_id) missing.push('--user-pool-id');
+      if (!merged.client_id) missing.push('--client-id');
+      if (missing.length > 0) {
+        throw new CliError(
+          `Missing required configuration: ${missing.join(', ')}. `
+          + 'Provide all four core fields on the first `bgagent configure` call.',
+        );
+      }
+
+      saveConfig(merged as CliConfig);
       console.log('Configuration saved.');
     });
 }
