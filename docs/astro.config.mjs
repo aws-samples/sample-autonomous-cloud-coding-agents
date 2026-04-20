@@ -33,7 +33,7 @@ export default defineConfig({
           tag: 'script',
           attrs: { type: 'module' },
           content:
-            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
+            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
         },
       ],
       sidebar: [
@@ -59,8 +59,8 @@ export default defineConfig({
         {
           label: 'Customizing',
           items: [
-            { slug: 'using/repository-onboarding' },
-            { slug: 'using/per-repo-overrides' },
+            { slug: 'customizing/repository-onboarding' },
+            { slug: 'customizing/per-repo-overrides' },
             { label: 'Prompt Engineering', slug: 'customizing/prompt-engineering' },
           ],
         },
