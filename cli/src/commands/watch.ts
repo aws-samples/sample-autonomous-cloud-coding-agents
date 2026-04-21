@@ -522,8 +522,17 @@ async function runSse(args: RunSseArgs): Promise<void> {
     // token via api-client.ts's default getAuthToken() path.
     getAuthToken: async () => getAccessToken(),
     catchUp: async (afterEventId: string): Promise<AgUiEvent[]> => {
-      debug(`[watch/sse] catchUp afterEventId=${afterEventId || '<empty>'}`);
-      const rows = await apiClient.catchUpEvents(taskId, afterEventId);
+      // The SSE cursor may carry a synthetic AG-UI suffix (e.g.
+      // "01KPPVWM...:step-started") because the translator mints multiple
+      // AG-UI frames per DDB row and needs unique dedup ids. REST only
+      // accepts a bare 26-char ULID — strip everything from ':' onward
+      // to get back to the DDB event_id.
+      const bareEventId = afterEventId.split(':', 1)[0] ?? afterEventId;
+      debug(
+        `[watch/sse] catchUp afterEventId=${afterEventId || '<empty>'} ` +
+          `bareEventId=${bareEventId}`,
+      );
+      const rows = await apiClient.catchUpEvents(taskId, bareEventId);
       debug(`[watch/sse] catchUp fetched ${rows.length} rows`);
       const agUi: AgUiEvent[] = [];
       for (const row of rows) {

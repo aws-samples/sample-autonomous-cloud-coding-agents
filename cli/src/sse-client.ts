@@ -198,6 +198,26 @@ export function buildInvocationUrl(region: string, runtimeArn: string, qualifier
  *  Falls back to a type+timestamp synthesis which is NOT guaranteed unique
  *  but is the best we can do for CUSTOM / RAW without payload hashing.
  */
+/**
+ * Build a Runtime session ID from the task ID that satisfies AgentCore's
+ * ``>= 33 characters`` constraint. Task IDs are 26-character ULIDs; we
+ * prefix with a deterministic ``bgagent-watch-`` (14 chars) → 40 chars total.
+ *
+ * Determinism is load-bearing: reconnect attempts must re-use the same
+ * session ID so AgentCore routes to the same microVM (preserving
+ * in-progress session state). Do NOT substitute a random UUID per call.
+ *
+ * Exported for unit testing.
+ */
+export function buildRuntimeSessionId(taskId: string): string {
+  const prefix = 'bgagent-watch-';
+  const candidate = `${prefix}${taskId}`;
+  if (candidate.length >= 33) return candidate;
+  // Pad deterministically with 'x' to reach the minimum. Only fires if the
+  // task ID is unusually short (shouldn't happen with ULIDs).
+  return candidate.padEnd(33, 'x');
+}
+
 export function extractDedupId(ev: AgUiEvent): string {
   if (ev.id) return `id:${ev.id}`;
   if (ev.messageId) return `msg:${ev.type}:${ev.messageId}`;
@@ -498,17 +518,26 @@ async function openAndDrainStream(args: StreamAttemptArgs): Promise<StreamAttemp
     },
   });
 
+  // AgentCore Runtime requires `runtimeSessionId` >= 33 chars (verified by
+  // error responses; matches cdk/src/handlers/shared/strategies/agentcore-
+  // strategy.ts which uses randomUUID() = 36 chars). Task IDs are 26-char
+  // ULIDs — too short. We prefix with a deterministic 'bgagent-watch-'
+  // (14 chars) → 40 chars total. Determinism is load-bearing: reconnect
+  // attempts must re-use the same session ID so AgentCore maps back to
+  // the same microVM (preserving in-progress session state).
+  const sessionId = buildRuntimeSessionId(options.taskId);
+
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json',
     'Accept': 'text/event-stream',
-    'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': options.taskId,
+    'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
   };
 
   debug(
     `[sse] connecting url=${url} ` +
     `authorization=Bearer ${redactSuffix(token)} ` +
-    `session=${options.taskId} ` +
+    `session=${sessionId} ` +
     `bodyBytes=${body.length} ` +
     `reconnectAttempt=${reconnectAttempt}`,
   );

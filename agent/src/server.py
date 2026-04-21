@@ -44,11 +44,83 @@ from sse_wire import (
     translate,
 )
 
-# Log the active event loop policy at import time so operators can diagnose
-# uvloop-related subprocess conflicts (see: uvloop SIGCHLD bug).
+# DEBUG LOGGING IS ENABLED BY DEFAULT during Phase 1b development.
+# AgentCore Runtime does NOT forward container stdout to APPLICATION_LOGS.
+# Only explicit CloudWatch Logs API writes land there (see how
+# telemetry.py's _emit_metrics_to_cloudwatch uses boto3). To get debug
+# visibility for the SSE path we mirror that pattern via _debug_cw below.
+# The print() calls are retained for local docker-compose runs (DDB Local
+# flow from agent/docker-compose.yml) where stdout is directly visible.
+
+import contextlib as _ctx_for_debug
+import time as _time_for_debug
+
+
+def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
+    """Write a debug line to a CloudWatch stream in a background thread.
+
+    Unconditional (DEBUG LOGGING ENABLED BY DEFAULT for Phase 1b). Mirrors
+    the ``_emit_metrics_to_cloudwatch`` pattern in ``telemetry.py`` but runs
+    the boto3 work in a daemon thread so the caller is never blocked —
+    AgentCore's health check hits the container within ~1 s of boot, and
+    synchronous boto3 calls during module import would starve uvicorn of
+    the CPU time it needs to bind port 8080 and answer ``GET /ping``.
+
+    Always prints to stdout so local docker-compose runs see the line
+    immediately. CloudWatch writes are best-effort fire-and-forget.
+    """
+    stamped = f"[server/debug] {msg}"
+    # Always visible on local stdout.
+    print(stamped, flush=True)
+
+    log_group = os.environ.get("LOG_GROUP_NAME")
+    if not log_group:
+        return
+
+    # Fire-and-forget to avoid blocking the request / event loop.
+    _t = threading.Thread(
+        target=_debug_cw_write_blocking,
+        args=(log_group, task_id, stamped),
+        name="debug-cw-write",
+        daemon=True,
+    )
+    _t.start()
+
+
+def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
+    """Blocking CloudWatch write — only called from a background thread."""
+    try:
+        import boto3  # noqa: PLC0415  (intentional lazy import, mirrors telemetry.py)
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("logs", region_name=region)
+
+        stream = f"server_debug/{task_id or 'server'}"
+        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream,
+            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
+        )
+    except Exception as _exc:  # noqa: BLE001
+        # Never let debug logging break the request path.
+        print(f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}", flush=True)
+
+
+# Log the active event loop policy at import time.
+# CRITICAL: use plain ``print`` here, NOT ``_debug_cw``, to avoid spawning a
+# daemon thread during module import. In-container, that thread's first
+# boto3 call contends with uvicorn's startup for the single scarce CPU
+# slot and can make ``GET /ping`` return slow enough for AgentCore's
+# health-check to fail (observed symptom: 424 "Runtime health check
+# failed or timed out" before any request reaches the container). CW
+# debug writes are re-enabled by the time the first request arrives.
 _policy = asyncio.get_event_loop_policy()
 print(
-    f"[server] Event loop policy: {type(_policy).__module__}.{type(_policy).__name__}",
+    f"[server/debug] boot: event_loop_policy={type(_policy).__module__}.{type(_policy).__name__} "
+    f"sse_adapter_imported=True sse_wire_imported=True",
     flush=True,
 )
 
@@ -158,6 +230,12 @@ def _run_task_background(
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
+
+    _debug_cw(
+        f"_run_task_background ENTERED task_id={task_id!r} "
+        f"sse_adapter_attached={sse_adapter is not None} thread={threading.current_thread().name!r}",
+        task_id=task_id,
+    )
 
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
@@ -295,10 +373,16 @@ def _spawn_background(params: dict, sse_adapter: _SSEAdapter | None) -> threadin
     kwargs = dict(params)
     kwargs["sse_adapter"] = sse_adapter
 
+    thread_name = f"pipeline-{params.get('task_id') or 'anon'}"
+    _debug_cw(
+        f"_spawn_background: thread_name={thread_name!r} "
+        f"sse_adapter_attached={sse_adapter is not None}",
+        task_id=params.get("task_id"),
+    )
     thread = threading.Thread(
         target=_run_task_background,
         kwargs=kwargs,
-        name=f"pipeline-{params.get('task_id') or 'anon'}",
+        name=thread_name,
     )
     with _threads_lock:
         _active_threads[:] = [t for t in _active_threads if t.is_alive()]
@@ -306,6 +390,10 @@ def _spawn_background(params: dict, sse_adapter: _SSEAdapter | None) -> threadin
             _background_pipeline_failed = False
         _active_threads.append(thread)
     thread.start()
+    _debug_cw(
+        f"_spawn_background: thread started name={thread_name!r}",
+        task_id=params.get("task_id"),
+    )
     return thread
 
 
@@ -318,12 +406,41 @@ async def invoke_agent(request: Request, body: InvocationRequest):
     AG-UI events and a terminal RUN_FINISHED/RUN_ERROR when the pipeline
     completes.
     """
-    inp = body.input
-    params = _extract_invocation_params(inp, request)
+    accept_header = request.headers.get("accept", "") or ""
+    session_hdr = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "") or ""
+    _debug_cw(
+        f"/invocations received: accept={accept_header!r} "
+        f"session={session_hdr[:20]!r} body_input_keys={list(body.input.keys())}"
+    )
+
+    try:
+        inp = body.input
+        params = _extract_invocation_params(inp, request)
+        _debug_cw(
+            f"params extracted: task_id={params.get('task_id')!r} "
+            f"repo_url={params.get('repo_url')!r} session_id={params.get('session_id', '')[:20]!r}",
+            task_id=params.get("task_id"),
+        )
+    except Exception as exc:
+        _debug_cw(f"_extract_invocation_params FAILED: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        raise
 
     if _wants_sse(request):
-        return await _invoke_sse(params)
+        _debug_cw("routing to SSE path", task_id=params.get("task_id"))
+        try:
+            response = await _invoke_sse(params)
+            _debug_cw("_invoke_sse returned StreamingResponse", task_id=params.get("task_id"))
+            return response
+        except Exception as exc:
+            _debug_cw(
+                f"_invoke_sse FAILED: {type(exc).__name__}: {exc}",
+                task_id=params.get("task_id"),
+            )
+            traceback.print_exc()
+            raise
 
+    _debug_cw("routing to sync path", task_id=params.get("task_id"))
     # ----- existing sync path (unchanged behaviour) --------------------
     _spawn_background(params, sse_adapter=None)
     task_id = params["task_id"]
@@ -359,6 +476,7 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
     * Tolerate client disconnect: the generator is cancelled cleanly, the
       background pipeline continues, and DDB remains the durable source.
     """
+    _debug_cw(f"_sse_event_stream ENTERED run_id={run_id!r}", task_id=run_id)
     state = _TranslationState()
 
     def _frame(obj: dict) -> bytes:
@@ -366,18 +484,33 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
 
     try:
         # Initial RUN_STARTED — synthesised by the handler, not the adapter.
-        yield _frame(make_run_started(run_id))
+        started_frame = _frame(make_run_started(run_id))
+        _debug_cw(
+            f"_sse_event_stream about to yield RUN_STARTED ({len(started_frame)} bytes)",
+            task_id=run_id,
+        )
+        yield started_frame
+        _debug_cw("_sse_event_stream yielded RUN_STARTED; entering drain loop", task_id=run_id)
 
+        event_count = 0
+        ping_count = 0
         while True:
             try:
                 item = await asyncio.wait_for(sse_adapter.get(), timeout=_SSE_KEEPALIVE_SECONDS)
             except TimeoutError:
+                ping_count += 1
+                _debug_cw(f"keepalive ping #{ping_count} (no events in 15s)", task_id=run_id)
                 # Idle keepalive: ``:`` prefix = SSE comment, ignored by EventSource.
                 yield b": ping\n\n"
                 continue
 
             if item is None:
                 # Close sentinel → emit terminal and exit.
+                _debug_cw(
+                    f"close sentinel received; saw_error={state.saw_error} "
+                    f"event_count={event_count} ping_count={ping_count}",
+                    task_id=run_id,
+                )
                 if state.saw_error:
                     yield _frame(
                         make_run_error(
@@ -390,12 +523,20 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
                     yield _frame(make_run_finished(run_id))
                 return
 
-            for agui_event in translate(item, state=state):
+            event_count += 1
+            agui_events = translate(item, state=state)
+            _debug_cw(
+                f"event #{event_count}: semantic.type={item.get('type')!r} "
+                f"→ {len(agui_events)} AG-UI frame(s)",
+                task_id=run_id,
+            )
+            for agui_event in agui_events:
                 yield _frame(agui_event)
     except (asyncio.CancelledError, GeneratorExit):
         # Client disconnected mid-stream. Detach the adapter so the
         # pipeline's enqueues become silent drops; let the background
         # thread keep running — ProgressWriter is still writing to DDB.
+        _debug_cw("_sse_event_stream client disconnect (CancelledError/GeneratorExit)", task_id=run_id)
         with contextlib.suppress(Exception):
             sse_adapter.detach_loop()
         raise
@@ -406,6 +547,7 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
             f"[server] SSE stream error (background task continues): {type(exc).__name__}: {exc}",
             flush=True,
         )
+        traceback.print_exc()
         with contextlib.suppress(Exception):
             sse_adapter.detach_loop()
         return
@@ -413,18 +555,45 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
 
 async def _invoke_sse(params: dict) -> StreamingResponse:
     """Content-type negotiated SSE branch of /invocations."""
-    task_id = params["task_id"] or "anon"
-    sse_adapter = _SSEAdapter(task_id=task_id)
-    loop = asyncio.get_running_loop()
-    sse_adapter.attach_loop(loop)
+    task_id_arg = params.get("task_id")
+    _debug_cw(f"_invoke_sse ENTERED task_id={task_id_arg!r}", task_id=task_id_arg)
 
-    _spawn_background(params, sse_adapter=sse_adapter)
+    task_id = params["task_id"] or "anon"
+    try:
+        sse_adapter = _SSEAdapter(task_id=task_id)
+        _debug_cw(f"_SSEAdapter constructed for {task_id!r}", task_id=task_id)
+    except Exception as exc:
+        _debug_cw(f"_SSEAdapter construction FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
+        traceback.print_exc()
+        raise
+
+    try:
+        loop = asyncio.get_running_loop()
+        sse_adapter.attach_loop(loop)
+        _debug_cw(f"attached asyncio loop: {type(loop).__name__}", task_id=task_id)
+    except Exception as exc:
+        _debug_cw(f"attach_loop FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
+        traceback.print_exc()
+        raise
+
+    try:
+        _spawn_background(params, sse_adapter=sse_adapter)
+        _debug_cw(f"background thread spawned for task_id={task_id!r}", task_id=task_id)
+    except Exception as exc:
+        _debug_cw(f"_spawn_background FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
+        traceback.print_exc()
+        raise
 
     headers = {
         "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
+    _debug_cw(
+        f"returning StreamingResponse for task_id={task_id!r} "
+        f"media_type=text/event-stream headers={list(headers.keys())}",
+        task_id=task_id,
+    )
     return StreamingResponse(
         _sse_event_stream(sse_adapter, run_id=task_id),
         media_type="text/event-stream",
