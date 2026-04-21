@@ -238,7 +238,8 @@ def test_sse_keepalive_on_idle(monkeypatch):
     async def scenario():
         adapter = _SSEAdapter("t-keepalive")
         adapter.attach_loop(asyncio.get_running_loop())
-        gen = server._sse_event_stream(adapter, run_id="t-keepalive")
+        sub_queue = adapter.subscribe()
+        gen = server._sse_event_stream(adapter, run_id="t-keepalive", sub_queue=sub_queue)
         first = await gen.__anext__()
         assert b"RUN_STARTED" in first
         second = await gen.__anext__()
@@ -253,26 +254,204 @@ def test_sse_keepalive_on_idle(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_sse_stream_client_disconnect_calls_detach(monkeypatch):
-    """If the generator is cancelled, detach_loop is called and background runs on."""
+def test_sse_stream_client_disconnect_unsubscribes(monkeypatch):
+    """If the generator is cancelled, this observer's queue is unsubscribed.
+
+    Rev-5: disconnect is per-observer — the adapter and any other subscribers
+    keep running, and the background pipeline keeps writing to DDB. We verify
+    ``unsubscribe`` is called with this observer's queue.
+    """
     monkeypatch.setattr(server, "_SSE_KEEPALIVE_SECONDS", 10.0)
 
     async def scenario():
         adapter = _SSEAdapter("t-disc")
         adapter.attach_loop(asyncio.get_running_loop())
+        sub_queue = adapter.subscribe()
 
-        detach_calls: list[bool] = []
-        original = adapter.detach_loop
+        unsubscribe_calls: list = []
+        original = adapter.unsubscribe
 
-        def spy():
-            detach_calls.append(True)
-            original()
+        def spy(q):
+            unsubscribe_calls.append(q)
+            original(q)
 
-        monkeypatch.setattr(adapter, "detach_loop", spy)
+        monkeypatch.setattr(adapter, "unsubscribe", spy)
 
-        gen = server._sse_event_stream(adapter, run_id="t-disc")
+        gen = server._sse_event_stream(adapter, run_id="t-disc", sub_queue=sub_queue)
         await gen.__anext__()  # RUN_STARTED
         await gen.aclose()
-        assert detach_calls == [True]
+        assert unsubscribe_calls == [sub_queue]
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Rev-5 Branch A (§9.13): attach-don't-spawn + /ping HealthyBusy + multi-sub
+# ---------------------------------------------------------------------------
+
+
+def test_ping_reports_healthy_when_idle(client, monkeypatch):
+    """/ping returns {"status": "healthy"} with no active pipeline threads."""
+    monkeypatch.setattr(server, "_background_pipeline_failed", False)
+    with server._threads_lock:
+        server._active_threads.clear()
+    r = client.get("/ping")
+    assert r.status_code == 200
+    assert r.json() == {"status": "healthy"}
+
+
+def test_ping_reports_healthybusy_when_pipeline_alive(client, monkeypatch):
+    """/ping returns HealthyBusy while a pipeline thread is alive (idle-evict guard)."""
+    monkeypatch.setattr(server, "_background_pipeline_failed", False)
+
+    stop = threading.Event()
+
+    def worker():
+        stop.wait(timeout=5)
+
+    t = threading.Thread(target=worker, name="test-live-pipeline")
+    t.start()
+    try:
+        with server._threads_lock:
+            server._active_threads.clear()
+            server._active_threads.append(t)
+        r = client.get("/ping")
+        assert r.status_code == 200
+        assert r.json() == {"status": "HealthyBusy"}
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        with server._threads_lock:
+            server._active_threads.clear()
+
+
+def test_sse_attach_does_not_spawn_second_pipeline(monkeypatch):
+    """A second SSE invocation for a task_id in the registry attaches, doesn't spawn.
+
+    Rev-5 attach-don't-spawn (§9.13.3).
+    """
+    # Pre-populate the registry as if a pipeline is already running for this task.
+    async def scenario():
+        adapter = _SSEAdapter("t-attach")
+        adapter.attach_loop(asyncio.get_running_loop())
+
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+
+        with server._threads_lock:
+            server._active_sse_adapters["t-attach"] = adapter
+
+        try:
+            params = {
+                "task_id": "t-attach",
+                "repo_url": "o/r",
+                "task_description": "x",
+                "issue_number": "",
+                "github_token": "ghp_x",
+                "anthropic_model": "m",
+                "max_turns": 10,
+                "max_budget_usd": 1.0,
+                "aws_region": "us-east-1",
+                "session_id": "",
+                "hydrated_context": None,
+                "system_prompt_overrides": "",
+                "prompt_version": "",
+                "memory_id": "",
+                "task_type": "new_task",
+                "branch_name": "",
+                "pr_number": "",
+                "cedar_policies": [],
+            }
+            resp = await server._invoke_sse(params)
+            # Attach path returns a StreamingResponse without calling _spawn_background.
+            assert resp.media_type == "text/event-stream"
+            assert spawn_calls == []
+            # Registry still has the ORIGINAL adapter (attach does not replace it).
+            with server._threads_lock:
+                assert server._active_sse_adapters["t-attach"] is adapter
+            # Two subscribers now exist (default + attach)
+            assert adapter.subscriber_count >= 2
+        finally:
+            with server._threads_lock:
+                server._active_sse_adapters.pop("t-attach", None)
+            adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_multi_subscriber_broadcast():
+    """Two subscribers on one adapter both receive every event."""
+    async def scenario():
+        adapter = _SSEAdapter("t-multi")
+        adapter.attach_loop(asyncio.get_running_loop())
+        q1 = adapter.subscribe()
+        q2 = adapter.subscribe()
+
+        adapter.write_agent_milestone("m1", "details-1")
+        # Allow call_soon_threadsafe to run.
+        await asyncio.sleep(0)
+
+        ev1 = await asyncio.wait_for(q1.get(), timeout=1.0)
+        ev2 = await asyncio.wait_for(q2.get(), timeout=1.0)
+        assert ev1["type"] == "agent_milestone"
+        assert ev2["type"] == "agent_milestone"
+        assert ev1["milestone"] == ev2["milestone"] == "m1"
+
+        adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_multi_subscriber_close_sentinel_fans_out():
+    """close() delivers the sentinel to every subscriber."""
+    async def scenario():
+        adapter = _SSEAdapter("t-multi-close")
+        adapter.attach_loop(asyncio.get_running_loop())
+        q1 = adapter.subscribe()
+        q2 = adapter.subscribe()
+
+        adapter.close()
+        await asyncio.sleep(0)
+
+        from sse_adapter import _CLOSE_SENTINEL
+
+        v1 = await asyncio.wait_for(q1.get(), timeout=1.0)
+        v2 = await asyncio.wait_for(q2.get(), timeout=1.0)
+        assert v1 is _CLOSE_SENTINEL
+        assert v2 is _CLOSE_SENTINEL
+
+    asyncio.run(scenario())
+
+
+def test_registry_cleanup_on_pipeline_completion(monkeypatch):
+    """_run_task_background's finally removes the adapter from the registry."""
+    # Pre-populate a dummy adapter; call _run_task_background with
+    # a patched run_task that returns immediately.
+    monkeypatch.setattr(server, "run_task", lambda **_kwargs: None)
+    monkeypatch.setattr(server.task_state, "write_heartbeat", MagicMock())
+    monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+    adapter = _SSEAdapter("t-cleanup")
+    # Note: no loop attached is fine — close() is a no-op in that case.
+    with server._threads_lock:
+        server._active_sse_adapters["t-cleanup"] = adapter
+
+    server._run_task_background(
+        repo_url="o/r",
+        task_description="x",
+        issue_number="",
+        github_token="",
+        anthropic_model="m",
+        max_turns=5,
+        max_budget_usd=None,
+        aws_region="us-east-1",
+        task_id="t-cleanup",
+        sse_adapter=adapter,
+    )
+
+    with server._threads_lock:
+        assert "t-cleanup" not in server._active_sse_adapters

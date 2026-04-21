@@ -137,8 +137,20 @@ logging.getLogger("uvicorn.access").addFilter(_PingFilter())
 _active_threads: list[threading.Thread] = []
 _threads_lock = threading.Lock()
 
+# Rev-5 Branch A (design doc §9.13.3): per-microVM registry of active
+# ``_SSEAdapter`` instances by ``task_id``. A second SSE invocation for a
+# task that already has a running pipeline in THIS microVM attaches to the
+# existing adapter via ``subscribe()`` instead of spawning a duplicate
+# pipeline. Entries are removed in ``_run_task_background``'s ``finally``.
+# Guarded by ``_threads_lock`` — adapter lifecycle is tied to its thread.
+_active_sse_adapters: dict[str, _SSEAdapter] = {}
+
 # Set when the pipeline thread raises after /invocations accepted (Dynamo backup + ping signal).
 _background_pipeline_failed = False
+
+# Track last reported /ping status so we only emit a CW debug line on
+# transitions (avoids flooding logs with per-health-check entries).
+_last_ping_status: str = ""
 
 # Keepalive cadence for SSE streams — comment frames keep proxies from timing out.
 _SSE_KEEPALIVE_SECONDS = 15.0
@@ -195,16 +207,40 @@ class InvocationResponse(BaseModel):
 
 @app.get("/ping")
 async def ping():
-    """Health check endpoint. Returns 503 if the last background pipeline thread crashed."""
+    """Health check endpoint.
+
+    Return shape per AgentCore Runtime Service Contract
+    (https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-long-run.html):
+
+    * ``{"status": "healthy"}``      — no work in progress; idle timer counts.
+    * ``{"status": "HealthyBusy"}``  — pipeline thread is alive, agent is processing;
+      AgentCore treats this as "do not idle-evict me even if no new invocations
+      arrive". Load-bearing for long-running tasks that have no active SSE
+      watcher (Path 2 orchestrator-spawned flows, §9.13.2).
+    * HTTP 503 + ``{"status": "unhealthy", ...}`` — the background pipeline
+      thread crashed (Phase 1a contract); the orchestrator's reconciler takes
+      over to transition the task to FAILED.
+    """
+    global _last_ping_status  # noqa: PLW0603
+
     if _background_pipeline_failed:
+        status = "unhealthy"
+        if status != _last_ping_status:
+            _debug_cw(f"/ping transition: {_last_ping_status or '<init>'} -> {status}")
+            _last_ping_status = status
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "unhealthy",
-                "reason": "background_pipeline_failed",
-            },
+            content={"status": status, "reason": "background_pipeline_failed"},
         )
-    return {"status": "healthy"}
+
+    with _threads_lock:
+        any_alive = any(t.is_alive() for t in _active_threads)
+
+    status = "HealthyBusy" if any_alive else "healthy"
+    if status != _last_ping_status:
+        _debug_cw(f"/ping transition: {_last_ping_status or '<init>'} -> {status}")
+        _last_ping_status = status
+    return {"status": status}
 
 
 def _run_task_background(
@@ -297,6 +333,22 @@ def _run_task_background(
         if sse_adapter is not None:
             with contextlib.suppress(Exception):
                 sse_adapter.close()
+
+        # Rev-5: remove this task's adapter from the per-microVM registry so
+        # a future SSE invocation for the same task_id (unlikely after
+        # completion, but guards against test re-entry and future restart
+        # semantics) takes the spawn path rather than attaching to a closed
+        # adapter.
+        if task_id:
+            with _threads_lock:
+                current = _active_sse_adapters.get(task_id)
+                if current is sse_adapter:
+                    _active_sse_adapters.pop(task_id, None)
+                    _debug_cw(
+                        f"registry: removed task_id={task_id!r} "
+                        f"active_count={len(_active_sse_adapters)}",
+                        task_id=task_id,
+                    )
 
 
 def _extract_invocation_params(inp: dict, request: Request) -> dict:
@@ -463,18 +515,29 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 # ---------------------------------------------------------------------------
 
 
-async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
+async def _sse_event_stream(
+    sse_adapter: _SSEAdapter,
+    run_id: str,
+    sub_queue: "asyncio.Queue[Any]",
+):
     """Async generator yielding AG-UI-framed bytes for the StreamingResponse.
 
+    Drains a per-observer subscriber queue (``sub_queue``) — NOT the adapter's
+    default queue — so multiple CLI watchers attached to the same pipeline
+    (rev-5 multi-subscriber fan-out) each receive the full event stream
+    independently.
+
     Responsibilities:
+
     * Emit synthesised ``RUN_STARTED`` first.
-    * Drain the adapter's queue, translating each semantic event into one
-      or more AG-UI events.
+    * Drain ``sub_queue``, translating each semantic event into one or more
+      AG-UI events.
     * Emit ``: ping\\n\\n`` comment frames every 15 s when idle.
-    * Emit terminal ``RUN_FINISHED`` or ``RUN_ERROR`` when the close
-      sentinel arrives.
-    * Tolerate client disconnect: the generator is cancelled cleanly, the
-      background pipeline continues, and DDB remains the durable source.
+    * Emit terminal ``RUN_FINISHED`` or ``RUN_ERROR`` when the close sentinel
+      arrives on this observer's queue.
+    * Tolerate client disconnect: the generator unsubscribes ITS queue (leaves
+      the adapter and other subscribers intact) and the background pipeline
+      continues writing to DDB via ProgressWriter.
     """
     _debug_cw(f"_sse_event_stream ENTERED run_id={run_id!r}", task_id=run_id)
     state = _TranslationState()
@@ -496,13 +559,17 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
         ping_count = 0
         while True:
             try:
-                item = await asyncio.wait_for(sse_adapter.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+                raw = await asyncio.wait_for(sub_queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
             except TimeoutError:
                 ping_count += 1
                 _debug_cw(f"keepalive ping #{ping_count} (no events in 15s)", task_id=run_id)
                 # Idle keepalive: ``:`` prefix = SSE comment, ignored by EventSource.
                 yield b": ping\n\n"
                 continue
+
+            # Adapter uses a distinguishing close sentinel (object()) — normalise
+            # to None here so the rest of the loop treats it uniformly.
+            item = None if raw is _adapter_close_sentinel() else raw
 
             if item is None:
                 # Close sentinel → emit terminal and exit.
@@ -533,32 +600,84 @@ async def _sse_event_stream(sse_adapter: _SSEAdapter, run_id: str):
             for agui_event in agui_events:
                 yield _frame(agui_event)
     except (asyncio.CancelledError, GeneratorExit):
-        # Client disconnected mid-stream. Detach the adapter so the
-        # pipeline's enqueues become silent drops; let the background
-        # thread keep running — ProgressWriter is still writing to DDB.
-        _debug_cw("_sse_event_stream client disconnect (CancelledError/GeneratorExit)", task_id=run_id)
+        # THIS client disconnected. Unsubscribe only our queue — the adapter
+        # and any other observers keep running, and the background pipeline
+        # keeps writing to DDB via ProgressWriter.
+        _debug_cw(
+            "_sse_event_stream client disconnect (CancelledError/GeneratorExit)",
+            task_id=run_id,
+        )
         with contextlib.suppress(Exception):
-            sse_adapter.detach_loop()
+            sse_adapter.unsubscribe(sub_queue)
         raise
     except Exception as exc:
-        # Never let a stream error kill the background task. Log and
-        # terminate the stream cleanly.
+        # Never let a stream error kill the background task. Log, unsubscribe
+        # this observer, and terminate the stream cleanly.
         print(
             f"[server] SSE stream error (background task continues): {type(exc).__name__}: {exc}",
             flush=True,
         )
         traceback.print_exc()
         with contextlib.suppress(Exception):
-            sse_adapter.detach_loop()
+            sse_adapter.unsubscribe(sub_queue)
         return
 
 
+def _adapter_close_sentinel() -> Any:
+    """Return the adapter module's private close sentinel.
+
+    Kept as a tiny helper so ``_sse_event_stream`` can identify the sentinel
+    without reaching into the private name directly at every comparison.
+    """
+    from sse_adapter import _CLOSE_SENTINEL as sentinel  # noqa: PLC0415
+    return sentinel
+
+
 async def _invoke_sse(params: dict) -> StreamingResponse:
-    """Content-type negotiated SSE branch of /invocations."""
+    """Content-type negotiated SSE branch of /invocations.
+
+    Rev-5 attach-don't-spawn logic (§9.13.3): if this microVM already has a
+    running pipeline for ``task_id`` (tracked in ``_active_sse_adapters``),
+    the observer subscribes to the existing adapter and returns a
+    ``StreamingResponse`` without spawning a new pipeline. Otherwise the
+    classic spawn path runs: create adapter → attach loop → register →
+    spawn ``run_task`` → return streaming response.
+    """
     task_id_arg = params.get("task_id")
     _debug_cw(f"_invoke_sse ENTERED task_id={task_id_arg!r}", task_id=task_id_arg)
 
     task_id = params["task_id"] or "anon"
+
+    # --- ATTACH path: same-session reconnect or concurrent observer ---------
+    with _threads_lock:
+        existing = _active_sse_adapters.get(task_id)
+    if existing is not None and existing.has_subscribers:
+        try:
+            sub_queue = existing.subscribe()
+            _debug_cw(
+                f"attach path: subscribed to existing adapter for task_id={task_id!r} "
+                f"subscriber_count={existing.subscriber_count}",
+                task_id=task_id,
+            )
+        except Exception as exc:
+            _debug_cw(
+                f"attach subscribe FAILED ({type(exc).__name__}: {exc}); falling through to spawn",
+                task_id=task_id,
+            )
+            # Fall through to spawn below.
+        else:
+            headers = {
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+            return StreamingResponse(
+                _sse_event_stream(existing, run_id=task_id, sub_queue=sub_queue),
+                media_type="text/event-stream",
+                headers=headers,
+            )
+
+    # --- SPAWN path: no pipeline running for this task_id in this microVM ---
     try:
         sse_adapter = _SSEAdapter(task_id=task_id)
         _debug_cw(f"_SSEAdapter constructed for {task_id!r}", task_id=task_id)
@@ -576,12 +695,42 @@ async def _invoke_sse(params: dict) -> StreamingResponse:
         traceback.print_exc()
         raise
 
+    # Register the adapter BEFORE spawning so a rapid reconnect race (unlikely
+    # but possible when AgentCore retries quickly) attaches to the existing
+    # adapter instead of double-spawning.
+    with _threads_lock:
+        _active_sse_adapters[task_id] = sse_adapter
+    _debug_cw(
+        f"registry: inserted task_id={task_id!r} "
+        f"active_count={len(_active_sse_adapters)}",
+        task_id=task_id,
+    )
+
+    # Subscribe THIS observer's queue BEFORE spawning the pipeline so no
+    # events are missed between spawn and first drain iteration.
+    try:
+        sub_queue = sse_adapter.subscribe()
+    except Exception as exc:
+        _debug_cw(
+            f"subscribe FAILED in spawn path: {type(exc).__name__}: {exc}",
+            task_id=task_id,
+        )
+        # Roll back the registry insert on failure.
+        with _threads_lock:
+            if _active_sse_adapters.get(task_id) is sse_adapter:
+                _active_sse_adapters.pop(task_id, None)
+        raise
+
     try:
         _spawn_background(params, sse_adapter=sse_adapter)
         _debug_cw(f"background thread spawned for task_id={task_id!r}", task_id=task_id)
     except Exception as exc:
         _debug_cw(f"_spawn_background FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
         traceback.print_exc()
+        # Roll back the registry insert on spawn failure.
+        with _threads_lock:
+            if _active_sse_adapters.get(task_id) is sse_adapter:
+                _active_sse_adapters.pop(task_id, None)
         raise
 
     headers = {
@@ -595,7 +744,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse:
         task_id=task_id,
     )
     return StreamingResponse(
-        _sse_event_stream(sse_adapter, run_id=task_id),
+        _sse_event_stream(sse_adapter, run_id=task_id, sub_queue=sub_queue),
         media_type="text/event-stream",
         headers=headers,
     )

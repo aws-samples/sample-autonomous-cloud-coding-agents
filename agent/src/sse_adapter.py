@@ -50,9 +50,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass, field
 from typing import Any
 
 from shell import log
+
+
+@dataclass
+class _Subscriber:
+    """One consumer of the broadcast stream, with its own bounded queue.
+
+    Drop-oldest backpressure applies per subscriber: a slow consumer cannot
+    stall the others. ``dropped_count`` is maintained independently for
+    per-subscriber observability.
+    """
+
+    queue: "asyncio.Queue[Any]"
+    dropped_count: int = 0
+    # Reserved for future per-subscriber filters / transforms. Currently unused.
+    tags: dict[str, str] = field(default_factory=dict)
 
 # Default ceiling: ~1000 events is several minutes of heavy agent activity at
 # current emission rates (turn + several tool calls per turn).  Bounded so a
@@ -84,10 +100,26 @@ class _SSEAdapter:
     def __init__(self, task_id: str, max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE) -> None:
         self._task_id = task_id
         self._max_queue_size = max_queue_size
-        self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max_queue_size)
+        # Multi-subscriber fan-out: every subscriber has its own bounded queue
+        # with its own drop counter. Broadcasts write to every subscriber.
+        # Rev-5 Branch A (§9.13.3) allows multiple CLI watchers to attach to
+        # the same in-process pipeline via the {task_id: adapter} registry in
+        # server.py.
+        #
+        # The default subscriber is created eagerly so that the legacy
+        # single-subscriber API (``get()``) delivers events even when the
+        # first ``write_*`` fires before the first ``get()`` — which is the
+        # common pattern in tests. ``subscribe()`` adds ADDITIONAL queues.
+        self._subscribers: list[_Subscriber] = []
+        self._default_subscriber: _Subscriber = _Subscriber(
+            queue=asyncio.Queue(maxsize=max_queue_size),
+        )
+        self._subscribers.append(self._default_subscriber)
+        # Aggregate drop counter for "loop not attached / adapter closed"
+        # cases — events that weren't delivered to ANY subscriber.
+        self._undelivered_count = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
-        self._dropped_count = 0
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -95,27 +127,27 @@ class _SSEAdapter:
         """Bind the adapter to an asyncio loop (called by the SSE handler).
 
         Until this is called, writes are silently dropped and counted.  The
-        loop must own the queue; all ``get()`` calls must happen on this loop.
+        loop owns all subscriber queues; ``subscribe`` / ``get`` callers must
+        await on this loop.
         """
         self._loop = loop
         log("[sse]", f"attach_loop task={self._task_id}")
 
     def detach_loop(self) -> None:
-        """Unbind the loop (SSE client disconnected).
+        """Unbind the loop (last SSE client disconnected).
 
-        Further ``write_agent_*`` calls become silent drops.  The queue is
-        left intact so a subsequent ``attach_loop`` can resume streaming (any
-        remaining items in the queue will be delivered to the next consumer).
+        Further ``write_agent_*`` calls become silent drops until
+        ``attach_loop`` is called again. Subscriber queues are kept intact so
+        a reconnected observer picks up from where it left off (within
+        buffer bounds).
         """
         self._loop = None
         log("[sse]", f"detach_loop task={self._task_id}")
 
     def close(self) -> None:
-        """Signal end-of-stream.
+        """Signal end-of-stream to every subscriber.
 
-        Enqueues a terminal sentinel (best-effort — if the queue is full we
-        drop the oldest to make room, because the sentinel is load-bearing for
-        the consumer's clean shutdown).  Idempotent.
+        Broadcasts a terminal sentinel to all subscriber queues. Idempotent.
         """
         if self._closed:
             return
@@ -126,33 +158,79 @@ class _SSEAdapter:
             return
         # Loop already shutting down is harmless — we are in a shutdown path.
         with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(self._put_sentinel_from_loop)
+            loop.call_soon_threadsafe(self._broadcast_sentinel_from_loop)
 
     # ------------------------------------------------------------------ properties
 
     @property
     def dropped_count(self) -> int:
-        """Number of events dropped due to queue full, no-subscribers, or error."""
-        return self._dropped_count
+        """Sum of per-subscriber drop counts plus undelivered events."""
+        per_sub = sum(sub.dropped_count for sub in self._subscribers)
+        return per_sub + self._undelivered_count
 
     def get_dropped_count(self) -> int:  # alias, for callers that prefer a method
-        return self._dropped_count
+        return self.dropped_count
 
     @property
     def has_subscribers(self) -> bool:
-        """True iff :meth:`attach_loop` is active and we are not closed."""
+        """True iff the adapter is ready to deliver events.
+
+        The loop must be attached (``attach_loop`` called) and the adapter
+        must not be closed. The default subscriber is always present, so
+        ``subscribers`` non-emptiness is implied.
+        """
         return self._loop is not None and not self._closed
+
+    @property
+    def subscriber_count(self) -> int:
+        """Number of live subscriber queues."""
+        return len(self._subscribers)
 
     # ------------------------------------------------------------------ consumer API
 
-    async def get(self) -> dict | None:
-        """Await the next event.
+    def subscribe(self) -> "asyncio.Queue[Any]":
+        """Register a new subscriber queue; returns the queue.
 
-        Returns ``None`` when the close sentinel is dequeued, signalling the
-        SSE handler to terminate its stream.  Must be awaited on the same loop
-        that was passed to :meth:`attach_loop`.
+        Multiple observers (e.g. two CLI watchers attached to the same task)
+        can call this independently. Each receives the full broadcast stream
+        of future events — no replay of earlier events (late observers catch
+        up via the DDB catch-up endpoint).
+
+        Must be called on the adapter's asyncio loop after ``attach_loop``.
         """
-        item = await self._queue.get()
+        sub = _Subscriber(queue=asyncio.Queue(maxsize=self._max_queue_size))
+        self._subscribers.append(sub)
+        log(
+            "[sse]",
+            f"subscribe task={self._task_id} subscriber_count={len(self._subscribers)}",
+        )
+        if self._closed:
+            # Adapter already closed — deliver sentinel immediately so the
+            # new subscriber's get() returns None without blocking.
+            with contextlib.suppress(Exception):
+                sub.queue.put_nowait(_CLOSE_SENTINEL)
+        return sub.queue
+
+    def unsubscribe(self, queue: "asyncio.Queue[Any]") -> None:
+        """Remove a subscriber. Call when the observer disconnects."""
+        before = len(self._subscribers)
+        self._subscribers = [s for s in self._subscribers if s.queue is not queue]
+        if len(self._subscribers) < before:
+            log(
+                "[sse]",
+                f"unsubscribe task={self._task_id} subscriber_count={len(self._subscribers)}",
+            )
+
+    async def get(self) -> dict | None:
+        """Await the next event on the default subscriber (legacy API).
+
+        Backward-compatible single-subscriber entrypoint. New code should
+        prefer ``subscribe`` + per-observer consumption via the returned
+        queue so multiple observers receive the full broadcast.
+
+        Returns ``None`` when the close sentinel is dequeued.
+        """
+        item = await self._default_subscriber.queue.get()
         if item is _CLOSE_SENTINEL:
             return None
         return item
@@ -267,69 +345,95 @@ class _SSEAdapter:
         Runs on the pipeline's background thread.  Never raises, never blocks.
         """
         if self._closed:
-            self._dropped_count += 1
+            self._undelivered_count += 1
             return
 
         loop = self._loop
         if loop is None:
-            # No subscriber attached — drop silently.
-            self._dropped_count += 1
+            # No loop attached — nothing to deliver to.
+            self._undelivered_count += 1
             return
 
         try:
             if loop.is_closed():
-                self._dropped_count += 1
+                self._undelivered_count += 1
                 return
-            loop.call_soon_threadsafe(self._put_from_loop, event)
+            loop.call_soon_threadsafe(self._broadcast_from_loop, event)
         except RuntimeError:
             # Loop was closed between our check and the call, or similar.
-            self._dropped_count += 1
+            self._undelivered_count += 1
         except Exception as exc:
-            self._dropped_count += 1
+            self._undelivered_count += 1
             with contextlib.suppress(Exception):
                 log("[sse]", f"enqueue dropped ({type(exc).__name__}): {exc}")
 
-    def _put_from_loop(self, event: dict) -> None:
-        """Run on the asyncio loop — push the event, drop-oldest if full.
+    def _broadcast_from_loop(self, event: dict) -> None:
+        """Broadcast the event to every subscriber's queue.
 
-        ``call_soon_threadsafe`` guarantees we are on the loop thread here, so
-        ``put_nowait`` / ``get_nowait`` are safe without the queue's internal
-        asyncio locking.
+        Runs on the asyncio loop thread (guaranteed by ``call_soon_threadsafe``
+        callers), so per-subscriber ``put_nowait`` / ``get_nowait`` pairs are
+        safe without explicit locking. Drop-oldest backpressure is applied per
+        subscriber independently — one slow consumer does not stall the others.
+
+        If no subscribers are registered, increments ``_undelivered_count`` —
+        this is distinct from per-subscriber queue-full drops.
         """
-        try:
-            self._queue.put_nowait(event)
-        except asyncio.QueueFull:
-            # Drop-oldest policy: pop one item (even if it's a previously
-            # enqueued sentinel — unlikely since close() is idempotent and
-            # single-shot), then push the new event.
-            # Race: somebody else might have drained it; suppress and retry put.
-            with contextlib.suppress(asyncio.QueueEmpty):
-                self._queue.get_nowait()
-            self._dropped_count += 1
+        subs = list(self._subscribers)  # snapshot
+        if not subs:
+            self._undelivered_count += 1
+            return
+        for sub in subs:
             try:
-                self._queue.put_nowait(event)
+                sub.queue.put_nowait(event)
             except asyncio.QueueFull:
-                # Extremely unlikely second-level full (would require a
-                # concurrent producer on this loop, which we don't have).
-                self._dropped_count += 1
-        except Exception as exc:
-            self._dropped_count += 1
-            with contextlib.suppress(Exception):
-                log("[sse]", f"put_from_loop dropped ({type(exc).__name__}): {exc}")
+                # Drop-oldest policy per subscriber: pop one item (may be an
+                # older event or previously enqueued sentinel), then push the
+                # new event. Suppress the race where another coroutine drained
+                # between our put and the pop.
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    sub.queue.get_nowait()
+                sub.dropped_count += 1
+                try:
+                    sub.queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # Extremely unlikely second-level full (would require a
+                    # concurrent producer on this loop, which we don't have).
+                    sub.dropped_count += 1
+            except Exception as exc:
+                sub.dropped_count += 1
+                with contextlib.suppress(Exception):
+                    log("[sse]", f"broadcast dropped ({type(exc).__name__}): {exc}")
 
-    def _put_sentinel_from_loop(self) -> None:
-        """Run on the asyncio loop — push the close sentinel, drop-oldest if full."""
-        try:
-            self._queue.put_nowait(_CLOSE_SENTINEL)
-        except asyncio.QueueFull:
-            with contextlib.suppress(asyncio.QueueEmpty):
-                self._queue.get_nowait()
-            self._dropped_count += 1
+    def _broadcast_sentinel_from_loop(self) -> None:
+        """Broadcast the close sentinel to every subscriber."""
+        subs = list(self._subscribers)
+        for sub in subs:
             try:
-                self._queue.put_nowait(_CLOSE_SENTINEL)
+                sub.queue.put_nowait(_CLOSE_SENTINEL)
             except asyncio.QueueFull:
-                # If we still can't put the sentinel, we've lost the ability to
-                # signal clean shutdown — SSE handler will time out instead.
-                self._dropped_count += 1
-        except Exception:
-            self._dropped_count += 1
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    sub.queue.get_nowait()
+                sub.dropped_count += 1
+                with contextlib.suppress(asyncio.QueueFull):
+                    sub.queue.put_nowait(_CLOSE_SENTINEL)
+            except Exception:
+                sub.dropped_count += 1
+
+    # Backward-compatible alias preserved for one in-file caller further down.
+    # New code should not reference this name.
+    def _put_sentinel_from_loop(self) -> None:  # pragma: no cover - compat shim
+        """Legacy shim; delegates to the broadcast form."""
+        try:
+            self._subscribers  # noqa: B018 (ruff: attr access test)
+        except AttributeError:
+            return
+        # Maintain the old single-subscriber path by falling through to the
+        # broadcast form — all subscribers get the sentinel.
+        self._broadcast_sentinel_from_loop()
+
+    # Legacy single-subscriber drop-oldest path. Kept so any older code still
+    # linking here does not break during refactor; the new broadcast form is
+    # the canonical path.
+    def _put_from_loop(self, event: dict) -> None:  # pragma: no cover - compat shim
+        self._broadcast_from_loop(event)
+
