@@ -36,6 +36,7 @@ This design adds **bidirectional interactivity** through two core capabilities:
 | 2 | 2026-04-xx | Design review outcomes: SSE-first transport, Cognito-direct auth, 3-tier HITL, nudge rate limits, PAUSED viability confirmed, testing strategy. |
 | 3 | 2026-04-16 | Phase 1a scope locked (DDB + REST polling). Adds local testing infrastructure (DynamoDB Local via `docker compose`, `run.sh --local-events`, `mise run local:*` tasks). |
 | 4 | 2026-04-17 | Phase 1b decisions **D1 / D2 / D3 resolved** (two-runtime split, background-thread + `asyncio.Queue` SSE, hybrid CLI SSE client). Incorporates AWS primary-source research on the three AgentCore streaming duration ceilings (15 min sync / **60 min streaming** / 8 h async) and the two adjustable session timers (`idleRuntimeSessionTimeout`, `maxLifetime`). Adds the **control plane / streaming plane / fan-out plane** framing (§8.9) and channel-fit matrix. Records the Phase 3 ADR trigger for revisiting a full-async `server.py` refactor. Marks §9.3 (HITL) as still pending Cedar-driven rev (Phase 2/3 scope). |
+| 5 | 2026-04-21 | **Execution-location clarification (§9.13):** first live SSE bring-up against the deployed stack revealed that the initial Phase 1b design conflated three distinct interaction modes, causing duplicate pipeline execution when a CLI opened SSE for a task that was already spawned via the orchestrator path. Resolved by adopting **Branch A** from a competitive-architecture study (LangGraph Platform, Vercel `resumable-stream`, CopilotKit, Mastra, OpenAI Assistants — see `docs/research/agent-streaming-patterns.md`): introduce a direct **`submit --watch` / `bgagent run`** path where the CLI POSTs straight to Runtime-JWT and the pipeline runs **same-process** with the SSE stream (real-time, no orchestrator). Plain `submit` (no watch) continues to go via the orchestrator for fire-and-forget / non-interactive flows. `watch` against a task started elsewhere degrades to **polling** — real-time cross-runtime attach is deferred to **Phase 1c** (pub/sub layer: IoT Core MQTT or ElastiCache Redis). Also lands the **attach-don't-spawn** logic in `server.py` (same-session-ID re-invocations observe the existing in-process pipeline rather than spawning a duplicate) and the **`/ping HealthyBusy`** idle-eviction guard while a task's pipeline is active. Three SSE-path production bugs fixed in the same cycle: access-token vs ID-token routing, 33-char session-ID minimum (`bgagent-watch-<task_id>` prefix), and CloudWatch debug writes running on a daemon thread so uvicorn binds port 8080 before AgentCore's health check fires. |
 
 ---
 
@@ -1222,6 +1223,65 @@ This is the only reconnection mechanism. The handler `cdk/src/handlers/get-task-
 | AWS JS SDK v3 (`@aws-sdk/*`) | Request timeout ~2 minutes | `NodeHttp2Handler.requestTimeout: 0` (unlimited) for the streaming invocation. |
 
 These overrides are mandatory in any code path that opens a streaming `InvokeAgentRuntime`.
+
+### 9.13 Execution location: interactive direct-submit vs. orchestrator fan-out (added in rev 5, 2026-04-21)
+
+First live SSE bring-up against the deployed stack revealed a design gap: the rev‑4 plan routed every SSE invocation through `_spawn_background(...)` in `agent/src/server.py`, which meant that after a plain `bgagent submit` fired the orchestrator pipeline on Runtime‑IAM, a subsequent `bgagent watch --transport sse` on Runtime‑JWT would spawn a **second pipeline** for the same task. Both microVMs would clone the repo, run the agent, and create PRs — the observed failure mode. The root cause is that AgentCore's ``same `runtimeSessionId` → same microVM`` routing ([AgentCore sessions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-sessions.html)) is scoped **per runtime ARN**; Runtime‑IAM and Runtime‑JWT are distinct microVM pools, so same-session-ID attach across them is not possible without an external pub/sub layer.
+
+The competitive survey (`docs/research/agent-streaming-patterns.md`) identified three shapes: **same‑process streaming** (CopilotKit, Mastra, OpenAI Assistants), **orchestrator + observer with pub/sub** (LangGraph Platform `join_stream`, Vercel `resumable-stream`), and **pull-based** (Temporal queries, OpenAI fallback). AgentCore sits between the first two — same-session-ID routing provides the substrate for in-process attach within a single runtime, but no managed join-stream across runtimes.
+
+**Decision: Branch A — same-process streaming for interactive flows, polling fallback for cross-runtime observation.**
+
+#### 9.13.1 Two submission paths, three observation modes
+
+| Submission | Runtime | Pipeline lives in | Watcher behaviour |
+|---|---|---|---|
+| `bgagent submit --watch` (or `bgagent run`) | Runtime‑JWT (direct) | The same microVM that serves the SSE stream | **Real-time SSE**, same-process. Reconnect routes to the same microVM via same-session-ID → attaches to the existing `_SSEAdapter`. |
+| `bgagent submit` (plain) | Runtime‑IAM (via orchestrator) | A microVM on Runtime‑IAM (different pool than Runtime‑JWT) | No real-time cross-runtime attach possible. `bgagent watch` on this task falls back to **polling** against DDB (Phase 1a path, now with 500 ms interval instead of 2 s). |
+| Non-interactive (webhook, Slack bot, cron) | Runtime‑IAM (via orchestrator) | A microVM on Runtime‑IAM | DDB Streams fan-out (§8.9) pushes events to the non-interactive consumer (`chat.postMessage`, PR comment, SES, etc.). |
+
+#### 9.13.2 Lifetime semantics (honest trade-off)
+
+A pipeline is a Python background thread **inside a microVM**. Its lifetime is bounded by AgentCore's ``maxLifetime`` (8 h in our CDK — `LifecycleConfiguration`) and ``idleRuntimeSessionTimeout`` (also 8 h). DynamoDB persistence records the event log; it does **not** continue pipeline execution on a fresh microVM.
+
+- **Direct-submit (`submit --watch`)**: task lifetime == microVM lifetime. If the CLI disconnects and does not reconnect before the microVM is evicted (idle timeout or `maxLifetime`), the task dies with the microVM. For coding-agent workloads (minutes to low single-digit hours), the 8 h ceiling is comfortable.
+- **Orchestrator-submit (`submit`)**: task lifetime is similarly bounded on Runtime‑IAM — **also 8 h**. DDB is just the audit log. For tasks that genuinely exceed 8 h, architect outside AgentCore Runtime (Fargate, Step Functions) — out of scope for Phase 1b.
+
+`/ping` returning ``{"status": "HealthyBusy"}`` whenever a pipeline thread is alive is defence-in-depth against idle eviction with non-default `idleRuntimeSessionTimeout`. We set 8 h explicitly, but `HealthyBusy` makes the server correct under any configuration ([runtime service contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-service-contract.html), [long-running agents guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-long-run.html)).
+
+#### 9.13.3 `server.py` attach-don't-spawn logic
+
+A per-process registry `{task_id: _SSEAdapter}` is maintained under `_threads_lock`. The `/invocations` handler:
+
+1. If `Accept: text/event-stream` **and** an `_SSEAdapter` already exists for the requested `task_id` in this microVM → **attach**: return a `StreamingResponse` backed by a new `_sse_event_stream(...)` generator that drains the existing adapter's queue. Do **not** call `_spawn_background`.
+2. Otherwise → **spawn**: create a new `_SSEAdapter`, insert it into the registry, call `_spawn_background(params, sse_adapter=adapter)`. On `run_task` completion (success or failure), the pipeline's `finally` block removes the adapter from the registry.
+
+The registry is process-local; cross-microVM attach is out of scope (that's the polling fallback).
+
+For the sync `Accept: application/json` path (orchestrator → Runtime‑IAM), behaviour is unchanged: always spawn via `_spawn_background`, return 202. The orchestrator never needs to attach.
+
+#### 9.13.4 Admission control with two submission paths
+
+Admission checks (guardrail screening, idempotency, repo-onboarded, concurrency limits) live in `cdk/src/handlers/shared/create-task-core.ts` today and run in the `CreateTask` Lambda. They must run for **both** submission paths. The control-plane REST endpoint stays the authoritative admission gate:
+
+- `POST /v1/tasks` with new optional field `execution_mode` (default `"orchestrator"`, or `"interactive"`). Admission is unconditional.
+- `execution_mode: "orchestrator"` (default, plain `submit`): Lambda writes TaskTable record, fires the orchestrator Lambda via async invoke, returns `202 {task_id}`.
+- `execution_mode: "interactive"` (CLI `submit --watch` / `run`): Lambda writes TaskTable record + initial `task_created` event, **skips** the orchestrator invoke, returns `202 {task_id}`. The CLI then opens SSE directly to Runtime‑JWT's `/invocations` with the returned `task_id`, and server.py executes the pipeline.
+
+Server.py on Runtime‑JWT fetches the TaskTable record by `task_id` to resolve `repo_url`, hydrated context, prompt version, etc. — it does **not** re-admit; the Lambda already did. Unauthenticated/unauthorised requests are blocked earlier by the Cognito JWT authoriser on Runtime‑JWT.
+
+Both paths write to the same `TaskTable` and `TaskEventsTable`, preserving the single source of truth.
+
+#### 9.13.5 Phase 1c: real-time cross-runtime attach (future)
+
+Current polling fallback is acceptable for attach-to-already-running because the common case is "I just submitted; show me live" (direct-submit path handles this natively). The uncommon case ("Slack bot fired a task yesterday; I want to watch it now") uses polling.
+
+Phase 1c adds a pub/sub layer so the uncommon case is real-time too. Two candidates, to be chosen then:
+
+- **IoT Core MQTT** — `tasks/{task_id}/events` topics; SSE microVMs subscribe via MQTT-over-WSS. ~100 ms fan-out, native topic filtering, scales to very large fan-outs. Adds IoT dep.
+- **ElastiCache Redis + port of `vercel/resumable-stream`** — proven pattern (Vercel / LangGraph Platform), pubsub channels + resumable buffer. Adds ElastiCache cluster.
+
+In both cases the orchestrator-spawned pipeline gains a lightweight publisher alongside `ProgressWriter`; the SSE observer on Runtime‑JWT subscribes by `task_id`. Catch-up from DDB continues to be the reconnection backstop. No Branch A code change is required — the observer path on Runtime‑JWT gets a "subscribe to live topic" option in addition to "poll DDB".
 
 ## 10. Implementation plan
 

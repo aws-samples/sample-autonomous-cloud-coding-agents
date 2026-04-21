@@ -175,7 +175,7 @@
         <mxCell id="p2-t" parent="p2-1" style="text;html=1;align=left;verticalAlign=top;fontSize=28;fontStyle=1;fontFamily=Helvetica;fontColor=#2E7D32;" value="Phase 1b final design — two runtimes, SSE streaming, fan-out" vertex="1">
           <mxGeometry height="40" width="1700" x="50" y="30" as="geometry" />
         </mxCell>
-        <mxCell id="p2-ts" parent="p2-1" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontFamily=Helvetica;fontColor=#555555;" value="Runtime-IAM (orchestrator path) and Runtime-JWT (direct CLI SSE) from the same Docker image. Agent emits events through ProgressWriter (DDB, durable) AND SSEAdapter (Queue, real-time). TaskEventsTable DDB Stream fans out to Slack/GitHub/SES for non-interactive consumers." vertex="1">
+        <mxCell id="p2-ts" parent="p2-1" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontFamily=Helvetica;fontColor=#555555;" value="Two submission paths (rev 5). INTERACTIVE: `bgagent submit --watch` → POST /v1/tasks with execution_mode=interactive → Lambda admits + writes TaskTable, skips orchestrator → CLI opens SSE directly to Runtime-JWT → pipeline runs SAME-PROCESS in the SSE microVM (real-time). ORCHESTRATOR: `bgagent submit` (plain) → POST /v1/tasks (default mode) → Lambda async-invokes OrchestratorFn → Runtime-IAM runs the pipeline; CLI `watch` against such a task uses polling (no cross-runtime live attach). Same Docker image on both runtimes. Agent emits events via ProgressWriter → DDB (durable) and, when running same-process under SSE, also via SSEAdapter → Queue (real-time). TaskEventsTable DDB Stream fans out to Slack/GitHub/SES." vertex="1">
           <mxGeometry height="40" width="2000" x="50" y="70" as="geometry" />
         </mxCell>
         <mxCell id="p2-bar" parent="p2-1" style="line;strokeWidth=2;strokeColor=#2E7D32;html=1;" value="" vertex="1">
@@ -845,7 +845,7 @@
         <mxCell id="p5-t" parent="p5-1" style="text;html=1;align=left;verticalAlign=top;fontSize=26;fontStyle=1;fontFamily=Helvetica;fontColor=#2E7D32;" value="Phase 1b — happy-path event flow (submit + live SSE)" vertex="1">
           <mxGeometry height="40" width="2200" x="40" y="20" as="geometry" />
         </mxCell>
-        <mxCell id="p5-ts" parent="p5-1" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontFamily=Helvetica;fontColor=#555555;" value="Submission goes through REST control plane. CLI then opens SSE directly to Runtime-JWT (bypasses orchestrator). Every event is pushed via BOTH paths: ProgressWriter → DDB (durability) AND SSEAdapter → Queue → SSE (real-time)." vertex="1">
+        <mxCell id="p5-ts" parent="p5-1" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontFamily=Helvetica;fontColor=#555555;" value="Interactive Path 1 (`bgagent submit --watch`). REST admits with execution_mode=interactive (Lambda does NOT fire orchestrator). CLI opens SSE directly to Runtime-JWT. Runtime-JWT's container runs the pipeline SAME-PROCESS and streams events. Every event goes to BOTH sinks: ProgressWriter → DDB (durability + catch-up source) AND SSEAdapter → Queue → SSE (real-time). Reconnecting with same session_id attaches to the existing adapter in the same microVM (attach-don't-spawn)." vertex="1">
           <mxGeometry height="50" width="2200" x="40" y="60" as="geometry" />
         </mxCell>
         <mxCell id="p5-bar" parent="p5-1" style="line;strokeWidth=2;strokeColor=#2E7D32;html=1;" value="" vertex="1">
@@ -998,7 +998,7 @@
         <mxCell id="p5-m-async" parent="p5-1" style="text;html=1;fontSize=9;fontFamily=Helvetica;fontColor=#666;align=left;" value="(orchestrator invokes Runtime-IAM in parallel for legacy path — not shown)" vertex="1">
           <mxGeometry height="20" width="500" x="480" y="410" as="geometry" />
         </mxCell>
-        <mxCell id="p5-m7" edge="1" parent="p5-1" style="endArrow=classic;html=1;fontSize=10;fontFamily=Helvetica;labelBackgroundColor=#FFFFFF;strokeColor=#2E7D32;strokeWidth=2;" value="4. SSE connect: POST /invocations (Accept: text/event-stream, JWT)">
+        <mxCell id="p5-m7" edge="1" parent="p5-1" style="endArrow=classic;html=1;fontSize=10;fontFamily=Helvetica;labelBackgroundColor=#FFFFFF;strokeColor=#2E7D32;strokeWidth=2;" value="4. SSE connect: POST /invocations (JWT, Accept: text/event-stream, same-process pipeline)">
           <mxGeometry relative="1" as="geometry">
             <mxPoint x="110" y="460" as="sourcePoint" />
             <mxPoint x="930" y="460" as="targetPoint" />
