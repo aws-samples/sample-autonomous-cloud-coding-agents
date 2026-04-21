@@ -213,6 +213,7 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
+    execution_mode: executionMode,
     status_created_at: `${TaskStatus.SUBMITTED}#${now}`,
     created_at: now,
     updated_at: now,

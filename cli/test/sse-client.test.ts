@@ -506,6 +506,37 @@ describe('runSseClient — reconnect and catch-up', () => {
     expect(result.terminalEvent?.type).toBe('RUN_FINISHED');
   });
 
+  test('HTTP 409 RUN_ELSEWHERE → throws CliError (non-retriable, caller falls back)', async () => {
+    const runElsewhereBody = JSON.stringify({
+      code: 'RUN_ELSEWHERE',
+      message: 'Task is running on a different runtime.',
+      execution_mode: 'orchestrator',
+    });
+    const mockFetch = jest.fn().mockResolvedValue(
+      new Response(runElsewhereBody, { status: 409, statusText: 'Conflict' }),
+    );
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const options = buildOptions();
+    await expect(runSseClient(options)).rejects.toThrow(/RUN_ELSEWHERE/);
+    // Must not retry — the call is non-retriable.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('HTTP 409 without RUN_ELSEWHERE code → reconnects (generic http_error)', async () => {
+    const genericBody = JSON.stringify({ code: 'OTHER', message: 'nope' });
+    const mockFetch = jest.fn()
+      .mockResolvedValueOnce(
+        new Response(genericBody, { status: 409, statusText: 'Conflict' }),
+      )
+      .mockResolvedValueOnce(staticResponse(200, [sseFrame(EV_RUN_FINISHED)]));
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const result = await runSseClient(buildOptions());
+    expect(result.reconnectCount).toBe(1);
+    expect(result.terminalEvent?.type).toBe('RUN_FINISHED');
+  });
+
   test('HTTP 500 on connect → reconnects with http_error reason', async () => {
     const mockFetch = jest.fn()
       .mockResolvedValueOnce(staticResponse(500, [], 'Server Error'))

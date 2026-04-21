@@ -67,6 +67,13 @@ export interface TaskRecord {
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
   readonly compute_metadata?: Record<string, string>;
+  /**
+   * Execution mode recorded at task creation time (rev 5, §9.13.4). Used by
+   * `server.py` on Runtime-JWT to reject SSE spawn attempts on tasks that
+   * were submitted via the orchestrator path (RUN_ELSEWHERE guard). If
+   * unset, the task predates rev 5 and is treated as `'orchestrator'`.
+   */
+  readonly execution_mode?: ExecutionMode;
   readonly ttl?: number;
 }
 

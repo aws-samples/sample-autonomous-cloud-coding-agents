@@ -633,7 +633,7 @@ def _adapter_close_sentinel() -> Any:
     return sentinel
 
 
-async def _invoke_sse(params: dict) -> StreamingResponse:
+async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     """Content-type negotiated SSE branch of /invocations.
 
     Rev-5 attach-don't-spawn logic (§9.13.3): if this microVM already has a
@@ -676,6 +676,44 @@ async def _invoke_sse(params: dict) -> StreamingResponse:
                 media_type="text/event-stream",
                 headers=headers,
             )
+
+    # --- RUN_ELSEWHERE guard (rev 5, §9.13.4) -------------------------------
+    # Before spawning a pipeline for ``task_id``, check TaskTable. If the
+    # task was submitted with ``execution_mode != 'interactive'`` the
+    # orchestrator path is (or was) running it on Runtime-IAM; spawning here
+    # would duplicate the pipeline. Return 409 RUN_ELSEWHERE so the CLI's
+    # ``--transport auto`` can fall back to polling. Missing record or
+    # fetch failure defers to spawn (fail-open — preserves pre-rev-5
+    # behaviour for blueprints / legacy tasks).
+    if task_id and task_id != "anon":
+        try:
+            record = task_state.get_task(task_id)
+        except Exception as exc:  # pragma: no cover — defensive; get_task already catches
+            _debug_cw(
+                f"RUN_ELSEWHERE guard: task_state.get_task raised "
+                f"{type(exc).__name__}: {exc} — deferring to spawn",
+                task_id=task_id,
+            )
+            record = None
+        if record is not None:
+            existing_mode = record.get("execution_mode") or "orchestrator"
+            if existing_mode != "interactive":
+                _debug_cw(
+                    f"RUN_ELSEWHERE: task_id={task_id!r} execution_mode="
+                    f"{existing_mode!r} — returning 409 so client falls back to polling",
+                    task_id=task_id,
+                )
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "code": "RUN_ELSEWHERE",
+                        "message": (
+                            "Task is running (or was submitted to run) on a "
+                            "different runtime. Use polling to observe progress."
+                        ),
+                        "execution_mode": existing_mode,
+                    },
+                )
 
     # --- SPAWN path: no pipeline running for this task_id in this microVM ---
     try:

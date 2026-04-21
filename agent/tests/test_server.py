@@ -455,3 +455,104 @@ def test_registry_cleanup_on_pipeline_completion(monkeypatch):
 
     with server._threads_lock:
         assert "t-cleanup" not in server._active_sse_adapters
+
+
+# ---------------------------------------------------------------------------
+# Rev-5 Branch A (§9.13.4): RUN_ELSEWHERE guard — SSE must refuse to spawn
+# a pipeline on Runtime-JWT for tasks that were submitted via the
+# orchestrator path.
+# ---------------------------------------------------------------------------
+
+
+def test_sse_run_elsewhere_returns_409_for_orchestrator_task(monkeypatch):
+    """SSE invoke for an orchestrator-mode task returns 409 RUN_ELSEWHERE.
+
+    Prevents duplicate pipeline execution when a CLI does
+    ``bgagent watch --transport auto`` against a task that was submitted
+    via plain ``bgagent submit`` (orchestrator → Runtime-IAM).
+    """
+    async def scenario():
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {"task_id": task_id, "execution_mode": "orchestrator"},
+        )
+
+        params = {"task_id": "t-orch", "repo_url": "o/r", "task_description": "x"}
+        resp = await server._invoke_sse(params)
+
+        assert resp.status_code == 409
+        body = json.loads(resp.body.decode())
+        assert body["code"] == "RUN_ELSEWHERE"
+        assert body["execution_mode"] == "orchestrator"
+        # Critical: no pipeline spawned.
+        assert spawn_calls == []
+        # Registry must be untouched.
+        with server._threads_lock:
+            assert "t-orch" not in server._active_sse_adapters
+
+    asyncio.run(scenario())
+
+
+def test_sse_run_elsewhere_allows_interactive_task(monkeypatch):
+    """SSE invoke for an interactive-mode task proceeds to spawn."""
+    async def scenario():
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {"task_id": task_id, "execution_mode": "interactive"},
+        )
+
+        params = {"task_id": "t-inter", "repo_url": "o/r", "task_description": "x"}
+        try:
+            resp = await server._invoke_sse(params)
+            assert resp.media_type == "text/event-stream"
+            assert len(spawn_calls) == 1
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-inter", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_run_elsewhere_fails_open_when_record_missing(monkeypatch):
+    """If TaskTable lookup returns None, the guard defers to spawn (fail-open).
+
+    Preserves backward compat for tasks that predate rev 5 and blueprints
+    that aren't persisted at create time.
+    """
+    async def scenario():
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+        monkeypatch.setattr(server.task_state, "get_task", lambda task_id: None)
+
+        params = {"task_id": "t-legacy", "repo_url": "o/r", "task_description": "x"}
+        try:
+            resp = await server._invoke_sse(params)
+            assert resp.media_type == "text/event-stream"
+            assert len(spawn_calls) == 1
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-legacy", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())

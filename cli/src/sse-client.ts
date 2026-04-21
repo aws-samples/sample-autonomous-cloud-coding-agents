@@ -583,6 +583,34 @@ async function openAndDrainStream(args: StreamAttemptArgs): Promise<StreamAttemp
     return { unauthorized: true, error: new Error('401 Unauthorized') };
   }
 
+  // RUN_ELSEWHERE (rev 5, §9.13.4): server.py rejects SSE for tasks
+  // submitted via the orchestrator path. This is non-retriable — surfacing
+  // it as a CliError lets `watch --transport auto` fall back to polling.
+  if (response.status === 409) {
+    let bodyText = '';
+    try {
+      bodyText = await response.text();
+    } catch {
+      // ignore — we only need the body for code extraction
+    }
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+    let isRunElsewhere = false;
+    try {
+      const parsed = JSON.parse(bodyText);
+      isRunElsewhere = parsed?.code === 'RUN_ELSEWHERE';
+    } catch {
+      // Non-JSON 409 body — not a RUN_ELSEWHERE signal; fall through to
+      // generic HTTP-error handling below.
+    }
+    if (isRunElsewhere) {
+      const err = new CliError(
+        'RUN_ELSEWHERE: task is running on a different runtime; ' +
+        'falling back to polling.',
+      );
+      throw err;
+    }
+  }
+
   if (!response.ok) {
     const e = new Error(`HTTP ${response.status} ${response.statusText}`);
     debug(`[sse] non-ok response: ${e.message}`);

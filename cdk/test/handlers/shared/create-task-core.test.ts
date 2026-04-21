@@ -383,6 +383,30 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 
+  test('execution_mode persisted on TaskRecord (RUN_ELSEWHERE guard)', async () => {
+    // interactive
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Interactive task', execution_mode: 'interactive' },
+      makeContext(),
+      'req-exec-mode-1',
+      ['orchestrator', 'interactive'],
+    );
+    const interactivePut = mockSend.mock.calls[0][0];
+    expect(interactivePut.input.Item.execution_mode).toBe('interactive');
+
+    mockSend.mockClear();
+    mockLambdaSend.mockClear();
+
+    // orchestrator (default)
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Orch task' },
+      makeContext(),
+      'req-exec-mode-2',
+    );
+    const orchPut = mockSend.mock.calls[0][0];
+    expect(orchPut.input.Item.execution_mode).toBe('orchestrator');
+  });
+
   test('execution_mode=orchestrator fires orchestrator (explicit)', async () => {
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Background task', execution_mode: 'orchestrator' },
