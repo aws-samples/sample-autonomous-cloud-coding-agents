@@ -356,7 +356,10 @@ describe('watch command — transport resolution', () => {
       data: [],
       pagination: { next_token: null, has_more: false },
     });
-    mockGetTask.mockResolvedValue({ status: 'RUNNING' });
+    // Default snapshot: interactive mode so SSE is attempted (this describe
+    // exercises the SSE code path). Tests that specifically want polling
+    // override mockGetTask with execution_mode: 'orchestrator' or null.
+    mockGetTask.mockResolvedValue({ status: 'RUNNING', execution_mode: 'interactive' });
   });
 
   afterEach(() => {
@@ -403,7 +406,7 @@ describe('watch command — transport resolution', () => {
 
     // After SSE terminates the command calls getTask to get authoritative status.
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' }) // snapshot
       .mockResolvedValueOnce({ status: 'COMPLETED' }); // post-SSE
 
     const cmd = makeWatchCommand();
@@ -450,7 +453,7 @@ describe('watch command — transport resolution', () => {
       };
     });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();
@@ -472,7 +475,7 @@ describe('watch command — transport resolution', () => {
 
     // After fallback, polling: one more getTaskEvents + getTask → COMPLETED.
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' }) // snapshot
       .mockResolvedValueOnce({ status: 'COMPLETED' }); // polling
 
     const cmd = makeWatchCommand();
@@ -492,7 +495,7 @@ describe('watch command — transport resolution', () => {
     loadConfig.mockReturnValue(CONFIG_WITH_SSE); // even with ARN, polling wins
     // Snapshot: RUNNING (so resolveTransport actually runs); poll: COMPLETED.
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();
@@ -508,7 +511,7 @@ describe('watch command — transport resolution', () => {
   test('--transport auto without runtime_jwt_arn: WARN + falls back to polling', async () => {
     loadConfig.mockReturnValue(CONFIG_POLLING);
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' }) // snapshot
       .mockResolvedValueOnce({ status: 'COMPLETED' }); // polling
 
     const cmd = makeWatchCommand();
@@ -553,6 +556,49 @@ describe('watch command — transport resolution', () => {
 
     expect(runSseClient).not.toHaveBeenCalled();
     expect(stdoutWrites.some(l => l.includes('done'))).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 8b: RUN_ELSEWHERE guard (rev 5) — orchestrator-mode task skips SSE
+  // -----------------------------------------------------------------------
+  test('orchestrator-mode task with --transport auto: skips SSE, uses polling', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    mockGetTaskEvents.mockResolvedValueOnce({
+      data: [makeEvent({ event_id: 'evt-1', event_type: 'agent_milestone', metadata: { milestone: 'start', details: '' } })],
+      pagination: { next_token: null, has_more: false },
+    });
+    mockGetTaskEvents.mockResolvedValue({
+      data: [makeEvent({ event_id: 'evt-1', event_type: 'agent_milestone', metadata: { milestone: 'start', details: '' } })],
+      pagination: { next_token: null, has_more: false },
+    });
+    // Snapshot returns RUNNING + execution_mode=orchestrator — polling path.
+    mockGetTask.mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'orchestrator' });
+    mockGetTask.mockResolvedValueOnce({ status: 'COMPLETED', execution_mode: 'orchestrator' });
+
+    const cmd = makeWatchCommand();
+    await cmd.parseAsync(['node', 'test', 'task-orch', '--transport', 'auto']);
+
+    // SSE must NOT be attempted — avoids the 424 reconnect storm.
+    expect(runSseClient).not.toHaveBeenCalled();
+    expect(joinStderr()).toMatch(/execution_mode=orchestrator/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  test('legacy task (null execution_mode) with --transport auto: defaults to polling', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    mockGetTaskEvents.mockResolvedValue({
+      data: [],
+      pagination: { next_token: null, has_more: false },
+    });
+    // No execution_mode field at all — legacy task.
+    mockGetTask.mockResolvedValueOnce({ status: 'RUNNING' });
+    mockGetTask.mockResolvedValueOnce({ status: 'COMPLETED' });
+
+    const cmd = makeWatchCommand();
+    await cmd.parseAsync(['node', 'test', 'task-legacy', '--transport', 'auto']);
+
+    expect(runSseClient).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(0);
   });
 
@@ -621,7 +667,7 @@ describe('watch command — transport resolution', () => {
       };
     });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();
@@ -658,7 +704,7 @@ describe('watch command — transport resolution', () => {
       totalDurationMs: 1,
     });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();
@@ -684,7 +730,7 @@ describe('watch command — transport resolution', () => {
       totalDurationMs: 1,
     });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'FAILED' });
 
     const cmd = makeWatchCommand();
@@ -717,7 +763,7 @@ describe('watch command — transport resolution', () => {
       };
     });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();
@@ -767,7 +813,7 @@ describe('watch command — transport resolution', () => {
         pagination: { next_token: null, has_more: false },
       });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' }) // snapshot
       .mockResolvedValueOnce({ status: 'COMPLETED' }); // polling
 
     runSseClient.mockRejectedValue(new Error('SSE down'));
@@ -810,7 +856,7 @@ describe('watch command — transport resolution', () => {
       };
     });
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
       .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();

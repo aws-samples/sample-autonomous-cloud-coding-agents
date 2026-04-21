@@ -55,6 +55,12 @@ export interface TaskDetail {
   readonly build_passed: boolean | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
+  /**
+   * Execution mode recorded at task creation (rev 5, §9.13.4). Watch uses
+   * this to pick the correct transport: `'orchestrator'` (or null for
+   * legacy tasks) → polling; `'interactive'` → SSE.
+   */
+  readonly execution_mode?: ExecutionMode | null;
 }
 
 /** Task summary returned by GET /v1/tasks list responses. */

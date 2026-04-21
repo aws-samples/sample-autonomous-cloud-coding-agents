@@ -104,6 +104,13 @@ export interface TaskDetail {
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
   readonly prompt_version: string | null;
+  /**
+   * Execution mode the task was submitted with (rev 5, §9.13.4). Lets the
+   * CLI pick the correct transport for `watch`: tasks with
+   * `'orchestrator'` (or missing, for legacy tasks) must use polling; only
+   * `'interactive'` tasks are observable via SSE on Runtime-JWT.
+   */
+  readonly execution_mode: ExecutionMode | null;
 }
 
 /**
@@ -231,6 +238,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     max_turns: record.max_turns ?? null,
     max_budget_usd: record.max_budget_usd ?? null,
     prompt_version: record.prompt_version ?? null,
+    execution_mode: record.execution_mode ?? null,
   };
 }
 

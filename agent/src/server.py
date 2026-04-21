@@ -715,6 +715,46 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                     },
                 )
 
+            # --- Hydrate params from TaskTable (rev 5, §9.13.4) -----------
+            # The CLI's SSE body only carries ``{task_id}``; the full set of
+            # pipeline inputs (repo_url, task_description, issue_number,
+            # max_turns, max_budget_usd, task_type, branch_name, pr_number)
+            # must come from TaskTable when the CLI drove admission. Fill
+            # any missing fields; never overwrite a value the caller did
+            # pass (orchestrator path preserves its existing contract).
+            hydrated_from_record: dict = {}
+            if not params.get("repo_url") and record.get("repo"):
+                params["repo_url"] = record["repo"]
+                hydrated_from_record["repo_url"] = record["repo"]
+            if not params.get("task_description") and record.get("task_description"):
+                params["task_description"] = record["task_description"]
+                hydrated_from_record["task_description"] = "<present>"
+            if not params.get("issue_number") and record.get("issue_number") is not None:
+                params["issue_number"] = str(record["issue_number"])
+                hydrated_from_record["issue_number"] = params["issue_number"]
+            if not params.get("max_turns") and record.get("max_turns"):
+                params["max_turns"] = int(record["max_turns"])
+                hydrated_from_record["max_turns"] = params["max_turns"]
+            if params.get("max_budget_usd") in (None, 0, 0.0) and record.get("max_budget_usd") is not None:
+                params["max_budget_usd"] = float(record["max_budget_usd"])
+                hydrated_from_record["max_budget_usd"] = params["max_budget_usd"]
+            if not params.get("task_type") or params.get("task_type") == "new_task":
+                if record.get("task_type"):
+                    params["task_type"] = record["task_type"]
+                    hydrated_from_record["task_type"] = record["task_type"]
+            if not params.get("branch_name") and record.get("branch_name"):
+                params["branch_name"] = record["branch_name"]
+                hydrated_from_record["branch_name"] = record["branch_name"]
+            if not params.get("pr_number") and record.get("pr_number") is not None:
+                params["pr_number"] = str(record["pr_number"])
+                hydrated_from_record["pr_number"] = params["pr_number"]
+            if hydrated_from_record:
+                _debug_cw(
+                    f"hydrated {len(hydrated_from_record)} params from TaskTable: "
+                    f"{sorted(hydrated_from_record.keys())}",
+                    task_id=task_id,
+                )
+
     # --- SPAWN path: no pipeline running for this task_id in this microVM ---
     try:
         sse_adapter = _SSEAdapter(task_id=task_id)

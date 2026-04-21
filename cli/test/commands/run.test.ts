@@ -160,7 +160,10 @@ describe('run command', () => {
     loadConfig.mockReturnValue(CONFIG_WITH_SSE);
     runSseClient.mockResolvedValue({
       terminalEvent: { type: 'RUN_FINISHED', threadId: 't', runId: 'r' } as never,
-      reconnectCount: 0, eventsReceived: 0, eventsDeduplicated: 0, totalDurationMs: 1,
+      reconnectCount: 0,
+      eventsReceived: 0,
+      eventsDeduplicated: 0,
+      totalDurationMs: 1,
     });
     mockGetTask.mockResolvedValue({ ...TASK_DETAIL_RUNNING, status: 'COMPLETED' });
 
@@ -198,7 +201,10 @@ describe('run command', () => {
       capturedOpts = opts;
       return {
         terminalEvent: { type: 'RUN_FINISHED', threadId: 't', runId: 'r' } as never,
-        reconnectCount: 0, eventsReceived: 0, eventsDeduplicated: 0, totalDurationMs: 1,
+        reconnectCount: 0,
+        eventsReceived: 0,
+        eventsDeduplicated: 0,
+        totalDurationMs: 1,
       };
     });
     mockGetTask.mockResolvedValueOnce({ ...TASK_DETAIL_RUNNING, status: 'RUNNING' });
@@ -222,7 +228,10 @@ describe('run command', () => {
     loadConfig.mockReturnValue(CONFIG_WITH_SSE);
     runSseClient.mockResolvedValue({
       terminalEvent: { type: 'RUN_FINISHED', threadId: 't', runId: 'r' } as never,
-      reconnectCount: 0, eventsReceived: 0, eventsDeduplicated: 0, totalDurationMs: 1,
+      reconnectCount: 0,
+      eventsReceived: 0,
+      eventsDeduplicated: 0,
+      totalDurationMs: 1,
     });
     // Final getTask is the second call — first is for the snapshot.
     mockGetTask.mockResolvedValueOnce({ ...TASK_DETAIL_RUNNING, status: 'RUNNING' });
@@ -238,7 +247,10 @@ describe('run command', () => {
     loadConfig.mockReturnValue(CONFIG_WITH_SSE);
     runSseClient.mockResolvedValue({
       terminalEvent: { type: 'RUN_ERROR', threadId: 't', runId: 'r', message: 'boom' } as never,
-      reconnectCount: 0, eventsReceived: 0, eventsDeduplicated: 0, totalDurationMs: 1,
+      reconnectCount: 0,
+      eventsReceived: 0,
+      eventsDeduplicated: 0,
+      totalDurationMs: 1,
     });
     mockGetTask.mockResolvedValueOnce({ ...TASK_DETAIL_RUNNING, status: 'RUNNING' });
     mockGetTask.mockResolvedValueOnce({ ...TASK_DETAIL_RUNNING, status: 'FAILED' });
@@ -300,7 +312,10 @@ describe('run command', () => {
     loadConfig.mockReturnValue(CONFIG_WITH_SSE);
     runSseClient.mockResolvedValue({
       terminalEvent: { type: 'RUN_FINISHED', threadId: 't', runId: 'r' } as never,
-      reconnectCount: 0, eventsReceived: 0, eventsDeduplicated: 0, totalDurationMs: 1,
+      reconnectCount: 0,
+      eventsReceived: 0,
+      eventsDeduplicated: 0,
+      totalDurationMs: 1,
     });
     mockGetTask.mockResolvedValueOnce({ ...TASK_DETAIL_RUNNING, status: 'RUNNING' });
     mockGetTask.mockResolvedValueOnce({ ...TASK_DETAIL_RUNNING, status: 'COMPLETED' });

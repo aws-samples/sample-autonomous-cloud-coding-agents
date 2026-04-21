@@ -281,6 +281,9 @@ interface SnapshotResult {
   readonly latestEventId: string | null;
   readonly events: TaskEvent[];
   readonly taskStatus: string;
+  /** execution_mode from TaskDetail. `null` for legacy tasks created before
+   *  rev 5 (effectively `'orchestrator'`). */
+  readonly executionMode: string | null;
 }
 
 /** Fetch the latest events + current task status. Used both to detect a
@@ -298,11 +301,12 @@ export async function fetchInitialSnapshot(apiClient: ApiClient, taskId: string)
   ]);
   const events = eventsPage.data;
   const latestEventId = events.length > 0 ? events[events.length - 1].event_id : null;
+  const executionMode = task.execution_mode ?? null;
   debug(
     `[watch/snapshot] events=${events.length} latestEventId=${latestEventId ?? '<none>'} `
-    + `status=${task.status}`,
+    + `status=${task.status} execution_mode=${executionMode ?? '<legacy>'}`,
   );
-  return { latestEventId, events, taskStatus: task.status };
+  return { latestEventId, events, taskStatus: task.status, executionMode };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -383,6 +387,21 @@ export function makeWatchCommand(): Command {
         }
 
         // -------- Transport decision and execution. ---------------------
+        // Rev 5, §9.13.4: tasks submitted via the orchestrator path cannot
+        // be attached to over SSE on Runtime-JWT (different microVM pool);
+        // server.py returns 409 RUN_ELSEWHERE which AgentCore wraps as 424
+        // Failed Dependency to the client. Use the snapshot's execution_mode
+        // to skip SSE directly and avoid a reconnect storm.
+        if (transport === 'auto' && snapshot.executionMode !== 'interactive') {
+          logInfo(
+            isJson,
+            `Task execution_mode=${snapshot.executionMode ?? 'orchestrator'} — using polling (SSE only supported for interactive tasks).`,
+          );
+          debug(`[watch] transport=polling (auto: execution_mode=${snapshot.executionMode})`);
+          await runPolling(apiClient, taskId, seedCursor, formatter, abortController.signal, isJson);
+          return;
+        }
+
         const resolved = resolveTransport(transport, config.runtime_jwt_arn, isJson);
         if (resolved === 'polling') {
           await runPolling(apiClient, taskId, seedCursor, formatter, abortController.signal, isJson);

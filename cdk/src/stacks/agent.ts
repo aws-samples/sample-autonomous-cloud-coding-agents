@@ -52,7 +52,16 @@ export class AgentStack extends Stack {
 
     const runnerPath = path.join(__dirname, '..', '..', '..', 'agent');
 
-    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+    // Two separate AssetImage instances — one per runtime. The L2 construct
+    // grants ECR pull inside ``AssetImage.bind``, but guards the grant with a
+    // ``this.bound`` flag. When the SAME instance is passed to two Runtimes,
+    // the second runtime is skipped and its execution role never receives
+    // ECR permissions → image pull fails with 424 "no basic auth credentials"
+    // (see upstream awslabs/agentcore#<check>). The DockerImageAsset dedupes
+    // on asset hash so we still publish one image to ECR. Keep this split
+    // until the L2 fixes the multi-runtime bind guard.
+    const artifactIam = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+    const artifactJwt = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
@@ -249,7 +258,7 @@ export class AgentStack extends Stack {
     // variable name `runtimeIam` documents its Phase 1b role.
     const runtimeIam = new agentcore.Runtime(this, 'Runtime', {
       runtimeName,
-      agentRuntimeArtifact: artifact,
+      agentRuntimeArtifact: artifactIam,
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
       lifecycleConfiguration: sharedLifecycleConfiguration,
@@ -264,7 +273,7 @@ export class AgentStack extends Stack {
     const runtimeJwtName = `${runtimeName}_jwt`;
     const runtimeJwt = new agentcore.Runtime(this, 'RuntimeJwt', {
       runtimeName: runtimeJwtName,
-      agentRuntimeArtifact: artifact,
+      agentRuntimeArtifact: artifactJwt,
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
       lifecycleConfiguration: sharedLifecycleConfiguration,
