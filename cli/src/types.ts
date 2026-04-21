@@ -94,6 +94,16 @@ export interface GetTaskEventsQuery {
   readonly after?: string;
 }
 
+/**
+ * Execution mode for a submitted task (rev 5, §9.13).
+ *
+ * - `'orchestrator'` (default): Lambda fires the orchestrator, pipeline
+ *   runs on Runtime-IAM. Non-interactive channels use this.
+ * - `'interactive'`: Lambda SKIPS the orchestrator. Caller MUST open SSE
+ *   to Runtime-JWT to run the pipeline same-process with the stream.
+ */
+export type ExecutionMode = 'orchestrator' | 'interactive';
+
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -103,6 +113,7 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
+  readonly execution_mode?: ExecutionMode;
 }
 
 /** Cancel task response from DELETE /v1/tasks/{task_id}. */

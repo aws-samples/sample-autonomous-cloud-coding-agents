@@ -152,7 +152,7 @@ interface Formatter {
   emitSemantic(ev: SemanticEvent | TaskEvent): void;
 }
 
-function makeFormatter(isJson: boolean): Formatter {
+export function makeFormatter(isJson: boolean): Formatter {
   return {
     emitAgUi(ev: AgUiEvent): void {
       if (isJson) {
@@ -290,7 +290,7 @@ interface SnapshotResult {
  *
  *  Emitted event ordering: events are returned in ascending order (matching
  *  the REST contract from Phase 1b Step 4). */
-async function fetchInitialSnapshot(apiClient: ApiClient, taskId: string): Promise<SnapshotResult> {
+export async function fetchInitialSnapshot(apiClient: ApiClient, taskId: string): Promise<SnapshotResult> {
   debug(`[watch/snapshot] fetching initial snapshot task=${taskId}`);
   const [eventsPage, task] = await Promise.all([
     apiClient.getTaskEvents(taskId, { limit: SNAPSHOT_PAGE_SIZE }),
@@ -493,7 +493,7 @@ function resolveTransport(
 /*  SSE runner                                                               */
 /* ------------------------------------------------------------------------ */
 
-interface RunSseArgs {
+export interface RunSseArgs {
   readonly apiClient: ApiClient;
   readonly taskId: string;
   readonly seedCursor: string;
@@ -505,7 +505,7 @@ interface RunSseArgs {
   readonly isJson: boolean;
 }
 
-async function runSse(args: RunSseArgs): Promise<void> {
+export async function runSse(args: RunSseArgs): Promise<void> {
   const {
     apiClient, taskId, seedCursor, runtimeJwtArn, region,
     streamTimeoutSeconds, formatter, abortController, isJson,

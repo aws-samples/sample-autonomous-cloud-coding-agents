@@ -49,12 +49,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const idempotencyKey = event.headers['Idempotency-Key'] ?? event.headers['idempotency-key'];
 
     // 4. Delegate to shared core
+    // Cognito-authed API path allows both execution modes: 'orchestrator'
+    // (default, fire-and-forget via orchestrator Lambda) and 'interactive'
+    // (rev 5 Branch A Path 1 — skip orchestrator; CLI will open SSE to
+    // Runtime-JWT and run the pipeline same-process).
     return await createTaskCore(body, {
       userId,
       channelSource: 'api',
       channelMetadata: buildChannelMetadata(event),
       idempotencyKey: idempotencyKey ?? undefined,
-    }, requestId);
+    }, requestId, ['orchestrator', 'interactive']);
   } catch (err) {
     logger.error('Failed to create task', { error: String(err), request_id: requestId });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);

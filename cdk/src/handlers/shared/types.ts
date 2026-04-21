@@ -151,6 +151,25 @@ export interface GetTaskEventsQuery {
 }
 
 /**
+ * How a task's pipeline should be executed (rev 5, §9.13).
+ *
+ * - `'orchestrator'` (default, Phase 1a behaviour): the CreateTask Lambda
+ *   async-invokes the orchestrator, which calls Runtime-IAM. The pipeline
+ *   runs on Runtime-IAM independent of any live watcher. This is the only
+ *   correct choice for non-interactive channels (webhook, Slack, cron).
+ * - `'interactive'` (rev 5 Branch A Path 1): the CreateTask Lambda SKIPS
+ *   the orchestrator invoke. The caller is expected to immediately open an
+ *   SSE connection to Runtime-JWT's /invocations with the returned task_id,
+ *   so the pipeline runs same-process with the stream (real-time). If no
+ *   SSE connection is established, the task stays in PENDING and is
+ *   eventually cleaned up by the concurrency reconciler.
+ *
+ * Only the Cognito-authed API path accepts `'interactive'`. The webhook
+ * path (no live watcher by definition) rejects it with 400.
+ */
+export type ExecutionMode = 'orchestrator' | 'interactive';
+
+/**
  * Create task request body.
  */
 export interface CreateTaskRequest {
@@ -162,6 +181,7 @@ export interface CreateTaskRequest {
   readonly task_type?: TaskType;
   readonly pr_number?: number;
   readonly attachments?: Attachment[];
+  readonly execution_mode?: ExecutionMode;
 }
 
 /**

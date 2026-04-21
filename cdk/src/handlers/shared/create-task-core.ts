@@ -69,7 +69,21 @@ export async function createTaskCore(
   body: CreateTaskRequest,
   context: TaskCreationContext,
   requestId: string,
+  allowedExecutionModes: readonly ('orchestrator' | 'interactive')[] = ['orchestrator'],
 ): Promise<APIGatewayProxyResult> {
+  // 0. Validate execution_mode (rev 5 Branch A, §9.13).
+  // Cognito-authed callers get ['orchestrator', 'interactive'];
+  // webhook callers get ['orchestrator'] only (no live watcher ever).
+  const executionMode = body.execution_mode ?? 'orchestrator';
+  if (!allowedExecutionModes.includes(executionMode)) {
+    return errorResponse(
+      400,
+      ErrorCode.VALIDATION_ERROR,
+      `execution_mode='${executionMode}' is not allowed for this channel. Allowed: ${allowedExecutionModes.join(', ')}.`,
+      requestId,
+    );
+  }
+
   // 1. Validate request body
   if (!body.repo || !isValidRepo(body.repo)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
@@ -245,15 +259,29 @@ export async function createTaskCore(
     request_id: requestId,
   });
 
-  // 8. Async-invoke the orchestrator (fire-and-forget)
-  if (lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
+  // 8. Async-invoke the orchestrator (fire-and-forget) — UNLESS the caller
+  //    requested execution_mode='interactive'. In that mode the CLI is
+  //    about to open SSE to Runtime-JWT and the pipeline runs same-process
+  //    with the stream (rev 5 §9.13.4). The orchestrator invoke would be a
+  //    duplicate pipeline.
+  if (executionMode === 'interactive') {
+    logger.info('Admission: interactive mode, orchestrator invoke skipped', {
+      task_id: taskId,
+      execution_mode: executionMode,
+      request_id: requestId,
+    });
+  } else if (lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
     try {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: process.env.ORCHESTRATOR_FUNCTION_ARN,
         InvocationType: 'Event',
         Payload: new TextEncoder().encode(JSON.stringify({ task_id: taskId })),
       }));
-      logger.info('Orchestrator invoked', { task_id: taskId });
+      logger.info('Orchestrator invoked', {
+        task_id: taskId,
+        execution_mode: executionMode,
+        request_id: requestId,
+      });
     } catch (orchErr) {
       logger.error('Failed to invoke orchestrator', { error: String(orchErr), task_id: taskId });
     }

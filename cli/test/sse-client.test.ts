@@ -649,7 +649,11 @@ describe('runSseClient — request construction', () => {
     expect(headers.Authorization).toMatch(/^Bearer /);
     expect(headers['Content-Type']).toBe('application/json');
     expect(headers.Accept).toBe('text/event-stream');
-    expect(headers['X-Amzn-Bedrock-AgentCore-Runtime-Session-Id']).toBe('my-task-777');
+    // Session-ID is buildRuntimeSessionId(taskId) — AgentCore requires >= 33
+    // chars. 'my-task-777' (11) + 'bgagent-watch-' (14) = 25, then padded to 33.
+    expect(headers['X-Amzn-Bedrock-AgentCore-Runtime-Session-Id']).toBe(
+      'bgagent-watch-my-task-777xxxxxxxx',
+    );
   });
 
   test('invocation body has shape {"input": {"task_id": ..., ...}}', async () => {
