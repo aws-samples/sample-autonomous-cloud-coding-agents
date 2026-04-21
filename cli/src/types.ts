@@ -176,9 +176,20 @@ export interface CliConfig {
   readonly runtime_jwt_arn?: string;
 }
 
-/** Cached credentials stored in ~/.bgagent/credentials.json. */
+/** Cached credentials stored in ~/.bgagent/credentials.json.
+ *
+ * Both Cognito-issued tokens are cached. The **access token** is what we send
+ * on the Authorization header because AgentCore Runtime's Cognito JWT
+ * authorizer validates `client_id` (present on access tokens, not ID tokens).
+ * API Gateway's Cognito authorizer accepts either by default, so the REST
+ * path is unaffected. The ID token is retained for introspection / debugging
+ * and for potential future features that need user identity claims. Older
+ * credentials files without `access_token` are tolerated — `getAuthToken`
+ * falls back to `id_token` and logs a WARN so the user knows to re-login.
+ */
 export interface Credentials {
   readonly id_token: string;
+  readonly access_token?: string;
   readonly refresh_token: string;
   readonly token_expiry: string;
 }

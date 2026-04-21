@@ -45,32 +45,72 @@ export async function login(username: string, password: string): Promise<void> {
   }));
 
   const auth = result.AuthenticationResult;
-  if (!auth?.IdToken || !auth.RefreshToken || !auth.ExpiresIn) {
+  if (!auth?.IdToken || !auth.AccessToken || !auth.RefreshToken || !auth.ExpiresIn) {
     throw new CliError('Unexpected authentication response from Cognito.');
   }
 
   const expiry = new Date(Date.now() + auth.ExpiresIn * 1000).toISOString();
   saveCredentials({
     id_token: auth.IdToken,
+    access_token: auth.AccessToken,
     refresh_token: auth.RefreshToken,
     token_expiry: expiry,
   });
 }
 
-/** Get a valid auth token, refreshing automatically if needed. */
+/** Get a valid auth token, refreshing automatically if needed.
+ *
+ * The REST API Gateway's Cognito authorizer validates **ID tokens** (checks
+ * the `aud` claim against the app client ID). AgentCore Runtime's Cognito
+ * JWT authorizer validates **access tokens** (checks the `client_id` claim).
+ * The two endpoints require different tokens, so we expose two getters.
+ *
+ * Default export keeps backward compat: returns the ID token (the original
+ * behaviour before Phase 1b), which is what the REST client needs.
+ */
 export async function getAuthToken(): Promise<string> {
+  return getIdToken();
+}
+
+/** Get the Cognito ID token — for REST API Gateway calls. */
+export async function getIdToken(): Promise<string> {
+  const creds = await ensureFreshCredentials();
+  return creds.id_token;
+}
+
+/** Get the Cognito access token — for direct AgentCore Runtime-JWT (SSE) calls.
+ *
+ * Falls back to ID token if the cached credentials predate the access-token
+ * migration (logs a WARN). SSE against AgentCore will 401 in that case and
+ * the SSE client's 401 handler will trigger a refresh that populates
+ * `access_token` via Cognito's refresh flow.
+ */
+export async function getAccessToken(): Promise<string> {
+  const creds = await ensureFreshCredentials();
+  if (creds.access_token) {
+    return creds.access_token;
+  }
+  debug('Cached credentials predate access-token support; falling back to id_token. Run `bgagent login` for a fresh session to enable SSE transport.');
+  return creds.id_token;
+}
+
+/** Internal: return non-expired credentials, refreshing if needed. */
+async function ensureFreshCredentials(): Promise<Credentials> {
   const creds = loadCredentials();
   if (!creds) {
     throw new CliError('Not authenticated. Run `bgagent login` first.');
   }
-
   if (!isExpired(creds)) {
-    debug('Using cached token (not expired)');
-    return creds.id_token;
+    debug('Using cached tokens (not expired)');
+    return creds;
   }
-
-  debug('Token expired or near expiry, refreshing...');
-  return refreshToken(creds);
+  debug('Tokens expired or near expiry, refreshing...');
+  await refreshToken(creds);
+  const fresh = loadCredentials();
+  if (!fresh) {
+    throw new CliError('Credentials vanished after refresh. Run `bgagent login`.');
+  }
+  return fresh;
 }
 
 function isExpired(creds: Credentials): boolean {
@@ -92,18 +132,19 @@ async function refreshToken(creds: Credentials): Promise<string> {
     }));
 
     const auth = result.AuthenticationResult;
-    if (!auth?.IdToken || !auth.ExpiresIn) {
+    if (!auth?.IdToken || !auth.AccessToken || !auth.ExpiresIn) {
       throw new CliError('Unexpected refresh response from Cognito.');
     }
 
     const expiry = new Date(Date.now() + auth.ExpiresIn * 1000).toISOString();
     saveCredentials({
       id_token: auth.IdToken,
+      access_token: auth.AccessToken,
       refresh_token: creds.refresh_token,
       token_expiry: expiry,
     });
 
-    return auth.IdToken;
+    return auth.AccessToken;
   } catch (err) {
     if (err instanceof CliError) throw err;
     throw new CliError('Session expired. Run `bgagent login` to re-authenticate.');

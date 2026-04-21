@@ -56,6 +56,7 @@ describe('auth', () => {
       mockSend.mockResolvedValue({
         AuthenticationResult: {
           IdToken: 'id-token-123',
+          AccessToken: 'access-token-123',
           RefreshToken: 'refresh-token-123',
           ExpiresIn: 3600,
         },
@@ -67,6 +68,7 @@ describe('auth', () => {
         fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'),
       );
       expect(creds.id_token).toBe('id-token-123');
+      expect(creds.access_token).toBe('access-token-123');
       expect(creds.refresh_token).toBe('refresh-token-123');
       expect(creds.token_expiry).toBeDefined();
     });
@@ -81,33 +83,53 @@ describe('auth', () => {
     test('returns cached token when not expired', async () => {
       const futureExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       saveCredentials({
-        id_token: 'cached-token',
+        id_token: 'cached-id',
+        access_token: 'cached-access',
         refresh_token: 'refresh-token',
         token_expiry: futureExpiry,
       });
 
+      // getAuthToken is a backward-compat alias for getIdToken (for the REST API).
       const token = await getAuthToken();
-      expect(token).toBe('cached-token');
+      expect(token).toBe('cached-id');
       expect(mockSend).not.toHaveBeenCalled();
     });
 
     test('refreshes expired token', async () => {
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({
-        id_token: 'old-token',
+        id_token: 'old-id',
+        access_token: 'old-access',
         refresh_token: 'refresh-token',
         token_expiry: pastExpiry,
       });
 
       mockSend.mockResolvedValue({
         AuthenticationResult: {
-          IdToken: 'new-token',
+          IdToken: 'new-id',
+          AccessToken: 'new-access',
           ExpiresIn: 3600,
         },
       });
 
       const token = await getAuthToken();
-      expect(token).toBe('new-token');
+      expect(token).toBe('new-id');
+    });
+
+    test('falls back to id_token when legacy credentials lack access_token', async () => {
+      // Credentials file from before the access-token migration — only has id_token.
+      // getAuthToken should still work (for REST calls) but log a WARN. SSE will
+      // trigger a refresh via the 401 handler, populating access_token.
+      const futureExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      saveCredentials({
+        id_token: 'legacy-id',
+        refresh_token: 'refresh-token',
+        token_expiry: futureExpiry,
+      });
+
+      const token = await getAuthToken();
+      expect(token).toBe('legacy-id');
+      expect(mockSend).not.toHaveBeenCalled();
     });
 
     test('throws when no credentials exist', async () => {

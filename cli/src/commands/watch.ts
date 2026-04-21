@@ -25,7 +25,7 @@ import {
   translateDbRowToAgUi,
 } from '../ag-ui-translator';
 import { ApiClient } from '../api-client';
-import { getAuthToken } from '../auth';
+import { getAccessToken } from '../auth';
 import { loadConfig } from '../config';
 import { debug, isVerbose } from '../debug';
 import { CliError } from '../errors';
@@ -517,7 +517,10 @@ async function runSse(args: RunSseArgs): Promise<void> {
     runtimeJwtArn,
     region,
     taskId,
-    getAuthToken: async () => getAuthToken(),
+    // SSE-specific: AgentCore Runtime-JWT validates `client_id` which only
+    // exists on Cognito access tokens. REST API Gateway still uses the ID
+    // token via api-client.ts's default getAuthToken() path.
+    getAuthToken: async () => getAccessToken(),
     catchUp: async (afterEventId: string): Promise<AgUiEvent[]> => {
       debug(`[watch/sse] catchUp afterEventId=${afterEventId || '<empty>'}`);
       const rows = await apiClient.catchUpEvents(taskId, afterEventId);
