@@ -57,10 +57,14 @@ export interface TaskDetail {
   readonly max_budget_usd: number | null;
   /**
    * Execution mode recorded at task creation (rev 5, §9.13.4). Watch uses
-   * this to pick the correct transport: `'orchestrator'` (or null for
+   * this to pick the correct transport: `'orchestrator'` (or `null` for
    * legacy tasks) → polling; `'interactive'` → SSE.
+   *
+   * The server-side `toTaskDetail` always sets this field (including
+   * `null` for legacy rows), so the shape is `ExecutionMode | null`, not
+   * optional. Matches CDK's `TaskDetail` definition exactly.
    */
-  readonly execution_mode?: ExecutionMode | null;
+  readonly execution_mode: ExecutionMode | null;
 }
 
 /** Task summary returned by GET /v1/tasks list responses. */

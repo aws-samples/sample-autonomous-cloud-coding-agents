@@ -25,12 +25,12 @@ import { debug, isVerbose } from '../debug';
 import { CliError } from '../errors';
 import { CreateTaskRequest, TERMINAL_STATUSES } from '../types';
 import { exitCodeForStatus } from '../wait';
+import { DEFAULT_STREAM_TIMEOUT_SECONDS, validateStreamTimeout } from './_stream';
 
-/** Default stream timeout — 58 min, pre-empts AgentCore's 60-min streaming cap.
- *  Must match watch.ts. */
-const DEFAULT_STREAM_TIMEOUT_SECONDS = 3500;
-
-function logInfo(message: string): void {
+/** Log an INFO-level message to stderr. Matches `watch.ts`'s signature so
+ *  the two commands can share helpers in the future. Stdout stays free of
+ *  info text regardless of output mode. */
+function logInfo(_isJson: boolean, message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
@@ -45,6 +45,8 @@ function logError(message: string): void {
  * pipeline executes same-process with the SSE stream on Runtime-JWT. The
  * Lambda writes the TaskTable record but SKIPS the orchestrator invoke;
  * server.py on Runtime-JWT spawns the pipeline when the SSE stream opens.
+ *
+ * @returns Configured commander `Command` instance to attach to the bin.
  */
 export function makeRunCommand(): Command {
   return new Command('run')
@@ -133,8 +135,10 @@ export function makeRunCommand(): Command {
       debug(`[run] task=${task.task_id} status=${task.status}`);
 
       if (!isJson) {
-        logInfo(`Task: ${task.task_id}`);
-        logInfo(`Verbose mode: ${isVerbose()}`);
+        logInfo(isJson, `Task: ${task.task_id}`);
+        if (isVerbose()) {
+          logInfo(isJson, `Verbose mode: on`);
+        }
       }
 
       // -------- Snapshot: seed cursor (brand-new task — rarely has events)
@@ -150,13 +154,13 @@ export function makeRunCommand(): Command {
       // FAILED, or idempotent replay of a completed task).
       if ((TERMINAL_STATUSES as readonly string[]).includes(snapshot.taskStatus)) {
         debug(`[run] task already terminal status=${snapshot.taskStatus}`);
-        if (!isJson) logInfo(`Task ${snapshot.taskStatus.toLowerCase()}.`);
+        if (!isJson) logInfo(isJson, `Task ${snapshot.taskStatus.toLowerCase()}.`);
         process.exitCode = exitCodeForStatus(snapshot.taskStatus);
         return;
       }
 
       if (!isJson) {
-        logInfo(`Streaming task ${task.task_id}... (Ctrl+C to stop)`);
+        logInfo(isJson, `Streaming task ${task.task_id}... (Ctrl+C to stop)`);
       }
 
       // -------- SIGINT/SIGTERM → abort --------------------------------------
@@ -169,30 +173,51 @@ export function makeRunCommand(): Command {
       process.on('SIGTERM', onSignal);
 
       try {
-        await runSse({
-          apiClient,
-          taskId: task.task_id,
-          seedCursor,
-          runtimeJwtArn: config.runtime_jwt_arn,
-          region: config.region,
-          streamTimeoutSeconds,
-          formatter,
-          abortController,
-          isJson,
-        });
+        try {
+          await runSse({
+            apiClient,
+            taskId: task.task_id,
+            seedCursor,
+            runtimeJwtArn: config.runtime_jwt_arn,
+            region: config.region,
+            streamTimeoutSeconds,
+            formatter,
+            abortController,
+            isJson,
+          });
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err));
+          debug(`[run] runSse threw: ${e.name}: ${e.message}`);
+
+          // Rev-5 design: interactive tasks run same-process with the SSE
+          // stream. If SSE fatally fails before or during the pipeline,
+          // the orchestrator was skipped — nothing else will run this
+          // task. Cancel it so the user isn't left with a task stranded
+          // in SUBMITTED / HYDRATING.
+          //
+          // Best-effort: cancel failure is logged but doesn't change the
+          // exit path; the user still needs to know the original error.
+          try {
+            await apiClient.cancelTask(task.task_id);
+            debug(`[run] cancelled stranded task ${task.task_id}`);
+          } catch (cancelErr) {
+            const ce = cancelErr instanceof Error ? cancelErr : new Error(String(cancelErr));
+            debug(`[run] cancel after SSE failure also failed: ${ce.message}`);
+          }
+
+          logError(`SSE stream failed: ${e.message}`);
+          logError(`Task ${task.task_id} was cancelled. To re-run, try: bgagent run ...`);
+          logError(`If you believe the task should have succeeded, check status with:`);
+          logError(`  bgagent status ${task.task_id}`);
+          throw new CliError(`run failed: ${e.message}`);
+        }
+
+        // runSse sets process.exitCode internally from the authoritative
+        // REST status (watch.ts's post-terminal getTask), so no outer
+        // final-status call is needed here.
       } finally {
         process.removeListener('SIGINT', onSignal);
         process.removeListener('SIGTERM', onSignal);
       }
     });
-}
-
-function validateStreamTimeout(raw: unknown): number {
-  const n = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new CliError(
-      `Invalid --stream-timeout-seconds value: ${String(raw)}. Must be a positive integer.`,
-    );
-  }
-  return n;
 }

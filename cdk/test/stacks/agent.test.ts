@@ -108,6 +108,35 @@ describe('AgentStack', () => {
     expect(jwtAuth.AllowedClients).toBeDefined();
   });
 
+  test('both runtime execution roles carry ECR pull permissions (rev-5 CDK-2)', () => {
+    // Regression: the L2 AgentRuntimeArtifact.fromAsset has a double-attach
+    // guard (AssetImage.bind's `this.bound = true`) that silently skips
+    // granting ECR pull perms to the second runtime when a single asset
+    // instance is shared. We work around it in agent.ts by calling
+    // fromAsset twice (one per runtime); if a future refactor collapses
+    // them back to one, this test will fail. The JWT runtime's missing
+    // ECR perms produced a 424 Failed Dependency outage during rev-5
+    // bring-up.
+    const policies = template.findResources('AWS::IAM::Policy');
+
+    const rolesWithEcrPull = Object.values(policies).filter(policy => {
+      const statements = policy.Properties?.PolicyDocument?.Statement ?? [];
+      return statements.some((s: { Action?: unknown }) => {
+        const action = s.Action;
+        const actions = Array.isArray(action) ? action : [action];
+        return actions.includes('ecr:BatchGetImage')
+          && actions.includes('ecr:GetDownloadUrlForLayer')
+          && actions.includes('ecr:BatchCheckLayerAvailability');
+      });
+    });
+
+    // Both the IAM runtime execution role AND the JWT runtime execution role
+    // must be among the policies with ECR pull. (Their sibling policies
+    // also carry `ecr:GetAuthorizationToken`, so we look for the
+    // repo-scoped triplet that the AgentRuntimeArtifact grant emits.)
+    expect(rolesWithEcrPull.length).toBeGreaterThanOrEqual(2);
+  });
+
   test('both runtimes have 8-hour lifecycle limits (idle + max)', () => {
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     const runtimeList = Object.values(runtimes);

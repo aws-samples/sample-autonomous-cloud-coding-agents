@@ -54,12 +54,19 @@ export class AgentStack extends Stack {
 
     // Two separate AssetImage instances — one per runtime. The L2 construct
     // grants ECR pull inside ``AssetImage.bind``, but guards the grant with a
-    // ``this.bound`` flag. When the SAME instance is passed to two Runtimes,
-    // the second runtime is skipped and its execution role never receives
-    // ECR permissions → image pull fails with 424 "no basic auth credentials"
-    // (see upstream awslabs/agentcore#<check>). The DockerImageAsset dedupes
-    // on asset hash so we still publish one image to ECR. Keep this split
-    // until the L2 fixes the multi-runtime bind guard.
+    // ``this.bound`` flag (see the copy of the construct under
+    // ``node_modules/@aws-cdk/aws-bedrock-agentcore-alpha/lib/runtime/
+    // runtime-artifact.js`` — ``AssetImage.bind`` sets ``this.bound = true``
+    // after the first ``grantPull``, so subsequent ``bind()`` calls are
+    // skipped entirely). When the SAME instance is passed to two Runtimes,
+    // the second runtime's execution role never receives ECR permissions →
+    // image pull fails with 424 "no basic auth credentials" on /invocations.
+    //
+    // The DockerImageAsset dedupes on asset hash so we still publish one
+    // image to ECR. Keep this split until the L2 fixes the multi-runtime
+    // bind guard. Tracking follow-up: ``docs/design/PHASE_1B_REV5_FOLLOWUPS.md``
+    // → CDK-1 (file an upstream issue against
+    // ``@aws-cdk/aws-bedrock-agentcore-alpha``).
     const artifactIam = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
     const artifactJwt = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 

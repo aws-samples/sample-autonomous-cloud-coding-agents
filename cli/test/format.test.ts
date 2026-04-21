@@ -43,6 +43,7 @@ describe('format', () => {
     build_passed: true,
     max_turns: 100,
     max_budget_usd: null,
+    execution_mode: null,
   };
 
   describe('formatTaskDetail', () => {

@@ -556,3 +556,202 @@ def test_sse_run_elsewhere_fails_open_when_record_missing(monkeypatch):
                 adapter.close()
 
     asyncio.run(scenario())
+
+
+def test_sse_run_elsewhere_fails_closed_on_taskfetch_error(monkeypatch):
+    """P0-b: When task_state raises TaskFetchError (DDB blip, throttling),
+    _invoke_sse must NOT fall through to spawn. Falling through would
+    duplicate pipelines on DDB instability.
+
+    Expected: HTTP 503 TASK_STATE_UNAVAILABLE so the client retries.
+    """
+    async def scenario():
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+
+        def _raise(_task_id: str) -> None:
+            raise server.task_state.TaskFetchError("simulated DDB throttle")
+
+        monkeypatch.setattr(server.task_state, "get_task", _raise)
+
+        params = {"task_id": "t-ddb-err", "repo_url": "o/r"}
+        resp = await server._invoke_sse(params)
+
+        assert resp.status_code == 503
+        body = json.loads(resp.body.decode())
+        assert body["code"] == "TASK_STATE_UNAVAILABLE"
+        assert spawn_calls == []
+        with server._threads_lock:
+            assert "t-ddb-err" not in server._active_sse_adapters
+
+    asyncio.run(scenario())
+
+
+def test_sse_hydrates_missing_params_from_task_table(monkeypatch):
+    """P0-b/P0-e: For an interactive task with empty params (CLI SSE body
+    carries only {task_id}), _invoke_sse must hydrate repo_url +
+    task_description + max_turns + max_budget_usd + task_type + branch_name
+    from the TaskTable record before spawning the pipeline.
+    """
+    async def scenario():
+        captured_params: dict = {}
+
+        def _capture(params: dict, sse_adapter=None) -> None:  # type: ignore[no-untyped-def]
+            captured_params.update(params)
+
+        monkeypatch.setattr(server, "_spawn_background", _capture)
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {
+                "task_id": task_id,
+                "execution_mode": "interactive",
+                "repo": "owner/repo",
+                "task_description": "hydrated from DDB",
+                "max_turns": 25,
+                "max_budget_usd": "2.5",
+                "task_type": "new_task",
+                "branch_name": "bgagent/t/hy",
+            },
+        )
+
+        # CLI body carries only task_id (empty repo_url / description / etc.).
+        params = {
+            "task_id": "t-hydrate",
+            "repo_url": "",
+            "task_description": "",
+            "issue_number": "",
+            "max_turns": 0,
+            "max_budget_usd": None,
+            "task_type": "new_task",
+            "branch_name": "",
+            "pr_number": "",
+        }
+        try:
+            resp = await server._invoke_sse(params)
+            assert resp.media_type == "text/event-stream"
+            assert captured_params["repo_url"] == "owner/repo"
+            assert captured_params["task_description"] == "hydrated from DDB"
+            assert captured_params["max_turns"] == 25
+            assert captured_params["max_budget_usd"] == 2.5
+            assert captured_params["branch_name"] == "bgagent/t/hy"
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-hydrate", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_hydration_does_not_overwrite_caller_values(monkeypatch):
+    """P0-e corollary: If the caller (orchestrator) supplied a value, hydration
+    must NOT overwrite it with the TaskTable value. Only empty fields are
+    filled from the record.
+    """
+    async def scenario():
+        captured_params: dict = {}
+
+        def _capture(params: dict, sse_adapter=None) -> None:  # type: ignore[no-untyped-def]
+            captured_params.update(params)
+
+        monkeypatch.setattr(server, "_spawn_background", _capture)
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {
+                "task_id": task_id,
+                "execution_mode": "interactive",
+                "repo": "wrong/repo",  # should be ignored
+                "task_description": "wrong description",  # should be ignored
+            },
+        )
+
+        # Caller already set explicit values.
+        params = {
+            "task_id": "t-explicit",
+            "repo_url": "correct/repo",
+            "task_description": "correct description",
+        }
+        try:
+            await server._invoke_sse(params)
+            assert captured_params["repo_url"] == "correct/repo"
+            assert captured_params["task_description"] == "correct description"
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-explicit", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_returns_500_task_record_incomplete_on_missing_required(monkeypatch):
+    """P0-e: post-hydration validation. If the record exists and is
+    execution_mode=interactive but missing the minimum viable params
+    (repo_url + either issue/description), return 500 TASK_RECORD_INCOMPLETE
+    instead of letting the pipeline fail deep in setup_repo.
+    """
+    async def scenario():
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {
+                "task_id": task_id,
+                "execution_mode": "interactive",
+                # Deliberately missing `repo` → repo_url stays empty.
+                "task_description": "something",
+            },
+        )
+
+        params = {"task_id": "t-missing-repo", "repo_url": "", "task_description": ""}
+        resp = await server._invoke_sse(params)
+
+        assert resp.status_code == 500
+        body = json.loads(resp.body.decode())
+        assert body["code"] == "TASK_RECORD_INCOMPLETE"
+        assert "repo_url" in body["missing"]
+        assert spawn_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_validate_required_params_pr_types_require_pr_number():
+    """PR-iteration and PR-review task_types need a pr_number regardless."""
+    missing = server._validate_required_params({
+        "repo_url": "o/r",
+        "task_type": "pr_iteration",
+        "pr_number": "",
+    })
+    assert missing == ["pr_number"]
+
+    missing = server._validate_required_params({
+        "repo_url": "o/r",
+        "task_type": "pr_review",
+        "pr_number": "42",
+    })
+    assert missing == []
+
+    # new_task needs issue OR description.
+    missing = server._validate_required_params({
+        "repo_url": "o/r",
+        "task_type": "new_task",
+    })
+    assert missing == ["issue_number_or_task_description"]
+
+    missing = server._validate_required_params({
+        "repo_url": "o/r",
+        "task_type": "new_task",
+        "task_description": "do the thing",
+    })
+    assert missing == []

@@ -196,14 +196,35 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
         print(f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
 
 
+class TaskFetchError(Exception):
+    """DDB/boto failure while fetching a task record.
+
+    Distinguished from ``None`` (== "record not found") so callers can
+    decide whether to fail open (no record) or fail closed (couldn't tell).
+    """
+
+
 def get_task(task_id: str) -> dict | None:
-    """Fetch a task record by ID. Returns None if not found or on error."""
-    try:
-        table = _get_table()
-        if table is None:
-            return None
-        resp = table.get_item(Key={"task_id": task_id})
-        return resp.get("Item")
-    except Exception as e:
-        print(f"[task_state] get_task failed: {e}")
+    """Fetch a task record by ID.
+
+    Returns:
+        The item dict if present, ``None`` if the task_id is not in the
+        table, or if the table resource is unavailable (local dev /
+        ``TASK_TABLE_NAME`` unset).
+
+    Raises:
+        TaskFetchError: DDB/boto/network failure. Callers that depend on
+            correctness (e.g. the rev-5 RUN_ELSEWHERE guard) should treat
+            this as fail-closed — a transient DDB blip must NOT be confused
+            with "record doesn't exist" or they will spawn duplicate
+            pipelines on Runtime-JWT.
+    """
+    table = _get_table()
+    if table is None:
         return None
+    try:
+        resp = table.get_item(Key={"task_id": task_id})
+    except Exception as e:
+        print(f"[task_state] get_task failed: {type(e).__name__}: {e}")
+        raise TaskFetchError(f"{type(e).__name__}: {e}") from e
+    return resp.get("Item")

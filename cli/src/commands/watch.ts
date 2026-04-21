@@ -31,11 +31,10 @@ import { debug, isVerbose } from '../debug';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
 import { AgUiEvent, runSseClient } from '../sse-client';
-import { TERMINAL_STATUSES, TaskEvent } from '../types';
+import { ExecutionMode, TERMINAL_STATUSES, TaskEvent } from '../types';
+import { DEFAULT_STREAM_TIMEOUT_SECONDS, validateStreamTimeout } from './_stream';
 
 const POLL_INTERVAL_MS = 2_000;
-/** Default stream timeout — 58 min, pre-empts AgentCore's 60-min streaming cap. */
-const DEFAULT_STREAM_TIMEOUT_SECONDS = 3500;
 /** Size of the initial snapshot fetch used to detect already-terminal tasks
  *  and seed the catch-up cursor. */
 const SNAPSHOT_PAGE_SIZE = 100;
@@ -117,14 +116,11 @@ export function renderEvent(event: SemanticEvent | TaskEvent): string {
 /*  Structured logging helpers                                               */
 /* ------------------------------------------------------------------------ */
 
-/** Log an INFO-level message to stderr. Suppressed in JSON mode so stdout
- *  remains pure NDJSON. */
-function logInfo(isJson: boolean, message: string): void {
-  if (isJson) {
-    process.stderr.write(`${message}\n`);
-  } else {
-    process.stderr.write(`${message}\n`);
-  }
+/** Log an INFO-level message to stderr. Stdout stays pure NDJSON in either
+ *  mode because info messages never go there; the ``isJson`` parameter is
+ *  kept for call-site documentation of the mode. */
+function logInfo(_isJson: boolean, message: string): void {
+  process.stderr.write(`${message}\n`);
 }
 
 /** Log a WARN-level message to stderr regardless of output mode. */
@@ -282,8 +278,10 @@ interface SnapshotResult {
   readonly events: TaskEvent[];
   readonly taskStatus: string;
   /** execution_mode from TaskDetail. `null` for legacy tasks created before
-   *  rev 5 (effectively `'orchestrator'`). */
-  readonly executionMode: string | null;
+   *  rev 5 (effectively `'orchestrator'`). Typed as the `ExecutionMode`
+   *  union so `!== 'interactive'` is exhaustiveness-checked at compile
+   *  time. */
+  readonly executionMode: ExecutionMode | null;
 }
 
 /** Fetch the latest events + current task status. Used both to detect a
@@ -458,16 +456,6 @@ function validateTransport(raw: unknown): Transport {
   throw new CliError(
     `Invalid --transport value: ${String(raw)}. Expected one of: sse, polling, auto.`,
   );
-}
-
-function validateStreamTimeout(raw: unknown): number {
-  const n = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new CliError(
-      `Invalid --stream-timeout-seconds value: ${String(raw)}. Must be a positive integer.`,
-    );
-  }
-  return n;
 }
 
 /** Choose the actual transport given the requested mode and the availability

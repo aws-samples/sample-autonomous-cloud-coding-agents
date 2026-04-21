@@ -331,4 +331,136 @@ describe('run command', () => {
     expect(runSseClient).toHaveBeenCalledTimes(1);
     expect(process.exitCode).toBe(0);
   });
+
+  // --------------------------------------------------------------------
+  // P0-d: fatal SSE error → cancel task + user-visible recovery hint
+  // --------------------------------------------------------------------
+
+  test('SSE fails immediately → cancels the task and surfaces a resume hint', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    // Snapshot: brand-new task, RUNNING, execution_mode=interactive.
+    mockGetTask.mockResolvedValueOnce({
+      ...TASK_DETAIL_RUNNING,
+      status: 'RUNNING',
+      execution_mode: 'interactive',
+    });
+    // SSE rejects fatally.
+    runSseClient.mockRejectedValue(new Error('424 Failed Dependency'));
+
+    // Spy on cancelTask to assert it was called.
+    const mockCancelTask = jest.fn().mockResolvedValue({
+      task_id: TASK_DETAIL_RUNNING.task_id,
+      status: 'CANCELLED',
+      cancelled_at: '2026-04-21T00:00:00Z',
+    });
+    (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
+      createTask: mockCreateTask,
+      listTasks: jest.fn(),
+      getTask: mockGetTask,
+      cancelTask: mockCancelTask,
+      getTaskEvents: mockGetTaskEvents,
+      catchUpEvents: jest.fn().mockResolvedValue([]),
+      createWebhook: jest.fn(),
+      listWebhooks: jest.fn(),
+      revokeWebhook: jest.fn(),
+    }) as unknown as ApiClient);
+
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const cmd = makeRunCommand();
+      await expect(cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'go',
+      ])).rejects.toThrow(/run failed/);
+
+      // Task must be cancelled so it doesn't sit stranded in SUBMITTED.
+      expect(mockCancelTask).toHaveBeenCalledWith(TASK_DETAIL_RUNNING.task_id);
+      // Stderr must carry a resume hint referencing the task id.
+      const stderr = stderrSpy.mock.calls.map(c => String(c[0])).join('');
+      expect(stderr).toContain(TASK_DETAIL_RUNNING.task_id);
+      expect(stderr).toMatch(/bgagent status/);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test('SSE failure + cancel also fails → still rejects with original SSE error', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    mockGetTask.mockResolvedValueOnce({
+      ...TASK_DETAIL_RUNNING,
+      status: 'RUNNING',
+      execution_mode: 'interactive',
+    });
+    runSseClient.mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const mockCancelTask = jest.fn().mockRejectedValue(new Error('cancel also broken'));
+    (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
+      createTask: mockCreateTask,
+      listTasks: jest.fn(),
+      getTask: mockGetTask,
+      cancelTask: mockCancelTask,
+      getTaskEvents: mockGetTaskEvents,
+      catchUpEvents: jest.fn().mockResolvedValue([]),
+      createWebhook: jest.fn(),
+      listWebhooks: jest.fn(),
+      revokeWebhook: jest.fn(),
+    }) as unknown as ApiClient);
+
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const cmd = makeRunCommand();
+      // Must still reject with the SSE error, not the cancel error.
+      await expect(cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'go',
+      ])).rejects.toThrow(/ECONNREFUSED|run failed/);
+      expect(mockCancelTask).toHaveBeenCalledTimes(1);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test('SIGINT during SSE stream forwards abort signal to runSseClient', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    mockGetTask.mockResolvedValueOnce({
+      ...TASK_DETAIL_RUNNING,
+      status: 'RUNNING',
+      execution_mode: 'interactive',
+    });
+    // Final status check after SSE resolves.
+    mockGetTask.mockResolvedValue({ ...TASK_DETAIL_RUNNING, status: 'CANCELLED' });
+
+    let capturedAbortController: AbortController | null = null;
+    runSseClient.mockImplementation(async (opts: SseClientOptions) => {
+      // Listen for abort so this mock resolves cleanly after SIGINT.
+      capturedAbortController = { signal: opts.signal } as unknown as AbortController;
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return {
+        terminalEvent: null,
+        reconnectCount: 0,
+        eventsReceived: 0,
+        eventsDeduplicated: 0,
+        totalDurationMs: 1,
+      } as never;
+    });
+
+    const cmd = makeRunCommand();
+    const run = cmd.parseAsync(['node', 'test', '--repo', 'owner/repo', '--task', 'go']);
+    // Give the mock a tick to begin listening for abort.
+    await new Promise(r => setTimeout(r, 10));
+    process.emit('SIGINT');
+
+    await run;
+
+    expect(capturedAbortController).not.toBeNull();
+    expect(capturedAbortController!.signal.aborted).toBe(true);
+  });
 });

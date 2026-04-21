@@ -335,7 +335,11 @@ class _SSEAdapter:
             )
         except Exception:
             # Last-ditch counter bump; do not log (log may also fail).
-            self._dropped_count += 1
+            # The counter name is ``_undelivered_count`` on this class — the
+            # earlier reference to ``_dropped_count`` was a typo that would
+            # have raised AttributeError inside this catch-all, defeating the
+            # "never compounds the problem" contract.
+            self._undelivered_count += 1
 
     # ------------------------------------------------------------------ internals
 

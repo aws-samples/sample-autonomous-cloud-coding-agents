@@ -155,10 +155,23 @@ _last_ping_status: str = ""
 # Keepalive cadence for SSE streams — comment frames keep proxies from timing out.
 _SSE_KEEPALIVE_SECONDS = 15.0
 
+# Heartbeat cadence for the TaskTable ``agent_heartbeat_at`` writer thread.
+# Each live pipeline bumps the heartbeat every N seconds so operators can
+# distinguish a stuck pipeline from a healthy long-running one.
+_HEARTBEAT_INTERVAL_SECONDS = 45
+
+# Canonical execution-mode strings. Mirror the TypeScript
+# ``ExecutionMode = 'orchestrator' | 'interactive'`` union in
+# ``cdk/src/handlers/shared/types.ts`` / ``cli/src/types.ts``. Legacy rows
+# (pre-rev-5) have no ``execution_mode`` field and are treated as
+# ``EXECUTION_MODE_ORCHESTRATOR`` (preserves Phase 1a behaviour).
+EXECUTION_MODE_ORCHESTRATOR = "orchestrator"
+EXECUTION_MODE_INTERACTIVE = "interactive"
+
 
 def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
     """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
-    while not stop.wait(timeout=45):
+    while not stop.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
         try:
             task_state.write_heartbeat(task_id)
         except Exception as e:
@@ -403,6 +416,31 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
     }
+
+
+def _validate_required_params(params: dict) -> list[str]:
+    """Check the rev-5 interactive SSE path's minimum viable param set.
+
+    Called AFTER TaskTable hydration in ``_invoke_sse``. Returns the list of
+    missing field names (empty list = valid). The pipeline requires at
+    minimum a ``repo_url`` and either an ``issue_number`` or
+    ``task_description`` to have something to do; ``pr_iteration`` and
+    ``pr_review`` task_types additionally require ``pr_number``.
+    """
+    missing: list[str] = []
+    if not params.get("repo_url"):
+        missing.append("repo_url")
+    task_type = params.get("task_type") or "new_task"
+    if task_type in ("pr_iteration", "pr_review"):
+        if not params.get("pr_number"):
+            missing.append("pr_number")
+    else:
+        # new_task: need EITHER issue_number or task_description.
+        has_issue = bool(params.get("issue_number"))
+        has_desc = bool(params.get("task_description"))
+        if not (has_issue or has_desc):
+            missing.append("issue_number_or_task_description")
+    return missing
 
 
 def _wants_sse(request: Request) -> bool:
@@ -682,22 +720,34 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     # task was submitted with ``execution_mode != 'interactive'`` the
     # orchestrator path is (or was) running it on Runtime-IAM; spawning here
     # would duplicate the pipeline. Return 409 RUN_ELSEWHERE so the CLI's
-    # ``--transport auto`` can fall back to polling. Missing record or
-    # fetch failure defers to spawn (fail-open — preserves pre-rev-5
-    # behaviour for blueprints / legacy tasks).
+    # ``--transport auto`` can fall back to polling.
+    #
+    # IMPORTANT: `get_task` returning ``None`` means "record not found"
+    # (fail-open for blueprints / legacy tasks predating rev 5). If DDB
+    # itself fails we fail CLOSED with 503: treating a transient fetch
+    # failure as "no record → spawn" would duplicate pipelines whenever DDB
+    # is slow or throttling.
     if task_id and task_id != "anon":
         try:
             record = task_state.get_task(task_id)
-        except Exception as exc:  # pragma: no cover — defensive; get_task already catches
+        except task_state.TaskFetchError as exc:
             _debug_cw(
-                f"RUN_ELSEWHERE guard: task_state.get_task raised "
-                f"{type(exc).__name__}: {exc} — deferring to spawn",
+                f"RUN_ELSEWHERE guard: TaskTable fetch FAILED "
+                f"({exc}) — returning 503 so client retries",
                 task_id=task_id,
             )
-            record = None
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "code": "TASK_STATE_UNAVAILABLE",
+                    "message": (
+                        "Could not verify task execution_mode; retry shortly."
+                    ),
+                },
+            )
         if record is not None:
-            existing_mode = record.get("execution_mode") or "orchestrator"
-            if existing_mode != "interactive":
+            existing_mode = record.get("execution_mode") or EXECUTION_MODE_ORCHESTRATOR
+            if existing_mode != EXECUTION_MODE_INTERACTIVE:
                 _debug_cw(
                     f"RUN_ELSEWHERE: task_id={task_id!r} execution_mode="
                     f"{existing_mode!r} — returning 409 so client falls back to polling",
@@ -753,6 +803,31 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                     f"hydrated {len(hydrated_from_record)} params from TaskTable: "
                     f"{sorted(hydrated_from_record.keys())}",
                     task_id=task_id,
+                )
+
+            # --- Post-hydration validation (rev 5, §9.13.4) --------------
+            # After hydration completes, the pipeline still needs a minimum
+            # viable parameter set. Validate here so users see a crisp
+            # TASK_RECORD_INCOMPLETE error instead of a cryptic git-clone
+            # failure three stack frames into ``setup_repo``.
+            missing_fields = _validate_required_params(params)
+            if missing_fields:
+                _debug_cw(
+                    f"TASK_RECORD_INCOMPLETE: task_id={task_id!r} "
+                    f"missing={missing_fields!r}",
+                    task_id=task_id,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "code": "TASK_RECORD_INCOMPLETE",
+                        "message": (
+                            "Task record is missing required fields after "
+                            "hydration. This is a server-side data consistency "
+                            "issue; please retry or contact an operator."
+                        ),
+                        "missing": missing_fields,
+                    },
                 )
 
     # --- SPAWN path: no pipeline running for this task_id in this microVM ---

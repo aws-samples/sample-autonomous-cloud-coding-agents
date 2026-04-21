@@ -172,6 +172,28 @@ class TestRoundTrip:
             "message": "kaboom",
         }
 
+    def test_write_agent_error_fallback_uses_undelivered_counter(self, loop_env):
+        """If _enqueue itself raises inside write_agent_error, the last-ditch
+        counter bump must NOT raise AttributeError — the adapter's contract
+        is "never compound the problem we're trying to emit."
+
+        Regression: a prior commit referenced ``self._dropped_count`` which
+        does not exist on the class; only ``_undelivered_count`` does. The
+        bug was a latent AttributeError on the catch-all path.
+        """
+        import unittest.mock as mock
+
+        loop, _ = loop_env
+        adapter = _make_adapter()
+        adapter.attach_loop(loop)
+
+        undelivered_before = adapter._undelivered_count  # noqa: SLF001
+        with mock.patch.object(adapter, "_enqueue", side_effect=RuntimeError("boom")):
+            # Must NOT raise — this is the "last-ditch" safety net.
+            adapter.write_agent_error(error_type="X", message="y")
+
+        assert adapter._undelivered_count == undelivered_before + 1  # noqa: SLF001
+
 
 # ---------------------------------------------------------------------------
 # FIFO ordering
