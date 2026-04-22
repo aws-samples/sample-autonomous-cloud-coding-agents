@@ -34,7 +34,23 @@ import { AgUiEvent, runSseClient } from '../sse-client';
 import { ExecutionMode, TERMINAL_STATUSES, TaskEvent } from '../types';
 import { DEFAULT_STREAM_TIMEOUT_SECONDS, validateStreamTimeout } from './_stream';
 
-const POLL_INTERVAL_MS = 2_000;
+/**
+ * Polling cadence for the REST-based `watch` fallback (rev-5 POLL-1).
+ *
+ * Design §9.13.1 calls for 500 ms polling. We adopt that for the first
+ * POLL_FAST_WINDOW_MS window (users are watching fresh, active tasks)
+ * and decay to POLL_SLOW_INTERVAL_MS for long-running observations so
+ * we don't hammer REST for hours at 500 ms.
+ */
+const POLL_FAST_INTERVAL_MS = 500;
+const POLL_SLOW_INTERVAL_MS = 2_000;
+const POLL_FAST_WINDOW_MS = 3 * 60 * 1_000; // 3 min of fast polling
+
+function currentPollInterval(startedAt: number): number {
+  return Date.now() - startedAt < POLL_FAST_WINDOW_MS
+    ? POLL_FAST_INTERVAL_MS
+    : POLL_SLOW_INTERVAL_MS;
+}
 /** Size of the initial snapshot fetch used to detect already-terminal tasks
  *  and seed the catch-up cursor. */
 const SNAPSHOT_PAGE_SIZE = 100;
@@ -189,10 +205,11 @@ interface PollOptions {
 }
 
 /**
- * Poll ``GET /tasks/{id}/events`` every ``POLL_INTERVAL_MS`` and
- * ``GET /tasks/{id}`` alongside, invoking ``onEvent`` for each new event and
- * ``onTerminal`` once the task reaches a terminal status. Resolves when the
- * task terminates or the signal fires.
+ * Poll ``GET /tasks/{id}/events`` and ``GET /tasks/{id}`` on a
+ * decaying interval (500 ms for the first 3 min, then 2 s), invoking
+ * ``onEvent`` for each new event and ``onTerminal`` once the task
+ * reaches a terminal status. Resolves when the task terminates or the
+ * signal fires.
  */
 async function pollTaskEvents(
   apiClient: ApiClient,
@@ -200,6 +217,7 @@ async function pollTaskEvents(
   options: PollOptions,
 ): Promise<void> {
   let lastSeenEventId: string | null = options.afterEventId ?? null;
+  const pollStartedAt = Date.now();
   debug(`[watch/poll] starting polling loop afterEventId=${lastSeenEventId ?? '<none>'}`);
 
   while (!options.signal.aborted) {
@@ -245,7 +263,7 @@ async function pollTaskEvents(
       debug('[watch/poll] aborted after poll iteration, exiting');
       return;
     }
-    await abortableSleep(POLL_INTERVAL_MS, options.signal);
+    await abortableSleep(currentPollInterval(pollStartedAt), options.signal);
   }
 }
 

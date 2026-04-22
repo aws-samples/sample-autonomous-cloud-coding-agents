@@ -63,6 +63,12 @@ export interface TaskRecord {
   readonly build_passed?: boolean;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
+   *  tripped any cap. Equals the legacy `turns` value. */
+  readonly turns_attempted?: number;
+  /** Rev-5 DATA-1: turns that actually completed (clamped to
+   *  `max_turns` when `agent_status='error_max_turns'`). */
+  readonly turns_completed?: number;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
@@ -103,6 +109,12 @@ export interface TaskDetail {
   readonly build_passed: boolean | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
+  /** Rev-5 DATA-1: SDK-attempted turn count (may exceed `max_turns` by 1
+   *  under `agent_status='error_max_turns'`). */
+  readonly turns_attempted: number | null;
+  /** Rev-5 DATA-1: actually-completed turns, clamped to `max_turns`
+   *  when the cap tripped. */
+  readonly turns_completed: number | null;
   readonly prompt_version: string | null;
   /**
    * Execution mode the task was submitted with (rev 5, §9.13.4). Lets the
@@ -260,6 +272,8 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     build_passed: record.build_passed ?? null,
     max_turns: record.max_turns ?? null,
     max_budget_usd: record.max_budget_usd ?? null,
+    turns_attempted: record.turns_attempted ?? null,
+    turns_completed: record.turns_completed ?? null,
     prompt_version: record.prompt_version ?? null,
     execution_mode: record.execution_mode ?? null,
   };

@@ -55,6 +55,13 @@ export interface TaskDetail {
   readonly build_passed: boolean | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
+  /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
+   *  when `agent_status='error_max_turns'` — the aborted attempt is
+   *  counted). */
+  readonly turns_attempted?: number | null;
+  /** Rev-5 DATA-1: turns that actually completed (clamped to
+   *  `max_turns` when the cap tripped). */
+  readonly turns_completed?: number | null;
   /**
    * Execution mode recorded at task creation (rev 5, §9.13.4). Watch uses
    * this to pick the correct transport: `'orchestrator'` (or `null` for

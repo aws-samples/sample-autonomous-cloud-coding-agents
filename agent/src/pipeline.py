@@ -413,6 +413,15 @@ def run_task(
 
             # Build TaskResult
             usage = agent_result.usage
+            turns_attempted = agent_result.num_turns or agent_result.turns
+            # Rev-5 DATA-1: when the SDK hit max_turns it reports
+            # num_turns = max_turns + 1 (the aborted attempt is counted).
+            # `turns_completed` clamps to max_turns in that case so
+            # "how many turns actually executed" is truthful.
+            if agent_status == "error_max_turns" and turns_attempted:
+                turns_completed = min(turns_attempted, config.max_turns)
+            else:
+                turns_completed = turns_attempted
             result = TaskResult(
                 status=overall_status,
                 agent_status=agent_status,
@@ -420,7 +429,10 @@ def run_task(
                 build_passed=build_passed,
                 lint_passed=lint_passed,
                 cost_usd=agent_result.cost_usd,
-                turns=agent_result.num_turns or agent_result.turns,
+                # Legacy field (= turns_attempted) kept for back-compat.
+                turns=turns_attempted,
+                turns_attempted=turns_attempted,
+                turns_completed=turns_completed,
                 duration_s=round(duration, 1),
                 task_id=config.task_id,
                 disk_before=format_bytes(disk_before),

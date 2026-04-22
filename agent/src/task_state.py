@@ -222,6 +222,14 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("turns") is not None:
                 update_parts.append("turns = :turns")
                 expr_values[":turns"] = str(result["turns"])
+            # Rev-5 DATA-1: dual counters so operators can distinguish
+            # SDK-attempted vs pipeline-completed turn counts.
+            if result.get("turns_attempted") is not None:
+                update_parts.append("turns_attempted = :ta")
+                expr_values[":ta"] = str(result["turns_attempted"])
+            if result.get("turns_completed") is not None:
+                update_parts.append("turns_completed = :tc")
+                expr_values[":tc"] = str(result["turns_completed"])
             if result.get("prompt_version"):
                 update_parts.append("prompt_version = :pv")
                 expr_values[":pv"] = result["prompt_version"]

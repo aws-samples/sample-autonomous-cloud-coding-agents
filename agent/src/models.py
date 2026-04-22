@@ -153,7 +153,19 @@ class TaskResult(BaseModel):
     build_passed: bool = False
     lint_passed: bool = False
     cost_usd: float | None = None
+    # Rev-5 DATA-1: historically the `turns` field was set to the SDK's
+    # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
+    # tripped a cap (so `max_turns=6` yields `turns=7` under
+    # `agent_status='error_max_turns'`). That confused operators. We
+    # now expose both fields explicitly:
+    #   * `turns_attempted` — the SDK's authoritative counter (ex-`turns`).
+    #   * `turns_completed` — clamped to max_turns when we know the cap
+    #     fired; otherwise equals `turns_attempted`.
+    # The legacy `turns` field is retained (= `turns_attempted`) so
+    # existing DDB consumers keep working during the transition.
     turns: int | None = None
+    turns_attempted: int | None = None
+    turns_completed: int | None = None
     duration_s: float = 0.0
     task_id: str = ""
     disk_before: str = ""
