@@ -1,231 +1,194 @@
-# Phase 1b rev-5 — deferred follow-ups
+# Phase 1b rev-5 — follow-up status
 
-Created 2026-04-21 after the rev-5 multi-agent validation pass. Each item is a
-concrete, scoped piece of work that did **not** land in the rev-5 PR.
+Created 2026-04-21 after the rev-5 multi-agent validation pass. Each item was
+surfaced by one of the validators (`[SFH]` silent-failure-hunter, `[CR]`
+code-reviewer, `[TDA]` type-design-analyzer, `[PTA]` pr-test-analyzer) or by
+the user during review. This document tracks what landed vs what's still
+pending, in the order the rev-5 rounds were executed.
 
-Items are tagged with the validator that surfaced them:
-- `[SFH]` = `silent-failure-hunter`
-- `[CR]` = `code-reviewer`
-- `[TDA]` = `type-design-analyzer`
-- `[PTA]` = `pr-test-analyzer`
+## Round summary
 
-Priority is the team's call (no SLA implied). `P0` here means "the rev-5 PR
-shipped without it because the ordinary case is handled elsewhere"; it does
-not mean "fix today."
+| Round | Scope | Commit | Status |
+|---|---|---|---|
+| Rev-5 core | `bgagent run`, RUN_ELSEWHERE guard, execution_mode propagation, hydration | `022fb88`, `2d9d680` | ✅ |
+| Pre-push hardening | P0-a, P0-b, P0-d, P0-e + key nits | `fe84de5` | ✅ |
+| Stranded-task reconciler + concurrency raise | P0-c follow-up, MAX_CONCURRENT 3→10 | `9af3b50` | ✅ |
+| Round 1 | Correctness: P1-3, P1-1, OBS-4 | `fce9d07` | ✅ |
+| Round 2 | Error surfacing: P1-2, P1-5 | `bd7b886` | ✅ |
+| Round 3 | Observability: OBS-1/2/3, P1-4 | `0d29939` | ✅ |
+| Round 4a | Encapsulation: TDA-1, TDA-2, TDA-6 | `bc56731` | ✅ |
+| Round 4b | Shared types: TDA-3, TDA-4, TDA-5 | `228c935` | ✅ |
+| Round 5 | Design alignment: POLL-1, DATA-1 | `dfe7b84` | ✅ |
+| Round 6 | Housekeeping (this commit) | TBD | in progress |
 
----
+## ✅ Landed (grouped by round for traceability)
 
-## ✅ Stranded-task reconciler (P0-c) — LANDED
+### Rev-5 final (pre-hardening)
 
-Shipped alongside this rev-5 PR as a separate construct
-(`cdk/src/constructs/stranded-task-reconciler.ts`) + handler
-(`cdk/src/handlers/reconcile-stranded-tasks.ts`).
+- `bgagent run` direct-submit interactive path (`cli/src/commands/run.ts`).
+- `execution_mode` end-to-end (CreateTaskRequest, TaskRecord, TaskDetail).
+- Server-side RUN_ELSEWHERE guard + TaskTable param hydration.
+- Two-runtime ECR pull fix (two `AssetImage.fromAsset` instances to dodge
+  the L2 `AssetImage.bind` double-attach guard — see CDK-1 below).
+- Client-side transport decision from `snapshot.execution_mode` (AgentCore
+  wraps non-2xx as 424; decide on the client instead of parsing the
+  wrapped response).
 
-- Runs every 5 minutes on an EventBridge schedule.
-- Queries `TaskTable.StatusIndex` for `status IN (SUBMITTED, HYDRATING)` with
-  `created_at < cutoff`.
-- Per-row per-mode threshold: 300 s for interactive, 1200 s for orchestrator
-  (including legacy rows without `execution_mode`). Configurable via Lambda
-  env vars.
-- Transitions to `FAILED` with `error_message="Stranded: ... no pipeline
-  attached before timeout"`, emits `task_stranded` + `task_failed` events
-  (the `task_stranded` event carries `{code: 'STRANDED_NO_HEARTBEAT',
-  prior_status, execution_mode, age_seconds}`), and decrements the user's
-  concurrency counter.
-- Idempotent: conditional UpdateItem on `status = :expected` means a
-  concurrent legitimate transition wins.
+### Pre-push P0 hardening (`fe84de5`)
 
-RUNNING / FINALIZING are NOT handled here — `pollTaskStatus` in
-`orchestrator.ts` already transitions those to TIMED_OUT via the
-`agent_heartbeat_at` path. This reconciler only catches the "never
-started" case.
+- **P0-a** `_SSEAdapter.write_agent_error` latent `_dropped_count` →
+  `_undelivered_count` fix + regression test.
+- **P0-b** `task_state.get_task` distinguishes NotFound (returns `None`,
+  fail-open) from FetchFailed (raises `TaskFetchError`; server returns
+  503). Prevents duplicate pipelines during DDB blips.
+- **P0-d** `bgagent run` wraps `runSse` in try/catch; auto-cancels stranded
+  task + emits `bgagent status <task_id>` resume hint + exit non-zero.
+- **P0-e** Post-hydration validation returns 500
+  `TASK_RECORD_INCOMPLETE` with a list of missing fields.
+- Key nits: shared `_stream.ts`, typed `SnapshotResult.executionMode`,
+  `TaskDetail.execution_mode` required in CLI, `EXECUTION_MODE_*` string
+  constants in server.py, `_HEARTBEAT_INTERVAL_SECONDS`, `logInfo`
+  cleanup, v3 diagram.
 
----
+### Stranded-task reconciler (`9af3b50`) — P0-c
 
-## ✅ MAX_CONCURRENT_TASKS_PER_USER: 3 → 10 — LANDED
+- `cdk/src/constructs/stranded-task-reconciler.ts` + handler
+  `cdk/src/handlers/reconcile-stranded-tasks.ts`.
+- EventBridge schedule every 5 min, per-mode timeouts (300 s interactive,
+  1200 s orchestrator / legacy).
+- Transitions stranded tasks to FAILED with
+  `STRANDED_NO_HEARTBEAT`, emits `task_stranded` + `task_failed` events,
+  decrements concurrency.
+- `MAX_CONCURRENT_TASKS_PER_USER` default raised 3 → 10.
 
-Default raised in `cdk/src/constructs/task-orchestrator.ts:163` after the
-live concurrency-limit incident during E2E-B retry (two stranded
-interactive tasks occupied the user's 3 slots, admission-rejected a legit
-submit). The stranded-task reconciler above prevents slot accumulation, so
-the bump is ergonomic rather than load-bearing. Test updated.
+### Round 1 — correctness (`fce9d07`)
 
----
+- **P1-3** — attach-path `subscribe()` exception no longer falls through
+  to duplicate-spawn; returns 503 `SSE_ATTACH_RACE`
+  (`agent/src/server.py`). Duplicate-pipeline risk closed.
+- **P1-1** — 409 on the SSE path is always terminal. RUN_ELSEWHERE →
+  fallback; any other 409 → `CliError` with a 500-byte body excerpt.
+  Eliminates reconnect-storm on server-side refusals
+  (`cli/src/sse-client.ts`).
+- **OBS-4** — interactive path records `session_id` on TaskTable via
+  new `task_state.write_session_info`; cancel-task Lambda resolves the
+  correct runtime ARN from `execution_mode` + two new env vars
+  (`RUNTIME_IAM_ARN`, `RUNTIME_JWT_ARN`) to sidestep the CFN cycle that
+  would have been created by runtime-self-ARN injection.
 
-## Silent-failure hardening
+### Round 2 — error surfacing (`bd7b886`)
 
-### P1-1 — sse-client: 409 non-JSON bodies fall through to reconnect — [SFH]
-`cli/src/sse-client.ts:589-612` currently logs nothing and treats a 409 whose
-body is not JSON as a generic retryable HTTP error. Should always surface the
-body (truncated) at `logError` and make 409 terminal-by-default for SSE.
+- **P1-2** — post-SSE `getTask` failure now emits `WARN` to stderr with a
+  `bgagent status <task_id>` suggestion and suffixes the terminal line
+  with `(inferred)`.
+- **P1-5** — new `_debug_cw_exc(message, exc, *, task_id)` helper
+  formats tracebacks into CloudWatch at every rev-5 bare
+  `except Exception` site.
 
-### P1-2 — getTask post-SSE failure silently infers status — [SFH]
-`cli/src/commands/watch.ts:616-629` only `debug()`-logs when the final
-authoritative-status lookup fails; the user sees `Task completed.` + exit 0
-even if REST is down. Promote to `logWarn` with a `bgagent status <task_id>`
-retry hint.
+### Round 3 — observability (`0d29939`)
 
-### P1-3 — Attach-path subscribe() failure → falls through to spawn — [SFH]
-`agent/src/server.py:655-667`: if `has_subscribers=True` but `subscribe()`
-raises (adapter closing race, queue full), we currently spawn a second
-pipeline for the same task_id. Should return 503 with a retry hint instead.
+- **OBS-1** — `_emit_sse_route_metric(task_id, route)` writes
+  `{event: "SSE_ROUTE", route: "attach"|"spawn"}` to CW stream
+  `sse_routing/<task_id>`; called from both `_invoke_sse` branches.
+  Enables attach-vs-spawn ratio alarms.
+- **OBS-2** — after hydration, always log `post-hydration params:
+  populated=[...] origin={k: 'record'|'caller'}`.
+- **OBS-3** — structured `event` fields on admission logs
+  (`task.admitted.orchestrator_skipped`, `...orchestrator_invoked`,
+  `...orchestrator_invoke_failed`).
+- **P1-4** — `_debug_cw_failures` counter bumped on daemon-thread
+  failures; every 5 failures (and the first) emits
+  `{event: "DEBUG_CW_WRITE_FAILURES", count, last_error_type}` via the
+  separate sse-routing code path.
 
-### P1-4 — `_debug_cw` daemon-thread failures lost in production — [SFH]
-`agent/src/server.py:90-109`. Container stdout is not forwarded to
-APPLICATION_LOGS on AgentCore, so a broken `_debug_cw` is invisible. Emit a
-counter via the telemetry path (`debug_cw_write_failures`) so we can alarm on
-a blind rev-5 code path.
+### Round 4a — encapsulation (`bc56731`)
 
-### P1-5 — broad `except Exception` loses tracebacks — [SFH]
-`agent/src/server.py:662, 691, 762, 771, 791, 805`. Every rev-5 try-block
-catches everything and logs only the exception type + message. Include
-`traceback.format_exc()` in `_debug_cw` output; narrow to
-`(ClientError, BotoCoreError)` where only a boto-specific branch is
-expected.
+- **TDA-1** — `_AdapterRegistry` class owns `_threads_lock` + enforces
+  identity-checked pop in one place. Four open-coded sites collapsed to
+  `remove_if_current(task_id, adapter)`. `insert` raises on genuine
+  conflict.
+- **TDA-2** — `_SSEAdapter.subscription()` context manager yields the
+  queue and auto-unsubscribes on exit (normal + exception paths). Raw
+  `subscribe()`/`unsubscribe()` retained for the
+  `_sse_event_stream` handoff to `StreamingResponse`.
+- **TDA-6** — Python `ExecutionMode = Literal["orchestrator",
+  "interactive"]` + `normalize_execution_mode(raw)` helper for safe
+  coercion from DDB/env.
 
----
+### Round 4b — shared types (`228c935`)
 
-## Type-design refactors — [TDA]
+- **TDA-3** — `ApiErrorCode` union + `ApiErrorBody<C>` envelope +
+  `isApiError<C>(body, code)` type guard, defined in both
+  `cdk/src/handlers/shared/types.ts` and `cli/src/types.ts`. sse-client
+  uses the guard in its 409 branch.
+- **TDA-4** — cross-file drift detection via
+  `cli/test/types-sync.test.ts`. Parses the CDK types.ts source and
+  asserts `ExecutionMode` + `ApiErrorCode` unions match the CLI
+  canonical list. Bigger `@abca/shared-types` workspace deferred per
+  scope.
+- **TDA-5** — `SemanticEvent` TypedDict union in
+  `agent/src/sse_adapter.py`. Six event shapes declared, each mirroring
+  the sibling `ProgressWriter.write_agent_*` dict.
 
-These are correctness-preserving but will pay dividends on long-term drift.
+### Round 5 — design alignment (`dfe7b84`)
 
-### TDA-1 — `_active_sse_adapters` → `_AdapterRegistry` class
-`agent/src/server.py`. Today a bare `dict` at module scope with three
-open-coded identity-checked pop sites and invariants-by-comment. Wrap behind
-a small class that owns `_threads_lock` and exposes
-`insert / remove_if_current / get`. Makes the invariants structural.
+- **POLL-1** — `watch` polling cadence decays 500 ms → 2 s after 3 min.
+  First 3 min matches design §9.13.1; the decay caps REST cost for
+  long-running observation.
+- **DATA-1** — `TaskResult` gains `turns_attempted` + `turns_completed`
+  (clamped to `max_turns` when `error_max_turns`). Legacy `turns` field
+  retained as `turns_attempted` value for back-compat.
+  `TaskRecord`/`TaskDetail` in CDK + CLI types mirror; `toTaskDetail`
+  forwards.
 
-### TDA-2 — `_SSEAdapter.subscribe()` → subscription handle / context manager
-`agent/src/sse_adapter.py`. Returning a raw `asyncio.Queue` requires callers
-to remember `unsubscribe(queue)` with the exact same object. A `with
-adapter.subscribe() as queue:` pattern (or a `Subscription` dataclass with
-`__enter__`/`__exit__`) would make unsubscription structural. Also: decide
-whether to keep the legacy `get()` + default-subscriber path or remove it
-entirely.
-
-### TDA-3 — Shared `ApiErrorBody<Code>` envelope
-`cdk/src/handlers/shared/types.ts` + `cli/src/types.ts` + `agent/src/server.py`.
-Today the `RUN_ELSEWHERE` response is an ad-hoc dict on the server and parsed
-via an ad-hoc shape on the client. Introduce a typed envelope so `code`
-strings are a union and `execution_mode` in the details is typed. Second ad-hoc
-error shape in the project; a shared type would prevent the third.
-
-### TDA-4 — `ExecutionMode` single source of truth
-`cdk/src/handlers/shared/types.ts` + `cli/src/types.ts`. Already flagged in
-AGENTS.md as "must stay in sync" but the duplication remains. Spin up a tiny
-`@abca/shared-types` workspace (or codegen) so future variants can't drift.
-
-### TDA-5 — `_SSEAdapter` event dicts → `SemanticEvent` TypedDict union
-`agent/src/sse_adapter.py`. `_enqueue(event: dict)` + `get() -> dict | None`
-use bare dicts for a closed set of semantic event shapes. A TypedDict union
-(or frozen dataclasses) would make parity with `ProgressWriter` compile-
-checkable.
-
-### TDA-6 — Python-side `ExecutionMode` Literal + normalizer
-`agent/src/server.py`. `record.get("execution_mode") or "orchestrator"` is
-stringly-typed. Introduce
-`ExecutionMode = Literal["orchestrator", "interactive"]` and a single
-`normalize_execution_mode(raw) -> ExecutionMode` helper (returning the
-"orchestrator" legacy default).
-
----
-
-## Observability gaps
-
-### OBS-1 — Metric for attach-vs-spawn ratio — [SFH P2-3]
-`agent/src/server.py`. Emit counters (`sse.attach.count`, `sse.spawn.count`)
-so a regression (always spawning, or attaching to a dead adapter) is
-alarmable.
-
-### OBS-2 — Post-hydration full-param keyset log — [SFH P2-2]
-`agent/src/server.py:751-756`. Today we log which fields hydration TOUCHED;
-we don't log the final full keyset. When triaging "ran with wrong repo" we
-can't tell whether hydration overwrote a CLI value or CLI passed a wrong
-one.
-
-### OBS-3 — Stable event name on admission log — [SFH P2-1]
-`cdk/src/handlers/shared/create-task-core.ts:267-287`. Free-text "Admission:
-interactive mode, orchestrator invoke skipped" has no stable filter key; add
-a `event: 'task.admitted.orchestrator_skipped'` field.
-
-### OBS-4 — TaskTable writes for interactive path — [self-identified]
-`agent/src/server.py`. The orchestrator path writes `session_id` and
-`agent_runtime_arn` on the TaskTable record; the interactive path does NOT.
-Needed for cancellation (`StopRuntimeSession`) and cross-runtime observability
-in Phase 1c. Small add in `_run_task_background`: write both fields when
-`sse_adapter is not None`.
-
----
-
-## Data-shape clarity
-
-### DATA-1 — `turns` DDB field: split into `turns_attempted` + derived `turns_completed` — [user 2026-04-21]
-`agent/src/pipeline.py:423` writes `turns = agent_result.num_turns or agent_result.turns` to TaskTable. The SDK reports `num_turns = max_turns + 1` when the abort happens on the cap check — i.e., `turns=7` when `max_turns=6` is cleanly honored. Operators asking "why is `turns=7` when I asked for 6?" reasonably expect the field to mean completed turns.
-
-**Proposed:**
-- Rename the DDB column to `turns_attempted` (faithful to what the SDK gives us — counts the check that fired the cap).
-- Derive a `turns_completed` at read time (or at write time): `turns_attempted - (1 if agent_status == 'error_max_turns' else 0)`. For non-cap terminations, `attempted == completed`.
-- Propagate through `TaskDetail` (CDK side) + CLI `types.ts` + watch/run formatters + docs + dashboards.
-- Backfill strategy for existing rows: write both fields going forward; read-time code tolerates old rows where only `turns` is present (treat as `turns_attempted`).
-
-**Why deferred:** rename is a cross-cutting churn (TaskTable shape, TaskDetail contract, CLI types, dashboard widgets, tests). Not a correctness bug — just a naming mismatch between SDK semantics and user expectation.
-
-## Polling and performance
-
-### POLL-1 — Polling interval 2 s → 500 ms — [design deviation D2]
-`cli/src/commands/watch.ts:36`. Design §9.13.1 said 500 ms for the polling
-fallback; we kept 2 s from Phase 1a. Evaluate whether 500 ms is worth the
-API Gateway / REST load increase; may be fine given the fan-out is
-per-observer and most tasks complete in minutes. If yes, also consider
-decaying from 500 ms → 2 s after N minutes to cap cost.
-
----
-
-## CDK / infra hygiene
+## Pending — deferred beyond rev-5
 
 ### CDK-1 — File upstream bug for `AssetImage.bind` double-attach — [self]
-`cdk/src/stacks/agent.ts:55-65`. The two-artifact workaround references
-`<check>` as a placeholder for the upstream issue link. File the issue
-against `@aws-cdk/aws-bedrock-agentcore-alpha` (or the containing repo) and
-update the comment with the real URL.
 
-### CDK-2 — Assert ECR pull perms on both runtime roles in CDK tests — [PTA]
-`cdk/test/stacks/agent.test.ts`. The current 37 tests would still pass if we
-reverted to a single `AssetImage.fromAsset`. Add a test that asserts each of
-`RuntimeExecutionRole` and `RuntimeJwtExecutionRole` carries
-`ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`,
-`ecr:BatchCheckLayerAvailability`, and `ecr:GetAuthorizationToken` scoped to
-the asset repo.
+`cdk/src/stacks/agent.ts` has a two-artifact workaround:
 
----
+```ts
+const artifactIam = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+const artifactJwt = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+```
 
-## Done — landed in rev-5 final PR
+Root cause in `@aws-cdk/aws-bedrock-agentcore-alpha`'s
+`AssetImage.bind` method: it guards against double-grant with
+`this.bound = true`, so when the same artifact instance is passed to
+two Runtimes the second runtime's execution role never receives ECR
+pull permissions. Image pull fails with 424 "no basic auth
+credentials".
 
-These items were surfaced by the validators and addressed inline:
+**Action**: open a GitHub issue against the CDK repo (or AWS CDK
+Construct Hub) with:
+- Minimal repro (two `new agentcore.Runtime()` calls sharing one
+  `fromAsset` artifact).
+- CFN template output showing `ecr:BatchGetImage` missing on the second
+  runtime's IAM::Policy.
+- The workaround ("call `fromAsset` twice; DockerImageAsset dedupes on
+  hash so only one image is published to ECR").
 
-- **P0-a** `_SSEAdapter.write_agent_error` references non-existent
-  `_dropped_count` → `_undelivered_count` fix. One line +
-  `test_write_agent_error_fallback_uses_undelivered_counter`.
-- **P0-b** `task_state.get_task` conflated NotFound with FetchFailed →
-  introduce explicit `TaskFetchError` / `TaskNotFound` distinction; server.py
-  RUN_ELSEWHERE guard returns 503 on FetchFailed instead of falling through
-  to spawn (avoids duplicate pipelines during DDB blips).
-- **P0-d** `bgagent run` wrapped `runSse` in try/catch; emits task_id +
-  `bgagent watch <task>` resume hint + cancels the task on CLI-side fatal
-  error + fetches final status before exit.
-- **P0-e** Post-hydration validation in `_invoke_sse`: asserts minimum viable
-  params for the task_type and returns a 500 with
-  `{"code": "TASK_RECORD_INCOMPLETE", "missing": [...]}` on failure — user
-  sees a clear error instead of a git-clone failure five frames deep.
-- **Key nits** — `validateStreamTimeout` + `DEFAULT_STREAM_TIMEOUT_SECONDS`
-  lifted to `cli/src/commands/_stream.ts`; `SnapshotResult.executionMode`
-  typed as `ExecutionMode | null`; `TaskDetail.execution_mode` required in
-  CLI to match CDK; `EXECUTION_MODE_INTERACTIVE`/`ORCHESTRATOR` constants in
-  `server.py`; no-op `if/else` in `watch.ts logInfo` removed; heartbeat
-  interval extracted to `_HEARTBEAT_INTERVAL_SECONDS`; `run.ts` `logInfo`
-  signature aligned with `watch.ts`; `Verbose mode:` line gated on
-  `isVerbose()`.
-- **Tests added** — hydration-fills-missing-params +
-  hydration-explicit-wins-over-record; SIGINT-propagation-through-runSse;
-  createTask-succeeds-SSE-fails-immediately; ECR-pull-perms-on-both-runtime-
-  roles.
+Once filed, update the comment at `cdk/src/stacks/agent.ts:55-68` to
+reference the issue URL (replace "Tracking follow-up:
+`docs/design/PHASE_1B_REV5_FOLLOWUPS.md` → CDK-1"). Until that lands
+upstream, keep the workaround.
+
+### Candidates NOT landed (by design)
+
+- **Full `@abca/shared-types` workspace (bigger TDA-4)** — deferred in
+  favour of the drift-detection test. Spin up when a third package
+  needs the shared types (e.g., a future SDK package, or if the web
+  console moves in-tree).
+- **`SemanticEvent` threaded through adapter signatures** — TDA-5
+  landed the types; call-site propagation (`_enqueue(event:
+  SemanticEvent)` etc.) deferred until we tighten mypy strictness.
+- **CLI formatter for `turns_attempted`/`turns_completed`** — DATA-1
+  landed the DDB/REST fields; `bgagent status` / `bgagent watch`
+  formatters still display just `turns`. UX decision for a separate
+  pass (e.g., "6 turns (7 attempted — hit max_turns cap)").
+
+## Status as of this round
+
+All validator-surfaced P0/P1/OBS/TDA/POLL/DATA items are either landed
+or explicitly classified as not-in-scope above. CDK-1 is the only
+remaining item and it's an upstream admin task, not code.
