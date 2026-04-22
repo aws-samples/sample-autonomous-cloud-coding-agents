@@ -35,6 +35,7 @@ import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
+import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { RepoTable } from '../constructs/repo-table';
@@ -473,6 +474,17 @@ export class AgentStack extends Stack {
     // --- Concurrency counter reconciler (drift correction) ---
     new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
+      userConcurrencyTable: userConcurrencyTable.table,
+    });
+
+    // --- Stranded-task reconciler (rev-5 P0-c) ---
+    // Fails SUBMITTED / HYDRATING tasks whose pipeline never started.
+    // Complements the `bgagent run` client-side cancel on SSE fatal by
+    // catching the CLI-dead edge case (kill -9, network partition, or
+    // orchestrator Lambda crash).
+    new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
 

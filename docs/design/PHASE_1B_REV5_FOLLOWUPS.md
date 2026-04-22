@@ -15,33 +15,40 @@ not mean "fix today."
 
 ---
 
-## Stranded-task reconciler extension (P0-c) — [SFH]
+## ✅ Stranded-task reconciler (P0-c) — LANDED
 
-The CLI path (`bgagent run` → SSE failure) is handled in-band by the inline
-P0-d fix: the CLI now wraps `runSse` and emits a clear `bgagent watch`
-resume hint + final `getTask` fallback on any failure. The **residual edge
-case** is a hard-kill (`kill -9 bgagent`) between `POST /tasks` (201) and the
-SSE connect, or a network partition before the connect. In that case an
-`execution_mode='interactive'` task stays in `SUBMITTED` forever — the
-orchestrator was skipped, no pipeline ever started, nothing sets a terminal
-status.
+Shipped alongside this rev-5 PR as a separate construct
+(`cdk/src/constructs/stranded-task-reconciler.ts`) + handler
+(`cdk/src/handlers/reconcile-stranded-tasks.ts`).
 
-**Proposed work:**
-- Extend `cdk/src/handlers/reconcile-concurrency.ts` (or spin up a sibling
-  `reconcile-stranded-tasks.ts` on its own schedule) to scan for
-  `status IN (SUBMITTED, HYDRATING)` with `execution_mode='interactive'` and
-  `created_at` older than a configurable `STRANDED_TIMEOUT_SECONDS` (suggest
-  300 s = 5 min; the user-facing SLA is "task transitions or fails within 5
-  minutes of submit").
-- Transition to `FAILED` with `error_message='Stranded: interactive task
-  was admitted but no SSE pipeline ever attached'` and a new
-  `TaskEvent.event_type = 'task_stranded'` for observability.
-- Existing `UserStatusIndex` supports the query pattern cheaply.
-- Write tests for the reconciler's scan/classify/transition path.
+- Runs every 5 minutes on an EventBridge schedule.
+- Queries `TaskTable.StatusIndex` for `status IN (SUBMITTED, HYDRATING)` with
+  `created_at < cutoff`.
+- Per-row per-mode threshold: 300 s for interactive, 1200 s for orchestrator
+  (including legacy rows without `execution_mode`). Configurable via Lambda
+  env vars.
+- Transitions to `FAILED` with `error_message="Stranded: ... no pipeline
+  attached before timeout"`, emits `task_stranded` + `task_failed` events
+  (the `task_stranded` event carries `{code: 'STRANDED_NO_HEARTBEAT',
+  prior_status, execution_mode, age_seconds}`), and decrements the user's
+  concurrency counter.
+- Idempotent: conditional UpdateItem on `status = :expected` means a
+  concurrent legitimate transition wins.
 
-**Why deferred:** real feature addition; affects orchestrator-mode tasks too
-(same bug exists if the orchestrator Lambda crashes between write and
-invoke). Worth designing end-to-end rather than patching one mode at a time.
+RUNNING / FINALIZING are NOT handled here — `pollTaskStatus` in
+`orchestrator.ts` already transitions those to TIMED_OUT via the
+`agent_heartbeat_at` path. This reconciler only catches the "never
+started" case.
+
+---
+
+## ✅ MAX_CONCURRENT_TASKS_PER_USER: 3 → 10 — LANDED
+
+Default raised in `cdk/src/constructs/task-orchestrator.ts:163` after the
+live concurrency-limit incident during E2E-B retry (two stranded
+interactive tasks occupied the user's 3 slots, admission-rejected a legit
+submit). The stranded-task reconciler above prevents slot accumulation, so
+the bump is ergonomic rather than load-bearing. Test updated.
 
 ---
 
@@ -149,6 +156,19 @@ in Phase 1c. Small add in `_run_task_background`: write both fields when
 `sse_adapter is not None`.
 
 ---
+
+## Data-shape clarity
+
+### DATA-1 — `turns` DDB field: split into `turns_attempted` + derived `turns_completed` — [user 2026-04-21]
+`agent/src/pipeline.py:423` writes `turns = agent_result.num_turns or agent_result.turns` to TaskTable. The SDK reports `num_turns = max_turns + 1` when the abort happens on the cap check — i.e., `turns=7` when `max_turns=6` is cleanly honored. Operators asking "why is `turns=7` when I asked for 6?" reasonably expect the field to mean completed turns.
+
+**Proposed:**
+- Rename the DDB column to `turns_attempted` (faithful to what the SDK gives us — counts the check that fired the cap).
+- Derive a `turns_completed` at read time (or at write time): `turns_attempted - (1 if agent_status == 'error_max_turns' else 0)`. For non-cap terminations, `attempted == completed`.
+- Propagate through `TaskDetail` (CDK side) + CLI `types.ts` + watch/run formatters + docs + dashboards.
+- Backfill strategy for existing rows: write both fields going forward; read-time code tolerates old rows where only `turns` is present (treat as `turns_attempted`).
+
+**Why deferred:** rename is a cross-cutting churn (TaskTable shape, TaskDetail contract, CLI types, dashboard widgets, tests). Not a correctness bug — just a naming mismatch between SDK semantics and user expectation.
 
 ## Polling and performance
 

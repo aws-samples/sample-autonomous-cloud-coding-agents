@@ -60,7 +60,15 @@ export interface TaskOrchestratorProps {
 
   /**
    * Maximum concurrent tasks per user.
-   * @default 3
+   *
+   * Raised from 3 to 10 in rev 5 to accommodate power-user CLI flows
+   * (developer running `bgagent run` a few times while iterating on a
+   * feature, reviewing queued PRs, etc.). 3 was a conservative starter
+   * that led to surprise admission rejections in practice. The
+   * stranded-task reconciler (scheduled handler) prevents abandoned
+   * tasks from permanently consuming slots.
+   *
+   * @default 10
    */
   readonly maxConcurrentTasksPerUser?: number;
 
@@ -160,7 +168,7 @@ export class TaskOrchestrator extends Construct {
     }
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
-    const maxConcurrent = props.maxConcurrentTasksPerUser ?? 3;
+    const maxConcurrent = props.maxConcurrentTasksPerUser ?? 10;
 
     this.fn = new lambda.NodejsFunction(this, 'OrchestratorFn', {
       entry: path.join(handlersDir, 'orchestrate-task.ts'),
