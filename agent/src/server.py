@@ -106,6 +106,72 @@ def _debug_cw_exc(
     _debug_cw(f"{message} [{type(exc).__name__}: {exc}]\n{tb}", task_id=task_id)
 
 
+# --- P1-4: _debug_cw failure counter -------------------------------------
+# Counts write failures from the daemon thread. AgentCore doesn't forward
+# container stdout to APPLICATION_LOGS, so a broken _debug_cw is invisible
+# except for this metric. We expose the count via ``/ping`` and emit a
+# structured log line every _DEBUG_CW_FAILURE_EMIT_EVERY failures so the
+# dashboard can alarm on it.
+_debug_cw_failures = 0
+_debug_cw_failures_lock = threading.Lock()
+_DEBUG_CW_FAILURE_EMIT_EVERY = 5
+
+
+def _emit_sse_route_metric(task_id: str, route: str, *, subscriber_count: int | None = None) -> None:
+    """Emit an SSE_ROUTE metric so operators can alarm on attach-vs-spawn drift.
+
+    Rev-5 OBS-1: ``route ∈ {'attach', 'spawn'}`` per ``/invocations`` SSE
+    call. Attach reuses an adapter already in the registry (same task_id,
+    same microVM); spawn creates a new adapter + pipeline.
+
+    Written to CloudWatch Logs as a JSON event (same pattern as
+    ``telemetry._emit_metrics_to_cloudwatch``) under log stream
+    ``sse_routing/<task_id>`` in ``LOG_GROUP_NAME``. Best-effort from a
+    daemon thread so the request path is never blocked.
+    """
+    if not task_id or route not in ("attach", "spawn"):
+        return
+    log_group = os.environ.get("LOG_GROUP_NAME")
+    if not log_group:
+        return
+    payload: dict[str, Any] = {
+        "event": "SSE_ROUTE",
+        "route": route,
+        "task_id": task_id,
+    }
+    if subscriber_count is not None:
+        payload["subscriber_count"] = subscriber_count
+    threading.Thread(
+        target=_emit_sse_route_metric_blocking,
+        args=(log_group, task_id, payload),
+        name="sse-route-metric",
+        daemon=True,
+    ).start()
+
+
+def _emit_sse_route_metric_blocking(log_group: str, task_id: str, payload: dict) -> None:
+    try:
+        import boto3  # noqa: PLC0415
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("logs", region_name=region)
+        stream = f"sse_routing/{task_id}"
+        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+        import json as _json  # noqa: PLC0415
+        import time as _time  # noqa: PLC0415
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream,
+            logEvents=[{
+                "timestamp": int(_time.time() * 1000),
+                "message": _json.dumps(payload),
+            }],
+        )
+    except Exception as exc:
+        # Best-effort metric emission; never cascade a metric failure.
+        print(f"[sse-route-metric] write failed: {type(exc).__name__}: {exc}", flush=True)
+
+
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
@@ -124,8 +190,29 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
     except Exception as _exc:  # noqa: BLE001
-        # Never let debug logging break the request path.
+        # Never let debug logging break the request path. Bump the failure
+        # counter (P1-4) so operators can alarm on a blind rev-5 debug
+        # path; emit a structured log line every N failures so one appears
+        # in APPLICATION_LOGS even if `stamped` writes are broken.
+        global _debug_cw_failures
+        emit_snapshot: int | None = None
+        with _debug_cw_failures_lock:
+            _debug_cw_failures += 1
+            if _debug_cw_failures == 1 or _debug_cw_failures % _DEBUG_CW_FAILURE_EMIT_EVERY == 0:
+                emit_snapshot = _debug_cw_failures
         print(f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}", flush=True)
+        if emit_snapshot is not None:
+            # Best-effort: emit a metric to the sse_routing stream (which
+            # uses a separate code path, so less likely to be broken the
+            # same way).
+            try:
+                _emit_sse_route_metric_blocking(log_group, task_id or 'server', {
+                    "event": "DEBUG_CW_WRITE_FAILURES",
+                    "count": _debug_cw_failures,
+                    "last_error_type": type(_exc).__name__,
+                })
+            except Exception:
+                pass
 
 
 # Log the active event loop policy at import time.
@@ -711,6 +798,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                 f"subscriber_count={existing.subscriber_count}",
                 task_id=task_id,
             )
+            _emit_sse_route_metric(task_id, "attach", subscriber_count=existing.subscriber_count)
         except Exception as exc:
             # A live adapter exists (has_subscribers was True) but we
             # couldn't subscribe — likely an adapter-closing race or a
@@ -835,6 +923,15 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                     f"{sorted(hydrated_from_record.keys())}",
                     task_id=task_id,
                 )
+            # OBS-2: always log the post-hydration keyset (non-empty fields)
+            # + hydration origin for each so "ran with wrong repo" triage
+            # can distinguish a hydration miss from a wrong caller value.
+            populated_keys = sorted(k for k, v in params.items() if v not in (None, "", 0, 0.0, []))
+            origin = {k: ("record" if k in hydrated_from_record else "caller") for k in populated_keys}
+            _debug_cw(
+                f"post-hydration params: populated={populated_keys} origin={origin}",
+                task_id=task_id,
+            )
 
             # --- Record session + runtime ARN on TaskTable (rev 5, OBS-4)
             # The orchestrator Lambda writes these fields for Runtime-IAM
@@ -924,6 +1021,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     try:
         _spawn_background(params, sse_adapter=sse_adapter)
         _debug_cw(f"background thread spawned for task_id={task_id!r}", task_id=task_id)
+        _emit_sse_route_metric(task_id, "spawn")
     except Exception as exc:
         _debug_cw_exc("_spawn_background FAILED", exc, task_id=task_id)
         # Roll back the registry insert on spawn failure.

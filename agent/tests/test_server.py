@@ -855,6 +855,104 @@ def test_sse_spawn_interactive_writes_session_info(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_sse_emits_attach_route_metric(monkeypatch):
+    """OBS-1: attach path emits `SSE_ROUTE` metric with route='attach'."""
+    async def scenario():
+        adapter = _SSEAdapter("t-metric-attach")
+        adapter.attach_loop(asyncio.get_running_loop())
+
+        with server._threads_lock:
+            server._active_sse_adapters["t-metric-attach"] = adapter
+
+        metric_calls: list[tuple] = []
+        monkeypatch.setattr(
+            server,
+            "_emit_sse_route_metric",
+            lambda task_id, route, **kw: metric_calls.append((task_id, route, kw)),
+        )
+
+        try:
+            params = {"task_id": "t-metric-attach", "repo_url": "o/r", "task_description": "x"}
+            await server._invoke_sse(params)
+            assert any(c[1] == "attach" for c in metric_calls)
+        finally:
+            with server._threads_lock:
+                server._active_sse_adapters.pop("t-metric-attach", None)
+            adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_emits_spawn_route_metric(monkeypatch):
+    """OBS-1: spawn path emits `SSE_ROUTE` metric with route='spawn'."""
+    async def scenario():
+        metric_calls: list[tuple] = []
+        monkeypatch.setattr(
+            server,
+            "_emit_sse_route_metric",
+            lambda task_id, route, **kw: metric_calls.append((task_id, route, kw)),
+        )
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {"task_id": task_id, "execution_mode": "interactive"},
+        )
+        monkeypatch.setattr(server, "_spawn_background", lambda *a, **kw: None)
+
+        params = {"task_id": "t-metric-spawn", "repo_url": "o/r", "task_description": "x"}
+        try:
+            await server._invoke_sse(params)
+            assert any(c[0] == "t-metric-spawn" and c[1] == "spawn" for c in metric_calls)
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-metric-spawn", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_logs_full_post_hydration_keyset(monkeypatch, capsys):
+    """OBS-2: after hydration, log the populated keyset + origin (record vs caller).
+
+    Used to distinguish "ran with wrong repo because hydration overwrote
+    caller value" from "caller passed wrong repo" during triage.
+    """
+    async def scenario():
+        monkeypatch.setattr(server, "_spawn_background", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {
+                "task_id": task_id,
+                "execution_mode": "interactive",
+                "repo": "owner/repo",
+            },
+        )
+
+        params = {
+            "task_id": "t-obs2",
+            "repo_url": "",
+            "task_description": "caller-provided",
+        }
+        try:
+            await server._invoke_sse(params)
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-obs2", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
+    out = capsys.readouterr().out
+    # The post-hydration debug line must include both the populated list
+    # and origin mapping so operators can see where each field came from.
+    assert "post-hydration params" in out
+    assert "repo_url" in out
+    assert "'record'" in out or 'record' in out
+    assert "'caller'" in out or 'caller' in out
+
+
 def test_sse_spawn_interactive_skips_session_write_when_env_and_header_missing(monkeypatch):
     """If neither AGENT_RUNTIME_ARN env nor session header is set, we
     should NOT call write_session_info (empty write would be a no-op but

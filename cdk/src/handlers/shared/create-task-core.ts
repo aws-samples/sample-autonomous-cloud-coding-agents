@@ -266,7 +266,11 @@ export async function createTaskCore(
   //    with the stream (rev 5 §9.13.4). The orchestrator invoke would be a
   //    duplicate pipeline.
   if (executionMode === 'interactive') {
+    // Rev-5 OBS-3: stable event name so Logs Insights can filter on
+    // `event = 'task.admitted.orchestrator_skipped'` without free-text
+    // substring matching on log messages.
     logger.info('Admission: interactive mode, orchestrator invoke skipped', {
+      event: 'task.admitted.orchestrator_skipped',
       task_id: taskId,
       execution_mode: executionMode,
       request_id: requestId,
@@ -279,12 +283,17 @@ export async function createTaskCore(
         Payload: new TextEncoder().encode(JSON.stringify({ task_id: taskId })),
       }));
       logger.info('Orchestrator invoked', {
+        event: 'task.admitted.orchestrator_invoked',
         task_id: taskId,
         execution_mode: executionMode,
         request_id: requestId,
       });
     } catch (orchErr) {
-      logger.error('Failed to invoke orchestrator', { error: String(orchErr), task_id: taskId });
+      logger.error('Failed to invoke orchestrator', {
+        event: 'task.admitted.orchestrator_invoke_failed',
+        error: String(orchErr),
+        task_id: taskId,
+      });
     }
   }
 
