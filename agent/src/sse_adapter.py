@@ -51,7 +51,72 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, TypedDict
+
+
+# ---------------------------------------------------------------------------
+# Rev-5 TDA-5: semantic-event TypedDicts.
+#
+# The bare ``dict`` that flows through ``_enqueue`` / ``_broadcast_from_loop``
+# / ``get`` carries a closed set of shapes — each matches the ``metadata``
+# dict a matching ``_ProgressWriter.write_agent_*`` stores to DDB. A
+# ``TypedDict`` union makes that symmetry compile-checkable (with mypy) and
+# gives call sites autocompletion. Runtime behaviour is unchanged (Python
+# doesn't enforce TypedDict at runtime).
+# ---------------------------------------------------------------------------
+
+
+class AgentTurnEvent(TypedDict, total=False):
+    type: Literal["agent_turn"]
+    turn: int
+    model: str
+    tool_calls_count: int
+    thinking_preview: str
+    text_preview: str
+
+
+class AgentToolCallEvent(TypedDict, total=False):
+    type: Literal["agent_tool_call"]
+    tool_name: str
+    tool_input_preview: str
+    turn: int
+
+
+class AgentToolResultEvent(TypedDict, total=False):
+    type: Literal["agent_tool_result"]
+    tool_name: str
+    is_error: bool
+    content_preview: str
+    turn: int
+
+
+class AgentMilestoneEvent(TypedDict, total=False):
+    type: Literal["agent_milestone"]
+    milestone: str
+    details: str
+
+
+class AgentCostUpdateEvent(TypedDict, total=False):
+    type: Literal["agent_cost_update"]
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+
+
+class AgentErrorEvent(TypedDict, total=False):
+    type: Literal["agent_error"]
+    error_type: str
+    message: str
+
+
+SemanticEvent = (
+    AgentTurnEvent
+    | AgentToolCallEvent
+    | AgentToolResultEvent
+    | AgentMilestoneEvent
+    | AgentCostUpdateEvent
+    | AgentErrorEvent
+)
 
 from shell import log
 

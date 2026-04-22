@@ -159,6 +159,51 @@ export interface ErrorResponse {
   };
 }
 
+/**
+ * Closed union of well-known API error codes (rev-5 TDA-3).
+ *
+ * Used by the SSE data-plane's direct responses (not the REST envelope
+ * above) where server.py on Runtime-JWT emits ad-hoc JSON on non-2xx.
+ * KEEP IN SYNC with the matching union in
+ * `cdk/src/handlers/shared/types.ts` and the string constants in
+ * `agent/src/server.py`.
+ */
+export type ApiErrorCode =
+  | 'RUN_ELSEWHERE'
+  | 'TASK_STATE_UNAVAILABLE'
+  | 'SSE_ATTACH_RACE'
+  | 'TASK_RECORD_INCOMPLETE';
+
+/**
+ * Typed envelope for SSE data-plane error bodies. `details` holds
+ * code-specific extras (e.g. RUN_ELSEWHERE's `execution_mode`, or
+ * TASK_RECORD_INCOMPLETE's `missing` array).
+ */
+export interface ApiErrorBody<C extends ApiErrorCode = ApiErrorCode> {
+  readonly code: C;
+  readonly message: string;
+  readonly details?: Record<string, unknown>;
+  // Flattened convenience fields for backwards-compat — legacy bodies
+  // emit these at the top level rather than under `details`.
+  readonly execution_mode?: ExecutionMode;
+  readonly missing?: readonly string[];
+}
+
+/**
+ * Type guard for an `ApiErrorBody` with a specific code. Use in
+ * `sse-client.ts`'s 409/503/500 branches to narrow the parsed body.
+ */
+export function isApiError<C extends ApiErrorCode>(
+  body: unknown,
+  code: C,
+): body is ApiErrorBody<C> {
+  return (
+    body !== null
+    && typeof body === 'object'
+    && (body as { code?: unknown }).code === code
+  );
+}
+
 /** Webhook detail returned by API responses. */
 export interface WebhookDetail {
   readonly webhook_id: string;

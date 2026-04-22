@@ -184,6 +184,29 @@ export interface GetTaskEventsQuery {
 export type ExecutionMode = 'orchestrator' | 'interactive';
 
 /**
+ * Closed union of well-known API error codes (rev-5 TDA-3).
+ *
+ * Used by the SSE data-plane on Runtime-JWT (server.py) where non-2xx
+ * responses carry an ad-hoc JSON body rather than going through the
+ * REST API Gateway's structured ErrorResponse envelope. KEEP IN SYNC
+ * with `cli/src/types.ts` and the `agent/src/server.py` constants.
+ */
+export type ApiErrorCode =
+  | 'RUN_ELSEWHERE'
+  | 'TASK_STATE_UNAVAILABLE'
+  | 'SSE_ATTACH_RACE'
+  | 'TASK_RECORD_INCOMPLETE';
+
+/** Typed envelope for SSE data-plane error bodies. */
+export interface ApiErrorBody<C extends ApiErrorCode = ApiErrorCode> {
+  readonly code: C;
+  readonly message: string;
+  readonly details?: Record<string, unknown>;
+  readonly execution_mode?: ExecutionMode;
+  readonly missing?: readonly string[];
+}
+
+/**
  * Create task request body.
  */
 export interface CreateTaskRequest {

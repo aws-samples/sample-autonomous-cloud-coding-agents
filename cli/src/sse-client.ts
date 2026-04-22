@@ -48,6 +48,7 @@ import { EventSchemas, EventType } from '@ag-ui/core';
 import { createParser, EventSourceMessage } from 'eventsource-parser';
 import { debug } from './debug';
 import { CliError } from './errors';
+import { isApiError } from './types';
 
 /* ------------------------------------------------------------------------ */
 /*  Public types                                                             */
@@ -602,17 +603,14 @@ async function openAndDrainStream(args: StreamAttemptArgs): Promise<StreamAttemp
     }
     if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
 
-    let code: string | undefined;
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(bodyText);
-      if (parsed && typeof parsed === 'object' && typeof parsed.code === 'string') {
-        code = parsed.code;
-      }
+      parsed = JSON.parse(bodyText);
     } catch {
-      // Non-JSON 409 body — fall through; `code` stays undefined.
+      // Non-JSON 409 body — `parsed` stays undefined; fall through.
     }
 
-    if (code === 'RUN_ELSEWHERE') {
+    if (isApiError(parsed, 'RUN_ELSEWHERE')) {
       throw new CliError(
         'RUN_ELSEWHERE: task is running on a different runtime; '
         + 'falling back to polling.',
