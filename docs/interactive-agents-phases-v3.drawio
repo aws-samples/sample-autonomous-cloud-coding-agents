@@ -168,7 +168,7 @@
     </mxGraphModel>
   </diagram>
   <diagram name="2. Phase 1b final architecture" id="p2-page">
-    <mxGraphModel dx="2109" dy="1009" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
+    <mxGraphModel dx="2515" dy="1073" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
       <root>
         <mxCell id="p2-0" />
         <mxCell id="p2-1" parent="p2-0" />
@@ -858,7 +858,7 @@
     </mxGraphModel>
   </diagram>
   <diagram name="5. Phase 1b happy-path flow" id="p5-page">
-    <mxGraphModel dx="1614" dy="953" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="2500" math="0" shadow="0">
+    <mxGraphModel dx="2417" dy="1226" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="2500" math="0" shadow="0">
       <root>
         <mxCell id="p5-0" />
         <mxCell id="p5-1" parent="p5-0" />
@@ -1368,7 +1368,7 @@
     </mxGraphModel>
   </diagram>
   <diagram name="6. Phase 1b reconnection flow" id="p6-page">
-    <mxGraphModel dx="1321" dy="1180" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2000" pageHeight="1800" math="0" shadow="0">
+    <mxGraphModel dx="1938" dy="780" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2000" pageHeight="1800" math="0" shadow="0">
       <root>
         <mxCell id="p6-0" />
         <mxCell id="p6-1" parent="p6-0" />
@@ -1590,7 +1590,7 @@
           <mxGeometry height="160" width="1870" x="40" y="1570" as="geometry" />
         </mxCell>
         <mxCell id="ozlB_Y58O8h_wpdCgz1Q-0" parent="p6-1" style="text;html=1;fontSize=10;fontFamily=Helvetica;fontColor=#C925D1;align=left;verticalAlign=top;spacing=6;whiteSpace=wrap;" value="&lt;b&gt;Pattern:&lt;/b&gt; non-interactive consumers receive PUSH via DDB Stream — not SSE.&lt;br&gt;Filter milestone/error events only; suppress verbose text triads.&lt;br&gt;Slack bots MUST ack in 3s → this path gives async delivery after submission.&lt;br&gt;Rate-limiting prevents spam on chatty agents (per-session throttle)." vertex="1">
-          <mxGeometry height="180" width="320" x="255.23" y="-27.269999999999996" as="geometry" />
+          <mxGeometry height="180" width="373" x="-348" y="119" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

@@ -35,6 +35,7 @@ import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
+import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
@@ -506,6 +507,16 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+    });
+
+    // --- Fan-out plane consumer (Phase 1b §8.9) ---
+    // Consumes TaskEventsTable DynamoDB Streams and dispatches
+    // milestones / terminal events / pr_created signals to
+    // non-interactive channels (Slack, GitHub PR comments, email).
+    // Ships as a skeleton: dispatchers log-only until per-channel
+    // integrations land incrementally. No change to agent or CLI.
+    new FanOutConsumer(this, 'FanOutConsumer', {
+      taskEventsTable: taskEventsTable.table,
     });
 
     // --- Operator dashboard ---
