@@ -38,6 +38,15 @@ const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const RUNTIME_ARN = process.env.RUNTIME_ARN;
 const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
+/** Rev-5 OBS-4: runtime-IAM ARN (orchestrator path) and runtime-JWT ARN
+ *  (interactive path). Used as a fallback when the task record lacks
+ *  `agent_runtime_arn` — the interactive server.py can record
+ *  `session_id` on TaskTable but cannot record its own runtime ARN
+ *  without creating a CFN cycle, so we resolve from `execution_mode`
+ *  here. Either env var may be undefined in older deploys; falls back
+ *  to the legacy `RUNTIME_ARN`. */
+const RUNTIME_IAM_ARN = process.env.RUNTIME_IAM_ARN ?? RUNTIME_ARN;
+const RUNTIME_JWT_ARN = process.env.RUNTIME_JWT_ARN;
 
 /**
  * DELETE /v1/tasks/{task_id} — Cancel a task.
@@ -81,7 +90,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const wasRunning = record.status === TaskStatus.RUNNING;
     const runtimeSessionId = record.session_id;
-    const agentRuntimeArn = record.agent_runtime_arn ?? RUNTIME_ARN;
+    // Prefer the ARN recorded on the task (orchestrator path writes this).
+    // Interactive path (rev-5) records only session_id; resolve the ARN
+    // from execution_mode against the two known runtime ARNs.
+    const inferredRuntimeArn = record.execution_mode === 'interactive'
+      ? RUNTIME_JWT_ARN
+      : RUNTIME_IAM_ARN;
+    const agentRuntimeArn = record.agent_runtime_arn ?? inferredRuntimeArn;
 
     // 6. Update task to CANCELLED with condition to prevent race
     const now = new Date().toISOString();

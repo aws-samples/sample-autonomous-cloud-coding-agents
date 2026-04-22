@@ -583,32 +583,49 @@ async function openAndDrainStream(args: StreamAttemptArgs): Promise<StreamAttemp
     return { unauthorized: true, error: new Error('401 Unauthorized') };
   }
 
-  // RUN_ELSEWHERE (rev 5, §9.13.4): server.py rejects SSE for tasks
-  // submitted via the orchestrator path. This is non-retriable — surfacing
-  // it as a CliError lets `watch --transport auto` fall back to polling.
+  // 409 responses on the SSE path are terminal, not retryable.
+  //
+  // * RUN_ELSEWHERE (rev 5, §9.13.4) — server.py rejects SSE for tasks
+  //   submitted via the orchestrator path. Surfacing as CliError lets
+  //   `watch --transport auto` fall back to polling.
+  // * Any other 409 (non-JSON body, unexpected shape, proxy-injected
+  //   gateway error) — reconnect would just retry the same rejection
+  //   indefinitely. Treat as terminal and surface the body in the error
+  //   so the user / logs can see why the server refused.
   if (response.status === 409) {
     let bodyText = '';
     try {
       bodyText = await response.text();
     } catch {
-      // ignore — we only need the body for code extraction
+      // If the body isn't readable, we still want 409 to be terminal —
+      // just with less detail in the error message.
     }
     if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-    let isRunElsewhere = false;
+
+    let code: string | undefined;
     try {
       const parsed = JSON.parse(bodyText);
-      isRunElsewhere = parsed?.code === 'RUN_ELSEWHERE';
+      if (parsed && typeof parsed === 'object' && typeof parsed.code === 'string') {
+        code = parsed.code;
+      }
     } catch {
-      // Non-JSON 409 body — not a RUN_ELSEWHERE signal; fall through to
-      // generic HTTP-error handling below.
+      // Non-JSON 409 body — fall through; `code` stays undefined.
     }
-    if (isRunElsewhere) {
-      const err = new CliError(
-        'RUN_ELSEWHERE: task is running on a different runtime; ' +
-        'falling back to polling.',
+
+    if (code === 'RUN_ELSEWHERE') {
+      throw new CliError(
+        'RUN_ELSEWHERE: task is running on a different runtime; '
+        + 'falling back to polling.',
       );
-      throw err;
     }
+    // Unknown 409 — still terminal. Include a truncated body excerpt so
+    // operators can see what the server said without flooding the log.
+    const preview = bodyText.length > 500
+      ? `${bodyText.slice(0, 500)}... (${bodyText.length} bytes total)`
+      : bodyText;
+    throw new CliError(
+      `HTTP 409 from SSE endpoint (non-retriable); body: ${preview || '<empty>'}`,
+    );
   }
 
   if (!response.ok) {

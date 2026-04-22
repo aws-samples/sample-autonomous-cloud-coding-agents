@@ -186,6 +186,15 @@ export class AgentStack extends Stack {
         return runtimeIamArnHolder;
       },
     });
+    let runtimeJwtArnHolder: string | undefined;
+    const lazyRuntimeJwtArn = Lazy.string({
+      produce: () => {
+        if (!runtimeJwtArnHolder) {
+          throw new Error('Runtime-JWT ARN was accessed before RuntimeJwt was created');
+        }
+        return runtimeJwtArnHolder;
+      },
+    });
 
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     // Created early so the Cognito User Pool is available for Runtime-JWT below.
@@ -197,7 +206,7 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: lazyOrchestratorArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
-      agentCoreStopSessionRuntimeArns: [lazyRuntimeIamArn],
+      agentCoreStopSessionRuntimeArns: [lazyRuntimeIamArn, lazyRuntimeJwtArn],
     });
 
     // --- Two AgentCore Runtimes (same artifact, different authorizer) ---
@@ -292,6 +301,7 @@ export class AgentStack extends Stack {
     });
 
     runtimeIamArnHolder = runtimeIam.agentRuntimeArn;
+    runtimeJwtArnHolder = runtimeJwt.agentRuntimeArn;
 
     // --- Session storage (preview) on BOTH runtimes ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
@@ -308,6 +318,17 @@ export class AgentStack extends Stack {
         },
       ]);
     }
+
+    // --- Rev-5 OBS-4 note: no runtime-self-ARN env var ---
+    // An earlier attempt injected each runtime's own ARN as an env var
+    // so `server.py` could write it to TaskTable. That creates a CFN
+    // cycle (Runtime property references the same Runtime's
+    // `AgentRuntimeArn` GetAtt). The interactive path instead records
+    // only `session_id` on TaskTable from server.py; the cancel-task
+    // Lambda resolves the correct runtime ARN by consulting
+    // `execution_mode` on the task record (RUNTIME_IAM_ARN for
+    // orchestrator, RUNTIME_JWT_ARN for interactive) — both ARNs are
+    // known to the cancel-task Lambda at CDK synth time with no cycle.
 
     // --- Shared IAM grants on BOTH runtimes ---
     for (const rt of [runtimeIam, runtimeJwt]) {

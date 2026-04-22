@@ -340,7 +340,16 @@ export class TaskApi extends Construct {
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
     const stopSessionArns = props.agentCoreStopSessionRuntimeArns ?? [];
     if (stopSessionArns.length > 0) {
+      // Legacy env (pre-rev-5) pointed at the orchestrator runtime only.
       cancelTaskEnv.RUNTIME_ARN = stopSessionArns[0]!;
+      // Rev-5 OBS-4: disambiguate by execution_mode. By convention the
+      // stopSessionArns array is [iam, jwt]. Pass both so cancel-task can
+      // resolve the correct runtime for interactive tasks (which record
+      // `execution_mode='interactive'` but not their runtime ARN).
+      cancelTaskEnv.RUNTIME_IAM_ARN = stopSessionArns[0]!;
+      if (stopSessionArns[1]) {
+        cancelTaskEnv.RUNTIME_JWT_ARN = stopSessionArns[1];
+      }
     }
     if (props.ecsClusterArn) {
       cancelTaskEnv.ECS_CLUSTER_ARN = props.ecsClusterArn;

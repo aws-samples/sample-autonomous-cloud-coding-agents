@@ -523,18 +523,29 @@ describe('runSseClient — reconnect and catch-up', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  test('HTTP 409 without RUN_ELSEWHERE code → reconnects (generic http_error)', async () => {
+  test('HTTP 409 without RUN_ELSEWHERE code → terminal CliError (NOT retried)', async () => {
+    // P1-1 (Round 1): any 409 on the SSE path is terminal. The prior
+    // "reconnect and hope for the best" behavior would retry against a
+    // server that's deliberately rejecting the request. Surface the body
+    // in the error so operators can see why.
     const genericBody = JSON.stringify({ code: 'OTHER', message: 'nope' });
-    const mockFetch = jest.fn()
-      .mockResolvedValueOnce(
-        new Response(genericBody, { status: 409, statusText: 'Conflict' }),
-      )
-      .mockResolvedValueOnce(staticResponse(200, [sseFrame(EV_RUN_FINISHED)]));
+    const mockFetch = jest.fn().mockResolvedValue(
+      new Response(genericBody, { status: 409, statusText: 'Conflict' }),
+    );
     global.fetch = mockFetch as unknown as typeof fetch;
 
-    const result = await runSseClient(buildOptions());
-    expect(result.reconnectCount).toBe(1);
-    expect(result.terminalEvent?.type).toBe('RUN_FINISHED');
+    await expect(runSseClient(buildOptions())).rejects.toThrow(/HTTP 409/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('HTTP 409 with non-JSON body → terminal CliError (body preview in message)', async () => {
+    const mockFetch = jest.fn().mockResolvedValue(
+      new Response('Gateway rejected: proxy overload', { status: 409, statusText: 'Conflict' }),
+    );
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    await expect(runSseClient(buildOptions())).rejects.toThrow(/Gateway rejected/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   test('HTTP 500 on connect → reconnects with http_error reason', async () => {

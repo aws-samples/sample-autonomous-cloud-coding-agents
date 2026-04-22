@@ -698,11 +698,28 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                 task_id=task_id,
             )
         except Exception as exc:
+            # A live adapter exists (has_subscribers was True) but we
+            # couldn't subscribe — likely an adapter-closing race or a
+            # queue-lifecycle bug. Do NOT fall through to spawn; that
+            # would duplicate the pipeline in this microVM. Return 503
+            # so the client retries, by which time the adapter has
+            # either finished closing (attach path won't match) or
+            # recovered.
             _debug_cw(
-                f"attach subscribe FAILED ({type(exc).__name__}: {exc}); falling through to spawn",
+                f"attach subscribe FAILED ({type(exc).__name__}: {exc}); "
+                f"returning 503 to client for retry (NOT spawning duplicate)",
                 task_id=task_id,
             )
-            # Fall through to spawn below.
+            traceback.print_exc()
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "code": "SSE_ATTACH_RACE",
+                    "message": (
+                        "Pipeline adapter is transitioning; retry in a moment."
+                    ),
+                },
+            )
         else:
             headers = {
                 "Cache-Control": "no-cache, no-transform",
@@ -802,6 +819,27 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                 _debug_cw(
                     f"hydrated {len(hydrated_from_record)} params from TaskTable: "
                     f"{sorted(hydrated_from_record.keys())}",
+                    task_id=task_id,
+                )
+
+            # --- Record session + runtime ARN on TaskTable (rev 5, OBS-4)
+            # The orchestrator Lambda writes these fields for Runtime-IAM
+            # tasks; the interactive path has no Lambda in the loop, so
+            # we write them here just before spawning. Consumed by
+            # `cancel-task` (StopRuntimeSession needs both the runtime ARN
+            # and the session id) and by the stranded-task reconciler.
+            interactive_session_id = params.get("session_id") or ""
+            interactive_runtime_arn = os.environ.get("AGENT_RUNTIME_ARN", "") or ""
+            if interactive_session_id or interactive_runtime_arn:
+                task_state.write_session_info(
+                    task_id,
+                    interactive_session_id,
+                    interactive_runtime_arn,
+                )
+                _debug_cw(
+                    f"wrote session_info to TaskTable: session_id="
+                    f"{interactive_session_id!r} runtime_arn="
+                    f"{interactive_runtime_arn!r}",
                     task_id=task_id,
                 )
 

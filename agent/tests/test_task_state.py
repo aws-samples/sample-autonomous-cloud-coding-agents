@@ -94,3 +94,77 @@ class TestGetTask:
         with pytest.raises(TaskFetchError) as exc_info:
             task_state.get_task("t-throttled")
         assert "ProvisionedThroughputExceededException" in str(exc_info.value)
+
+
+class TestWriteSessionInfo:
+    """Rev-5 OBS-4: interactive path writes session_id + agent_runtime_arn."""
+
+    def test_writes_session_id_and_arn(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        task_state.write_session_info(
+            "t-interactive",
+            "sess-abc123",
+            "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz",
+        )
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["Key"] == {"task_id": "t-interactive"}
+        assert "session_id = :sid" in call["UpdateExpression"]
+        assert "agent_runtime_arn = :arn" in call["UpdateExpression"]
+        assert "compute_type = :ct" in call["UpdateExpression"]
+        assert "compute_metadata = :cm" in call["UpdateExpression"]
+        values = call["ExpressionAttributeValues"]
+        assert values[":sid"] == "sess-abc123"
+        assert values[":arn"] == "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
+        assert values[":ct"] == "agentcore"
+        assert values[":cm"] == {"runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"}
+
+    def test_noop_when_both_empty(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        task_state.write_session_info("t-empty", "", "")
+        assert calls == []
+
+    def test_skips_silently_when_task_already_advanced(self, monkeypatch):
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        # Must NOT raise — the conditional failure is expected when the
+        # task has already transitioned past SUBMITTED/HYDRATING.
+        task_state.write_session_info("t-raced", "sess-x", "arn:x")
+
+    def test_writes_only_session_when_arn_missing(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        task_state.write_session_info("t-partial", "sess-only", "")
+        assert len(calls) == 1
+        assert "session_id = :sid" in calls[0]["UpdateExpression"]
+        assert "agent_runtime_arn" not in calls[0]["UpdateExpression"]

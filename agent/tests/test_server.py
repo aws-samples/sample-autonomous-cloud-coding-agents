@@ -755,3 +755,139 @@ def test_validate_required_params_pr_types_require_pr_number():
         "task_description": "do the thing",
     })
     assert missing == []
+
+
+# ---------------------------------------------------------------------------
+# Rev-5 Round 1 — P1-3 (attach-path subscribe-failure) + OBS-4 (session info)
+# ---------------------------------------------------------------------------
+
+
+def test_sse_attach_subscribe_failure_returns_503_no_spawn(monkeypatch):
+    """P1-3: If subscribe() raises on a live adapter (queue/close race), we
+    must NOT fall through to spawn — that would duplicate the pipeline.
+    Return 503 SSE_ATTACH_RACE instead so the client retries.
+    """
+    async def scenario():
+        adapter = _SSEAdapter("t-race")
+        adapter.attach_loop(asyncio.get_running_loop())
+
+        # Pre-populate the registry so the attach path triggers.
+        with server._threads_lock:
+            server._active_sse_adapters["t-race"] = adapter
+
+        # Force subscribe to raise.
+        def _boom() -> None:
+            raise RuntimeError("simulated subscribe race")
+
+        monkeypatch.setattr(adapter, "subscribe", _boom)
+
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: spawn_calls.append((a, kw)),
+        )
+
+        try:
+            params = {"task_id": "t-race", "repo_url": "o/r", "task_description": "x"}
+            resp = await server._invoke_sse(params)
+
+            # Must return a JSONResponse (not StreamingResponse).
+            assert resp.status_code == 503
+            body = json.loads(resp.body.decode())
+            assert body["code"] == "SSE_ATTACH_RACE"
+            # Critical: no duplicate spawn.
+            assert spawn_calls == []
+            # Registry unchanged (adapter still in place).
+            with server._threads_lock:
+                assert server._active_sse_adapters["t-race"] is adapter
+        finally:
+            with server._threads_lock:
+                server._active_sse_adapters.pop("t-race", None)
+            adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_spawn_interactive_writes_session_info(monkeypatch):
+    """OBS-4: the interactive-mode spawn path must call
+    task_state.write_session_info so TaskTable has session_id +
+    agent_runtime_arn for cancellation and observability.
+    """
+    async def scenario():
+        session_info_calls: list[tuple] = []
+        monkeypatch.setattr(
+            server.task_state,
+            "write_session_info",
+            lambda task_id, sid, arn: session_info_calls.append((task_id, sid, arn)),
+        )
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {"task_id": task_id, "execution_mode": "interactive"},
+        )
+        monkeypatch.setattr(
+            server,
+            "_spawn_background",
+            lambda *a, **kw: None,  # no-op; we only care about the session write
+        )
+        monkeypatch.setenv("AGENT_RUNTIME_ARN", "arn:aws:bedrock-agentcore:us-east-1:9:runtime/jwt-obs4")
+
+        params = {
+            "task_id": "t-obs4",
+            "session_id": "sess-obs4-abc",
+            "repo_url": "o/r",
+            "task_description": "x",
+        }
+        try:
+            await server._invoke_sse(params)
+            assert len(session_info_calls) == 1
+            called_task_id, called_sid, called_arn = session_info_calls[0]
+            assert called_task_id == "t-obs4"
+            assert called_sid == "sess-obs4-abc"
+            assert called_arn == "arn:aws:bedrock-agentcore:us-east-1:9:runtime/jwt-obs4"
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-obs4", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_sse_spawn_interactive_skips_session_write_when_env_and_header_missing(monkeypatch):
+    """If neither AGENT_RUNTIME_ARN env nor session header is set, we
+    should NOT call write_session_info (empty write would be a no-op but
+    we prefer to skip entirely for clarity).
+    """
+    async def scenario():
+        session_info_calls: list[tuple] = []
+        monkeypatch.setattr(
+            server.task_state,
+            "write_session_info",
+            lambda task_id, sid, arn: session_info_calls.append((task_id, sid, arn)),
+        )
+        monkeypatch.setattr(
+            server.task_state,
+            "get_task",
+            lambda task_id: {"task_id": task_id, "execution_mode": "interactive"},
+        )
+        monkeypatch.setattr(server, "_spawn_background", lambda *a, **kw: None)
+        monkeypatch.delenv("AGENT_RUNTIME_ARN", raising=False)
+
+        params = {
+            "task_id": "t-nosession",
+            "session_id": "",
+            "repo_url": "o/r",
+            "task_description": "x",
+        }
+        try:
+            await server._invoke_sse(params)
+            assert session_info_calls == []
+        finally:
+            with server._threads_lock:
+                adapter = server._active_sse_adapters.pop("t-nosession", None)
+            if adapter is not None:
+                adapter.close()
+
+    asyncio.run(scenario())
