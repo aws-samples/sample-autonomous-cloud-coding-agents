@@ -602,18 +602,30 @@ export async function runSse(args: RunSseArgs): Promise<void> {
   // the authoritative final task status so the exit code reflects the truth
   // rather than just the AG-UI frame type.
   let finalStatus: string;
+  let statusInferred = false;
   try {
     const task = await apiClient.getTask(taskId);
     finalStatus = task.status;
   } catch (err) {
     const e = err instanceof Error ? err : new Error(String(err));
     debug(`[watch/sse] getTask after RUN_FINISHED failed: ${e.message}`);
-    // If we can't read the final status, infer from the terminal event.
+    // If we can't read the authoritative status, INFER from the terminal
+    // AG-UI event. Surface the fact that we're inferring — the AG-UI
+    // event type and the server-side status can disagree (e.g., server
+    // cancels a task after RUN_FINISHED was emitted; or the stream saw
+    // a RUN_ERROR but the server finalized as COMPLETED via a retry).
     finalStatus = result.terminalEvent?.type === 'RUN_FINISHED' ? 'COMPLETED' : 'FAILED';
+    statusInferred = true;
+    logWarn(
+      `Final task status could not be fetched from REST (${e.message}); `
+      + `inferred as ${finalStatus} from the terminal SSE event. `
+      + `Run 'bgagent status ${taskId}' to confirm.`,
+    );
   }
 
   if (!isJson) {
-    logInfo(isJson, `Task ${finalStatus.toLowerCase()}.`);
+    const suffix = statusInferred ? ' (inferred)' : '';
+    logInfo(isJson, `Task ${finalStatus.toLowerCase()}${suffix}.`);
   }
   process.exitCode = finalStatus === 'COMPLETED' ? 0 : 1;
 }

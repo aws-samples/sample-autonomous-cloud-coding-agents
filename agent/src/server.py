@@ -87,6 +87,25 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     _t.start()
 
 
+def _debug_cw_exc(
+    message: str,
+    exc: BaseException,
+    *,
+    task_id: str | None = None,
+) -> None:
+    """Like ``_debug_cw`` but also captures the full traceback.
+
+    Rev-5 P1-5: bare ``except Exception`` catches in this file previously
+    logged only ``type(exc).__name__: exc``. A programming bug in, say,
+    hydration (TypeError on a malformed record) would surface without a
+    call site, making triage expensive. This helper inlines
+    ``traceback.format_exc()`` so operators grepping CloudWatch see the
+    full stack.
+    """
+    tb = traceback.format_exc()
+    _debug_cw(f"{message} [{type(exc).__name__}: {exc}]\n{tb}", task_id=task_id)
+
+
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
@@ -512,8 +531,7 @@ async def invoke_agent(request: Request, body: InvocationRequest):
             task_id=params.get("task_id"),
         )
     except Exception as exc:
-        _debug_cw(f"_extract_invocation_params FAILED: {type(exc).__name__}: {exc}")
-        traceback.print_exc()
+        _debug_cw_exc("_extract_invocation_params FAILED", exc)
         raise
 
     if _wants_sse(request):
@@ -523,11 +541,7 @@ async def invoke_agent(request: Request, body: InvocationRequest):
             _debug_cw("_invoke_sse returned StreamingResponse", task_id=params.get("task_id"))
             return response
         except Exception as exc:
-            _debug_cw(
-                f"_invoke_sse FAILED: {type(exc).__name__}: {exc}",
-                task_id=params.get("task_id"),
-            )
-            traceback.print_exc()
+            _debug_cw_exc("_invoke_sse FAILED", exc, task_id=params.get("task_id"))
             raise
 
     _debug_cw("routing to sync path", task_id=params.get("task_id"))
@@ -705,12 +719,12 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
             # so the client retries, by which time the adapter has
             # either finished closing (attach path won't match) or
             # recovered.
-            _debug_cw(
-                f"attach subscribe FAILED ({type(exc).__name__}: {exc}); "
-                f"returning 503 to client for retry (NOT spawning duplicate)",
+            _debug_cw_exc(
+                "attach subscribe FAILED; returning 503 to client "
+                "for retry (NOT spawning duplicate)",
+                exc,
                 task_id=task_id,
             )
-            traceback.print_exc()
             return JSONResponse(
                 status_code=503,
                 content={
@@ -873,8 +887,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
         sse_adapter = _SSEAdapter(task_id=task_id)
         _debug_cw(f"_SSEAdapter constructed for {task_id!r}", task_id=task_id)
     except Exception as exc:
-        _debug_cw(f"_SSEAdapter construction FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
-        traceback.print_exc()
+        _debug_cw_exc("_SSEAdapter construction FAILED", exc, task_id=task_id)
         raise
 
     try:
@@ -882,8 +895,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
         sse_adapter.attach_loop(loop)
         _debug_cw(f"attached asyncio loop: {type(loop).__name__}", task_id=task_id)
     except Exception as exc:
-        _debug_cw(f"attach_loop FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
-        traceback.print_exc()
+        _debug_cw_exc("attach_loop FAILED", exc, task_id=task_id)
         raise
 
     # Register the adapter BEFORE spawning so a rapid reconnect race (unlikely
@@ -902,10 +914,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     try:
         sub_queue = sse_adapter.subscribe()
     except Exception as exc:
-        _debug_cw(
-            f"subscribe FAILED in spawn path: {type(exc).__name__}: {exc}",
-            task_id=task_id,
-        )
+        _debug_cw_exc("subscribe FAILED in spawn path", exc, task_id=task_id)
         # Roll back the registry insert on failure.
         with _threads_lock:
             if _active_sse_adapters.get(task_id) is sse_adapter:
@@ -916,8 +925,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
         _spawn_background(params, sse_adapter=sse_adapter)
         _debug_cw(f"background thread spawned for task_id={task_id!r}", task_id=task_id)
     except Exception as exc:
-        _debug_cw(f"_spawn_background FAILED: {type(exc).__name__}: {exc}", task_id=task_id)
-        traceback.print_exc()
+        _debug_cw_exc("_spawn_background FAILED", exc, task_id=task_id)
         # Roll back the registry insert on spawn failure.
         with _threads_lock:
             if _active_sse_adapters.get(task_id) is sse_adapter:

@@ -883,4 +883,56 @@ describe('watch command — transport resolution', () => {
       ]),
     ).rejects.toThrow(/Invalid --stream-timeout-seconds/);
   });
+
+  // -----------------------------------------------------------------------
+  // Test 19 (P1-2): getTask after SSE terminal failing → WARN emitted +
+  // status marked (inferred) + exit code reflects the inferred status
+  // -----------------------------------------------------------------------
+  test('post-SSE getTask failure → logWarn + "(inferred)" suffix', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    runSseClient.mockResolvedValue({
+      terminalEvent: { type: 'RUN_FINISHED', runId: 'r' } as AgUiEvent,
+      reconnectCount: 0,
+      eventsReceived: 0,
+      eventsDeduplicated: 0,
+      totalDurationMs: 1,
+    });
+    mockGetTask
+      // Snapshot returns RUNNING so the code enters the SSE path.
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
+      // The POST-SSE getTask call throws — REST is down mid-run.
+      .mockRejectedValueOnce(new Error('ECONNRESET'));
+
+    const cmd = makeWatchCommand();
+    await cmd.parseAsync(['node', 'test', 'task-rest-down', '--transport', 'sse']);
+
+    // WARN surfaced so the user knows the status is inferred.
+    expect(joinStderr()).toMatch(/WARN.*Final task status could not be fetched/);
+    expect(joinStderr()).toMatch(/ECONNRESET/);
+    expect(joinStderr()).toMatch(/bgagent status task-rest-down/);
+    // "(inferred)" suffix on the user-visible terminal line.
+    expect(joinStderr()).toMatch(/Task completed \(inferred\)\./);
+    // Exit code still honors the inferred status.
+    expect(process.exitCode).toBe(0);
+  });
+
+  test('post-SSE getTask failure with RUN_ERROR → inferred FAILED + exit 1', async () => {
+    loadConfig.mockReturnValue(CONFIG_WITH_SSE);
+    runSseClient.mockResolvedValue({
+      terminalEvent: { type: 'RUN_ERROR', runId: 'r', message: 'boom' } as unknown as AgUiEvent,
+      reconnectCount: 0,
+      eventsReceived: 0,
+      eventsDeduplicated: 0,
+      totalDurationMs: 1,
+    });
+    mockGetTask
+      .mockResolvedValueOnce({ status: 'RUNNING', execution_mode: 'interactive' })
+      .mockRejectedValueOnce(new Error('nope'));
+
+    const cmd = makeWatchCommand();
+    await cmd.parseAsync(['node', 'test', 'task-failed-inf', '--transport', 'sse']);
+
+    expect(joinStderr()).toMatch(/Task failed \(inferred\)\./);
+    expect(process.exitCode).toBe(1);
+  });
 });
