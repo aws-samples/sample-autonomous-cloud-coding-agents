@@ -65,9 +65,8 @@ export class AgentStack extends Stack {
     //
     // The DockerImageAsset dedupes on asset hash so we still publish one
     // image to ECR. Keep this split until the L2 fixes the multi-runtime
-    // bind guard. Tracking follow-up: ``docs/design/PHASE_1B_REV5_FOLLOWUPS.md``
-    // → CDK-1 (file an upstream issue against
-    // ``@aws-cdk/aws-bedrock-agentcore-alpha``).
+    // bind guard — tracked upstream at
+    // https://github.com/aws/aws-cdk/issues/37663.
     const artifactIam = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
     const artifactJwt = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 

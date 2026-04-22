@@ -141,9 +141,9 @@ pending, in the order the rev-5 rounds were executed.
   `TaskRecord`/`TaskDetail` in CDK + CLI types mirror; `toTaskDetail`
   forwards.
 
-## Pending — deferred beyond rev-5
+## Non-code follow-ups tracked elsewhere
 
-### CDK-1 — File upstream bug for `AssetImage.bind` double-attach — [self]
+### ✅ CDK-1 — Upstream bug filed: aws/aws-cdk#37663
 
 `cdk/src/stacks/agent.ts` has a two-artifact workaround:
 
@@ -152,26 +152,18 @@ const artifactIam = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 const artifactJwt = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 ```
 
-Root cause in `@aws-cdk/aws-bedrock-agentcore-alpha`'s
-`AssetImage.bind` method: it guards against double-grant with
-`this.bound = true`, so when the same artifact instance is passed to
-two Runtimes the second runtime's execution role never receives ECR
-pull permissions. Image pull fails with 424 "no basic auth
-credentials".
+Root cause in `@aws-cdk/aws-bedrock-agentcore-alpha`'s `AssetImage.bind`
+method: it guards against double-grant with `this.bound = true`, so
+when the same artifact instance is passed to two Runtimes the second
+runtime's execution role never receives ECR pull permissions. Image
+pull fails with 424 "no basic auth credentials".
 
-**Action**: open a GitHub issue against the CDK repo (or AWS CDK
-Construct Hub) with:
-- Minimal repro (two `new agentcore.Runtime()` calls sharing one
-  `fromAsset` artifact).
-- CFN template output showing `ecr:BatchGetImage` missing on the second
-  runtime's IAM::Policy.
-- The workaround ("call `fromAsset` twice; DockerImageAsset dedupes on
-  hash so only one image is published to ECR").
-
-Once filed, update the comment at `cdk/src/stacks/agent.ts:55-68` to
-reference the issue URL (replace "Tracking follow-up:
-`docs/design/PHASE_1B_REV5_FOLLOWUPS.md` → CDK-1"). Until that lands
-upstream, keep the workaround.
+Filed upstream at <https://github.com/aws/aws-cdk/issues/37663> with
+minimal repro, root-cause analysis, and a suggested fix. The code
+comment at `cdk/src/stacks/agent.ts:55-68` now links the issue.
+Keep the two-artifact workaround until the upstream fix ships (or
+remove it when this repo upgrades to a version that includes the
+fix).
 
 ### Candidates NOT landed (by design)
 
@@ -190,5 +182,6 @@ upstream, keep the workaround.
 ## Status as of this round
 
 All validator-surfaced P0/P1/OBS/TDA/POLL/DATA items are either landed
-or explicitly classified as not-in-scope above. CDK-1 is the only
-remaining item and it's an upstream admin task, not code.
+or explicitly classified as not-in-scope above. CDK-1 is filed
+upstream (aws/aws-cdk#37663); the two-artifact workaround stays until
+the upstream fix ships.
