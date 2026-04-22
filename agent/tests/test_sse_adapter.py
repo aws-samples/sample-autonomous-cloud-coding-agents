@@ -172,6 +172,35 @@ class TestRoundTrip:
             "message": "kaboom",
         }
 
+    def test_subscription_context_manager_auto_unsubscribes(self, loop_env):
+        """Rev-5 TDA-2: `with adapter.subscription() as queue:` must call
+        unsubscribe on exit (even through exceptions), returning the
+        subscriber slot."""
+        loop, _ = loop_env
+        adapter = _make_adapter()
+        adapter.attach_loop(loop)
+
+        before = adapter.subscriber_count
+        with adapter.subscription() as q:
+            assert adapter.subscriber_count == before + 1
+            assert q is not None
+        # After the with block exits, subscriber_count is back to `before`.
+        assert adapter.subscriber_count == before
+
+    def test_subscription_context_manager_unsubscribes_on_error(self, loop_env):
+        loop, _ = loop_env
+        adapter = _make_adapter()
+        adapter.attach_loop(loop)
+
+        before = adapter.subscriber_count
+        try:
+            with adapter.subscription() as q:
+                assert q is not None
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert adapter.subscriber_count == before
+
     def test_write_agent_error_fallback_uses_undelivered_counter(self, loop_env):
         """If _enqueue itself raises inside write_agent_error, the last-ditch
         counter bump must NOT raise AttributeError — the adapter's contract

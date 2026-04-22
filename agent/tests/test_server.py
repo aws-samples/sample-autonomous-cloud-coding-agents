@@ -726,6 +726,45 @@ def test_sse_returns_500_task_record_incomplete_on_missing_required(monkeypatch)
     asyncio.run(scenario())
 
 
+def test_adapter_registry_insert_conflict_raises(monkeypatch):
+    """Rev-5 TDA-1: inserting a DIFFERENT adapter for an already-occupied
+    task_id slot raises RuntimeError. Re-inserting the SAME adapter is
+    idempotent."""
+    registry = server._AdapterRegistry()
+    a = _SSEAdapter("t-conflict")
+    b = _SSEAdapter("t-conflict")
+    registry.insert("t-conflict", a)
+    # Idempotent re-insert of the same adapter.
+    registry.insert("t-conflict", a)
+    import pytest
+    with pytest.raises(RuntimeError, match="registry conflict"):
+        registry.insert("t-conflict", b)
+
+
+def test_adapter_registry_remove_if_current_identity_checked():
+    """TDA-1: remove_if_current only removes when the identity matches."""
+    registry = server._AdapterRegistry()
+    a = _SSEAdapter("t-rm")
+    b = _SSEAdapter("t-rm")
+    registry.insert("t-rm", a)
+    # Remove with a different adapter identity → no-op.
+    assert registry.remove_if_current("t-rm", b) is False
+    assert registry.get("t-rm") is a
+    # Remove with the correct identity → removed.
+    assert registry.remove_if_current("t-rm", a) is True
+    assert registry.get("t-rm") is None
+
+
+def test_normalize_execution_mode_legacy_default():
+    """TDA-6: unknown/missing/None → orchestrator; 'interactive' → interactive."""
+    assert server.normalize_execution_mode("interactive") == "interactive"
+    assert server.normalize_execution_mode("orchestrator") == "orchestrator"
+    assert server.normalize_execution_mode(None) == "orchestrator"
+    assert server.normalize_execution_mode("") == "orchestrator"
+    assert server.normalize_execution_mode("unknown") == "orchestrator"
+    assert server.normalize_execution_mode(42) == "orchestrator"
+
+
 def test_validate_required_params_pr_types_require_pr_number():
     """PR-iteration and PR-review task_types need a pr_number regardless."""
     missing = server._validate_required_params({

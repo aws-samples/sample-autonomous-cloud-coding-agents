@@ -24,7 +24,7 @@ import threading
 import traceback
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -249,7 +249,79 @@ _threads_lock = threading.Lock()
 # existing adapter via ``subscribe()`` instead of spawning a duplicate
 # pipeline. Entries are removed in ``_run_task_background``'s ``finally``.
 # Guarded by ``_threads_lock`` — adapter lifecycle is tied to its thread.
-_active_sse_adapters: dict[str, _SSEAdapter] = {}
+class _AdapterRegistry:
+    """Process-local ``{task_id: _SSEAdapter}`` registry, rev-5 TDA-1.
+
+    Owns its lock + enforces the identity-checked pop invariant in one
+    place so call sites can't forget it. A second SSE invocation for a
+    task that already has a running pipeline in THIS microVM attaches to
+    the existing adapter via ``subscribe()`` instead of spawning a
+    duplicate pipeline.
+
+    Prior design was a bare module-level ``dict`` + ``_threads_lock``
+    guarded by convention, with three open-coded identity-checked pop
+    sites. This class makes that structural.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_task_id: dict[str, _SSEAdapter] = {}
+
+    def insert(self, task_id: str, adapter: _SSEAdapter) -> None:
+        """Register a newly-spawned adapter. Raises if a conflicting
+        adapter is already present (caller bug — the attach path should
+        have caught this)."""
+        with self._lock:
+            existing = self._by_task_id.get(task_id)
+            if existing is not None and existing is not adapter:
+                raise RuntimeError(
+                    f"adapter registry conflict for task_id={task_id!r}: "
+                    f"a different adapter is already registered"
+                )
+            self._by_task_id[task_id] = adapter
+
+    def remove_if_current(self, task_id: str, adapter: _SSEAdapter) -> bool:
+        """Identity-checked pop. Removes only if the registry still
+        points at ``adapter`` — prevents accidentally evicting a
+        replacement adapter that took the slot during a reconnect race.
+        Returns True if removed, False if the slot holds a different
+        (or no) adapter."""
+        with self._lock:
+            current = self._by_task_id.get(task_id)
+            if current is adapter:
+                self._by_task_id.pop(task_id, None)
+                return True
+            return False
+
+    def get(self, task_id: str) -> _SSEAdapter | None:
+        with self._lock:
+            return self._by_task_id.get(task_id)
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._by_task_id)
+
+    # Test / introspection only — do not mutate concurrently with active
+    # pipelines. `in` / `pop` kept so existing tests that poked at the
+    # underlying dict keep working.
+    def __contains__(self, task_id: str) -> bool:
+        with self._lock:
+            return task_id in self._by_task_id
+
+    def __getitem__(self, task_id: str) -> _SSEAdapter:
+        with self._lock:
+            return self._by_task_id[task_id]
+
+    def __setitem__(self, task_id: str, adapter: _SSEAdapter) -> None:
+        with self._lock:
+            self._by_task_id[task_id] = adapter
+
+    def pop(self, task_id: str, default: _SSEAdapter | None = None) -> _SSEAdapter | None:
+        with self._lock:
+            return self._by_task_id.pop(task_id, default)
+
+
+_active_sse_adapters: _AdapterRegistry = _AdapterRegistry()
 
 # Set when the pipeline thread raises after /invocations accepted (Dynamo backup + ping signal).
 _background_pipeline_failed = False
@@ -271,8 +343,28 @@ _HEARTBEAT_INTERVAL_SECONDS = 45
 # ``cdk/src/handlers/shared/types.ts`` / ``cli/src/types.ts``. Legacy rows
 # (pre-rev-5) have no ``execution_mode`` field and are treated as
 # ``EXECUTION_MODE_ORCHESTRATOR`` (preserves Phase 1a behaviour).
-EXECUTION_MODE_ORCHESTRATOR = "orchestrator"
-EXECUTION_MODE_INTERACTIVE = "interactive"
+#
+# Rev-5 TDA-6: typed as a ``Literal`` so mypy flags stray string
+# comparisons. The ``normalize_execution_mode`` helper is the single
+# recommended way to coerce arbitrary input (DDB dict, env var) to the
+# union.
+ExecutionMode = Literal["orchestrator", "interactive"]
+EXECUTION_MODE_ORCHESTRATOR: ExecutionMode = "orchestrator"
+EXECUTION_MODE_INTERACTIVE: ExecutionMode = "interactive"
+
+
+def normalize_execution_mode(raw: object) -> ExecutionMode:
+    """Coerce an untrusted value (DDB dict lookup, env var, dict.get()
+    return) to the ``ExecutionMode`` union.
+
+    Unknown / missing / non-string values collapse to
+    ``EXECUTION_MODE_ORCHESTRATOR`` — the legacy default. Explicit
+    ``"interactive"`` returns as-is; any other string is treated as
+    legacy + logged (caller's responsibility to debug_cw).
+    """
+    if raw == EXECUTION_MODE_INTERACTIVE:
+        return EXECUTION_MODE_INTERACTIVE
+    return EXECUTION_MODE_ORCHESTRATOR
 
 
 def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
@@ -459,15 +551,12 @@ def _run_task_background(
         # semantics) takes the spawn path rather than attaching to a closed
         # adapter.
         if task_id:
-            with _threads_lock:
-                current = _active_sse_adapters.get(task_id)
-                if current is sse_adapter:
-                    _active_sse_adapters.pop(task_id, None)
-                    _debug_cw(
-                        f"registry: removed task_id={task_id!r} "
-                        f"active_count={len(_active_sse_adapters)}",
-                        task_id=task_id,
-                    )
+            if _active_sse_adapters.remove_if_current(task_id, sse_adapter):
+                _debug_cw(
+                    f"registry: removed task_id={task_id!r} "
+                    f"active_count={_active_sse_adapters.size()}",
+                    task_id=task_id,
+                )
 
 
 def _extract_invocation_params(inp: dict, request: Request) -> dict:
@@ -788,8 +877,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     task_id = params["task_id"] or "anon"
 
     # --- ATTACH path: same-session reconnect or concurrent observer ---------
-    with _threads_lock:
-        existing = _active_sse_adapters.get(task_id)
+    existing = _active_sse_adapters.get(task_id)
     if existing is not None and existing.has_subscribers:
         try:
             sub_queue = existing.subscribe()
@@ -865,7 +953,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                 },
             )
         if record is not None:
-            existing_mode = record.get("execution_mode") or EXECUTION_MODE_ORCHESTRATOR
+            existing_mode = normalize_execution_mode(record.get("execution_mode"))
             if existing_mode != EXECUTION_MODE_INTERACTIVE:
                 _debug_cw(
                     f"RUN_ELSEWHERE: task_id={task_id!r} execution_mode="
@@ -998,11 +1086,10 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     # Register the adapter BEFORE spawning so a rapid reconnect race (unlikely
     # but possible when AgentCore retries quickly) attaches to the existing
     # adapter instead of double-spawning.
-    with _threads_lock:
-        _active_sse_adapters[task_id] = sse_adapter
+    _active_sse_adapters.insert(task_id, sse_adapter)
     _debug_cw(
         f"registry: inserted task_id={task_id!r} "
-        f"active_count={len(_active_sse_adapters)}",
+        f"active_count={_active_sse_adapters.size()}",
         task_id=task_id,
     )
 
@@ -1012,10 +1099,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
         sub_queue = sse_adapter.subscribe()
     except Exception as exc:
         _debug_cw_exc("subscribe FAILED in spawn path", exc, task_id=task_id)
-        # Roll back the registry insert on failure.
-        with _threads_lock:
-            if _active_sse_adapters.get(task_id) is sse_adapter:
-                _active_sse_adapters.pop(task_id, None)
+        _active_sse_adapters.remove_if_current(task_id, sse_adapter)
         raise
 
     try:
@@ -1024,10 +1108,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
         _emit_sse_route_metric(task_id, "spawn")
     except Exception as exc:
         _debug_cw_exc("_spawn_background FAILED", exc, task_id=task_id)
-        # Roll back the registry insert on spawn failure.
-        with _threads_lock:
-            if _active_sse_adapters.get(task_id) is sse_adapter:
-                _active_sse_adapters.pop(task_id, None)
+        _active_sse_adapters.remove_if_current(task_id, sse_adapter)
         raise
 
     headers = {

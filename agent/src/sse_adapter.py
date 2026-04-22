@@ -221,6 +221,24 @@ class _SSEAdapter:
                 f"unsubscribe task={self._task_id} subscriber_count={len(self._subscribers)}",
             )
 
+    @contextlib.contextmanager
+    def subscription(self):  # -> "Iterator[asyncio.Queue[Any]]"
+        """Rev-5 TDA-2: subscribe + unsubscribe as a context manager.
+
+        Structural cleanup — callers can no longer forget to call
+        ``unsubscribe`` with the right queue. Wraps ``subscribe()`` +
+        ``unsubscribe(queue)`` in a try/finally so disconnects, errors,
+        and early returns all release the slot. ``subscribe()`` remains
+        the raw API for call sites that can't use ``with`` (e.g., the
+        per-observer ``_sse_event_stream`` generator which hands the
+        queue to a StreamingResponse outliving the subscribe call).
+        """
+        queue = self.subscribe()
+        try:
+            yield queue
+        finally:
+            self.unsubscribe(queue)
+
     async def get(self) -> dict | None:
         """Await the next event on the default subscriber (legacy API).
 
