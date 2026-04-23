@@ -6,7 +6,7 @@ title: Deployment roles
 
 This document defines least-privilege IAM policies for the CloudFormation execution role used during `cdk deploy`. The default CDK bootstrap grants `AdministratorAccess` to this role; the policies below scope it to only what ABCA needs.
 
-> **Origin**: These IAM policies were generated from a thorough review of the repository's CDK constructs, stacks, and handler code. Each permission was derived by analyzing what CloudFormation needs to create, update, and delete every resource defined in the CDK stack. They have not yet been validated against a live deployment and should be treated as a starting point for iterative tightening.
+> **Origin**: These IAM policies were derived from a thorough review of the repository's CDK constructs, stacks, and handler code, then **validated against a live deployment** in `us-east-1` (create, update, task execution, and destroy). CloudTrail analysis identified 36 additional actions beyond the initial code review, and 7 deployment iterations refined the policies to their current form. The policies are split into three managed policies to stay under the IAM 6,144-character limit.
 
 ## How CDK deployment roles work
 
@@ -19,16 +19,25 @@ CDK uses a **four-role model** created during `cdk bootstrap`:
 
 The policy below is a **CloudFormation Execution Role** replacement. The other three roles are scoped by the bootstrap template and do not need modification for least-privilege deployment.
 
-## Using this role
+## Using these policies
+
+The policies are split into three IAM managed policies (each under the 6,144-character limit):
+
+| Policy Name | Scope |
+|-------------|-------|
+| `IaCRole-ABCA-Infrastructure` | CloudFormation, IAM, VPC networking, Route 53 Resolver DNS Firewall |
+| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, Secrets Manager |
+| `IaCRole-ABCA-Observability` | Bedrock AgentCore, Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS |
 
 ```bash
-# Option 1: Re-bootstrap with custom execution policy
-# First, create the IAM policy in your account, then:
+# Create all three policies in your account, then re-bootstrap:
 cdk bootstrap aws://ACCOUNT/REGION \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Policy"
-
-# Option 2: For CI/CD pipelines, configure the execution role in the pipeline definition
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Infrastructure" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Application" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Observability"
 ```
+
+The `--cloudformation-execution-policies` flag can be repeated to attach multiple policies to the CloudFormation execution role.
 
 ## Trust policy
 
@@ -62,6 +71,12 @@ cdk bootstrap aws://ACCOUNT/REGION \
 ## IaCRole-ABCA
 
 For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
+
+> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into three policies to stay under this limit. Use all three when re-bootstrapping (see [Using these policies](#using-these-policies)).
+
+### IaCRole-ABCA-Infrastructure
+
+CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 53 Resolver DNS Firewall.
 
 ```json
 {
@@ -130,113 +145,6 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
       ]
     },
     {
-      "Sid": "DynamoDB",
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:CreateTable",
-        "dynamodb:DeleteTable",
-        "dynamodb:DescribeTable",
-        "dynamodb:DescribeTimeToLive",
-        "dynamodb:UpdateTimeToLive",
-        "dynamodb:UpdateTable",
-        "dynamodb:UpdateContinuousBackups",
-        "dynamodb:DescribeContinuousBackups",
-        "dynamodb:TagResource",
-        "dynamodb:UntagResource",
-        "dynamodb:ListTagsOfResource",
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem"
-      ],
-      "Resource": "arn:aws:dynamodb:*:*:table/backgroundagent-dev-*"
-    },
-    {
-      "Sid": "Lambda",
-      "Effect": "Allow",
-      "Action": [
-        "lambda:CreateFunction",
-        "lambda:DeleteFunction",
-        "lambda:GetFunction",
-        "lambda:GetFunctionConfiguration",
-        "lambda:UpdateFunctionCode",
-        "lambda:UpdateFunctionConfiguration",
-        "lambda:AddPermission",
-        "lambda:RemovePermission",
-        "lambda:GetPolicy",
-        "lambda:TagResource",
-        "lambda:UntagResource",
-        "lambda:ListTags",
-        "lambda:PublishVersion",
-        "lambda:CreateAlias",
-        "lambda:DeleteAlias",
-        "lambda:GetAlias",
-        "lambda:UpdateAlias",
-        "lambda:PutFunctionEventInvokeConfig",
-        "lambda:DeleteFunctionEventInvokeConfig",
-        "lambda:GetFunctionEventInvokeConfig",
-        "lambda:PutFunctionConcurrency",
-        "lambda:DeleteFunctionConcurrency"
-      ],
-      "Resource": "arn:aws:lambda:*:*:function:backgroundagent-dev-*"
-    },
-    {
-      "Sid": "APIGateway",
-      "Effect": "Allow",
-      "Action": [
-        "apigateway:POST",
-        "apigateway:GET",
-        "apigateway:PUT",
-        "apigateway:PATCH",
-        "apigateway:DELETE",
-        "apigateway:TagResource",
-        "apigateway:UntagResource",
-        "apigateway:SetWebACL",
-        "apigateway:UpdateRestApiPolicy"
-      ],
-      "Resource": [
-        "arn:aws:apigateway:*::/restapis",
-        "arn:aws:apigateway:*::/restapis/*",
-        "arn:aws:apigateway:*::/account",
-        "arn:aws:apigateway:*::/tags/*"
-      ]
-    },
-    {
-      "Sid": "Cognito",
-      "Effect": "Allow",
-      "Action": [
-        "cognito-idp:CreateUserPool",
-        "cognito-idp:DeleteUserPool",
-        "cognito-idp:DescribeUserPool",
-        "cognito-idp:UpdateUserPool",
-        "cognito-idp:CreateUserPoolClient",
-        "cognito-idp:DeleteUserPoolClient",
-        "cognito-idp:DescribeUserPoolClient",
-        "cognito-idp:UpdateUserPoolClient",
-        "cognito-idp:TagResource",
-        "cognito-idp:UntagResource",
-        "cognito-idp:ListTagsForResource"
-      ],
-      "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
-    },
-    {
-      "Sid": "WAFv2",
-      "Effect": "Allow",
-      "Action": [
-        "wafv2:CreateWebACL",
-        "wafv2:DeleteWebACL",
-        "wafv2:GetWebACL",
-        "wafv2:UpdateWebACL",
-        "wafv2:AssociateWebACL",
-        "wafv2:DisassociateWebACL",
-        "wafv2:ListTagsForResource",
-        "wafv2:TagResource",
-        "wafv2:UntagResource"
-      ],
-      "Resource": [
-        "arn:aws:wafv2:*:*:regional/webacl/*",
-        "arn:aws:wafv2:*:*:regional/managedruleset/*"
-      ]
-    },
-    {
       "Sid": "VPCNetworking",
       "Effect": "Allow",
       "Action": [
@@ -284,7 +192,10 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
         "ec2:DescribeTags",
         "ec2:DescribeAvailabilityZones",
         "ec2:DescribeNetworkInterfaces",
-        "ec2:DescribePrefixLists"
+        "ec2:DescribePrefixLists",
+        "ec2:DescribeNetworkAcls",
+        "ec2:DescribeVpcAttribute",
+        "ec2:ModifySubnetAttribute"
       ],
       "Resource": "*"
     },
@@ -317,9 +228,160 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
         "route53resolver:GetResolverQueryLogConfig",
         "route53resolver:AssociateResolverQueryLogConfig",
         "route53resolver:DisassociateResolverQueryLogConfig",
-        "route53resolver:GetResolverQueryLogConfigAssociation"
+        "route53resolver:GetResolverQueryLogConfigAssociation",
+        "route53resolver:ListResolverQueryLogConfigAssociations",
+        "route53resolver:ListResolverQueryLogConfigs"
       ],
       "Resource": "*"
+    }
+  ]
+}
+```
+
+### IaCRole-ABCA-Application
+
+DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and Secrets Manager. When ECS Fargate compute is enabled, add the ECS statement below to this policy.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DynamoDB",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:UpdateTimeToLive",
+        "dynamodb:UpdateTable",
+        "dynamodb:UpdateContinuousBackups",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:TagResource",
+        "dynamodb:UntagResource",
+        "dynamodb:ListTagsOfResource",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DescribeContributorInsights",
+        "dynamodb:DescribeKinesisStreamingDestination",
+        "dynamodb:GetResourcePolicy"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/backgroundagent-dev-*"
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:GetPolicy",
+        "lambda:TagResource",
+        "lambda:UntagResource",
+        "lambda:ListTags",
+        "lambda:PublishVersion",
+        "lambda:CreateAlias",
+        "lambda:DeleteAlias",
+        "lambda:GetAlias",
+        "lambda:UpdateAlias",
+        "lambda:PutFunctionEventInvokeConfig",
+        "lambda:DeleteFunctionEventInvokeConfig",
+        "lambda:GetFunctionEventInvokeConfig",
+        "lambda:PutFunctionConcurrency",
+        "lambda:DeleteFunctionConcurrency",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionRecursionConfig",
+        "lambda:GetProvisionedConcurrencyConfig",
+        "lambda:GetRuntimeManagementConfig",
+        "lambda:ListVersionsByFunction",
+        "lambda:InvokeFunction"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:backgroundagent-dev-*",
+        "arn:aws:lambda:*:*:function:backgroundagent-dev-AWS*"
+      ]
+    },
+    {
+      "Sid": "APIGateway",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:POST",
+        "apigateway:GET",
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:DELETE",
+        "apigateway:TagResource",
+        "apigateway:UntagResource",
+        "apigateway:SetWebACL",
+        "apigateway:UpdateRestApiPolicy"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/restapis",
+        "arn:aws:apigateway:*::/restapis/*",
+        "arn:aws:apigateway:*::/account",
+        "arn:aws:apigateway:*::/tags/*"
+      ]
+    },
+    {
+      "Sid": "Cognito",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:CreateUserPool",
+        "cognito-idp:DeleteUserPool",
+        "cognito-idp:DescribeUserPool",
+        "cognito-idp:UpdateUserPool",
+        "cognito-idp:CreateUserPoolClient",
+        "cognito-idp:DeleteUserPoolClient",
+        "cognito-idp:DescribeUserPoolClient",
+        "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:TagResource",
+        "cognito-idp:UntagResource",
+        "cognito-idp:ListTagsForResource",
+        "cognito-idp:GetUserPoolMfaConfig"
+      ],
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+    },
+    {
+      "Sid": "WAFv2",
+      "Effect": "Allow",
+      "Action": [
+        "wafv2:CreateWebACL",
+        "wafv2:DeleteWebACL",
+        "wafv2:GetWebACL",
+        "wafv2:UpdateWebACL",
+        "wafv2:AssociateWebACL",
+        "wafv2:DisassociateWebACL",
+        "wafv2:ListTagsForResource",
+        "wafv2:TagResource",
+        "wafv2:UntagResource",
+        "wafv2:GetWebACLForResource"
+      ],
+      "Resource": [
+        "arn:aws:wafv2:*:*:regional/webacl/*",
+        "arn:aws:wafv2:*:*:regional/managedruleset/*"
+      ]
+    },
+    {
+      "Sid": "EventBridge",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:TagResource",
+        "events:UntagResource",
+        "events:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:events:*:*:rule/backgroundagent-dev-*"
     },
     {
       "Sid": "SecretsManager",
@@ -335,25 +397,31 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
         "secretsmanager:UntagResource",
         "secretsmanager:GetResourcePolicy",
         "secretsmanager:PutResourcePolicy",
-        "secretsmanager:DeleteResourcePolicy"
+        "secretsmanager:DeleteResourcePolicy",
+        "secretsmanager:GetRandomPassword"
       ],
-      "Resource": "arn:aws:secretsmanager:*:*:secret:backgroundagent-*"
-    },
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:backgroundagent-*",
+        "*"
+      ]
+    }
+  ]
+}
+```
+
+### IaCRole-ABCA-Observability
+
+Bedrock AgentCore, Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), KMS, ECR, SSM, and STS.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
     {
       "Sid": "BedrockAgentCore",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:CreateRuntime",
-        "bedrock-agentcore:DeleteRuntime",
-        "bedrock-agentcore:GetRuntime",
-        "bedrock-agentcore:UpdateRuntime",
-        "bedrock-agentcore:CreateMemory",
-        "bedrock-agentcore:DeleteMemory",
-        "bedrock-agentcore:GetMemory",
-        "bedrock-agentcore:UpdateMemory",
-        "bedrock-agentcore:TagResource",
-        "bedrock-agentcore:UntagResource",
-        "bedrock-agentcore:ListTagsForResource"
+        "bedrock-agentcore:*"
       ],
       "Resource": "*"
     },
@@ -401,24 +469,27 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
         "cloudwatch:DeleteAlarms",
         "cloudwatch:DescribeAlarms",
         "cloudwatch:TagResource",
-        "cloudwatch:UntagResource"
+        "cloudwatch:UntagResource",
+        "logs:CreateDelivery",
+        "logs:DescribeDeliveries",
+        "logs:GetDelivery",
+        "logs:GetDeliveryDestination",
+        "logs:GetDeliveryDestinationPolicy",
+        "logs:GetDeliverySource",
+        "logs:PutDeliveryDestination",
+        "logs:PutDeliverySource",
+        "logs:DescribeIndexPolicies",
+        "cloudwatch:ListTagsForResource",
+        "logs:CreateLogDelivery",
+        "logs:DeleteLogDelivery",
+        "logs:GetLogDelivery",
+        "logs:UpdateLogDelivery",
+        "logs:ListLogDeliveries",
+        "logs:DeleteDelivery",
+        "logs:DeleteDeliverySource",
+        "logs:DeleteDeliveryDestination"
       ],
       "Resource": "*"
-    },
-    {
-      "Sid": "EventBridge",
-      "Effect": "Allow",
-      "Action": [
-        "events:PutRule",
-        "events:DeleteRule",
-        "events:DescribeRule",
-        "events:PutTargets",
-        "events:RemoveTargets",
-        "events:ListTargetsByRule",
-        "events:TagResource",
-        "events:UntagResource"
-      ],
-      "Resource": "arn:aws:events:*:*:rule/backgroundagent-dev-*"
     },
     {
       "Sid": "S3CDKAssets",
@@ -433,6 +504,18 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
         "arn:aws:s3:::cdk-hnb659fds-assets-*",
         "arn:aws:s3:::cdk-hnb659fds-assets-*/*"
       ]
+    },
+    {
+      "Sid": "KMSForCDKAssets",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateGrant",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "ECRForDockerAssets",
@@ -470,7 +553,9 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
       "Effect": "Allow",
       "Action": [
         "xray:UpdateTraceSegmentDestination",
-        "xray:GetTraceSegmentDestination"
+        "xray:GetTraceSegmentDestination",
+        "xray:ListResourcePolicies",
+        "xray:PutResourcePolicy"
       ],
       "Resource": "*"
     },
@@ -502,7 +587,7 @@ For deploying the `backgroundagent-dev` stack. This single stack contains all pl
 
 ### When ECS compute is enabled
 
-If you uncomment the ECS blocks in `cdk/src/stacks/agent.ts` to enable the Fargate compute backend, add the following statement to the policy:
+If you uncomment the ECS blocks in `cdk/src/stacks/agent.ts` to enable the Fargate compute backend, add the following statement to the `IaCRole-ABCA-Application` policy:
 
 ```json
 {
@@ -564,11 +649,12 @@ Several services require `Resource: "*"` because they do not support resource-le
 | EC2 (VPC) | `Create*`, `Describe*`, `Allocate*` | VPC resource ARNs unknown at policy creation time |
 | Route 53 Resolver | All DNS Firewall actions | No resource-level ARN support for firewall rule groups |
 | Bedrock | Guardrail + logging config actions | Account-level APIs (`PutModelInvocationLoggingConfiguration`) |
-| Bedrock AgentCore | Runtime + Memory CRUD | Resource ARN patterns may not be fully supported in IAM yet |
+| Bedrock AgentCore | All actions (`bedrock-agentcore:*`) | CloudFormation resource handler uses internal action names that differ from the public API; wildcard required for reliable deployment |
 | CloudWatch Logs | `CreateLogGroup`, `PutResourcePolicy` | Log group ARNs unknown at policy creation; resource policies are account-scoped |
 | ECS | Cluster + task definition actions | `RegisterTaskDefinition` doesn't support resource-level permissions |
 | ECR | `GetAuthorizationToken` | Account-level operation |
-| X-Ray | `UpdateTraceSegmentDestination` | Account-level operation |
+| KMS | `CreateGrant`, `Decrypt`, `Encrypt`, `GenerateDataKey` | CDK asset encryption keys; key ARNs unknown at policy time |
+| X-Ray | `UpdateTraceSegmentDestination`, `PutResourcePolicy` | Account-level operations |
 
 These constraints align with the CDK Nag `AwsSolutions-IAM5` suppressions in the codebase.
 
