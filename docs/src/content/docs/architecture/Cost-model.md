@@ -20,7 +20,11 @@ These costs are incurred regardless of task volume:
 | DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; no cost when idle. |
 | CloudWatch Logs retention | ~$1–5/month | Depends on log volume. 90-day retention. |
 | API Gateway (idle) | ~$0/month | Pay-per-request. |
-| **Total baseline** | **~$85–90/month** | |
+| **Total baseline** | **~$85–95/month** | |
+
+### Scale-to-zero characteristics
+
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST), Lambda, API Gateway, ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The always-on cost floor (~$85–95/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -89,7 +93,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [COMPUTE.md  - Network architecture](/architecture/compute)  - VPC infrastructure cost breakdown.
-- [ORCHESTRATOR.md](/architecture/orchestrator)  - Polling cost analysis.
-- [COMPUTE.md](/architecture/compute)  - Compute option billing models.
-- [OBSERVABILITY.md](/architecture/observability)  - Cost-related metrics (`agent.cost_usd`, token usage).
+- [COMPUTE.md](/architecture/compute) -- Compute option billing models and network architecture.
+- [ORCHESTRATOR.md](/architecture/orchestrator) -- Polling cost analysis.
+- [OBSERVABILITY.md](/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
+- [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.
