@@ -10,3 +10,7 @@ paths = [
     "^agent/tests/test_hooks\\.py$",
     "^agent/tests/test_output_scanner\\.py$",
 ]
+
+[[allowlists]]
+description = "Mock workload access token in CDK handler tests (not a real credential)."
+stopwords = ["wat-opaque-123"]
