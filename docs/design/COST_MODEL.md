@@ -89,8 +89,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
-- [DEPLOYMENT_ROLES.md](./DEPLOYMENT_ROLES.md) -- Least-privilege IAM policies for deployment.
 - [COMPUTE.md](./COMPUTE.md) -- VPC infrastructure cost breakdown, compute option billing models.
 - [ORCHESTRATOR.md](./ORCHESTRATOR.md) -- Polling cost analysis.
 - [OBSERVABILITY.md](./OBSERVABILITY.md) -- Cost-related metrics (`agent.cost_usd`, token usage).
+- [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [DEPLOYMENT_ROLES.md](./DEPLOYMENT_ROLES.md) -- Least-privilege IAM policies for deployment.
