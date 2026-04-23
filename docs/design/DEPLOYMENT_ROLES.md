@@ -572,7 +572,7 @@ These constraints align with the CDK Nag `AwsSolutions-IAM5` suppressions in the
 
 These policies are conservative-but-scoped starting points. To tighten further:
 
-1. **Deploy once with CloudTrail enabled**, then use [iamlive](https://github.com/iann0036/iamlive) or CloudTrail Lake to identify the exact API calls made during deployment.
+1. **Deploy once with CloudTrail enabled**, then use [IAM Access Analyzer policy generation](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-generation.html) to generate a least-privilege policy based on the actual API calls recorded in CloudTrail.
 2. **Replace `*` resources** with actual ARNs after the first deploy (e.g., once you know the VPC ID, scope EC2 actions to that VPC).
 3. **Add region conditions** where possible (e.g., `"aws:RequestedRegion": "us-east-1"`) to prevent cross-region resource creation.
 4. **Use permission boundaries** on the IaC role to set an outer limit even if the policy is too broad.
