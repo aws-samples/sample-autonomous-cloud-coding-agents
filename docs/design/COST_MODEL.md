@@ -89,7 +89,7 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [COMPUTE.md](./COMPUTE.md) -- Compute option billing models and [network architecture](./COMPUTE.md#network-architecture).
+- [COMPUTE.md](./COMPUTE.md) -- Compute option billing models and network architecture.
 - [ORCHESTRATOR.md](./ORCHESTRATOR.md) -- Polling cost analysis.
 - [OBSERVABILITY.md](./OBSERVABILITY.md) -- Cost-related metrics (`agent.cost_usd`, token usage).
 - [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
