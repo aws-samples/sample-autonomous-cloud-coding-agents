@@ -1,9 +1,13 @@
+---
+title: Observability
+---
+
 # Observability
 
 For a system where agents run for hours and burn tokens autonomously, observability is load-bearing infrastructure. The platform captures task lifecycle, agent reasoning, tool use, and outcomes so operators can monitor health, debug failures, and improve agent performance over time.
 
 - **Use this doc for:** understanding what the platform observes, how telemetry flows, metrics, dashboards, alarms, and deployment safety.
-- **Related docs:** [ORCHESTRATOR.md](./ORCHESTRATOR.md) for task state machine, [MEMORY.md](./MEMORY.md) for code attribution and cross-session learning, [EVALUATION.md](./EVALUATION.md) for agent performance measurement.
+- **Related docs:** [ORCHESTRATOR.md](/architecture/orchestrator) for task state machine, [MEMORY.md](/architecture/memory) for code attribution and cross-session learning, [EVALUATION.md](/architecture/evaluation) for agent performance measurement.
 
 ## Telemetry architecture
 
@@ -130,7 +134,7 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 
 Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during repo setup). This links code changes to the task and prompt that produced them, enabling queries like "what prompt led to this change?" and supporting the evaluation pipeline.
 
-Task conversations, tool calls, decisions, and outcomes are persisted with metadata (`task_id`, `session_id`, `repo`, `branch`, `commit SHAs`, `pr_url`) in a searchable store. The agent retrieves relevant past context via memory search at task start. See [MEMORY.md](./MEMORY.md) for the memory lifecycle and retrieval strategy.
+Task conversations, tool calls, decisions, and outcomes are persisted with metadata (`task_id`, `session_id`, `repo`, `branch`, `commit SHAs`, `pr_url`) in a searchable store. The agent retrieves relevant past context via memory search at task start. See [MEMORY.md](/architecture/memory) for the memory lifecycle and retrieval strategy.
 
 ## Audit and retention
 

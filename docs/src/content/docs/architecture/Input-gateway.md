@@ -42,7 +42,7 @@ In short: **every input channel connects through this central point; the gateway
   Every channel-specific payload must be transformed into the same internal message structure. The rest of the system only ever sees this normalized form.
 
 - **Validation**
-  The gateway must validate normalized messages (required fields, types, allowed actions, target repo/issue refs, size limits) and reject malformed or invalid requests with clear errors. Task descriptions are additionally screened by Amazon Bedrock Guardrails for prompt injection at submission time (fail-closed). See [SECURITY.md](/design/security).
+  The gateway must validate normalized messages (required fields, types, allowed actions, target repo/issue refs, size limits) and reject malformed or invalid requests with clear errors. Task descriptions are additionally screened by Amazon Bedrock Guardrails for prompt injection at submission time (fail-closed). See [SECURITY.md](/architecture/security).
 
 - **Access control**
   The gateway enforces who can do what (e.g. only the task owner can cancel; only authenticated users can create tasks). This may be defined per channel or globally.
@@ -72,8 +72,8 @@ In short: **every input channel connects through this central point; the gateway
 When a user submits a task from one channel (e.g. Slack), they may want notifications (task completed, errors, approval requests) delivered to other channels too (e.g. CLI, email, or a different Slack channel). The plans describe a **per-user notification preference** model:
 
 - **Which channels** receive notifications (e.g. only the originating channel, or a list such as Slack + CLI).
-- **Per-channel configuration** — e.g. Slack channel ID or DM flag, email address, so that outbound adapters know where to send.
-- **Per-channel filters** — e.g. send only approval_request and task_completed to Slack, but all events to CLI.
+- **Per-channel configuration**  - e.g. Slack channel ID or DM flag, email address, so that outbound adapters know where to send.
+- **Per-channel filters**  - e.g. send only approval_request and task_completed to Slack, but all events to CLI.
 
 MVP can use **implicit routing**: send notifications only to the channel the task was submitted from (stored as `channel_source` on the task), plus any always-on channel (e.g. real-time API for CLI). A **UserPreferences** store (e.g. DynamoDB table keyed by `user_id`) can hold `notification_channels`, `channel_configs`, and `notification_filters` so that outbound adapters can route each notification to the right set of channels per user.
 
@@ -90,7 +90,7 @@ MVP can use **implicit routing**: send notifications only to the channel the tas
 
 ---
 
-## Internal Message Schema (Inbound) — Concept
+## Internal Message Schema (Inbound)  - Concept
 
 The gateway defines a single **internal message** format that all channels produce. The rest of the system (task creation, orchestration) depends only on this. The following is a conceptual schema, not an implementation spec.
 
@@ -118,7 +118,7 @@ Validation rules (e.g. required fields per action, max message length, allowed U
 
 ---
 
-## Internal Notification Schema (Outbound) — Concept
+## Internal Notification Schema (Outbound)  - Concept
 
 When the core needs to notify the user, it produces a single **internal notification** format. Channel adapters turn this into Slack messages, CLI output, emails, etc.
 
@@ -166,7 +166,7 @@ Adapters are responsible for rendering this into channel-specific formats (e.g. 
 - **Gateway:**
   Verifies JWT, normalizes to “cancel task” with task_id and user_id, validates ownership (or delegates to a downstream service), dispatches. The task pipeline marks the task cancelled and stops the agent run. Outbound notifications (if any) can inform the user that the task was cancelled.
 
-### Example 4: Future — User submits a task from Slack
+### Example 4: Future  - User submits a task from Slack
 
 - User sends: “Implement the feature from issue #42 in org/myapp” in a Slack channel (or via a slash command).
 - Slack sends an HTTP POST to the gateway (e.g. `/channels/slack/events`) with its own signing and payload.
@@ -184,10 +184,10 @@ Adapters are responsible for rendering this into channel-specific formats (e.g. 
 
 ## Summary
 
-- **Role** — Single entry point for all user-facing channels; adapts many formats to one internal contract.
-- **Inbound** — Verify → normalize → validate → dispatch. All channels produce the same internal message schema.
-- **Outbound** — Core emits one internal notification schema; channel adapters render and send per channel.
-- **Requirements** — Per-channel auth, normalization, validation, access control, multi-modal payloads, channel metadata for routing.
-- **Extensibility** — New channel = new adapter(s) and config; core task pipeline and storage stay unchanged.
+- **Role**  - Single entry point for all user-facing channels; adapts many formats to one internal contract.
+- **Inbound**  - Verify → normalize → validate → dispatch. All channels produce the same internal message schema.
+- **Outbound**  - Core emits one internal notification schema; channel adapters render and send per channel.
+- **Requirements**  - Per-channel auth, normalization, validation, access control, multi-modal payloads, channel metadata for routing.
+- **Extensibility**  - New channel = new adapter(s) and config; core task pipeline and storage stay unchanged.
 
 This document describes the **input gateway’s purpose, requirements, and examples only**. It does not specify implementation (e.g. API Gateway, Lambda, SQS, or specific technologies); those belong in the architecture and implementation docs.

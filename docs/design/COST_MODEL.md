@@ -10,7 +10,7 @@ These costs are incurred regardless of task volume:
 
 | Component | Estimated cost | Notes |
 |---|---|---|
-| NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [NETWORK_ARCHITECTURE.md](./NETWORK_ARCHITECTURE.md)). |
+| NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](./COMPUTE.md)). |
 | VPC Interface Endpoints (7×) | ~$50/month | $0.01/hr per endpoint per AZ. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
 | DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; no cost when idle. |
@@ -61,7 +61,7 @@ These estimates assume Claude Sonnet with prompt caching enabled and average tas
 
 For multi-user deployments, cost should be attributable to individual users and repositories:
 
-- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns` — see [OBSERVABILITY.md](./OBSERVABILITY.md)).
+- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](./OBSERVABILITY.md)).
 - **Per-user:** Aggregate task costs by `user_id`.
 - **Per-repo:** Aggregate task costs by `repo`.
 - **Dashboard:** Cost attribution dashboards should be built from the same task-level metrics.
@@ -85,7 +85,7 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [NETWORK_ARCHITECTURE.md](./NETWORK_ARCHITECTURE.md) — VPC infrastructure cost breakdown.
-- [ORCHESTRATOR.md](./ORCHESTRATOR.md) — Polling cost analysis.
-- [COMPUTE.md](./COMPUTE.md) — Compute option billing models.
-- [OBSERVABILITY.md](./OBSERVABILITY.md) — Cost-related metrics (`agent.cost_usd`, token usage).
+- [COMPUTE.md  - Network architecture](./COMPUTE.md)  - VPC infrastructure cost breakdown.
+- [ORCHESTRATOR.md](./ORCHESTRATOR.md)  - Polling cost analysis.
+- [COMPUTE.md](./COMPUTE.md)  - Compute option billing models.
+- [OBSERVABILITY.md](./OBSERVABILITY.md)  - Cost-related metrics (`agent.cost_usd`, token usage).
