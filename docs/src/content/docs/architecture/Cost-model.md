@@ -80,8 +80,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 |---|---|---|
 | Turn limit | `max_turns` per task | 100 |
 | Cost budget | `max_budget_usd` per task | None (unlimited) |
-| Session timeout | Orchestrator timeout | 8 hours |
-| Concurrency limit | Per-user atomic counter | 2 concurrent tasks |
+| Session timeout | Orchestrator timeout | 9 hours |
+| Concurrency limit | Per-user atomic counter | 3 concurrent tasks |
 | System concurrency | System-wide counter | Account-level AgentCore quota |
 
 ## Additional guardrails
