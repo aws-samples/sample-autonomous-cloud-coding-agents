@@ -52,11 +52,17 @@ If `mise run install` fails with "yarn: command not found", Corepack wasn't acti
 
 ## Phase 3: One-Time AWS Setup
 
+On a fresh AWS account, X-Ray needs a CloudWatch Logs resource policy before it can write spans. Run both commands — the first creates the policy, the second sets the destination:
+
 ```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+aws logs put-resource-policy \
+  --policy-name xray-spans-policy \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"XRaySpansAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"xray.amazonaws.com\"},\"Action\":[\"logs:PutLogEvents\",\"logs:CreateLogGroup\",\"logs:CreateLogStream\"],\"Resource\":\"*\"}]}"
 aws xray update-trace-segment-destination --destination CloudWatchLogs
 ```
 
-This must be run once per AWS account before first deployment.
+These must be run once per AWS account before first deployment. If the `put-resource-policy` step is skipped, the `update-trace-segment-destination` command fails with `AccessDeniedException`.
 
 ## Phase 4: First Deployment
 
