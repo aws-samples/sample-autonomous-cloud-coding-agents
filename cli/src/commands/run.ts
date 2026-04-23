@@ -137,7 +137,7 @@ export function makeRunCommand(): Command {
       if (!isJson) {
         logInfo(isJson, `Task: ${task.task_id}`);
         if (isVerbose()) {
-          logInfo(isJson, `Verbose mode: on`);
+          logInfo(isJson, 'Verbose mode: on');
         }
       }
 
@@ -207,7 +207,7 @@ export function makeRunCommand(): Command {
 
           logError(`SSE stream failed: ${e.message}`);
           logError(`Task ${task.task_id} was cancelled. To re-run, try: bgagent run ...`);
-          logError(`If you believe the task should have succeeded, check status with:`);
+          logError('If you believe the task should have succeeded, check status with:');
           logError(`  bgagent status ${task.task_id}`);
           throw new CliError(`run failed: ${e.message}`);
         }

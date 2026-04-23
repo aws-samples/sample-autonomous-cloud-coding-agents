@@ -43,6 +43,7 @@ import { RepoTable } from '../constructs/repo-table';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
 import { TaskEventsTable } from '../constructs/task-events-table';
+import { TaskNudgesTable } from '../constructs/task-nudges-table';
 import { TaskOrchestrator } from '../constructs/task-orchestrator';
 import { TaskTable } from '../constructs/task-table';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
@@ -74,6 +75,7 @@ export class AgentStack extends Stack {
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
+    const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
@@ -201,6 +203,7 @@ export class AgentStack extends Stack {
     const taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskNudgesTable: taskNudgesTable.table,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
       orchestratorFunctionArn: lazyOrchestratorArn,
@@ -228,6 +231,7 @@ export class AgentStack extends Stack {
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
+      NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
@@ -334,6 +338,7 @@ export class AgentStack extends Stack {
     for (const rt of [runtimeIam, runtimeJwt]) {
       taskTable.table.grantReadWriteData(rt);
       taskEventsTable.table.grantReadWriteData(rt);
+      taskNudgesTable.table.grantReadWriteData(rt);
       userConcurrencyTable.table.grantReadWriteData(rt);
       githubTokenSecret.grantRead(rt);
       applicationLogGroup.grantWrite(rt);
@@ -418,6 +423,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskEventsTableName', {
       value: taskEventsTable.table.tableName,
       description: 'Name of the DynamoDB task events audit table',
+    });
+
+    new CfnOutput(this, 'TaskNudgesTableName', {
+      value: taskNudgesTable.table.tableName,
+      description: 'Name of the DynamoDB task nudges table (Phase 2)',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {

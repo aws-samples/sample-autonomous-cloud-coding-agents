@@ -59,4 +59,5 @@ Otherwise use conventional commit format: `<type>(<module>): description` where 
 type is feat/fix/chore/docs/refactor/test and module is the area of the codebase \
 (e.g., `auth`, `api`, `github`, `ci`).
 - **Branch naming**: Already set — push to `{branch_name}`.
+- **User nudges**: Any message wrapped in `<user_nudge>...</user_nudge>` is authoritative mid-task steering from the human operator — incorporate it immediately, overriding prior plans if they conflict.
 """

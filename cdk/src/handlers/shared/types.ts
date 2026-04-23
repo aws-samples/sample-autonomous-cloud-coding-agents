@@ -280,6 +280,66 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
 }
 
 /**
+ * Maximum length (in characters, after trim) of a nudge ``message``.
+ *
+ * Mirrored in ``cli/src/types.ts`` as ``NUDGE_MAX_MESSAGE_LENGTH`` and
+ * consumed both client-side (for fail-fast rejection without a round-trip)
+ * and server-side (in ``cdk/src/handlers/nudge-task.ts``).
+ */
+export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
+
+/**
+ * Nudge request body for POST /v1/tasks/{task_id}/nudge (Phase 2).
+ *
+ * A nudge is a short, between-turns steering message from the user to a
+ * running agent. It is written to `TaskNudgesTable` after guardrail
+ * screening + rate limiting, then picked up by the agent's nudge_reader
+ * at the next between-turns seam and injected as an authoritative
+ * `<user_nudge>` XML block.
+ *
+ * Keep in sync with `cli/src/types.ts`.
+ */
+export interface NudgeRequest {
+  /** Free-text steering message. Max 2000 chars after trim; guardrail-screened. */
+  readonly message: string;
+}
+
+/**
+ * Nudge response body. Returned with HTTP 202 Accepted — the nudge has
+ * been persisted but has not yet reached the agent; it will be injected
+ * at the next between-turns seam. Callers wanting confirmation that the
+ * agent saw the nudge should watch task events for `nudge_consumed`.
+ */
+export interface NudgeResponse {
+  readonly task_id: string;
+  readonly nudge_id: string;
+  readonly submitted_at: string;
+}
+
+/**
+ * Full nudge record as stored in `TaskNudgesTable`.
+ *
+ * - PK = `task_id` (groups all nudges for a task together)
+ * - SK = `nudge_id` (ULID — lexicographic sort == chronological sort)
+ *
+ * The agent-side reader queries by `task_id` with `consumed = false`
+ * filter, orders by `nudge_id` (implicit sort-key order), and marks
+ * each consumed nudge with an atomic conditional UpdateItem
+ * (ConditionExpression: `consumed = :false`) for idempotency across
+ * restarts mid-consume.
+ */
+export interface NudgeRecord {
+  readonly task_id: string;
+  readonly nudge_id: string;
+  readonly user_id: string;
+  readonly message: string;
+  readonly created_at: string;
+  readonly consumed: boolean;
+  readonly consumed_at?: string;
+  readonly ttl?: number;
+}
+
+/**
  * Full webhook record as stored in DynamoDB.
  */
 export interface WebhookRecord {

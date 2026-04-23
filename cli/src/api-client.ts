@@ -27,6 +27,8 @@ import {
   CreateWebhookRequest,
   CreateWebhookResponse,
   ErrorResponse,
+  NudgeRequest,
+  NudgeResponse,
   PaginatedResponse,
   SuccessResponse,
   TaskDetail,
@@ -130,6 +132,23 @@ export class ApiClient {
   /** DELETE /tasks/{task_id} — cancel a task. */
   async cancelTask(taskId: string): Promise<CancelTaskResponse> {
     const res = await this.request<SuccessResponse<CancelTaskResponse>>('DELETE', `/tasks/${encodeURIComponent(taskId)}`);
+    return res.data;
+  }
+
+  /**
+   * POST /tasks/{task_id}/nudge — send a steering message to a running task (Phase 2).
+   *
+   * The server guardrail-screens and rate-limits the nudge before enqueuing it
+   * for the agent to pick up at the next between-turns seam. Returns HTTP 202
+   * with the generated `nudge_id` on success.
+   */
+  async nudgeTask(taskId: string, message: string): Promise<NudgeResponse> {
+    const body: NudgeRequest = { message };
+    const res = await this.request<SuccessResponse<NudgeResponse>>(
+      'POST',
+      `/tasks/${encodeURIComponent(taskId)}/nudge`,
+      body,
+    );
     return res.data;
   }
 

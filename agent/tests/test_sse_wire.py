@@ -43,7 +43,7 @@ class TestAgentTurn:
                 "model": "claude-sonnet-4-5",
                 "thinking": "",
                 "text": "Hello world",
-                "tool_calls_count": 0,
+                "tool_calls_count": 2,
             },
             state=state,
         )
@@ -63,6 +63,15 @@ class TestAgentTurn:
         # Timestamps are ints
         for e in out:
             assert isinstance(e["timestamp"], int)
+        # Regression: START and END must carry semantic metadata so the
+        # CLI's agUiToSemantic reconstructs the per-turn line with the
+        # correct turn number, model, and tool-call count. Without these
+        # fields the CLI renders "Turn #0 (, 0 tool calls)" for every row.
+        for frame in (out[0], out[-1]):  # START, END
+            assert frame["turn"] == 1
+            assert frame["model"] == "claude-sonnet-4-5"
+            assert frame["tool_calls_count"] == 2
+            assert frame["text_preview"] == "Hello world"
 
     def test_turn_with_thinking_prefixes_custom_event(self):
         state = _fresh()

@@ -432,3 +432,121 @@ describe('TaskApi construct with webhooks', () => {
     });
   });
 });
+
+describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
+  function createStackWithNudges(overrides?: Partial<TaskApiProps>): Template {
+    const app = new App();
+    const stack = new Stack(app, 'NudgeStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskNudgesTable = new dynamodb.Table(stack, 'TaskNudgesTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
+    });
+    new TaskApi(stack, 'TaskApi', {
+      taskTable,
+      taskEventsTable,
+      taskNudgesTable,
+      guardrailId: 'gr-abc',
+      guardrailVersion: '1',
+      ...overrides,
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('does NOT create a nudge resource when taskNudgesTable is absent', () => {
+    const app = new App();
+    const stack = new Stack(app, 'NoNudgeStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    new TaskApi(stack, 'TaskApi', { taskTable, taskEventsTable });
+    const template = Template.fromStack(stack);
+
+    const resources = template.findResources('AWS::ApiGateway::Resource');
+    const nudgeRes = Object.values(resources).filter(
+      r => (r as { Properties?: { PathPart?: string } }).Properties?.PathPart === 'nudge',
+    );
+    expect(nudgeRes).toHaveLength(0);
+  });
+
+  test('creates a /nudge resource when taskNudgesTable is provided', () => {
+    const template = createStackWithNudges();
+    template.hasResourceProperties('AWS::ApiGateway::Resource', {
+      PathPart: 'nudge',
+    });
+  });
+
+  test('nudge route uses Cognito authorization on POST', () => {
+    const template = createStackWithNudges();
+    const methods = template.findResources('AWS::ApiGateway::Method');
+    const nudgePost = Object.values(methods).filter(m => {
+      const p = (m as { Properties?: { HttpMethod?: string } }).Properties ?? {};
+      return p.HttpMethod === 'POST';
+    });
+    // At least one POST is for nudge — assert at least one POST uses COGNITO.
+    const cognitoPosts = nudgePost.filter(m =>
+      (m as { Properties?: { AuthorizationType?: string } }).Properties?.AuthorizationType === 'COGNITO_USER_POOLS',
+    );
+    expect(cognitoPosts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('nudge Lambda has NUDGES_TABLE_NAME and NUDGE_RATE_LIMIT_PER_MINUTE env vars', () => {
+    const template = createStackWithNudges();
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          NUDGES_TABLE_NAME: Match.anyValue(),
+          NUDGE_RATE_LIMIT_PER_MINUTE: '10',
+        }),
+      },
+    });
+  });
+
+  test('nudge Lambda has guardrail env vars when provided', () => {
+    const template = createStackWithNudges();
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          NUDGES_TABLE_NAME: Match.anyValue(),
+          GUARDRAIL_ID: 'gr-abc',
+          GUARDRAIL_VERSION: '1',
+        }),
+      },
+    });
+  });
+
+  test('nudge Lambda has bedrock:ApplyGuardrail permission when guardrail configured', () => {
+    const template = createStackWithNudges();
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'bedrock:ApplyGuardrail',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('respects custom nudgeRateLimitPerMinute', () => {
+    const template = createStackWithNudges({ nudgeRateLimitPerMinute: 25 });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          NUDGE_RATE_LIMIT_PER_MINUTE: '25',
+        }),
+      },
+    });
+  });
+});

@@ -36,8 +36,37 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 5 DynamoDB tables', () => {
-    template.resourceCountIs('AWS::DynamoDB::Table', 5);
+  test('creates exactly 6 DynamoDB tables (including TaskNudgesTable for Phase 2)', () => {
+    template.resourceCountIs('AWS::DynamoDB::Table', 6);
+  });
+
+  test('outputs TaskNudgesTableName', () => {
+    template.hasOutput('TaskNudgesTableName', {
+      Description: 'Name of the DynamoDB task nudges table (Phase 2)',
+    });
+  });
+
+  test('creates TaskNudgesTable with task_id PK and nudge_id SK and no stream', () => {
+    const tables = template.findResources('AWS::DynamoDB::Table');
+    const nudgeTables = Object.values(tables).filter(t => {
+      const ks = (t as { Properties?: { KeySchema?: Array<{ AttributeName: string }> } }).Properties?.KeySchema ?? [];
+      return ks.length === 2 && ks[0]!.AttributeName === 'task_id' && ks[1]!.AttributeName === 'nudge_id';
+    });
+    expect(nudgeTables).toHaveLength(1);
+    const props = (nudgeTables[0] as { Properties?: { StreamSpecification?: unknown } }).Properties ?? {};
+    // No DynamoDB stream on nudges (poll-consumed).
+    expect(props.StreamSpecification).toBeUndefined();
+  });
+
+  test('both runtimes receive NUDGES_TABLE_NAME env var', () => {
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const runtimeList = Object.values(runtimes);
+    expect(runtimeList).toHaveLength(2);
+    for (const rt of runtimeList) {
+      const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
+        .Properties?.EnvironmentVariables ?? {};
+      expect(envVars).toHaveProperty('NUDGES_TABLE_NAME');
+    }
   });
 
   test('outputs TaskTableName', () => {

@@ -1372,25 +1372,96 @@ Phase 4:  Pause/Resume           → Lifecycle control (leverages 8-hour timeout
 
 **Goal:** Users can send course corrections to a running agent between turns.
 
-**Transport:** REST `POST /v1/tasks/{id}/nudge` through our API Gateway (existing Cognito auth). Works with both Phase 1a (polling) and Phase 1b (SSE). No dependency on WebSocket.
+**Transport:** REST `POST /v1/tasks/{task_id}/nudge` through our API Gateway (existing Cognito auth). Works identically on both runtime paths (Runtime-IAM / orchestrator, Runtime-JWT / interactive-SSE). **No dependency on WebSocket.** See `docs/interactive-agents-phases-v4.drawio` page 8 for the architecture.
+
+**Data path:**
+- Client authenticates with Cognito, POSTs `{ "message": "<free text>" }`.
+- Nudge Lambda: extract `user_id` from JWT → verify task ownership → reject if task status is terminal → **rate-limit** (see below) → **guardrail-screen** the message via the same Bedrock Guardrail path used for `task_description` (`screenWithGuardrail` in `cdk/src/handlers/shared/context-hydration.ts`) → write `NudgeRecord` to `TaskNudgesTable` → return `202 { task_id, nudge_id, submitted_at }`.
+- Agent runtime polls `TaskNudgesTable` at the **between-turns seam**, injects each pending nudge as a `<user_nudge>` XML block into the next `client.query()`, and atomically marks it `consumed=true` via a conditional DDB UpdateItem (`consumed = :false` precondition) for idempotency across restarts.
+
+**Nudge injection format** (what the model sees):
+
+```
+<user_nudge timestamp="2026-04-22T10:55:00Z" nudge_id="01KPT...">
+{free-text message}
+</user_nudge>
+```
+
+The base system prompt includes a one-line note instructing the model to treat `<user_nudge>` blocks as authoritative mid-task steering from the human operator.
+
+**DynamoDB table — `TaskNudgesTable`:**
+- PK: `task_id` (STRING) — groups all nudges for a task.
+- SK: `nudge_id` (STRING, ULID — lexicographic == chronological).
+- Attributes: `message`, `created_at`, `consumed` (BOOL), `consumed_at`, `user_id`, `ttl`.
+- `PAY_PER_REQUEST`, PITR enabled, AWS-owned encryption, no stream (nudges are poll-consumed, not fanned out).
+- **TTL: 30 days.** Gives enough retention to review nudge patterns during dogfooding; can be shortened later via CDK change without data migration.
+
+**Rate limit:** Per-task, per-minute cap. Default **10 nudges/task/minute**. Configurable via the **`NUDGE_RATE_LIMIT_PER_MINUTE`** env var on the nudge Lambda — can be tuned per environment without a code change. Enforced by a conditional DDB counter row (`task_id = RATE#<task_id>`, `nudge_id = MINUTE#<yyyymmddhhmm>`, 120s TTL). Exceeded → `429` with `ErrorCode.RATE_LIMITED`.
+
+**Between-turns hook composition:** The runner exposes `between_turns_hooks: list[Callable[[TurnContext], list[str]]]` so Phase 3 approval-gate polling and other future extensions can register alongside the nudge reader without re-modifying the turn loop. Nudge reader is registered as the first hook.
+
+**Files (as implemented):**
 
 | Package | File | Change |
 |---------|------|--------|
-| `cdk/` | `src/constructs/task-nudges-table.ts` | NEW: DynamoDB table for nudge storage + audit |
-| `cdk/` | `src/handlers/nudge-task.ts` | NEW: `POST /tasks/{id}/nudge` Lambda handler (validate, guardrail screen, write DDB) |
-| `cdk/` | `src/constructs/task-api.ts` | Add `/tasks/{task_id}/nudge` POST route |
-| `agent/` | `nudge_reader.py` | NEW: Polls DDB `TaskNudgesTable` between turns, consumes pending nudges |
-| `agent/` | `entrypoint.py` | Modify `run_agent()`: check nudge_reader between turns, inject via `client.query()` |
-| `agent/` | `tests/test_nudge_reader.py` | NEW: Tests |
-| `cli/` | `src/commands/nudge.ts` | NEW: `bgagent nudge <task_id> "message"` |
-| `cli/` | `test/commands/nudge.test.ts` | NEW: Tests |
+| `cdk/` | `src/handlers/shared/types.ts` | Add `NudgeRequest`, `NudgeResponse`, `NudgeRecord` |
+| `cdk/` | `src/constructs/task-nudges-table.ts` | NEW: DDB table (mirrors `task-events-table.ts`) |
+| `cdk/` | `src/handlers/nudge-task.ts` | NEW: POST handler (ownership, rate-limit, guardrail, PutItem) |
+| `cdk/` | `src/constructs/task-api.ts` | Wire `/v1/tasks/{task_id}/nudge` POST + Lambda + grants |
+| `cdk/` | `src/stacks/agent.ts` | Instantiate nudges table, grant both runtimes, set `NUDGES_TABLE_NAME` env |
+| `agent/` | `src/nudge_reader.py` | NEW: `read_pending`, `mark_consumed`, `format_as_user_message` |
+| `agent/` | `src/runner.py` | Add `between_turns_hooks` machinery + nudge hook registration |
+| `agent/` | `src/prompts/base.py` | One-line system-prompt note on `<user_nudge>` semantics |
+| `agent/` | `tests/test_nudge_reader.py` | NEW: Tests (query, empty, ordering, idempotency, error resilience) |
+| `cli/` | `src/types.ts` | Mirror `NudgeRequest`, `NudgeResponse` |
+| `cli/` | `src/api-client.ts` | Add `nudgeTask(taskId, message)` |
+| `cli/` | `src/commands/nudge.ts` | NEW: `bgagent nudge <task_id> "<message>"` |
+| `cli/` | `src/bin/bgagent.ts` | Register nudge command |
+| `cli/` | `test/commands/nudge.test.ts` | NEW: Tests (happy, 401/400/403/404/429, empty message, `--json`) |
 
 **Testing:**
-- Unit: nudge validation, guardrail screening, DDB consumption logic
-- Integration: submit task → send nudge via REST → verify agent acts on it
-- Security: non-owner cannot nudge, guardrail blocks injection, rate limits enforced
+- **Unit:** nudge validation, ownership check, rate-limit conditional, guardrail screening, DDB put, `mark_consumed` idempotency, nudge-reader resilience to DDB outage, XML formatter handles special chars.
+- **Integration:** submit task → send nudge via REST → verify agent acts on it in its next turn.
+- **Security:** non-owner cannot nudge (403), guardrail blocks injection attempts (400), rate limit enforced (429), terminal-status tasks rejected (409).
 
-**Risk:** Medium-High. Core agent loop modification (`run_agent()`) is the riskiest change.
+**Risk:** Medium-High. Core agent loop modification is the riskiest change; nudge-reader errors must never break the turn loop (fail-open at the reader, reports zero pending nudges on DDB errors).
+
+**Observability:** Every consumed nudge is written as an event to `TaskEventsTable` with `event_type=nudge_consumed` (metadata: `nudge_id`, `created_at`, truncated message prefix). The fan-out Lambda forwards `nudge_consumed` to configured dispatchers.
+
+---
+
+### Phase 2.5: Mid-turn interrupt (deferred — scoped, not implemented)
+
+**Goal:** Stop a running turn *mid-stream* — not just between turns. Complements nudges (which wait for the current turn to finish) for cases where the agent is visibly going off the rails and the user wants to halt NOW.
+
+**Status:** **Deferred.** Viable with today's Claude Agent SDK; scoped during Phase 2 research (see `project_phase25_midturn_interrupt_research.md` in the Claude memory store).
+
+**Key finding:** `ClaudeSDKClient.interrupt()` is supported today on the Python SDK. Signature: `async def interrupt(self) -> None`. Ends the current turn with `ResultMessage(subtype="error_during_execution")`, preserves session state (subsequent `client.query(...)` continues the conversation), no server-side cancel API needed at the Anthropic Messages layer.
+
+**Preconditions (must hold at runtime):**
+- Streaming mode (which we already use).
+- Connected `ClaudeSDKClient` (already true).
+- **A concurrent asyncio task actively consuming `client.receive_response()`** — otherwise the interrupt signal is not processed. Our runner already has this consumer loop; an interrupt trigger runs as a sibling task.
+
+**Proposed integration:**
+- Add a `stop_requested` flag on the `TaskRecord` (or a dedicated side table), toggleable via new `POST /v1/tasks/{task_id}/stop`.
+- Agent runtime runs a sibling asyncio polling task (2–5s cadence) on that flag alongside the existing `receive_response()` consumer.
+- On stop signal: `await client.interrupt()` → drain remaining messages from the stream (mandatory; otherwise the next `query()` reads the interrupted turn's tail) → write a `turn_interrupted` event to `TaskEventsTable` → terminal-stop closes the client, redirect-style stop issues a new `query()` with replacement instructions.
+
+**Critical risks (call out in implementation):**
+- **Side effects are NOT rolled back.** A partially-executed `Bash` or `Edit` tool may already have written files or run `git push`. `agent/src/policy.py` / `hooks.py` sandboxing is the only safety layer — `interrupt()` is not a transaction abort.
+- Tool subprocess may keep running after interrupt until MicroVM kill (e.g. a 10-minute test run). Consider a watchdog SIGTERM on interrupt.
+- Drain-before-next-query is load-bearing; skipping leaves stale tail messages that look like a bug.
+- Partial tool_use blocks may appear in the stream — consumer must tolerate them.
+- Billing for cancelled streams is undocumented; assume already-streamed tokens are billed.
+- `asyncio.Task.cancel()` is NOT an alternative — it kills your reader while the CLI subprocess keeps generating tokens. `interrupt()` first, cancel never.
+
+**Upstream state (as of 2026-04-22):**
+- Python SDK: `interrupt()` supported (anthropics/claude-agent-sdk-python).
+- TS SDK V2: regressed, `interrupt()` not yet re-added — tracked at anthropics/claude-agent-sdk-typescript#120.
+- Feature request for richer interrupt semantics (lifecycle hooks, partial-result preservation): anthropics/claude-code#12439, **closed as not planned**. Don't design around hypothetical richer APIs.
+
+**Not in scope for this design doc:** implementation details. When scheduled, Phase 2.5 gets its own subsection with task breakdown + test plan. The `between_turns_hooks` abstraction introduced in Phase 2 is intentionally compatible with adding a sibling `stop_poller` concurrent task.
 
 ---
 

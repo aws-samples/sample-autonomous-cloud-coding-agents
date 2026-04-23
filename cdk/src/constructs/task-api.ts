@@ -45,6 +45,18 @@ export interface TaskApiProps {
   readonly taskEventsTable: dynamodb.ITable;
 
   /**
+   * The DynamoDB task nudges table (Phase 2). When provided, the
+   * `POST /tasks/{task_id}/nudge` endpoint is created.
+   */
+  readonly taskNudgesTable?: dynamodb.ITable;
+
+  /**
+   * Per-task per-minute nudge rate limit.
+   * @default 10
+   */
+  readonly nudgeRateLimitPerMinute?: number;
+
+  /**
    * The DynamoDB repo config table. When provided, task creation checks
    * that the target repository is onboarded before accepting the task.
    */
@@ -447,6 +459,50 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // --- Nudge endpoint (Phase 2): POST /tasks/{task_id}/nudge ---
+    if (props.taskNudgesTable) {
+      const nudgeTaskEnv: Record<string, string> = {
+        ...commonEnv,
+        NUDGES_TABLE_NAME: props.taskNudgesTable.tableName,
+        NUDGE_RATE_LIMIT_PER_MINUTE: String(props.nudgeRateLimitPerMinute ?? 10),
+      };
+      if (props.guardrailId && props.guardrailVersion) {
+        nudgeTaskEnv.GUARDRAIL_ID = props.guardrailId;
+        nudgeTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+      }
+
+      const nudgeTaskFn = new lambda.NodejsFunction(this, 'NudgeTaskFn', {
+        entry: path.join(handlersDir, 'nudge-task.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: nudgeTaskEnv,
+        bundling: commonBundling,
+      });
+
+      // Read tasks (ownership + state), read/write nudges (persist + rate-limit counter).
+      props.taskTable.grantReadData(nudgeTaskFn);
+      props.taskNudgesTable.grantReadWriteData(nudgeTaskFn);
+
+      if (props.guardrailId) {
+        nudgeTaskFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['bedrock:ApplyGuardrail'],
+          resources: [
+            Stack.of(this).formatArn({
+              service: 'bedrock',
+              resource: 'guardrail',
+              resourceName: props.guardrailId,
+            }),
+          ],
+        }));
+      }
+
+      const nudge = taskById.addResource('nudge');
+      nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn), cognitoAuthOptions);
+
+      allFunctions.push(nudgeTaskFn);
+    }
 
     // --- Webhook endpoints (only when webhookTable is provided) ---
     if (props.webhookTable) {

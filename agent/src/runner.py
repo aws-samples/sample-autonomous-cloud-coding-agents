@@ -1,4 +1,27 @@
-"""Agent invocation: environment setup and Claude Agent SDK execution."""
+"""Agent invocation: environment setup and Claude Agent SDK execution.
+
+Between-turns injection seam (Phase 2 Nudges)
+---------------------------------------------
+User nudges and other synthetic mid-task steering messages are injected via
+the Claude Agent SDK's ``Stop`` hook (registered in ``hooks.build_hook_matchers``),
+NOT the message-receive loop below.
+
+Rationale for the Stop hook seam:
+  * The SDK's ``ClaudeSDKClient.receive_response()`` generator is
+    single-producer; calling ``client.query()`` mid-stream races with the
+    CLI subprocess's stdin and is not reliable.
+  * The Stop hook fires at a well-defined point — after the agent finishes a
+    turn and before it decides to stop.  Returning
+    ``{"decision": "block", "reason": "<text>"}`` causes the SDK to continue
+    the conversation with ``<text>`` as the next user message, which is
+    exactly the semantics we need for nudge injection.
+  * A module-level registry ``hooks.between_turns_hooks`` lets Phase 3
+    approval gates add additional hooks without touching this file.
+
+Turn counting (``result.turns``) is incremented on ``AssistantMessage`` only
+and is NOT affected by the Stop hook's block/continue decision — nudge
+injection does not double-count turns.
+"""
 
 from __future__ import annotations
 
@@ -228,7 +251,13 @@ async def run_agent(
         + (f" with {len(cedar_policies)} extra policies" if cedar_policies else ""),
     )
 
-    hooks = build_hook_matchers(engine=policy_engine, trajectory=trajectory)
+    hooks = build_hook_matchers(
+        engine=policy_engine,
+        trajectory=trajectory,
+        task_id=config.task_id or "",
+        progress=progress,
+        sse_adapter=sse_adapter,
+    )
 
     options = ClaudeAgentOptions(
         model=config.anthropic_model,

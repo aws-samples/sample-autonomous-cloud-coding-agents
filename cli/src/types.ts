@@ -133,6 +133,32 @@ export interface CreateTaskRequest {
   readonly execution_mode?: ExecutionMode;
 }
 
+/**
+ * Maximum length (after trim) of a nudge message. Mirrors
+ * `cdk/src/handlers/shared/types.ts` so the CLI can reject oversized
+ * input client-side without an API round-trip.
+ */
+export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
+
+/**
+ * Nudge request body for POST /v1/tasks/{task_id}/nudge (Phase 2).
+ *
+ * A short steering message sent mid-task. The server guardrail-screens,
+ * rate-limits (configurable, default 10/min/task), and stores the nudge;
+ * the agent picks it up at the next between-turns seam. Keep in sync
+ * with `cdk/src/handlers/shared/types.ts`.
+ */
+export interface NudgeRequest {
+  readonly message: string;
+}
+
+/** Nudge response from POST /v1/tasks/{task_id}/nudge (HTTP 202). */
+export interface NudgeResponse {
+  readonly task_id: string;
+  readonly nudge_id: string;
+  readonly submitted_at: string;
+}
+
 /** Cancel task response from DELETE /v1/tasks/{task_id}. */
 export interface CancelTaskResponse {
   readonly task_id: string;

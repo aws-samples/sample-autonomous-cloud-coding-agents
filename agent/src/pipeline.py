@@ -86,6 +86,29 @@ def _resolve_overall_task_status(
     return "error", err
 
 
+def _compute_turns_completed(
+    agent_status: str,
+    turns_attempted: int | None,
+    max_turns: int,
+) -> int | None:
+    """Clamp ``turns_completed`` to ``max_turns`` when the SDK hit the limit.
+
+    Rev-5 DATA-1 — the Claude Agent SDK reports ``num_turns = max_turns + 1``
+    on ``error_max_turns`` because the aborted attempt is counted.  Clamping
+    at the final write keeps ``turns_completed`` truthful ("how many turns
+    actually executed") while ``turns_attempted`` keeps the raw SDK value
+    for debugging.
+
+    Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
+    round-trip a missing SDK count without inventing a fake zero.
+    """
+    if not turns_attempted:
+        return turns_attempted
+    if agent_status == "error_max_turns":
+        return min(turns_attempted, max_turns)
+    return turns_attempted
+
+
 def _write_memory(
     config: TaskConfig,
     setup: RepoSetup,
@@ -414,14 +437,11 @@ def run_task(
             # Build TaskResult
             usage = agent_result.usage
             turns_attempted = agent_result.num_turns or agent_result.turns
-            # Rev-5 DATA-1: when the SDK hit max_turns it reports
-            # num_turns = max_turns + 1 (the aborted attempt is counted).
-            # `turns_completed` clamps to max_turns in that case so
-            # "how many turns actually executed" is truthful.
-            if agent_status == "error_max_turns" and turns_attempted:
-                turns_completed = min(turns_attempted, config.max_turns)
-            else:
-                turns_completed = turns_attempted
+            turns_completed = _compute_turns_completed(
+                agent_status=agent_status,
+                turns_attempted=turns_attempted,
+                max_turns=config.max_turns,
+            )
             result = TaskResult(
                 status=overall_status,
                 agent_status=agent_status,

@@ -144,11 +144,20 @@ def translate(semantic_event: dict, *, state: _TranslationState) -> list[dict]:
 
 
 def _translate_agent_turn(ev: dict, state: _TranslationState) -> list[dict]:
-    """agent_turn → [CUSTOM(thinking)?, TEXT_MESSAGE_START, _CONTENT, _END]."""
+    """agent_turn → [CUSTOM(thinking)?, TEXT_MESSAGE_START, _CONTENT, _END].
+
+    START and END both carry the semantic metadata (turn, model,
+    tool_calls_count, thinking_preview, text_preview) so the CLI's
+    ``agUiToSemantic`` can reconstruct the full ``agent_turn`` line on
+    TEXT_MESSAGE_END without correlating an earlier frame.  Without these
+    fields the CLI renders ``Turn #0 (, 0 tool calls)`` for every row.
+    """
     out: list[dict] = []
     thinking = ev.get("thinking") or ""
     text = ev.get("text") or ""
     turn = int(ev.get("turn", 0) or 0)
+    model = ev.get("model") or ""
+    tool_calls_count = int(ev.get("tool_calls_count", 0) or 0)
 
     if thinking:
         out.append(
@@ -168,6 +177,11 @@ def _translate_agent_turn(ev: dict, state: _TranslationState) -> list[dict]:
             "timestamp": _now_ms(),
             "messageId": message_id,
             "role": "assistant",
+            "turn": turn,
+            "model": model,
+            "tool_calls_count": tool_calls_count,
+            "thinking_preview": thinking,
+            "text_preview": text,
         }
     )
     out.append(
@@ -183,6 +197,11 @@ def _translate_agent_turn(ev: dict, state: _TranslationState) -> list[dict]:
             "type": "TEXT_MESSAGE_END",
             "timestamp": _now_ms(),
             "messageId": message_id,
+            "turn": turn,
+            "model": model,
+            "tool_calls_count": tool_calls_count,
+            "thinking_preview": thinking,
+            "text_preview": text,
         }
     )
     return out
