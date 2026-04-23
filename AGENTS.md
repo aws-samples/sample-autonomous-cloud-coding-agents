@@ -38,6 +38,7 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 ### Common mistakes
 
 - Editing **`docs/src/content/docs/`** instead of **`docs/guides/`** or **`docs/design/`** — content is generated; sync from sources.
+- Adding or editing files in **`docs/design/`** or **`docs/guides/`** without running **`cd docs && node scripts/sync-starlight.mjs`** — CI will reject ("Fail build on mutation") because the Starlight mirror files in `docs/src/content/docs/` are stale. Always commit the regenerated mirrors alongside source changes.
 - Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.
 - Running raw **`jest`/`tsc`/`cdk`** from muscle memory — prefer **`mise //cdk:test`**, **`mise //cdk:compile`**, **`mise //cdk:synth`** (see [Commands you can use](#commands-you-can-use)).
 - **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
@@ -120,7 +121,7 @@ To build or test only the CLI subproject:
 
 ## Boundaries
 
-- **Generated docs** — If you change docs sources (`docs/guides/`, `docs/design/`, `CONTRIBUTING.md`), run `mise //docs:sync` or `mise //docs:build`.
+- **Generated docs (CI will reject if stale)** — Editing files in `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md` requires regenerating Starlight mirrors under `docs/src/content/docs/`. Run **`cd docs && node scripts/sync-starlight.mjs`** (fast, <1 s) or **`mise //docs:sync`**, then commit the updated mirrors alongside your source changes. The pre-commit hook `docs-sync` does this automatically when prek hooks are installed, but if you bypass hooks (e.g. `--no-verify`), CI's "Fail build on mutation" step will catch it.
 - **Dependencies** — Add dependencies to the owning package `package.json` (`cdk/`, `cli/`, or `docs/`), then install via workspace/root install.
-- **Build before commit** — Run a full build (`mise run build`) when done so tests/synth/docs/security checks stay in sync.
+- **Build before commit** — Run a full build (`mise run build`) when done so tests/synth/docs/security checks stay in sync. This is especially critical for docs changes — the build includes `//docs:sync` which regenerates Starlight mirrors, and CI will fail if the committed mirrors don't match what the build produces.
 - **Major changes** — Before modifying existing files in a major way (large refactors, new stacks, changing the agent contract), ask first.
