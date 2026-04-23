@@ -583,7 +583,7 @@ Bedrock AgentCore, Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray,
 
 ### When ECS compute is enabled
 
-If you uncomment the ECS blocks in `cdk/src/stacks/agent.ts` to enable the Fargate compute backend, add the following statement to the `IaCRole-ABCA-Application` policy:
+If you uncomment the ECS blocks in `cdk/src/stacks/agent.ts` to enable the Fargate compute backend, add the following statement to the `IaCRole-ABCA-Application` policy (the combined policy remains under the 6,144-character IAM limit):
 
 ```json
 {
