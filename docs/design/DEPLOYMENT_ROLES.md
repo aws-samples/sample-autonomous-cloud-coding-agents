@@ -393,13 +393,15 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
         "secretsmanager:UntagResource",
         "secretsmanager:GetResourcePolicy",
         "secretsmanager:PutResourcePolicy",
-        "secretsmanager:DeleteResourcePolicy",
-        "secretsmanager:GetRandomPassword"
+        "secretsmanager:DeleteResourcePolicy"
       ],
-      "Resource": [
-        "arn:aws:secretsmanager:*:*:secret:backgroundagent-*",
-        "*"
-      ]
+      "Resource": "arn:aws:secretsmanager:*:*:secret:backgroundagent-*"
+    },
+    {
+      "Sid": "SecretsManagerAccountLevel",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetRandomPassword",
+      "Resource": "*"
     }
   ]
 }
@@ -650,7 +652,7 @@ Several services require `Resource: "*"` because they do not support resource-le
 | ECS | Cluster + task definition actions | `RegisterTaskDefinition` doesn't support resource-level permissions |
 | ECR | `GetAuthorizationToken` | Account-level operation |
 | KMS | `CreateGrant`, `Decrypt`, `Encrypt`, `GenerateDataKey` | CDK asset encryption keys; key ARNs unknown at policy time |
-| Secrets Manager | `GetRandomPassword` | Account-level API (no secret ARN) — combined in a single statement to stay under the IAM 6,144-character policy limit; see [Iterative tightening](#iterative-tightening) |
+| Secrets Manager | `GetRandomPassword` | Account-level API (no secret ARN); isolated in its own statement with `Resource: "*"` |
 | X-Ray | `UpdateTraceSegmentDestination`, `PutResourcePolicy` | Account-level operations |
 
 These constraints align with the CDK Nag `AwsSolutions-IAM5` suppressions in the codebase.
