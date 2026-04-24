@@ -82,7 +82,7 @@ The CDK stack deploys the full platform: API Gateway, Lambda functions (orchestr
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 aws logs put-resource-policy \
   --policy-name xray-spans-policy \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"XRaySpansAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"xray.amazonaws.com\"},\"Action\":[\"logs:PutLogEvents\",\"logs:CreateLogGroup\",\"logs:CreateLogStream\"],\"Resource\":\"*\"}]}"
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"XRaySpansAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"xray.amazonaws.com\"},\"Action\":[\"logs:PutLogEvents\",\"logs:CreateLogGroup\",\"logs:CreateLogStream\"],\"Resource\":[\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans\",\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans:*\"]}]}"
 aws xray update-trace-segment-destination --destination CloudWatchLogs
 
 # Bootstrap CDK (first time only)

@@ -29,12 +29,14 @@ The policies are split into three IAM managed policies (each under the 6,144-cha
 | `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, Secrets Manager |
 | `IaCRole-ABCA-Observability` | Bedrock AgentCore, Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS |
 
+> **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
+
 ```bash
 # Create all three policies in your account, then re-bootstrap:
-cdk bootstrap aws://ACCOUNT/REGION \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Infrastructure" \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Application" \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Observability"
+cdk bootstrap aws://ACCOUNT_ID/REGION \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT_ID:policy/IaCRole-ABCA-Infrastructure" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT_ID:policy/IaCRole-ABCA-Application" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT_ID:policy/IaCRole-ABCA-Observability"
 ```
 
 The `--cloudformation-execution-policies` flag can be repeated to attach multiple policies to the CloudFormation execution role.
@@ -688,8 +690,9 @@ These policies are conservative-but-scoped starting points. To tighten further:
 3. **Add region conditions** where possible (e.g., `"aws:RequestedRegion": "us-east-1"`) to prevent cross-region resource creation.
 4. **Restrict `iam:AttachRolePolicy`** with an `iam:PolicyARN` condition to limit which policies can be attached to `backgroundagent-dev-*` roles. This requires enumerating the AWS managed policies CDK attaches (e.g., `service-role/AWSLambdaBasicExecutionRole`) from a synthesized template, so it is deferred to a post-deployment tightening pass.
 5. **Scope `iam:CreateServiceLinkedRole`** with an `iam:AWSServiceName` condition to limit which AWS services can have service-linked roles created. After a first deploy, check CloudTrail for which service-linked roles were actually created and restrict accordingly.
-6. **Use permission boundaries** on the IaC role to set an outer limit even if the policy is too broad.
-7. **Review after each CDK version upgrade** -- new CDK versions may add/remove custom resources that need different permissions.
+6. **Scope KMS actions** with a `kms:ResourceAliases` condition (e.g., `"kms:ResourceAliases": "alias/cdk-hnb659fds-*"`) to limit `CreateGrant`, `Decrypt`, `Encrypt`, and `GenerateDataKey` to the deterministic CDK bootstrap key.
+7. **Use permission boundaries** on the IaC role to set an outer limit even if the policy is too broad.
+8. **Review after each CDK version upgrade** -- new CDK versions may add/remove custom resources that need different permissions.
 
 ## Reference
 
