@@ -115,7 +115,6 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
         "iam:CreateRole",
         "iam:DeleteRole",
         "iam:GetRole",
-        "iam:PassRole",
         "iam:UpdateRole",
         "iam:TagRole",
         "iam:UntagRole",
@@ -143,6 +142,25 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
         "arn:aws:iam::*:policy/backgroundagent-dev-*",
         "arn:aws:iam::*:role/aws-service-role/*"
       ]
+    },
+    {
+      "Sid": "IAMPassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/backgroundagent-dev-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "ecs-tasks.amazonaws.com",
+            "ecs.amazonaws.com",
+            "apigateway.amazonaws.com",
+            "logs.amazonaws.com",
+            "bedrock.amazonaws.com",
+            "events.amazonaws.com"
+          ]
+        }
+      }
     },
     {
       "Sid": "VPCNetworking",
@@ -668,8 +686,10 @@ These policies are conservative-but-scoped starting points. To tighten further:
 1. **Deploy once with CloudTrail enabled**, then use [IAM Access Analyzer policy generation](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-generation.html) to generate a least-privilege policy based on the actual API calls recorded in CloudTrail.
 2. **Replace `*` resources** with actual ARNs after the first deploy (e.g., once you know the VPC ID, scope EC2 actions to that VPC).
 3. **Add region conditions** where possible (e.g., `"aws:RequestedRegion": "us-east-1"`) to prevent cross-region resource creation.
-4. **Use permission boundaries** on the IaC role to set an outer limit even if the policy is too broad.
-5. **Review after each CDK version upgrade** -- new CDK versions may add/remove custom resources that need different permissions.
+4. **Restrict `iam:AttachRolePolicy`** with an `iam:PolicyARN` condition to limit which policies can be attached to `backgroundagent-dev-*` roles. This requires enumerating the AWS managed policies CDK attaches (e.g., `service-role/AWSLambdaBasicExecutionRole`) from a synthesized template, so it is deferred to a post-deployment tightening pass.
+5. **Scope `iam:CreateServiceLinkedRole`** with an `iam:AWSServiceName` condition to limit which AWS services can have service-linked roles created. After a first deploy, check CloudTrail for which service-linked roles were actually created and restrict accordingly.
+6. **Use permission boundaries** on the IaC role to set an outer limit even if the policy is too broad.
+7. **Review after each CDK version upgrade** -- new CDK versions may add/remove custom resources that need different permissions.
 
 ## Reference
 
