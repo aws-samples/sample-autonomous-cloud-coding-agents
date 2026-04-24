@@ -88,7 +88,9 @@ By default, CDK bootstrap grants `AdministratorAccess` to the CloudFormation exe
 
 ```bash
 cdk bootstrap aws://ACCOUNT/REGION \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Policy"
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Infrastructure" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Application" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Observability"
 ```
 
-See `docs/design/DEPLOYMENT_ROLES.md` in the repo root for the complete least-privilege IAM policy, trust policy, runtime role inventory, and iterative tightening recommendations.
+See `docs/design/DEPLOYMENT_ROLES.md` in the repo root for the complete least-privilege IAM policies, trust policy, runtime role inventory, and iterative tightening recommendations.
