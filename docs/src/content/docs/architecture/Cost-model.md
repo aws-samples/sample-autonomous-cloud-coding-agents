@@ -24,7 +24,7 @@ These costs are incurred regardless of task volume:
 
 ### Scale-to-zero characteristics
 
-Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST), Lambda, API Gateway, ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The always-on cost floor (~$85–95/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) for the full scale-to-zero breakdown.
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST), Lambda, API Gateway, ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The always-on cost floor (~$85–95/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -96,5 +96,5 @@ For multi-user deployments, cost should be attributable to individual users and 
 - [COMPUTE.md](/architecture/compute) -- Compute option billing models and network architecture.
 - [ORCHESTRATOR.md](/architecture/orchestrator) -- Polling cost analysis.
 - [OBSERVABILITY.md](/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
-- [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [Deployment guide](/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
 - [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.
