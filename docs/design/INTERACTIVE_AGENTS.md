@@ -980,11 +980,17 @@ See §9.12 for the full constraint table on AgentCore streaming limits.
 
 **What stays the same:** REST API auth (Cognito JWT → API Gateway) is unchanged — the control plane continues to use the existing authorizer. `OrchestratorFn` Lambda continues to use IAM (SigV4) to invoke `Runtime-IAM` for task execution. The orchestrator path is entirely unchanged from Phase 1a.
 
-### 9.3 HITL approval gates: 3-tier configurable model
+### 9.3 HITL approval gates: Cedar-driven model
 
-> **⚠️ Pending design update (still pending in rev 4, tracked 2026-04-17):** This section describes the Phase 3 HITL design as of rev 3. A team discussion (Sam ↔ Alain, 2026-04-17) agreed to replace the hardcoded 3-tier model below with **Cedar policy-driven HITL**, reusing the existing in-process Cedar engine (`agent/src/policy.py`, rebased onto `upstream/main` at `396a245` 2026-04-17). The existing Cedar decision model (`ALLOW`/`DENY` for tool governance) will be extended with a `REQUIRE_APPROVAL` outcome — same policy language, broader semantics. This enables workflows like AI-DLC where users gate per phase and relax over time.
+> **✅ Design revised and detailed — see [`PHASE3_CEDAR_HITL.md`](./PHASE3_CEDAR_HITL.md).**
 >
-> **Do not implement Phase 3 from the text below.** The design is being revised.
+> The rev-3 3-tier model (`autonomous`/`smart`/`gated`) below is **superseded**. Phase 3 now uses Cedar-policy-driven HITL that extends the existing in-process Cedar engine (`agent/src/policy.py`) with a third outcome — `REQUIRE_APPROVAL` — by running evaluations against two policy sets (hard-deny / soft-deny). Same policy language, broader semantics. The detailed design covers policy authoring, REST contract, CLI UX, state machine, concurrency, security model, sample scenarios, and the implementation plan.
+>
+> Companion draw.io file: [`../phase3-cedar-hitl.drawio`](../phase3-cedar-hitl.drawio) (12 pages).
+>
+> The rev-3 section below is retained for historical context only.
+>
+> **Do not implement Phase 3 from the text below — implement from `PHASE3_CEDAR_HITL.md`.**
 >
 > **Scope note (rev 4):** HITL approval gates remain Phase 2/3 scope. Real-time **nudges** (mid-turn steering that interrupts the current tool call) are explicitly **not** in Phase 1b — they require bidirectional transport and trigger the Phase 1c WebSocket upgrade (`/ws`). Phase 1a and Phase 1b cover progress streaming (server→client) and between-turn nudges via REST `POST /tasks/{id}/nudge`; anything that must interrupt an in-flight tool call waits for Phase 1c.
 
