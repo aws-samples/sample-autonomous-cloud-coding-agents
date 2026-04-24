@@ -654,6 +654,7 @@ Several services require `Resource: "*"` because they do not support resource-le
 | ECS | Cluster + task definition actions | `RegisterTaskDefinition` doesn't support resource-level permissions |
 | ECR | `GetAuthorizationToken` | Account-level operation |
 | KMS | `CreateGrant`, `Decrypt`, `Encrypt`, `GenerateDataKey` | CDK asset encryption keys; key ARNs unknown at policy time |
+| Secrets Manager | `GetRandomPassword` | Account-level API (no secret ARN) — combined in a single statement to stay under the IAM 6,144-character policy limit; see [Iterative tightening](#iterative-tightening) |
 | X-Ray | `UpdateTraceSegmentDestination`, `PutResourcePolicy` | Account-level operations |
 
 These constraints align with the CDK Nag `AwsSolutions-IAM5` suppressions in the codebase.
