@@ -17,7 +17,7 @@ ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all pl
 | **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` |
 | **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) |
 | **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) |
-| **Max duration** | 8 hours (AgentCore session) | Limited by orchestrator timeout (9 hours) |
+| **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) |
 
 Both backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
 
@@ -43,15 +43,15 @@ ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is presen
 | Component | Est. Monthly Idle Cost | Why |
 |-----------|----------------------|-----|
 | NAT Gateway (1x) | ~$32 | $0.045/hr fixed charge |
-| VPC Interface Endpoints (7x, 2 AZs) | ~$50 | $0.01/hr per endpoint per AZ |
+| VPC Interface Endpoints (7x, 2 AZs) | ~$102 | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs |
 | WAF v2 Web ACL | ~$5 | Base monthly charge |
 | CloudWatch Dashboard | ~$3 | Per-dashboard charge |
 | Secrets Manager (1+ secrets) | ~$0.40/secret | Per-secret monthly |
 | CloudWatch Alarms | ~$0.10/alarm | Per standard alarm |
 | CloudWatch Logs retention | ~$1-5 | Storage for retained logs |
-| **Total always-on baseline** | **~$85-95/month** | |
+| **Total always-on baseline** | **~$140-150/month** | |
 
-The dominant idle cost is VPC networking: 7 interface endpoints (~$50/month) plus the NAT Gateway (~$32/month).
+The dominant idle cost is VPC networking: 7 interface endpoints across 2 AZs (~$102/month) plus the NAT Gateway (~$32/month).
 
 For the full cost model including per-task costs, see [COST_MODEL.md](/architecture/cost-model).
 
@@ -79,7 +79,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/architect
 |---------|---------|---------------|
 | VPC (public + private subnets, 2 AZs) | All compute | N/A (no direct cost) |
 | NAT Gateway (1x) | Private subnet internet egress | **No** (~$32/mo) |
-| VPC Interface Endpoints (7x) | AWS service connectivity from private subnets | **No** (~$50/mo) |
+| VPC Interface Endpoints (7x, 2 AZs) | AWS service connectivity from private subnets | **No** (~$102/mo) |
 | VPC Gateway Endpoints (2x: S3, DynamoDB) | S3 and DynamoDB connectivity | Yes (free) |
 | Security Groups | HTTPS-only egress | N/A |
 | Route 53 Resolver DNS Firewall | Domain allowlisting for agent egress | Minimal |
