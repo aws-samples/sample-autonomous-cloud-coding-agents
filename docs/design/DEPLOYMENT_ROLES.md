@@ -415,7 +415,10 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
         "secretsmanager:PutResourcePolicy",
         "secretsmanager:DeleteResourcePolicy"
       ],
-      "Resource": "arn:aws:secretsmanager:*:*:secret:backgroundagent-*"
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:backgroundagent-*",
+        "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*"
+      ]
     },
     {
       "Sid": "SecretsManagerAccountLevel",
