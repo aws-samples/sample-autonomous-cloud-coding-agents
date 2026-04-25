@@ -155,7 +155,9 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
             "apigateway.amazonaws.com",
             "logs.amazonaws.com",
             "bedrock.amazonaws.com",
-            "events.amazonaws.com"
+            "bedrock-agentcore.amazonaws.com",
+            "events.amazonaws.com",
+            "vpc-flow-logs.amazonaws.com"
           ]
         }
       }
