@@ -25,7 +25,7 @@ The platform is built on AWS CDK with a modular architecture: an input gateway n
 
 ## The Use Case
 
-Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository, creates a branch, works on the task, and opens a pull request.
+Users submit tasks through webhooks, CLI, Slack,... For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository, creates a branch, works on the task, and opens a pull request.
 
 Key characteristics:
 
@@ -52,20 +52,7 @@ For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
 ABCA is under active development. The platform ships iteratively — each iteration adds features and builds on the previous one.
 
-| Iteration | Status | What it delivers |
-|---|---|---|
-| **1** | Done | Agent runs on AWS, CLI submit, branch + PR |
-| **2** | Done | Production orchestrator, API contract, task management, observability, security, webhooks |
-| **3a** | Done | Repo onboarding, per-repo credentials, turn caps, prompt guide |
-| **3b** | Done | Memory Tier 1, insights, agent self-feedback, prompt versioning, commit attribution |
-| **3bis** | Done | Hardening — reconciler error tracking, error serialization, test coverage gaps |
-| **3c** | WIP | Pre-flight checks, persistent session storage, deterministic validation, PR review task type, multi-modal input, input guardrail screening |
-| **3d** | Planned | Review feedback loop, PR outcome tracking, evaluation pipeline, memory input hardening |
-| **4** | Planned | GitLab, visual proof, Slack, control panel, WebSocket streaming |
-| **5** | Planned | Pre-warming, multi-user/team, cost management, output guardrails, alternate runtime |
-| **6** | Planned | Skills learning, multi-repo, iterative feedback, multiplayer, CDK constructs |
-
-See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on each iteration.
+See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on current status and planned work.
 
 ## Getting started
 
