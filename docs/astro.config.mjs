@@ -40,7 +40,10 @@ export default defineConfig({
         { label: 'Introduction', slug: 'index' },
         {
           label: 'Getting Started',
-          items: [{ label: 'Quick Start', slug: 'getting-started/quick-start' }],
+          items: [
+            { label: 'Quick Start', slug: 'getting-started/quick-start' },
+            { label: 'Deployment Guide', slug: 'getting-started/deployment-guide' },
+          ],
         },
         {
           label: 'Using the Platform',
@@ -81,6 +84,7 @@ export default defineConfig({
             { slug: 'architecture/architecture' },
             { slug: 'architecture/orchestrator' },
             { slug: 'architecture/security' },
+            { slug: 'architecture/deployment-roles' },
             { slug: 'architecture/memory' },
             { slug: 'architecture/api-contract' },
             { slug: 'architecture/compute' },

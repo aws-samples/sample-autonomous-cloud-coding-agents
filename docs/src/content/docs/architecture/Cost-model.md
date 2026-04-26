@@ -15,12 +15,16 @@ These costs are incurred regardless of task volume:
 | Component | Estimated cost | Notes |
 |---|---|---|
 | NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/architecture/compute)). |
-| VPC Interface Endpoints (7×) | ~$50/month | $0.01/hr per endpoint per AZ. |
+| VPC Interface Endpoints (7×, 2 AZs) | ~$102/month | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
 | DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; no cost when idle. |
 | CloudWatch Logs retention | ~$1–5/month | Depends on log volume. 90-day retention. |
 | API Gateway (idle) | ~$0/month | Pay-per-request. |
-| **Total baseline** | **~$85–90/month** | |
+| **Total baseline** | **~$140–150/month** | |
+
+### Scale-to-zero characteristics
+
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST), Lambda, API Gateway, ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -47,7 +51,7 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 | Model choice | 5–10× between Haiku and Opus | Default to Claude Sonnet; allow per-repo override. |
 | Turn count | Linear with turns | `max_turns` cap (default 100, configurable 1–500). |
 | Cost budget | Hard stop at budget | `max_budget_usd` cap (configurable $0.01–$100). Agent stops when budget is reached regardless of remaining turns. |
-| Task duration | Sub-linear (compute is cheap; tokens dominate) | 8-hour max session timeout. |
+| Task duration | Sub-linear (compute is cheap; tokens dominate) | AgentCore: 8-hour service limit; orchestrator: 9-hour `executionTimeout`. |
 | Prompt caching | 50–90% token cost reduction | Enable by default; cache system prompts and repo context. |
 | Concurrency | Linear with parallel tasks | Per-user and system-wide concurrency limits. |
 
@@ -55,8 +59,8 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 
 | Scale | Tasks/month | Estimated monthly cost (infra + tasks) |
 |---|---|---|
-| Low (1 developer) | 30–60 | $150–500 |
-| Medium (small team) | 200–500 | $500–3,000 |
+| Low (1 developer) | 30–60 | $200–550 |
+| Medium (small team) | 200–500 | $550–3,000 |
 | High (org-wide) | 2,000–5,000 | $5,000–30,000 |
 
 These estimates assume Claude Sonnet with prompt caching enabled and average task complexity.
@@ -76,8 +80,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 |---|---|---|
 | Turn limit | `max_turns` per task | 100 |
 | Cost budget | `max_budget_usd` per task | None (unlimited) |
-| Session timeout | Orchestrator timeout | 8 hours |
-| Concurrency limit | Per-user atomic counter | 2 concurrent tasks |
+| Session timeout | Orchestrator timeout | 9 hours |
+| Concurrency limit | Per-user atomic counter | 3 concurrent tasks |
 | System concurrency | System-wide counter | Account-level AgentCore quota |
 
 ## Additional guardrails
@@ -89,7 +93,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [COMPUTE.md  - Network architecture](/architecture/compute)  - VPC infrastructure cost breakdown.
-- [ORCHESTRATOR.md](/architecture/orchestrator)  - Polling cost analysis.
-- [COMPUTE.md](/architecture/compute)  - Compute option billing models.
-- [OBSERVABILITY.md](/architecture/observability)  - Cost-related metrics (`agent.cost_usd`, token usage).
+- [COMPUTE.md](/architecture/compute) -- Compute option billing models and network architecture.
+- [ORCHESTRATOR.md](/architecture/orchestrator) -- Polling cost analysis.
+- [OBSERVABILITY.md](/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
+- [Deployment guide](/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.

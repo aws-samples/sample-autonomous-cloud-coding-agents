@@ -54,6 +54,14 @@ repos:
         files: ^agent/.*\.py$
         stages: [pre-commit]
 
+      - id: docs-sync
+        name: sync docs → Starlight mirrors
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/docs" && node scripts/sync-starlight.mjs && git add src/content/docs/'
+        language: system
+        pass_filenames: false
+        files: ^(docs/(design|guides)/.*\.md$|CONTRIBUTING\.md$)
+        stages: [pre-commit]
+
       - id: docs-astro-check
         name: astro check (docs)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/docs" && ./node_modules/.bin/astro check'
