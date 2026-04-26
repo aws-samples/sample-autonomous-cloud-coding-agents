@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { classifyError, type ErrorClassification } from './error-classifier';
 import type { ComputeType } from './repo-config';
 import type { TaskStatusType } from '../../constructs/task-status';
 
@@ -85,6 +86,7 @@ export interface TaskDetail {
   readonly session_id: string | null;
   readonly pr_url: string | null;
   readonly error_message: string | null;
+  readonly error_classification: ErrorClassification | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;
@@ -169,6 +171,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     session_id: record.session_id ?? null,
     pr_url: record.pr_url ?? null,
     error_message: record.error_message ?? null,
+    error_classification: classifyError(record.error_message),
     created_at: record.created_at,
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
