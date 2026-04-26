@@ -102,6 +102,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 |------------|-------------|
 | **Autonomous feedback loop** | Extend the orchestrator state machine beyond `PR_OPENED` with a PR watcher phase. Auto-resume the agent when CI fails (inject failure logs), merge conflicts arise (rebase instructions), or reviewers request changes (inline comments). Continue the loop until the PR is merged or a human cancels. Optionally auto-merge when CI passes and review is approved. Transforms ABCA from "open PR" to "merge PR". |
 | **Tiered validation pipeline** | Three post-agent tiers: tool validation (build/test/lint), code quality (DRY/SOLID/complexity), risk and blast radius analysis. |
+| **In-pipeline build/lint fix-up loop** | Today the agent path is linear (clone → code → build → lint → PR); a post-change **verify_build** / **verify_lint** failure fails the task. Instead, loop back into the agent with the failure output as extra context, up to a **configurable retry count**, then fail only if fixes are exhausted—while still respecting the existing **max_turns** budget. Likely implementable in **`pipeline.py`** (after `run_agent()`, on verification failure re-invoke the agent) **without orchestrator changes**; distinct from the **Autonomous feedback loop** (PR/CI after the PR exists). |
 | **PR risk classification** | Rule-based risk classifier at submission. Drives model selection, budget defaults, approval requirements. |
 | **Review feedback memory loop** | Capture PR review comments via webhook, extract rules via LLM, persist as searchable memory. |
 | **PR outcome tracking** | Track merge/reject via GitHub webhooks. Positive/negative signals feed evaluation and memory. |
@@ -141,6 +142,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 |------------|-------------|
 | **Multi-user and teams** | Team visibility, shared approval queues, team concurrency/cost budgets, memory isolation. |
 | **Agent swarm** | Planner-worker architecture for complex multi-file tasks. DAG of subtasks, merge orchestrator, one consolidated PR. |
+| **Configurable human-in-the-loop (operator gate)** | Blueprint- or task-level workflow with **multiple gates per run** (for example: draft plan → operator review → implement → operator review). **Each gate is configured** as **human-review** (pause until the operator responds) or **auto** (continue through that checkpoint without blocking). Mix gates in one run—for example plan review enforced, implementation review auto. Resume, timeout, and cancel stay well-defined at every human-review wait. Complements **Iterative feedback** (soft inject without a hard pause). |
 | **Iterative feedback** | Follow-up instructions to running tasks. Multiple users inject context. Per-prompt commit attribution. |
 | **Scheduled triggers** | Cron-based task creation via EventBridge (dependency updates, nightly flaky test checks). |
 
