@@ -173,7 +173,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   const finalPollState = await context.waitForCondition<PollState>(
     'await-agent-completion',
     async (state) => {
-      const ddbState = await pollTaskStatus(taskId, state);
+      const ddbState = await pollTaskStatus(taskId, state, blueprintConfig.compute_type);
       let consecutiveEcsPollFailures = 0;
       let consecutiveEcsCompletedPolls = 0;
 
@@ -191,7 +191,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
               task_id: taskId,
               error: errorMsg,
             });
-            await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, true);
+            await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, false);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
           if (ecsStatus.status === 'completed') {
@@ -203,7 +203,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
                 task_id: taskId,
                 consecutive_completed_polls: consecutiveEcsCompletedPolls,
               });
-              await failTask(taskId, ddbState.lastStatus, `ECS task exited successfully but agent never wrote terminal status after ${consecutiveEcsCompletedPolls} polls`, task.user_id, true);
+              await failTask(taskId, ddbState.lastStatus, `ECS task exited successfully but agent never wrote terminal status after ${consecutiveEcsCompletedPolls} polls`, task.user_id, false);
               return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
             }
             logger.warn('ECS task completed but DDB not terminal — waiting for DDB catchup', {
@@ -219,7 +219,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
               consecutive_failures: consecutiveEcsPollFailures,
               error: err instanceof Error ? err.message : String(err),
             });
-            await failTask(taskId, ddbState.lastStatus, `ECS poll failed ${consecutiveEcsPollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, true);
+            await failTask(taskId, ddbState.lastStatus, `ECS poll failed ${consecutiveEcsPollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, false);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
           logger.warn('ECS pollSession check failed (non-fatal)', {

@@ -226,9 +226,9 @@ Agent sessions run for minutes to hours inside isolated compute environments. Th
 
 ### Liveness monitoring
 
-Two mechanisms keep the orchestrator informed about session health:
+Liveness detection varies by compute backend. AgentCore sessions use DynamoDB heartbeats and a `/ping` health endpoint; ECS Fargate tasks rely on the ECS `DescribeTasks` API since the ECS entrypoint does not write heartbeats.
 
-**DynamoDB heartbeat.** The agent writes `agent_heartbeat_at` every 45 seconds via a daemon thread. The orchestrator applies two thresholds during polling:
+**DynamoDB heartbeat (AgentCore only).** The agent writes `agent_heartbeat_at` every 45 seconds via a daemon thread. The orchestrator applies two thresholds during polling when `computeType === 'agentcore'`:
 
 - **Grace period** (120s) - After entering `RUNNING`, the orchestrator waits before expecting heartbeats (covers container startup).
 - **Stale threshold** (240s) - If the heartbeat exists but is older than this, the session is treated as lost.
@@ -236,7 +236,9 @@ Two mechanisms keep the orchestrator informed about session health:
 
 When the session is unhealthy, the task transitions to `FAILED` with "Agent session lost: no recent heartbeat."
 
-**`/ping` health endpoint.** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
+**ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. Three failure modes are detected: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS does not have heartbeat-based hung-process detection; a hung but alive container polls for the full `MAX_POLL_ATTEMPTS` window (~8.5h) before timing out.
+
+**`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
 
 ### The idle timeout problem
 
@@ -259,8 +261,8 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 | Hydration | Guardrail blocks content | Fail the task (content is adversarial, no retry) |
 | Hydration | Guardrail API unavailable | Fail the task (fail-closed: unscreened content never reaches agent) |
 | Session start | `invoke_agent_runtime` throttled | Exponential backoff. Fail after retries exhausted. |
-| Session start | Session crashes immediately | Heartbeat never set. Detected after 360s grace window. |
-| Running | Agent crashes mid-task | Heartbeat goes stale. Finalization inspects GitHub for partial work. |
+| Session start | Session crashes immediately | AgentCore: heartbeat never set, detected after 360s grace window. ECS: `DescribeTasks` reports failure on next poll. |
+| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Finalization inspects GitHub for partial work. |
 | Running | Agent hits turn or budget limit | Session ends normally. Finalize based on what was produced. |
 | Running | Idle for 15 min | AgentCore kills session. Task transitions to `TIMED_OUT`. |
 | Finalization | GitHub API down | Retry 3x. If still failing, mark `FAILED` with infrastructure reason. |
@@ -292,7 +294,7 @@ Each task runs in its own isolated compute session with no shared mutable state 
 - **UserConcurrency** - DynamoDB item per user with `active_count`. Incremented atomically (`active_count < max`) at admission, decremented at finalization.
 - **SystemConcurrency** - Single DynamoDB item, same pattern.
 
-The heartbeat-detected crash path guards against double-decrement by only releasing the counter after a successful state transition. If the transition fails (task already terminal), it re-reads and acts accordingly.
+Concurrency is always released in `finalizeTask` (step 6), never inside the poll loop. ECS poll failure paths call `failTask` with `releaseConcurrency: false` to transition the task to `FAILED` without decrementing — `finalizeTask` handles the single decrement after re-reading the task state. The heartbeat-detected crash path also guards against double-decrement by only releasing the counter after a successful state transition. If the transition fails (task already terminal), it re-reads and acts accordingly.
 
 ## Implementation
 

@@ -24,7 +24,7 @@ import { hydrateContext } from './context-hydration';
 import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { computePromptVersion } from './prompt-version';
-import { loadRepoConfig, type BlueprintConfig } from './repo-config';
+import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import type { TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
@@ -364,9 +364,14 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
  * Returns the updated PollState; the waitStrategy decides whether to continue.
  * @param taskId - the task to poll.
  * @param state - current poll state.
+ * @param computeType - the compute backend for this task (controls heartbeat checks).
  * @returns updated poll state with the latest task status.
  */
-export async function pollTaskStatus(taskId: string, state: PollState): Promise<PollState> {
+export async function pollTaskStatus(
+  taskId: string,
+  state: PollState,
+  computeType: ComputeType,
+): Promise<PollState> {
   const result = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
@@ -379,7 +384,8 @@ export async function pollTaskStatus(taskId: string, state: PollState): Promise<
 
   let sessionUnhealthy = false;
   if (
-    currentStatus === TaskStatus.RUNNING
+    computeType === 'agentcore'
+    && currentStatus === TaskStatus.RUNNING
     && item?.session_id
     && typeof item.started_at === 'string'
   ) {
