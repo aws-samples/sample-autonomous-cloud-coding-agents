@@ -152,6 +152,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
+| **Unified liveness decision model (follow-up design ticket)** | Normalize task health evaluation across compute backends so heartbeat, compute session status, and DynamoDB state are handled through a single typed decision path. Define explicit backend capabilities (for example, heartbeat support), deterministic precedence rules for terminal outcomes, and regression tests that prevent cross-runtime false failures like ECS heartbeat mismatch. |
 | **Pure decision function orchestrator refactor** | Extract orchestrator decision logic into pure functions that take a frozen snapshot and return a typed action. Side-effectful execution applies actions with CAS (compare-and-swap) guards on DynamoDB `updated_at` to prevent stale writes. Makes the orchestrator exhaustively unit-testable without mocking I/O, eliminates competing-worker race conditions, and is a prerequisite for the autonomous feedback loop. |
 | **CDK constructs library** | Publish reusable constructs to Construct Hub with semver versioning. |
 | **Centralized policy framework** | Unified Cedar-based framework with `PolicyDecisionEvent` audit schema. Three enforcement modes with observe-before-enforce rollout. |
