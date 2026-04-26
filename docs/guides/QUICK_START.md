@@ -6,7 +6,7 @@ Go from zero to your first agent-created pull request in about 30 minutes. This 
 
 Install these before you begin:
 
-- **AWS account** with credentials configured (`aws configure`)
+- **AWS account** with credentials configured (`aws configure`). If you use named profiles, set `AWS_PROFILE` before running any commands in this guide.
 - **Docker** - for building the agent container image
 - **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
 - **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
@@ -34,6 +34,8 @@ mise run build
 ```
 
 `mise run install` installs all JavaScript and Python dependencies across the monorepo. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
+
+> **Note:** `mise run build` includes CDK synthesis, which queries AWS for availability zones. Your active AWS credentials must have at least `ec2:DescribeAvailabilityZones` permission, or the build will fail. If you use named profiles, make sure `AWS_PROFILE` is set before running the build.
 
 ## Step 2 - Prepare a repository
 
@@ -75,7 +77,12 @@ The `repo` value must match **exactly** what you will pass to the CLI later (`ow
 The CDK stack deploys the full platform: API Gateway, Lambda functions (orchestrator, task CRUD, webhooks), DynamoDB tables, AgentCore Runtime, VPC with network isolation, Cognito user pool, and CloudWatch dashboards.
 
 ```bash
-# One-time account setup (X-Ray destination)
+# One-time account setup: allow X-Ray to write spans to CloudWatch Logs.
+# On a fresh account, X-Ray needs a resource policy before the destination can be set.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+aws logs put-resource-policy \
+  --policy-name xray-spans-policy \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"XRaySpansAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"xray.amazonaws.com\"},\"Action\":[\"logs:PutLogEvents\",\"logs:CreateLogGroup\",\"logs:CreateLogStream\"],\"Resource\":[\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans\",\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans:*\"]}]}"
 aws xray update-trace-segment-destination --destination CloudWatchLogs
 
 # Bootstrap CDK (first time only)
@@ -85,7 +92,7 @@ mise run //cdk:bootstrap
 mise run //cdk:deploy
 ```
 
-The X-Ray command is a one-time per-account setup. CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes - most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
+The X-Ray commands are a one-time per-account setup. On a fresh account the `put-resource-policy` call is required first — without it, the `update-trace-segment-destination` command fails with an `AccessDeniedException` because X-Ray cannot write to the `aws/spans` log group. CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes - most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
 
 ## Step 4 - Store the GitHub token
 
@@ -183,7 +190,10 @@ Here is what the platform did after you ran `bgagent submit`:
 |---|---|---|
 | `yarn: command not found` | Corepack not enabled or mise not activated in your shell | Run `eval "$(mise activate zsh)"`, then `corepack enable && corepack prepare yarn@1.22.22 --activate` |
 | `MISE_EXPERIMENTAL required` | Namespaced tasks need the experimental flag | `export MISE_EXPERIMENTAL=1` |
-| CDK deploy fails with "X-Ray Delivery Destination..." | Missing one-time account setup | `aws xray update-trace-segment-destination --destination CloudWatchLogs` |
+| `AccessDeniedException` on `update-trace-segment-destination` | Fresh account missing CloudWatch Logs resource policy for X-Ray | Run `aws logs put-resource-policy` first (see Step 3) |
+| CDK deploy fails with "X-Ray Delivery Destination..." | Missing one-time account setup | Run both X-Ray commands in Step 3 |
+| `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |
+| CDK deploy prompts for approval and hangs | Non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` to `cdk deploy` or use an interactive terminal |
 | `put-secret-value` returns double-dot endpoint | `REGION` variable is empty | Set `REGION=us-east-1` (or your actual region) before running the command |
 | `REPO_NOT_ONBOARDED` on task submit | Blueprint `repo` does not match what you passed to the CLI | Check `cdk/src/stacks/agent.ts` - the `repo` value must be exactly `owner/repo` matching your fork |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | PAT is missing required permissions or is scoped to the wrong repo | Regenerate the PAT with Contents (read/write) and Pull requests (read/write) scoped to your fork, then update Secrets Manager |

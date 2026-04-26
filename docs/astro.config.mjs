@@ -40,7 +40,10 @@ export default defineConfig({
         { label: 'Introduction', slug: 'index' },
         {
           label: 'Getting Started',
-          items: [{ label: 'Quick Start', slug: 'getting-started/quick-start' }],
+          items: [
+            { label: 'Quick Start', slug: 'getting-started/quick-start' },
+            { label: 'Deployment Guide', slug: 'getting-started/deployment-guide' },
+          ],
         },
         {
           label: 'Using the Platform',
