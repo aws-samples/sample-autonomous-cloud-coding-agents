@@ -52,7 +52,7 @@ export function formatTaskDetail(task: TaskDetail): string {
     lines.push(`PR:          ${task.pr_url}`);
   }
   if (task.error_message) {
-    lines.push(`Error:       ${task.error_message}`);
+    lines.push(...formatErrorLines(task));
   }
   lines.push(`Created:     ${task.created_at}`);
   if (task.started_at) {
@@ -160,6 +160,20 @@ export function formatWebhookDetail(webhook: WebhookDetail): string {
 /** Format data as JSON. */
 export function formatJson(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+function formatErrorLines(task: TaskDetail): string[] {
+  if (!task.error_classification) {
+    return [`Error:       ${task.error_message}`];
+  }
+  const { category, title, description, remedy, retryable } = task.error_classification;
+  return [
+    `Error:       [${category.toUpperCase()}] ${title}`,
+    `             ${description}`,
+    `  Remedy:    ${remedy}`,
+    `  Retryable: ${retryable ? 'yes' : 'no'}`,
+    `  Detail:    ${task.error_message}`,
+  ];
 }
 
 function formatTable(headers: string[], rows: string[][]): string {

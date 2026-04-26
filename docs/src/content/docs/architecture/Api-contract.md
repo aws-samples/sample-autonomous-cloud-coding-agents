@@ -143,6 +143,7 @@ Returns full details of a task. Users can only access their own tasks.
     "session_id": "sess-uuid",
     "pr_url": null,
     "error_message": null,
+    "error_classification": null,
     "max_turns": 100,
     "max_budget_usd": null,
     "cost_usd": null,
@@ -152,6 +153,31 @@ Returns full details of a task. Users can only access their own tasks.
     "updated_at": "2025-03-15T10:31:15Z",
     "started_at": "2025-03-15T10:31:10Z",
     "completed_at": null
+  }
+}
+```
+
+`error_classification` is a derived field computed at response time from `error_message`. When `error_message` is `null`, `error_classification` is `null`. When present, it contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `category` | String | One of: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `unknown` |
+| `title` | String | Human-readable error title |
+| `description` | String | Detailed explanation of what went wrong |
+| `remedy` | String | Suggested action to resolve the error |
+| `retryable` | Boolean | Whether retrying may succeed |
+
+Example for a failed task:
+
+```json
+{
+  "error_message": "User concurrency limit reached",
+  "error_classification": {
+    "category": "concurrency",
+    "title": "Concurrency limit reached",
+    "description": "The maximum number of concurrent tasks for this user has been reached.",
+    "remedy": "Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.",
+    "retryable": true
   }
 }
 ```

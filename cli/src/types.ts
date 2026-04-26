@@ -20,6 +20,18 @@
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
+/** Error categories produced by the runtime error classifier. */
+export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
+
+/** Structured classification of a task error (computed by the API from error_message). */
+export interface ErrorClassification {
+  readonly category: ErrorCategoryType;
+  readonly title: string;
+  readonly description: string;
+  readonly remedy: string;
+  readonly retryable: boolean;
+}
+
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;
@@ -33,6 +45,7 @@ export interface TaskDetail {
   readonly session_id: string | null;
   readonly pr_url: string | null;
   readonly error_message: string | null;
+  readonly error_classification: ErrorClassification | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;
