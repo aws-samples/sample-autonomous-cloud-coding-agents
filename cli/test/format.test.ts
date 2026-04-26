@@ -33,6 +33,7 @@ describe('format', () => {
     session_id: 'sess-1',
     pr_url: 'https://github.com/owner/repo/pull/1',
     error_message: null,
+    error_classification: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T01:00:00Z',
     started_at: '2026-01-01T00:01:00Z',
@@ -100,6 +101,57 @@ describe('format', () => {
       const output = formatTaskDetail(task);
       expect(output).not.toContain('Type:');
       expect(output).not.toContain('PR #:');
+    });
+
+    test('shows classified error with raw detail when error_classification is present', () => {
+      const failedTask: TaskDetail = {
+        ...task,
+        status: 'FAILED',
+        error_message: 'User concurrency limit reached',
+        error_classification: {
+          category: 'concurrency',
+          title: 'Concurrency limit reached',
+          description: 'The maximum number of concurrent tasks for this user has been reached.',
+          remedy: 'Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.',
+          retryable: true,
+        },
+      };
+      const output = formatTaskDetail(failedTask);
+      expect(output).toContain('[CONCURRENCY] Concurrency limit reached');
+      expect(output).toContain('The maximum number of concurrent tasks');
+      expect(output).toContain('Remedy:');
+      expect(output).toContain('Retryable: yes');
+      expect(output).toContain('Detail:    User concurrency limit reached');
+    });
+
+    test('shows retryable: no for non-retryable errors', () => {
+      const failedTask: TaskDetail = {
+        ...task,
+        status: 'FAILED',
+        error_message: 'Guardrail blocked: prompt injection',
+        error_classification: {
+          category: 'guardrail',
+          title: 'Content blocked by guardrail',
+          description: 'Bedrock Guardrails blocked the task content.',
+          remedy: 'Review the task description for policy violations.',
+          retryable: false,
+        },
+      };
+      const output = formatTaskDetail(failedTask);
+      expect(output).toContain('[GUARDRAIL] Content blocked by guardrail');
+      expect(output).toContain('Retryable: no');
+      expect(output).toContain('Detail:    Guardrail blocked: prompt injection');
+    });
+
+    test('falls back to raw error_message when classification is absent', () => {
+      const failedTask: TaskDetail = {
+        ...task,
+        status: 'FAILED',
+        error_message: 'Something unexpected',
+        error_classification: null,
+      };
+      const output = formatTaskDetail(failedTask);
+      expect(output).toContain('Error:       Something unexpected');
     });
   });
 

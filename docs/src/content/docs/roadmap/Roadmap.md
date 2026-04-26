@@ -69,6 +69,7 @@ What's shipped and what's coming next.
 - [x] **Operator dashboard** - Task success rate, cost, duration, build/lint pass rates, AgentCore metrics
 - [x] **Alarms** - Stuck tasks, orchestration failures, counter drift, crash rate, guardrail failures
 - [x] **Audit trail** - TaskEvents table with chronological event log per task
+- [x] **Runtime error classifier** - Pattern-matching classifier that categorizes task errors (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown) with human-readable titles, descriptions, remedies, and retryability flags. Computed at API response time; powers structured CLI error display and CloudWatch alarm routing
 
 ### Agent harness
 
@@ -103,6 +104,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
+| **Autonomous feedback loop** | Extend the orchestrator state machine beyond `PR_OPENED` with a PR watcher phase. Auto-resume the agent when CI fails (inject failure logs), merge conflicts arise (rebase instructions), or reviewers request changes (inline comments). Continue the loop until the PR is merged or a human cancels. Optionally auto-merge when CI passes and review is approved. Transforms ABCA from "open PR" to "merge PR". |
 | **Tiered validation pipeline** | Three post-agent tiers: tool validation (build/test/lint), code quality (DRY/SOLID/complexity), risk and blast radius analysis. |
 | **PR risk classification** | Rule-based risk classifier at submission. Drives model selection, budget defaults, approval requirements. |
 | **Review feedback memory loop** | Capture PR review comments via webhook, extract rules via LLM, persist as searchable memory. |
@@ -150,6 +152,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
+| **Pure decision function orchestrator refactor** | Extract orchestrator decision logic into pure functions that take a frozen snapshot and return a typed action. Side-effectful execution applies actions with CAS (compare-and-swap) guards on DynamoDB `updated_at` to prevent stale writes. Makes the orchestrator exhaustively unit-testable without mocking I/O, eliminates competing-worker race conditions, and is a prerequisite for the autonomous feedback loop. |
 | **CDK constructs library** | Publish reusable constructs to Construct Hub with semver versioning. |
 | **Centralized policy framework** | Unified Cedar-based framework with `PolicyDecisionEvent` audit schema. Three enforcement modes with observe-before-enforce rollout. |
 | **Formal verification** | TLA+ specification of task state machine, concurrency, cancellation races, reconciler interleavings. |
