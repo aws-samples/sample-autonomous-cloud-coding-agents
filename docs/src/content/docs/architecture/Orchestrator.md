@@ -368,6 +368,8 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `pr_url` | String? | PR URL (set during finalization) |
 | `error_message` | String? | Error reason if FAILED |
 | `error_code` | String? | Machine-readable error code (e.g. `SESSION_START_FAILED`) |
+
+> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
 | `max_turns` | Number? | Turn limit (per-task overrides per-repo default) |
 | `max_budget_usd` | Number? | Cost ceiling (per-task overrides per-repo default) |
 | `model_id` | String? | Foundation model ID |
