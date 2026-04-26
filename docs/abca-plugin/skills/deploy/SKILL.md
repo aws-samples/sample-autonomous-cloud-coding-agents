@@ -81,3 +81,16 @@ After a successful deploy, remind the user to:
 - Store/update the GitHub PAT in Secrets Manager if this is a fresh deployment
 - Onboard repositories via Blueprint constructs if needed
 - Run a smoke test: `curl -s -H "Authorization: $TOKEN" $API_URL/tasks`
+
+## Least-Privilege Deployment
+
+By default, CDK bootstrap grants `AdministratorAccess` to the CloudFormation execution role. For production or security-sensitive accounts, re-bootstrap with a scoped execution policy:
+
+```bash
+cdk bootstrap aws://ACCOUNT/REGION \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Infrastructure" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Application" \
+  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT:policy/IaCRole-ABCA-Observability"
+```
+
+See `docs/design/DEPLOYMENT_ROLES.md` in the repo root for the complete least-privilege IAM policies, trust policy, runtime role inventory, and iterative tightening recommendations.
