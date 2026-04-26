@@ -19,11 +19,13 @@
 
 import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
+import { Ec2ComputeStrategy } from './strategies/ec2-strategy';
 import { EcsComputeStrategy } from './strategies/ecs-strategy';
 
 export type SessionHandle =
   | { readonly sessionId: string; readonly strategyType: 'agentcore'; readonly runtimeArn: string }
-  | { readonly sessionId: string; readonly strategyType: 'ecs'; readonly clusterArn: string; readonly taskArn: string };
+  | { readonly sessionId: string; readonly strategyType: 'ecs'; readonly clusterArn: string; readonly taskArn: string }
+  | { readonly sessionId: string; readonly strategyType: 'ec2'; readonly instanceId: string; readonly commandId: string };
 
 export type SessionStatus =
   | { readonly status: 'running' }
@@ -48,6 +50,8 @@ export function resolveComputeStrategy(blueprintConfig: BlueprintConfig): Comput
       return new AgentCoreComputeStrategy();
     case 'ecs':
       return new EcsComputeStrategy();
+    case 'ec2':
+      return new Ec2ComputeStrategy();
     default: {
       const _exhaustive: never = computeType;
       throw new Error(`Unknown compute_type: '${_exhaustive}'`);

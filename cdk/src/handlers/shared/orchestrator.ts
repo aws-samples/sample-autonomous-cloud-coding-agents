@@ -47,10 +47,10 @@ export interface PollState {
   readonly lastStatus?: TaskStatusType;
   /** True when the agent stopped sending heartbeats while still RUNNING (likely crash/OOM). */
   readonly sessionUnhealthy?: boolean;
-  /** Consecutive ECS poll failures — escalated to error after 3. */
-  readonly consecutiveEcsPollFailures?: number;
-  /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
-  readonly consecutiveEcsCompletedPolls?: number;
+  /** Consecutive compute poll failures — escalated to error after 3. */
+  readonly consecutiveComputePollFailures?: number;
+  /** Consecutive polls where compute reports completed but DDB is not terminal — escalated after 5. */
+  readonly consecutiveComputeCompletedPolls?: number;
 }
 
 /** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
@@ -238,6 +238,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     max_budget_usd: repoConfig?.max_budget_usd,
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
+    instance_type: repoConfig?.instance_type,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
   };

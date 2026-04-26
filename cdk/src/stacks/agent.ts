@@ -23,8 +23,7 @@ import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-// ecr_assets import is only needed when the ECS block below is uncommented
-// import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -37,6 +36,7 @@ import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { Ec2AgentFleet } from '../constructs/ec2-agent-fleet';
 import { RepoTable } from '../constructs/repo-table';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
@@ -65,9 +65,20 @@ export class AgentStack extends Stack {
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
       repo: 'krokoko/agent-plugins',
       repoTable: repoTable.table,
+      compute: {
+        type: 'ec2',
+      },
     });
 
-    const blueprints = [agentPluginsBlueprint];
+    const ownRepoBlueprint = new Blueprint(this, 'OwnRepoBlueprint', {
+      repo: 'aws-samples/sample-autonomous-cloud-coding-agents',
+      repoTable: repoTable.table,
+      compute: {
+        type: 'ec2',
+      },
+    });
+
+    const blueprints = [agentPluginsBlueprint, ownRepoBlueprint];
 
     // The AwsCustomResource singleton Lambda used by Blueprint constructs
     NagSuppressions.addResourceSuppressionsByPath(this, [
@@ -310,6 +321,22 @@ export class AgentStack extends Stack {
     //   memoryId: agentMemory.memory.memoryId,
     // });
 
+    // --- EC2 fleet compute backend ---
+    const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
+      directory: runnerPath,
+      platform: ecr_assets.Platform.LINUX_ARM64,
+    });
+
+    const ec2Fleet = new Ec2AgentFleet(this, 'Ec2AgentFleet', {
+      vpc: agentVpc.vpc,
+      agentImageAsset,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      userConcurrencyTable: userConcurrencyTable.table,
+      githubTokenSecret,
+      memoryId: agentMemory.memory.memoryId,
+    });
+
     // --- Task Orchestrator (durable Lambda function) ---
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
@@ -331,6 +358,12 @@ export class AgentStack extends Stack {
       //   taskRoleArn: ecsCluster.taskRoleArn,
       //   executionRoleArn: ecsCluster.executionRoleArn,
       // },
+      ec2Config: {
+        fleetTagKey: ec2Fleet.fleetTagKey,
+        fleetTagValue: ec2Fleet.fleetTagValue,
+        payloadBucketName: ec2Fleet.payloadBucket.bucketName,
+        ecrImageUri: agentImageAsset.imageUri,
+      },
     });
 
     // Grant the orchestrator Lambda read+write access to memory
@@ -355,6 +388,7 @@ export class AgentStack extends Stack {
       agentCoreStopSessionRuntimeArns: [runtime.agentRuntimeArn],
       // To allow cancel-task to stop ECS-backed tasks, uncomment:
       // ecsClusterArn: ecsCluster.cluster.clusterArn,
+      ec2FleetConfig: {},
     });
 
     // --- Operator dashboard ---

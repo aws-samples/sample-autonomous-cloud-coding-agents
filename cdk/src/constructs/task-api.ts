@@ -106,6 +106,12 @@ export interface TaskApiProps {
    * When provided, the cancel Lambda gets `ECS_CLUSTER_ARN` env var and `ecs:StopTask` permission.
    */
   readonly ecsClusterArn?: string;
+
+  /**
+   * EC2 fleet configuration for cancel-task to stop EC2-backed tasks.
+   * When provided, the cancel Lambda gets `ssm:CancelCommand` permission.
+   */
+  readonly ec2FleetConfig?: Record<string, never>;
 }
 
 /**
@@ -381,6 +387,13 @@ export class TaskApi extends Construct {
             'ecs:cluster': props.ecsClusterArn,
           },
         },
+      }));
+    }
+
+    if (props.ec2FleetConfig) {
+      cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['ssm:CancelCommand'],
+        resources: ['*'],
       }));
     }
 

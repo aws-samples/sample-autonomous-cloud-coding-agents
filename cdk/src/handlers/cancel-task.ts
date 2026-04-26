@@ -20,6 +20,7 @@
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
+import { SSMClient, CancelCommandCommand } from '@aws-sdk/client-ssm';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -33,6 +34,7 @@ import { computeTtlEpoch } from './shared/validation';
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const agentCoreClient = new BedrockAgentCoreClient({});
 const ecsClient = new ECSClient({});
+const ssmClient = new SSMClient({});
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -138,6 +140,30 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             request_id: requestId,
             has_cluster: !!clusterArn,
             has_task: !!taskArn,
+          });
+        }
+      } else if (computeType === 'ec2') {
+        // EC2-backed task — cancel the SSM command
+        const commandId = record.compute_metadata?.commandId;
+        const instanceId = record.compute_metadata?.instanceId;
+        if (commandId) {
+          try {
+            await ssmClient.send(new CancelCommandCommand({
+              CommandId: commandId,
+              ...(instanceId && { InstanceIds: [instanceId] }),
+            }));
+            logger.info('SSM CancelCommand invoked after cancel', { task_id: taskId, command_id: commandId, request_id: requestId });
+          } catch (stopErr) {
+            logger.warn('SSM CancelCommand failed after cancel (command may already be done)', {
+              task_id: taskId,
+              request_id: requestId,
+              error: stopErr instanceof Error ? stopErr.message : String(stopErr),
+            });
+          }
+        } else {
+          logger.warn('EC2 task cancel skipped: missing commandId in compute_metadata', {
+            task_id: taskId,
+            request_id: requestId,
           });
         }
       } else if (agentRuntimeArn) {

@@ -47,7 +47,7 @@ export interface BlueprintProps {
      * Compute strategy type.
      * @default 'agentcore'
      */
-    readonly type?: 'agentcore' | 'ecs';
+    readonly type?: 'agentcore' | 'ecs' | 'ec2';
 
     /**
      * Override the default runtime ARN (agentcore strategy).
