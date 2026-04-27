@@ -109,9 +109,13 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **In-pipeline build/lint fix-up loop** | Today the agent path is linear (clone → code → build → lint → PR); a post-change **verify_build** / **verify_lint** failure fails the task. Instead, loop back into the agent with the failure output as extra context, up to a **configurable retry count**, then fail only if fixes are exhausted—while still respecting the existing **max_turns** budget. Likely implementable in **`pipeline.py`** (after `run_agent()`, on verification failure re-invoke the agent) **without orchestrator changes**; distinct from the **Autonomous feedback loop** (PR/CI after the PR exists). |
 | **In-pipeline pre-PR self-review** | Post-hooks already run **build** / **lint**, but the LLM is not prompted to **self-review** its own diff before the PR. Add an optional in-pipeline step: surface the change set (diff), have the model **critique** it (bugs, style, edge cases, test gaps), then **iterate** on fixes—within the same **max_turns** / budget constraints. Aims to improve first-pass PR quality before human or CI review; implementable alongside other **`pipeline.py`** phases. |
 | **PR risk classification** | Rule-based risk classifier at submission. Drives model selection, budget defaults, approval requirements. |
+| **PR scope creep check (`pr_review`)** | Add an advisory-first scope analysis in `pr_review` that compares declared intent (task description / issue / PR narrative) to the actual diff and touched areas. Return structured output with `scope_rating` (`within_scope`/`mild_expansion`/`significant_expansion`/`likely_scope_creep`), confidence, and rationale (files, API/schema/config changes, unrelated dependency churn). Start as non-blocking reviewer guidance; optional policy gates can be enabled later for high-risk repos. |
 | **Review feedback memory loop** | Capture PR review comments via webhook, extract rules via LLM, persist as searchable memory. |
 | **PR outcome tracking** | Track merge/reject via GitHub webhooks. Positive/negative signals feed evaluation and memory. |
 | **Evaluation pipeline** | Failure categorization, memory effectiveness metrics (merge rate, revision cycles, CI pass rate). |
+| **A/B prompt experiments** | Assign prompt variants per task or cohort; compare merge rate, failure rate, and token usage with statistical guardrails. |
+| **LLM-assisted trace analysis** | Automated deep dive on failed trajectories (logs + spans) to surface recurring reasoning and tool-use failure modes. |
+| **Validation and risk analytics** | Dashboards for PR risk labels, validation outcomes, and trends by repo, user, and `prompt_version`; eventually feed learned memory rules into Tier 2 when the tiered pipeline ships. |
 
 ### Memory security
 
@@ -122,6 +126,17 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Anomaly detection** | CloudWatch metrics on write patterns; alarms for burst writes or suspicious content. |
 | **Quarantine and rollback** | Operator API for isolating suspicious entries and restoring pre-task snapshots. |
 | **Write-ahead validation** | Route proposed memory writes through a guardian model. |
+| **Review feedback quorum** | Promote review-derived rules to persistent memory only after corroboration (e.g. pattern seen across trusted reviewers and PRs), reducing single-comment poisoning. Complements **Review feedback memory loop**. |
+| **Memory backup to S3** | Scheduled export of AgentCore Memory namespaces to versioned S3 for disaster recovery and pre-poisoning restore (see design: `SECURITY.md`). |
+| **Memory extraction replay** | Operator API (e.g. `start_memory_extraction_job`) to re-run failed PR-review extraction after webhook or Lambda errors. |
+| **Structured knowledge graph (tier 4)** | Optional long-term direction if semantic + episodic memory proves insufficient for repo-specific query patterns. |
+
+### Security (execution guardrails)
+
+| Capability | Description |
+|------------|-------------|
+| **Behavioral circuit breaker** | Per-session limits on tool-call rate, cumulative cost, consecutive failures, and file churn; pause or terminate when thresholds are exceeded. Configurable per repo via Blueprint (design: `SECURITY.md`, `REPO_ONBOARDING.md`). |
+| **Tool capability tiers** | Opt-in **extended** tool profile per repo: MCP servers, plugins, and additional Gateway-mediated tools beyond the default minimal surface (`COMPUTE.md`). Enforced at Gateway and policy layers. |
 
 ### Channels and integrations
 
@@ -132,6 +147,9 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Slack integration** | Submit tasks, check status, receive notifications from Slack. Block Kit rendering. |
 | **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. |
 | **Real-time event streaming** | WebSocket API for live task updates. Replaces polling for CLI, control panel, Slack. |
+| **Outbound notification pipeline** | Canonical internal notification schema emitted on task lifecycle events; channel adapters (Slack, email, CLI) render and deliver. Complements polling and WebSocket. |
+| **Per-user notification preferences** | DynamoDB (or equivalent) store for preferred channels, per-channel config, and event filters (`INPUT_GATEWAY.md`). |
+| **Browser extension channel** | Lightweight extension to open tasks from GitHub issue/PR pages using existing webhook or OAuth-issued JWT; same internal message contract as other channels. |
 
 ### Compute and performance
 
@@ -140,6 +158,27 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Adaptive model router** | Per-turn model selection by complexity. Cheaper models for reads, Opus for complex reasoning. ~30-40% cost reduction. |
 | **Alternative compute** | ECS/Fargate or EKS via ComputeStrategy interface. For workloads exceeding AgentCore's 2 GB image limit or requiring GPU. |
 | **Environment pre-warming** | Pre-build container layers per repo. Snapshot-on-schedule (rebuild on push). Cold start from minutes to seconds. |
+
+### Onboarding and repo lifecycle
+
+| Capability | Description |
+|------------|-------------|
+| **Automated re-onboarding** | Event-driven refresh of blueprint-related artifacts when the default branch changes materially (GitHub webhook); optional EventBridge schedule for periodic drift checks. Distinct from **Scheduled triggers** (task creation). |
+| **Dynamic onboarding artifacts** | When repo hygiene is weak, generate attachments for the agent context: codebase summaries, dependency graphs, suggested rules from layout (`REPO_ONBOARDING.md`). |
+
+### Cost governance
+
+| Capability | Description |
+|------------|-------------|
+| **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. |
+| **Automated model downgrade** | When approaching budget limits, shift to a cheaper default model for new work (e.g. Sonnet → Haiku) per policy. |
+
+### Observability and safe deploy
+
+| Capability | Description |
+|------------|-------------|
+| **Admission backlog observability** | Metric and alarm when `SUBMITTED` task depth exceeds an operator threshold (capacity and admission health). |
+| **Safe orchestrator deploys** | Pre-deploy checks for active tasks (drain or warn); blue-green or canary Lambda deploy for the durable orchestrator with rollback on error regressions (`OBSERVABILITY.md`). |
 
 ### Scale and collaboration
 
@@ -157,6 +196,11 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 |------------|-------------|
 | **Unified liveness decision model (follow-up design ticket)** | Normalize task health evaluation across compute backends so heartbeat, compute session status, and DynamoDB state are handled through a single typed decision path. Define explicit backend capabilities (for example, heartbeat support), deterministic precedence rules for terminal outcomes, and regression tests that prevent cross-runtime false failures like ECS heartbeat mismatch. |
 | **Pure decision function orchestrator refactor** | Extract orchestrator decision logic into pure functions that take a frozen snapshot and return a typed action. Side-effectful execution applies actions with CAS (compare-and-swap) guards on DynamoDB `updated_at` to prevent stale writes. Makes the orchestrator exhaustively unit-testable without mocking I/O, eliminates competing-worker race conditions, and is a prerequisite for the autonomous feedback loop. |
+| **Blueprint custom steps and step sequences** | Lambda-backed `pre-agent` / `post-agent` steps and optional `step_sequence` overrides with CDK synth + runtime validation and `INVALID_STEP_SEQUENCE` on misconfiguration (`REPO_ONBOARDING.md`, `ORCHESTRATOR.md`). |
+| **Blueprint RepoConfig parity** | Extend the Blueprint construct to persist per-repo default `max_budget_usd` and `memory_token_budget` in DynamoDB (orchestrator already merges `max_budget_usd` when present; hydration uses a fixed memory token cap today). |
+| **Orchestrator DLQ** | Dead-letter path for task orchestration after retry exhaustion so operators can inspect and replay failed durable executions (`ORCHESTRATOR.md`). |
+| **Automated stuck-task reconciliation** | Scheduled job beyond passive alarms: detect tasks stuck in non-terminal states longer than policy allows and drive explicit resume, fail, or notify (`ORCHESTRATOR.md`). |
+| **Task lifecycle push notifications** | On terminal transitions, publish events (e.g. EventBridge/SNS) for email, chat, or **Per-user notification preferences** without requiring clients to poll. |
 | **CDK constructs library** | Publish reusable constructs to Construct Hub with semver versioning. |
 | **Centralized policy framework** | Unified Cedar-based framework with `PolicyDecisionEvent` audit schema. Three enforcement modes with observe-before-enforce rollout. |
 | **Formal verification** | TLA+ specification of task state machine, concurrency, cancellation races, reconciler interleavings. |
