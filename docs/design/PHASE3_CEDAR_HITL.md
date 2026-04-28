@@ -365,7 +365,7 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
   when { context.command like "*DROP TABLE*" };
 ```
 
-**Gate destructive git ops** (soft-deny, medium severity):
+**Gate destructive git ops** (soft-deny — part of the built-in starter set):
 ```cedar
 @tier("soft")
 @rule_id("force_push_any")
@@ -381,12 +381,26 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
 @severity("high")
 @category("destructive")
 forbid (principal, action == Agent::Action::"execute_bash", resource)
-  when { context.command like "*git push --force origin main*" };
+  when { context.command like "*git push --force origin main*"
+      || context.command like "*git push --force origin prod*"
+      || context.command like "*git push -f origin main*"
+      || context.command like "*git push -f origin prod*" };
+
+@tier("soft")
+@rule_id("push_to_protected_branch")
+@approval_timeout_s("300")
+@severity("medium")
+@category("destructive")
+forbid (principal, action == Agent::Action::"execute_bash", resource)
+  when { context.command like "*git push origin main*"
+      || context.command like "*git push origin prod*"
+      || context.command like "*git push origin master*"
+      || context.command like "*git push origin release/*" };
 ```
 
-A force-push to any branch needs approval in 300s. A force-push specifically to `origin main` gives the user 600s and elevates severity. If the command matches both rules, multi-match merging picks `min(300, 600) = 300s` and `max(medium, high) = high`.
+A force-push to any branch needs approval in 300s. A force-push to `main` or `prod` gives the user 600s with elevated severity. A non-force push to a protected branch (`main`/`prod`/`master`/`release/*`) also gates — catches the case where an agent directly pushes rather than opening a PR. If a command matches both `force_push_any` and `force_push_main`, multi-match merging picks `min(300, 600) = 300s` and `max(medium, high) = high`.
 
-**Protect sensitive file paths** (soft-deny):
+**Protect sensitive file paths** (soft-deny — part of the built-in starter set):
 ```cedar
 @tier("soft")
 @rule_id("write_env_files")
@@ -397,14 +411,6 @@ forbid (principal, action == Agent::Action::"write_file", resource)
   when { context.file_path like "*.env" };
 
 @tier("soft")
-@rule_id("write_infrastructure")
-@approval_timeout_s("900")
-@severity("high")
-@category("filesystem")
-forbid (principal, action == Agent::Action::"write_file", resource)
-  when { context.file_path like "infrastructure/*" };
-
-@tier("soft")
 @rule_id("write_credentials")
 @approval_timeout_s("300")
 @severity("high")
@@ -413,15 +419,40 @@ forbid (principal, action == Agent::Action::"write_file", resource)
   when { context.file_path like "*credentials*" };
 ```
 
-**Gate whole tools** (soft-deny):
+**Optional patterns (not shipped by default — copy into your blueprint if your repo needs them):**
 ```cedar
-@tier("soft")
-@rule_id("webfetch_any")
-@approval_timeout_s("300")
-@severity("medium")
-@category("network")
-forbid (principal, action == Agent::Action::"invoke_tool",
-        resource == Agent::Tool::"WebFetch");
+// Gate writes under a conventional infrastructure/ directory. Not in the
+// built-in set because the "infrastructure/" path is a repo convention,
+// not a standard — many repos use cdk/, terraform/, deploy/, etc. Add to
+// your blueprint if your repo uses this layout.
+// @tier("soft")
+// @rule_id("write_infrastructure")
+// @approval_timeout_s("900")
+// @severity("high")
+// @category("filesystem")
+// forbid (principal, action == Agent::Action::"write_file", resource)
+//   when { context.file_path like "infrastructure/*" };
+
+// Gate all outbound WebFetch. Not in the built-in set because DNS
+// Firewall already restricts egress to an allowlist; gating every
+// WebFetch produces high-volume approval requests on doc-heavy tasks.
+// Add to your blueprint if your repo wants stricter scrutiny.
+// @tier("soft")
+// @rule_id("webfetch_any")
+// @approval_timeout_s("300")
+// @severity("medium")
+// @category("network")
+// forbid (principal, action == Agent::Action::"invoke_tool",
+//         resource == Agent::Tool::"WebFetch");
+
+// Gate writes to specific CI config. Example — tune paths per repo.
+// @tier("soft")
+// @rule_id("write_github_workflows")
+// @approval_timeout_s("600")
+// @severity("high")
+// @category("filesystem")
+// forbid (principal, action == Agent::Action::"write_file", resource)
+//   when { context.file_path like ".github/workflows/*" };
 ```
 
 Per the sentinel trick (see §6.2), `invoke_tool` matches on the real tool-name UID. The other actions (`write_file`, `execute_bash`) use a sentinel UID with the real value in `context`.
@@ -1179,23 +1210,30 @@ Fan-out dispatch rules (extending Phase 1b stubs):
 
 ### 11.3 Dashboard additions
 
-Extend `TaskDashboard`:
-- **Approval request rate**: count of `approval_requested` per hour
-- **Approval response time**: p50/p99 of `decided_at - created_at`
-- **Approval outcome distribution**: granted vs denied vs timed_out vs stranded
-- **Tasks stuck in AWAITING_APPROVAL**: alarm when age > `timeout_s + 60s`
-- **Active approval-gate count per task**: heatmap to spot anomalous loops
+Extend `TaskDashboard` (`cdk/src/constructs/task-dashboard.ts`). These are read-only CloudWatch widgets that surface approval behavior to operators; no notification channel or on-call action required:
 
-### 11.4 Alarms
+- **Approval request rate** (line, 7d): count of `approval_requested` per hour, across all tasks.
+- **Approval response time** (line + p50/p99): `decided_at - created_at`, per decision; plotted for the three outcome types.
+- **Outcome distribution** (stacked bar, per hour): granted / denied / timed_out / stranded. Inverts quickly if notifications break.
+- **Active AWAITING_APPROVAL tasks** (gauge): current count across the fleet.
+- **Per-task approval-gate count distribution** (histogram): spot tasks approaching the 50-gate cap.
+- **Top soft-deny rules by match frequency** (table): which rules are firing; informs rule tuning over time.
 
-- `HighApprovalTimeoutRate`: >50% of approval_requested in 1h end in TIMED_OUT
-- `StuckAwaitingApproval`: task in AWAITING_APPROVAL > `timeout_s + 60s`
-- `HighApprovalWriteFailureRate`: >1% of approval_write_failed events
-- `ApprovalGateCapHit`: approval_cap_exceeded > 1/hr/user — suspicious loop
-
-### 11.5 OTEL trace integration
+### 11.4 OTEL trace integration
 
 Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id`. A span `hitl.approval_wait` brackets the PreToolUse poll loop: `span.duration = decided_at - created_at`. `hitl.approval_race_loss` emitted when the agent's local timeout fired <5s before a late user decision (useful for tuning).
+
+### 11.5 CloudWatch alarms — deferred
+
+Operator-facing CloudWatch alarms that would page on:
+- High approval-timeout rate (users not responding, notifications broken)
+- Tasks stuck in AWAITING_APPROVAL beyond `timeout_s + 60s` (reconciler failure)
+- High approval-write failure rate (DDB throttled or IAM drift)
+- Approval-gate cap hit (suspicious retry loop)
+
+…are **out of scope for Phase 3a** because the project does not yet have a notification channel (Slack / PagerDuty / SNS topic / email distribution list) configured for operational alerts. Adding alarms without a notification channel produces CloudWatch widgets that nobody sees — no safety benefit.
+
+If / when an operational channel is added to the stack, these alarms become a small follow-up: wire CloudWatch metric filters on the milestone event types already emitted (§11.1), then an alarm + SNS action per threshold. The supporting metric data already flows (decisions 3-15 guarantee it); only the plumbing is deferred.
 
 ---
 
@@ -1466,7 +1504,7 @@ Each phase has explicit scope. Matches real-world review workflows. Visible in a
 ### 15.1 Milestone structure
 
 **Phase 3a** — core feature (3-4 weeks of work):
-- Day 1: spike cedarpy annotation round-trip (decision 22). Confirm the exact JSON shape `policies_to_json_str()` returns and adjust §6.3 if needed.
+- Day 1: commit the cedarpy annotation round-trip test (agent side, `agent/tests/test_cedarpy_annotations_contract.py`) + the `@cedar-policy/cedar-wasm` parse test (Lambda side, `cdk/test/handlers/shared/cedar-policy.test.ts`). Both packages already spiked 2026-04-24: `cedarpy.policies_to_json_str()` returns annotations verbatim under `staticPolicies.<id>.annotations`; `@cedar-policy/cedar-wasm/nodejs` exports `policySetTextToParts` + `policyToJson(text)` which together expose the same data (see §15.6).
 - Engine refactor (hard + soft + annotations + allowlist + recent-decisions)
 - New DDB table, new Lambdas, new CLI commands
 - PreToolUse hook extension (atomic transitions)
@@ -1477,7 +1515,7 @@ Each phase has explicit scope. Matches real-world review workflows. Visible in a
 **Phase 3b** — polish (1-2 weeks):
 - CLI inline streaming prompt (UX research first)
 - `approve --defer` / allowlist revocation (`bgagent revoke-approval`)
-- Dashboard additions + CloudWatch alarms polishing
+- CloudWatch alarm plumbing (§11.5) — deferred until an operational notification channel is available
 - More soft-deny policies in the default set based on real usage
 
 ### 15.2 Phase 3a task list
@@ -1550,17 +1588,49 @@ Each phase has explicit scope. Matches real-world review workflows. Visible in a
   - Degenerate bash_pattern → 400 at submit
   - Sanitizer-removing-secret test (OUTPUT_SCANNER integration)
 
-### 15.4 Feature flag + rollout
+### 15.4 Rollout — no feature flag
 
-Blueprint-level: `security.hitl_approval.enabled: bool` (default false initially, default true once stable).
+Cedar-HITL is shipped as standard functionality — no per-repo enable/disable flag. The safety posture of a given task is determined entirely by the content of the loaded policy set (built-in + blueprint) and the user's `--pre-approve` scopes at submit time.
 
-When disabled: `PolicyEngine.__init__` loads SOFT_DENY_POLICIES as empty. No soft-deny eval fires. Engine reverts to Phase 1a two-outcome behavior.
+Built-in policies shipped with the agent:
 
-Rollout:
-1. Ship code with flag default false globally
-2. Enable on `backgroundagent-dev` — Scenarios A-E validated
-3. Enable on one pilot production repo — monitor dashboards + alarms for 2 weeks
-4. Enable by default; blueprint opt-out for repos that want to skip
+**Hard-deny (absolute)**: `rm_slash`, `write_git_internals`, `write_git_internals_nested`, `drop_table`. Absolute; no scope bypasses them.
+
+**Soft-deny starter set (require approval by default)**:
+- `force_push_any` — `like "*git push --force*"` — medium, 300s
+- `push_to_protected_branch` — pushes to `main`/`master`/`prod`/`release/*` (non-force) — medium, 300s
+- `force_push_main` — force-push specifically to `main`/`prod` — high, 600s
+- `write_env_files` — `like "*.env"` — high, 600s
+- `write_credentials` — `like "*credentials*"` — high, 300s
+
+Users who want fully autonomous execution (no approval gates) pass `--pre-approve all_session --yes` at submit. Repos that want additional gates add them via `Blueprint.security.cedarPolicies.soft`. Repos that want a different policy set can override specific built-in rules by `@rule_id` via the blueprint's `security.cedarPolicies.disable` list (see §17 for the disable-by-id mechanism, implemented as part of 3a).
+
+Rollout steps:
+
+1. **Implement + merge to main.** Built-in soft-deny ships with the 5-rule starter set above. No flag, no global kill switch. Any task on any repo instantly has the gate behavior for rules in the starter set; any task with `--pre-approve all_session` bypasses soft-deny as it always has.
+2. **`backgroundagent-dev` validation.** Deploy merged code. Run E2E scenarios A–E:
+   - A: force-push gated + approved via CLI
+   - B: hard-deny path (DROP TABLE blocked, not gated)
+   - C: `--pre-approve all_session` bypasses soft-deny
+   - D: deny-with-reason steers agent via `<user_denial>` injection
+   - E: AI-DLC-style phased pre-approvals
+   Confirm Phase 1a/1b/2 regressions still pass. Confirm dashboards render.
+3. **Pilot period (2 weeks).** Designate `scoropeza/agent-plugins` as the pilot repo (non-critical, active usage). Monitor:
+   - Any stranded tasks → indicates reconciler gap
+   - Timeout rate on approval_requested
+   - Per-task approval-gate count distribution — spot anomalous retry loops
+   - User-reported friction: "is the gate firing on things it shouldn't?"
+   If the starter set is too noisy, tune. If reliability is solid, proceed.
+4. **Default for all repos.** Once the pilot is stable, the starter set is already live for everyone — no "flip the switch" step because there was no flag. Ongoing tuning happens by modifying built-in policies in code or via repo blueprints.
+
+**Rollback mechanism.** If the pilot surfaces a bug: remove the problem rule from `soft_deny.cedar` and redeploy (~5 min). No flag to flip. If the bug is more fundamental (engine regression), `git revert` the Phase 3 merge and redeploy — Phase 2 tests continue to pass because the backward-compat shim on `PolicyDecision.allowed` preserves the hook contract.
+
+**Success criteria for "pilot done":**
+- Zero stranded tasks in 2 weeks
+- <10% timeout rate on `approval_requested`
+- Zero `approval_cap_exceeded` events (if any fire, either the cap is wrong or adversarial traffic to investigate)
+- No regressions in Phase 1a/1b/2 tests (CI enforced on every commit)
+- User-initiated gates that work: every soft-deny match produces a visible `★ approval_requested` in the stream and a responsive `bgagent approve/deny` cycle
 
 ### 15.5 Backward compatibility
 
@@ -1568,6 +1638,77 @@ Rollout:
 - Existing policies without `@rule_id` / `@tier` → engine fails to start (fail-closed). Blueprint authors must add annotations explicitly during migration.
 - `PolicyDecision.allowed` property provides backward compat for existing `if not decision.allowed` callers
 - Hook return shape unchanged — Phase 1a/1b tests continue to pass
+
+### 15.6 Shared Cedar parsing — `@cedar-policy/cedar-wasm` API quickref
+
+The Lambda side (`CreateTaskFn`, `ApproveTaskFn`, `GetPoliciesFn`) uses [`@cedar-policy/cedar-wasm`](https://www.npmjs.com/package/@cedar-policy/cedar-wasm) — AWS's official WASM-compiled Cedar engine. Same Rust core as the Python `cedarpy` binding we already use in the agent. Spiked + verified 2026-04-24.
+
+**Package:** `@cedar-policy/cedar-wasm@4.10.0` (or latest major 4.x).
+**Size:** 4.1 MB unzipped / ~1.5 MB zipped — well under Lambda limits.
+**Import:** `const cedar = require('@cedar-policy/cedar-wasm/nodejs');` — use the CJS nodejs sub-export, NOT the default ESM export (ESM fails with `ERR_UNKNOWN_FILE_EXTENSION` on the `.wasm` file in Node 22).
+
+**Core functions used by the design:**
+
+| Function | Purpose |
+|---|---|
+| `policySetTextToParts(text: string)` | Split a multi-policy Cedar text into an array of individual policy texts. Returns `{type: "success", policies: string[]}` or `{type: "failure", errors: [...]}` |
+| `policyToJson(text: string)` | Parse a single policy text into structured JSON. Returns `{type: "success", json: {annotations, effect, principal, action, resource, conditions}}` — annotations preserved verbatim under `json.annotations` as a `Record<string, string>` |
+| `isAuthorized({principal, action, resource, context, policies: {staticPolicies: string}, entities: []})` | Main authorization call. Entity references are `{type, id}` objects, **not** string literals. Returns `{type, response: {decision, diagnostics: {reason: string[]}}}` — `diagnostics.reason` is the list of matching policy IDs (e.g. `["policy1", "policy2"]`) for multi-match |
+
+**Minimal annotation-extraction pattern (the only thing `CreateTaskFn` needs for rule validation):**
+
+```typescript
+// cdk/src/handlers/shared/cedar-policy.ts (sketch)
+import * as cedar from '@cedar-policy/cedar-wasm/nodejs';
+
+export interface ParsedRule {
+  ruleId: string;
+  tier: 'hard' | 'soft';
+  severity?: 'low' | 'medium' | 'high';
+  category?: string;
+  approvalTimeoutS?: number;
+}
+
+export function parseRules(policiesText: string): ParsedRule[] {
+  const splitResult = cedar.policySetTextToParts(policiesText);
+  if (splitResult.type !== 'success') {
+    throw new Error(`Cedar policy parse failed: ${JSON.stringify(splitResult.errors)}`);
+  }
+  const rules: ParsedRule[] = [];
+  for (const policyText of splitResult.policies ?? []) {
+    const jsonResult = cedar.policyToJson(policyText);
+    if (jsonResult.type !== 'success') continue;
+    const annotations = jsonResult.json.annotations ?? {};
+    const tier = annotations.tier;
+    const ruleId = annotations.rule_id;
+    if (tier !== 'hard' && tier !== 'soft') {
+      throw new Error(`Missing or invalid @tier annotation on policy (rule_id=${ruleId})`);
+    }
+    if (!ruleId) {
+      throw new Error(`Missing @rule_id annotation on ${tier}-deny policy`);
+    }
+    rules.push({
+      ruleId,
+      tier,
+      severity: annotations.severity as ParsedRule['severity'],
+      category: annotations.category,
+      approvalTimeoutS: annotations.approval_timeout_s ? parseInt(annotations.approval_timeout_s, 10) : undefined,
+    });
+  }
+  return rules;
+}
+
+export function isHardDenyRule(rules: ParsedRule[], ruleId: string): boolean {
+  return rules.some(r => r.ruleId === ruleId && r.tier === 'hard');
+}
+```
+
+**API differences from Python cedarpy to be aware of during implementation:**
+
+1. Results are always wrapped in `{type: "success" | "failure", ...}`. Always check `.type` before accessing payload.
+2. `isAuthorized` takes a single call object (not 3 positional args). Entities are `{type, id}` objects.
+3. The Lambda cold-start penalty is ~30ms for the first `require()` (WASM module instantiation). Keep the import at module scope — not inside the handler — so subsequent invocations reuse the already-instantiated module.
+4. The Node binding is CJS; the Lambda bundler (esbuild) treats the `.wasm` file as an external asset and Lambda's layer mechanism handles it automatically. No custom esbuild loader needed.
 
 ---
 
@@ -1693,9 +1834,10 @@ See §15.2. Net new files: ~13. Net modified files: ~15. Total LOC estimate: ~35
 - [ ] Race tests pass: approve+timeout, deny+timeout, double-approve, cancel-during-awaiting, late-approval-after-TIMED_OUT
 - [ ] E2E on `backgroundagent-dev`: Scenarios A-E, both runtime paths
 - [ ] `bgagent pending` + `bgagent policies list` functional
-- [ ] Dashboard emits all approval-* metrics; alarms wired
+- [ ] Dashboard widgets emitting all approval-* metrics
 - [ ] `bgagent status <task_id> --allowlist` (if IMPL-13 shipped)
-- [ ] Feature flag default false; enable explicitly on `backgroundagent-dev` only
+- [ ] Built-in starter soft-deny set loaded (5 rules: force_push_any, force_push_main, push_to_protected_branch, write_env_files, write_credentials)
+- [ ] No feature flag — Cedar-HITL is standard functionality; `--pre-approve all_session --yes` is the opt-out
 - [ ] Backward compat: Phase 1a/1b tests pass without modification
 - [ ] ULID length references are 26 chars throughout CLI + docs
 
