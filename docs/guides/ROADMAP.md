@@ -138,7 +138,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Multi-modal input** | Accept images in task payload (screenshots, UI mockups, design specs). |
+| **Task attachments (multimodal)** | Implement end-to-end support for the create-task **`attachments`** array (`API_CONTRACT.md`: `image`, `file`, `url` — inline base64 or fetchable URL, size/MIME limits). Flow through validation, guardrails, context hydration, and agent prompt so images (screenshots, mockups), documents, and linked assets reach the model where the channel allows it. Extend **CLI** and **webhook** task creation to populate the same schema. *Multimodal* is the vision/image path; attachments are the unified carrier for all non-text task context. |
 | **Additional git providers** | GitLab (and optionally Bitbucket). Same workflow, provider-specific API adapters. |
 | **Slack integration** | Submit tasks, check status, receive notifications from Slack. Block Kit rendering. |
 | **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. |
@@ -167,13 +167,14 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | Capability | Description |
 |------------|-------------|
 | **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. |
-| **Automated model downgrade** | When approaching budget limits, shift to a cheaper default model for new work (e.g. Sonnet → Haiku) per policy. |
+| **Complexity-aware model router** | Route each request to the most appropriate model based on task complexity (simple reads/edits to cheaper models, deeper reasoning to stronger models) while honoring budget and policy constraints. |
 
 ### Observability and safe deploy
 
 | Capability | Description |
 |------------|-------------|
 | **Admission backlog observability** | Metric and alarm when `SUBMITTED` task depth exceeds an operator threshold (capacity and admission health). |
+| **Admission queue with deferred pickup** | When admission is at capacity, persist tasks in a durable queue instead of failing them. Automatically re-attempt admission and continue processing in FIFO order (with optional priority lanes) as concurrency becomes available. Preserve cancel/idempotency semantics and expose queue position/ETA in task status. |
 | **Safe orchestrator deploys** | Pre-deploy checks for active tasks (drain or warn); blue-green or canary Lambda deploy for the durable orchestrator with rollback on error regressions (`OBSERVABILITY.md`). |
 
 ### Scale and collaboration
