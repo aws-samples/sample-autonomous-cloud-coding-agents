@@ -1,9 +1,10 @@
 # Phase 3 — Cedar-driven HITL Approval Gates
 
 > **Status:** Detailed design, pre-implementation.
-> **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (now pointing here), §7 (state machine), §11 (implementation plan).
+> **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (pointing here), §7 (state machine).
 > **Visual:** [`../phase3-cedar-hitl.drawio`](../phase3-cedar-hitl.drawio) (12 pages).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
+> **Rev:** 2 (2026-04-24 — rewrite integrating review findings).
 > **Implementation:** not started.
 
 ---
@@ -25,13 +26,14 @@
 13. [Failure modes + fail-closed posture](#13-failure-modes--fail-closed-posture)
 14. [Sample scenarios](#14-sample-scenarios)
 15. [Implementation plan](#15-implementation-plan)
-16. [Open questions / deferred](#16-open-questions--deferred)
+16. [Implementation notes (carry-forward tasks)](#16-implementation-notes-carry-forward-tasks)
+17. [Deferred / out of scope](#17-deferred--out-of-scope)
 
 ---
 
 ## 1. What we are building, in one paragraph
 
-When the agent is about to call a tool (Bash, Write, Edit, WebFetch, etc.), our existing Cedar policy engine today decides **Allow** or **Deny**. Phase 3 adds a third outcome — **Require-approval** — that pauses the tool call, writes an approval request to a new DynamoDB table, transitions the task to `AWAITING_APPROVAL`, and awaits a human response via a new REST endpoint + CLI command. The agent polls DynamoDB for the user's decision (2–5s cadence), then either proceeds with the tool call or receives a denial the agent can adapt to. At task-submit time the user can also *pre-approve* scopes (specific tools, bash patterns, rule IDs, or `all_session`) so low-risk agents run without any interactive gates. The same Cedar policy language is reused with a new `@tier("soft")` annotation to mark rules that should trigger approval instead of absolute denial — no new language, broader semantics.
+When the agent is about to call a tool (Bash, Write, Edit, WebFetch, etc.), our existing Cedar policy engine today decides **Allow** or **Deny**. Phase 3 adds a third outcome — **Require-approval** — that pauses the tool call, writes an approval request to a new DynamoDB table **atomically with the task state transition**, notifies the user via a live stream marker, and awaits a human response via a new REST endpoint + CLI command. The agent polls DynamoDB for the user's decision with strongly-consistent reads; on approval it proceeds, on denial (or timeout) the decision text is injected into the agent's context via the validated Phase 2 Stop-hook mechanism so the agent adapts rather than spinning. At task-submit time the user can also *pre-approve* scopes (specific tools, bash patterns, rule IDs, path patterns, or `all_session`) so low-risk agents run without any interactive gates. The same Cedar policy language is reused with a new `@tier("soft")` annotation to mark rules that should trigger approval instead of absolute denial — no new language, broader semantics.
 
 ---
 
@@ -57,6 +59,10 @@ We layer a **three-outcome abstraction** on top of Cedar by running **two evalua
 │       └─ match → return PolicyDecision(outcome=ALLOW, reason=...)        │
 │          Pre-approved (from --pre-approve) or previously approved        │
 │          with scope != this_call.                                        │
+│                                                                          │
+│  2.5. Recent-decision cache (anti-retry-loop)                            │
+│       └─ cached DENIED/TIMED_OUT for (tool_name, input_sha) within 60s  │
+│          → auto-deny with same reason (prevents re-gate storms)         │
 │                                                                          │
 │  3. Cedar eval against SOFT_DENY_POLICIES                                │
 │       └─ Deny → return PolicyDecision(outcome=REQUIRE_APPROVAL,          │
@@ -86,20 +92,32 @@ The winning property: **policy authors can put on their "security-review-approve
 
 ## 3. Design decisions (locked)
 
-Settled during the 2026-04-23 design discussion. Each has detailed rationale in that conversation; summary here for implementers.
+Settled during the 2026-04-23 design discussion and extended after the 2026-04-24 review. Each has detailed rationale in those conversations; summary here for implementers.
 
 | # | Decision | Summary |
 |---|---|---|
 | 1 | **Cedar encoding: two policy sets** | Physical hard-deny vs soft-deny split, validated via `@tier(...)` annotation. |
-| 2 | **Hook point: extend `PreToolUse`, not `can_use_tool`** | PreToolUse is already async-compatible, already wired to Cedar, and already owns the tool-governance boundary. No reason to add a second hook with overlapping responsibilities. |
-| 3 | **Wait mechanism: DDB polling, 2s → 5s backoff** | Initial 2s cadence for the first 30s, then 5s for the remainder. ~60-150 GetItem calls over a 5-min timeout; cheap on on-demand DDB. |
-| 4 | **Scope allowlist: in-process, seeded from persisted `initial_approvals`** | Runtime escalation (from mid-task `bgagent approve --scope tool_type_session`) lives in the `PolicyEngine` instance. Submit-time `--pre-approve` flags persist as `initial_approvals` on TaskTable and seed the allowlist at container startup. Lost on restart (rare; 8h maxLifetime + attach-don't-spawn). |
-| 5 | **CLI UX: standalone `bgagent approve/deny` + `--pre-approve <scope>` on `submit`/`run`** | No inline interactive prompt in the streaming CLI for v1 (too much UX risk with the stream rolling). |
-| 6 | **Timeouts: per-task default + per-rule Cedar annotation override, fail-closed** | `--approval-timeout <seconds>` at submit, bounded `[30s, maxLifetime - 5min]`. Per-rule `@approval_timeout_s("N")` annotation overrides. On timeout → deny (never auto-approve). |
-| 7 | **Concurrency slots: AWAITING_APPROVAL holds the slot** | Matches PAUSED semantics. Container is alive, consuming memory. See §9 for worked example. |
-| 8 | **Hard-deny is absolute** | No `--pre-approve` scope can bypass it; CreateTaskFn validates and rejects `rule:<hard_deny_rule_id>`. |
+| 2 | **Hook point: extend `PreToolUse`, not `can_use_tool`** | PreToolUse is already async-compatible, already wired to Cedar, and already owns the tool-governance boundary. |
+| 3 | **Wait mechanism: DDB strongly-consistent polling, 2s → 5s backoff** | Initial 2s cadence for the first 30s, then 5s. `ConsistentRead=True` so the agent never misses an approval that already landed. |
+| 4 | **Scope allowlist: in-process, seeded from persisted `initial_approvals`** | Runtime escalation lives in the `PolicyEngine` instance. Submit-time `--pre-approve` flags persist on TaskTable and seed the allowlist at container startup. Lost on restart (rare; reconciler fails stranded tasks). |
+| 5 | **CLI UX: standalone `bgagent approve/deny` + `--pre-approve <scope>` + `bgagent policies list` + `bgagent pending`** | No inline interactive prompt in the streaming CLI for v1. Discovery + listing commands solve the request_id/rule_id copy problem. |
+| 6 | **Timeouts: per-task default + per-rule Cedar annotation override, min wins, bounded floor + ceiling, fail-closed** | Floor: 30s (engine-enforced on both task default and rule annotations). Ceiling: `min(1h, maxLifetime - remaining_cleanup_margin)` — sized so the TTL on the approval row always covers the decision window. On timeout → deny (never auto-approve). |
+| 7 | **Concurrency slots: AWAITING_APPROVAL holds the slot** | Matches PAUSED semantics. Container is alive, consuming memory. |
+| 8 | **Hard-deny is absolute** | No `--pre-approve` scope can bypass it. CreateTaskFn validates and rejects `rule:<hard_deny_rule_id>`. |
 | 9 | **Submit-time scope cap: 20 entries, ≤128 chars each** | Keeps audit trail legible, bounds allowlist check cost, limits abuse-vector damage. |
-| 10 | **Cedar annotations (verified working)** | `@rule_id(...)`, `@tier(...)`, `@approval_timeout_s(...)`, `@severity(...)`, `@category(...)`. Recoverable via `cedarpy.policies_to_json_str()` → JSON. Multi-match merging: min timeout wins, max severity wins. |
+| 10 | **Cedar annotations (verified working)** | `@rule_id(...)`, `@tier(...)`, `@approval_timeout_s(...)`, `@severity(...)`, `@category(...)`. Recoverable via `cedarpy.policies_to_json_str()` → JSON. Multi-match merging: min timeout wins (clamped by floor), max severity wins. |
+| 11 | **Atomic state transitions via DDB TransactWriteItems** | The approval-request row write and the TaskTable status transition are a single atomic transaction. No partial-failure states. |
+| 12 | **Ownership encoded in ConditionExpression, not fetch-then-check** | `ApproveTaskFn` / `DenyTaskFn` put `user_id = :caller` into the ConditionExpression on TaskApprovalsTable. Authorization and state transition are atomic. |
+| 13 | **Per-task approval-gate cap: 50, fail-task on exceed** | Prevents denial-loop storms. Matches Phase 2 nudge cap. |
+| 14 | **Per-minute approval-creation rate limit: 20/task** | Agent-side throttle independent of per-task lifetime cap. |
+| 15 | **Recent-decision cache: deny an identical (tool, input) for 60s after DENIED/TIMED_OUT** | Prevents retry-loop amplification on the same destructive action. |
+| 16 | **Denial reason sanitized in the Lambda, before persisting** | `DenyTaskFn` runs `output_scanner` on the reason before writing to DDB. The agent never sees unscanned text. |
+| 17 | **`tool_input_preview` stripped of ANSI/control characters at agent-side write + CLI render** | Defense in depth against approver-confusion attacks where a prompt-injected tool input overwrites the CLI prompt with a different command. |
+| 18 | **Deny-as-steering injected via Stop hook `between_turns_hooks`, NOT via `permissionDecisionReason`** | Reuses the validated Phase 2 nudge mechanism. `<user_denial>` XML block wrapped by the same `_xml_escape` utility. |
+| 19 | **`rule:` discovery via new endpoint** | `GET /v1/repos/{repo_id}/policies` + `bgagent policies list` surfaces the rule IDs + annotations + whether the rule is hard or soft. Solves the otherwise-undiscoverable `rule:X` pre-approval scope. |
+| 20 | **`write_path:<glob>` scope** | Added so users can pre-approve file writes under specific path patterns (e.g., `write_path:docs/**`) without needing to grant all Writes. |
+| 21 | **`tool_group:file_write` convenience scope** | Resolves to `{Write, Edit}`. Prevents the surprise of pre-approving `Write` and still getting gated on `Edit`. |
+| 22 | **Pre-implementation spike: cedarpy annotation round-trip** | Day 1 of implementation validates that `policies_to_json_str()` returns annotations in the expected shape. If the API has changed, fall back to policy-ID prefix conventions. |
 
 ---
 
@@ -114,9 +132,10 @@ Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hit
 3. CLI POSTs `/v1/tasks` with `{repo, task, initial_approvals: [...], approval_timeout_s: 600}`.
 4. `CreateTaskFn` validates `initial_approvals`:
    - max 20 entries, ≤128 chars each
-   - rejects `rule:<id>` where `<id>` names a hard-deny rule
-   - honors `Blueprint.security.maxPreApprovalScope` (see §5.3)
-   - rejects `all_session` if blueprint prohibits it
+   - rejects `rule:<id>` where `<id>` names a hard-deny rule (resolved via shared policy-parsing library against the repo's blueprint; see §5.4)
+   - rejects degenerate `bash_pattern`/`write_path` scopes that match too broadly (see §7.3)
+   - honors `Blueprint.security.maxPreApprovalScope` (see §7.3)
+   - normalizes scope strings (trim whitespace; case-sensitive as documented)
 5. Task persists. `approval_timeout_s` and `initial_approvals` become DDB attributes on the task row.
 6. Container spawns on Runtime-JWT. `PolicyEngine.__init__` loads:
    - `HARD_DENY_POLICIES` (built-in + repo blueprint's `security.cedarPolicies.hard`)
@@ -124,6 +143,7 @@ Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hit
    - Annotation lookup table: `{policy_id: {annotation: value}}` built from `cedarpy.policies_to_json_str()` once, cached for the task lifetime
    - Rule-ID map: `{rule_id_annotation: policy_id}` to resolve `--pre-approve rule:<rule_id>` → internal Cedar policy ID
    - Allowlist seeded from `initial_approvals`
+   - Annotation validation: `@rule_id` uniqueness enforced (duplicate = task fails to start); `@approval_timeout_s` must be integer ≥ 30 (malformed or below floor = task fails to start)
 7. Container emits `agent_milestone("pre_approvals_loaded", {count: 2, scopes: ["tool_type:Read", "bash_pattern:git status*"]})` so Terminal A's stream shows the starting posture.
 8. Agent begins normal work.
 
@@ -134,34 +154,51 @@ Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hit
 11. Hook calls `PolicyEngine.evaluate_tool_use`:
     - Hard-deny eval: matches nothing → `allowed=True`
     - Allowlist fast-path: `tool_type:Bash`? no. `bash_pattern` matches `git push --force ...`? `git status*` doesn't match `git push --force ...` → skip
-    - Soft-deny eval: policy `force_push_any` matches (`like "*git push --force*"`). `diagnostics.reasons == ["policy1"]`. Lookup: `policy1` → annotations `{rule_id: "force_push_any", approval_timeout_s: "300", severity: "medium"}`.
+    - Recent-decision cache: no matching `(Bash, sha256(input))` in cache → skip
+    - Soft-deny eval: policy `force_push_any` matches. `diagnostics.reasons == ["policy1"]`. Lookup: `policy1` → annotations `{rule_id: "force_push_any", approval_timeout_s: "300", severity: "medium"}`.
     - Returns `PolicyDecision(outcome=REQUIRE_APPROVAL, reason="Cedar soft-deny: force_push_any", timeout_s=300, severity="medium", matching_rule_ids=["force_push_any"])`.
 
-    The 300s timeout is from the annotation, not the task default of 600s. Min of `(task_default, rule_annotation)` wins — the stricter one for safety.
+    Effective timeout computation:
+    ```
+    effective = max(
+        FLOOR_30S,
+        min(
+            rule_annotation_timeout_s or task_default,     # 300
+            task_default,                                   # 600 from submit
+            maxLifetime_remaining_s - CLEANUP_MARGIN_120S   # ~7h remaining
+        )
+    )
+    → effective = 300s
+    ```
+    If `maxLifetime_remaining_s - CLEANUP_MARGIN_120S < FLOOR_30S`, hook returns DENY immediately with reason `"insufficient lifetime for approval"` (§13.7).
 
-12. Hook mints `request_id = _ulid()` (33-char ULID).
-13. Hook writes to `TaskApprovalsTable`:
+12. Hook checks per-task approval-gate cap (50) and per-minute rate limit (20/task). If either exceeded → DENY with reason `"approval-gate cap exceeded"` (fail-closed).
+13. Hook mints `request_id = _ulid()` (26-char ULID).
+14. Hook builds the approval row payload:
     ```python
-    {
+    row = {
       "task_id": "01KPW...",
       "request_id": "01KPR...",
       "tool_name": "Bash",
-      "tool_input_preview": "git push --force origin feature-x",  # truncated to 256 chars
-      "tool_input_sha256": "abc123...",  # full-input hash for audit
+      "tool_input_preview": strip_ansi("git push --force origin feature-x")[:256],
+      "tool_input_sha256": "abc123...",
       "reason": "Cedar soft-deny: force_push_any",
       "severity": "medium",
-      "matching_rule_ids": ["force_push_any"],
+      "matching_rule_ids": ["force_push_any"],        # list, not set — supports empty
       "status": "PENDING",
       "created_at": "2026-04-23T14:00:00Z",
       "timeout_s": 300,
-      "ttl": 1734567890,   # created_at + 1h
+      "ttl": 1734567890,  # created_at + timeout_s + CLEANUP_MARGIN_120S; always covers the decision window
       "user_id": "...",
       "repo": "my-org/my-app"
     }
     ```
-14. Hook conditionally updates `TaskTable.status`: `RUNNING → AWAITING_APPROVAL` with `ConditionExpression: #status = :running` (fail-closed on race — §12.3).
-15. Hook emits `agent_milestone("approval_requested", {...})` to both `ProgressWriter` (DDB audit) and `sse_adapter` (live stream).
-16. Terminal A stream renders:
+15. **Atomic transition** — hook issues `TransactWriteItems` with two operations:
+    - Put on `TaskApprovalsTable` (new row with status=PENDING)
+    - ConditionalUpdate on `TaskTable`: `status = :awaiting, awaiting_approval_request_id = :rid WHERE status = :running`
+    Both succeed or both fail. On `TransactionCanceledException` (most likely the TaskTable condition fails because another process moved the status), the hook emits `approval_write_failed` and returns DENY.
+16. Hook emits `agent_milestone("approval_requested", {...})` to both `ProgressWriter` (DDB audit) and `sse_adapter` (live stream). Best-effort emission — transactional write has already committed; milestone failure is observability degradation, not state degradation.
+17. Terminal A stream renders:
     ```
     [14:00:00]  ★ approval_requested: Bash "git push --force origin feature-x" (medium)
                 reason: Cedar soft-deny: force_push_any
@@ -169,41 +206,60 @@ Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hit
                 bgagent deny <task_id> 01KPR... [--reason "..."]
                 timeout 300s
     ```
-17. Hook enters poll loop:
+    Severity colors the line (respecting `NO_COLOR` env var).
+18. Hook enters poll loop with strongly-consistent reads:
     ```python
     async def _poll_for_decision(task_id, request_id, timeout_s):
         start = time.monotonic()
         interval = 2
+        consecutive_failures = 0
         while True:
             elapsed = time.monotonic() - start
-            if elapsed > timeout_s:
+            if elapsed >= timeout_s:
                 return TimedOut()
             if elapsed > 30:
                 interval = 5  # backoff
-            row = await _ddb_get_approval(task_id, request_id)
-            if row["status"] != "PENDING":
-                return Decided(row)
+            try:
+                row = await _ddb_get_approval(task_id, request_id, ConsistentRead=True)
+                consecutive_failures = 0
+                if row is None:
+                    # Row disappeared between write and poll — treat as stranded
+                    return TimedOut(reason="approval row missing; fail-closed")
+                if row["status"] != "PENDING":
+                    return Decided(row)
+            except Exception as exc:
+                consecutive_failures += 1
+                if consecutive_failures == 3:
+                    log("WARN", f"approval poll degraded for {request_id}: {exc}")
+                    emit_milestone("approval_poll_degraded", {...})
+                if consecutive_failures >= 10:
+                    return TimedOut(reason="approval poll consecutive failures")
             await asyncio.sleep(interval)
     ```
+19. The approval CAP and local-timeout paths ALWAYS attempt to write the row to TIMED_OUT (best-effort conditional update `status = :pending`) before returning. This prevents orphan PENDING rows when the agent bails internally.
 
 ### User responds
 
-18. User in Terminal B runs `bgagent approve <task_id> <req_id> --scope tool_type_session`.
-19. CLI validates scope syntax client-side.
-20. CLI POSTs `/v1/tasks/{task_id}/approve` with `{request_id, decision: "approve", scope: "tool_type_session"}`.
-21. `ApproveTaskFn`:
-    - Validates Cognito JWT, ownership check (`TaskTable.user_id == caller`)
-    - Looks up row in `TaskApprovalsTable`. If not found → 404. If already decided → 409 CONFLICT.
-    - Conditional update: `UpdateExpression: SET #status = :approved, decided_at = :now, scope = :scope WITH ConditionExpression: #status = :pending`
-    - On success: returns 202 `{task_id, request_id, status: "APPROVED", scope, decided_at}`
-    - On ConditionalCheckFailedException: returns 409 `TASK_ALREADY_DECIDED`
-22. Agent's poll reads the `APPROVED` row on next tick (within 2-5s).
-23. Hook:
-    - Emits `agent_milestone("approval_granted", {request_id, scope, decided_at})`
-    - If `scope != "this_call"`: adds scope to `PolicyEngine._allowlist`. Subsequent matching tool calls skip Cedar soft-deny entirely.
-    - Conditional update `TaskTable.status`: `AWAITING_APPROVAL → RUNNING`
-    - Returns `{"permissionDecision": "allow"}` to SDK
-24. SDK runs the tool. Stream shows:
+20. User in Terminal B runs `bgagent approve <task_id> <req_id> --scope tool_type_session`.
+21. CLI validates scope syntax client-side.
+22. CLI POSTs `/v1/tasks/{task_id}/approve` with `{request_id, decision: "approve", scope: "tool_type_session"}`.
+23. `ApproveTaskFn`:
+    - Validates Cognito JWT, extracts `sub` as `caller_user_id`.
+    - Single `UpdateItem` on `TaskApprovalsTable` with compound ConditionExpression:
+      ```
+      #status = :pending AND user_id = :caller AND task_id = :task_id
+      ```
+      If all three conditions hold → atomic flip to APPROVED. Ownership + state + existence check in a single call. No TOCTOU.
+    - On `ConditionalCheckFailedException` with `ReturnValuesOnConditionCheckFailure=ALL_OLD`: distinguishes between (a) row missing (404 `REQUEST_NOT_FOUND`), (b) wrong user (404 `REQUEST_NOT_FOUND` — don't leak existence), (c) wrong status (409 `REQUEST_ALREADY_DECIDED`).
+    - Records audit event to TaskEventsTable directly (`approval_decision_recorded`) so the 90-day audit trail is owned by the Lambda, not dependent on agent milestones.
+    - Returns 202 `{task_id, request_id, status: "APPROVED", scope, decided_at}` or error.
+24. Agent's poll reads the `APPROVED` row on next tick (within 2-5s).
+25. Hook executes decision in this order:
+    - a. **Atomic resume transition**: `TransactWriteItems` — TaskTable `status = :running, REMOVE awaiting_approval_request_id WHERE status = :awaiting AND awaiting_approval_request_id = :rid`. If this fails (likely because user cancelled during the poll gap), hook skips allowlist mutation and returns DENY with reason `"task no longer awaiting approval"`.
+    - b. **Allowlist mutation** (only if `scope != "this_call"`): `PolicyEngine._allowlist.add(scope)`. Synchronously logged.
+    - c. **Milestone emission** (best-effort): `approval_granted` to both writers.
+    - d. **Return to SDK**: `{"permissionDecision": "allow"}`.
+26. SDK runs the tool. Stream shows:
     ```
     [14:00:12]  ★ approval_granted: request_id=01KPR... scope=tool_type_session
     [14:00:12]  ▶ Bash: git push --force origin feature-x
@@ -212,13 +268,26 @@ Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hit
 
 ### Continuation
 
-25. Agent continues with its turn, hits another `Bash` call (say `git log --oneline -5`).
-26. PreToolUse hook → PolicyEngine.evaluate_tool_use:
+27. Agent continues with its turn, hits another `Bash` call (say `git log --oneline -5`).
+28. PreToolUse hook → PolicyEngine.evaluate_tool_use:
     - Hard-deny: no match
     - Allowlist: `tool_type:Bash` ← matches. Returns ALLOW fast-path.
-27. No new approval request. Tool runs immediately.
+29. No new approval request. Tool runs immediately.
+30. Eventually agent reaches task completion, opens PR, writes memory, task → `COMPLETED`.
 
-28. Eventually agent reaches task completion, opens PR, writes memory, task → `COMPLETED`.
+### Denial with steering text
+
+If instead the user runs `bgagent deny <task_id> <req_id> --reason "use --force-with-lease instead"`:
+- `DenyTaskFn` runs `output_scanner.scan(reason)` to redact any accidental secrets/PII from the reason **before** writing it to DDB.
+- Flips row to DENIED with sanitized reason, atomic ownership check.
+- Agent's poll reads DENIED row.
+- Hook execution order:
+  - a. Atomic resume transition to RUNNING (same as approve path).
+  - b. **Inject denial into agent context** via the Phase 2 `between_turns_hooks` registry. The hook appends a synthetic `<user_denial nudge_id="..." timestamp="..." request_id="...">sanitized reason</user_denial>` block to the next Stop-seam injection. This reuses the validated nudge mechanism (§5 below) — the agent sees the denial as authoritative context on its next turn boundary.
+  - c. Milestone emission: `approval_denied`.
+  - d. Return to SDK: `{"permissionDecision": "deny", "permissionDecisionReason": "User denied — see next-turn context for reason"}`. The SDK's denial text is a terse fallback; the steering text arrives via the robust Stop-hook injection, not via `permissionDecisionReason`.
+
+Why this dual path: the Claude Agent SDK's `permissionDecisionReason` reaches the model as a tool-call-rejected system hint, which the model treats as a reason-to-retry-differently signal but is NOT the guaranteed steering surface the Phase 2 nudge pattern uses. By layering the denial as a between-turns user message, we guarantee the steering text becomes authoritative context. The `permissionDecisionReason` remains there as belt-and-suspenders for model versions that don't emit a Stop between the rejected tool call and the next turn.
 
 ---
 
@@ -252,15 +321,22 @@ security:
   maxPreApprovalScope: "tool_type_session"   # optional; caps what --pre-approve can grant
 ```
 
-`PolicyEngine.__init__` concatenates built-in + blueprint rules per tier, validates with a probe `cedarpy.is_authorized()` call, falls back to defaults if blueprint rules are malformed (logs WARN).
+`PolicyEngine.__init__` concatenates built-in + blueprint rules per tier, validates with a probe `cedarpy.is_authorized()` call. **Any** of the following cause task-start failure (not silent-fallback):
+- Malformed policy syntax
+- Duplicate `@rule_id` values across tiers
+- `@approval_timeout_s` below floor (30s) or non-integer
+- `@tier` value mismatches the file section (hard rules in soft file or vice versa)
+- Missing `@rule_id` on a soft-deny rule
+
+Fail-on-error is the right posture for blueprint misconfiguration — silent-fallback would let broken policies slip into production.
 
 ### 5.2 Annotation reference
 
 | Annotation | Required? | Values | Purpose |
 |---|---|---|---|
-| `@rule_id("...")` | Yes on soft-deny, recommended on hard-deny | Kebab-case or snake_case identifier, unique across both tiers | Stable ID for `--pre-approve rule:X` and for audit trail. Must be unique across ALL loaded policies; `PolicyEngine.__init__` raises on duplicates. |
-| `@tier("hard"\|"soft")` | Yes | Exactly one of "hard" or "soft" | Validates policy is in the correct file/section. Engine rejects mismatch at load time. |
-| `@approval_timeout_s("N")` | No | Integer seconds | Per-rule timeout. If absent, uses task default. Has no effect on hard-deny rules. |
+| `@rule_id("...")` | **Yes on soft-deny**, recommended on hard-deny | Kebab-case or snake_case identifier, unique across both tiers | Stable ID for `--pre-approve rule:X`, for audit trail, and for the `bgagent policies` discovery endpoint. `PolicyEngine.__init__` raises on duplicates. |
+| `@tier("hard"\|"soft")` | **Yes** | Exactly one of "hard" or "soft" | Validates policy is in the correct file/section. Engine rejects mismatch at load time. |
+| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Per-rule timeout. If absent, uses task default. Has no effect on hard-deny rules. Values below the floor are rejected at load time. |
 | `@severity("low"\|"medium"\|"high")` | No | One of the three | Shown in CLI approval prompt, colored by severity. Default: "medium". |
 | `@category("...")` | No | "destructive", "network", "filesystem", "auth", or free-form | UX grouping. CLI could filter approvals by category. Not enforced. |
 
@@ -282,6 +358,11 @@ forbid (principal, action == Agent::Action::"write_file", resource)
 @rule_id("write_git_internals_nested")
 forbid (principal, action == Agent::Action::"write_file", resource)
   when { context.file_path like "*/.git/*" };
+
+@tier("hard")
+@rule_id("drop_table")
+forbid (principal, action == Agent::Action::"execute_bash", resource)
+  when { context.command like "*DROP TABLE*" };
 ```
 
 **Gate destructive git ops** (soft-deny, medium severity):
@@ -345,7 +426,21 @@ forbid (principal, action == Agent::Action::"invoke_tool",
 
 Per the sentinel trick (see §6.2), `invoke_tool` matches on the real tool-name UID. The other actions (`write_file`, `execute_bash`) use a sentinel UID with the real value in `context`.
 
-### 5.4 Gotchas for policy authors
+### 5.4 Policy discovery — shared parser
+
+Because `CreateTaskFn` needs to validate `rule:<id>` pre-approvals against the target repo's actual policy set, we ship a **shared policy-parsing library** used in both places:
+
+- `cdk/src/handlers/shared/cedar-policy.ts` — thin wrapper around cedarpy's JSON form for TypeScript
+- `agent/src/policy.py` — the full engine
+
+Both consume the blueprint's `security.cedarPolicies` section. `CreateTaskFn` loads the target repo's blueprint (via the existing `RepoTable` store), concatenates with the built-in policies, parses via `cedarpy.policies_to_json_str()`, and extracts `rule_id` + `tier` annotations. `--pre-approve rule:X` is validated:
+- `X` exists as some rule's `@rule_id` → ok
+- `X` refers to a hard-deny rule → 400 at submit time (hard-deny cannot be bypassed)
+- `X` refers to a soft-deny rule → ok; passes through
+
+Runtime enforcement is still the authoritative layer. Submit-time validation is a UX guard — any drift between submit-time and runtime-loaded policies (possible if blueprint changes between them) causes the task to fail at container start with a clear error, not silently misbehave.
+
+### 5.5 Gotchas for policy authors
 
 **`like` is glob, not regex.** Only `*` (zero-or-more) and `?` (exactly-one-char) wildcards. If you need regex, write multiple `forbid` rules.
 
@@ -353,11 +448,13 @@ Per the sentinel trick (see §6.2), `invoke_tool` matches on the real tool-name 
 
 **Don't match `resource ==` for user-supplied values.** `Bash` commands and file paths go through the sentinel UID. Always use `context.command` / `context.file_path` in the `when` clause, never `resource == ...`.
 
-**`@rule_id` must be globally unique.** Including across tiers. `PolicyEngine.__init__` raises on duplicates to prevent confusion.
+**`@rule_id` must be globally unique.** Including across tiers. `PolicyEngine.__init__` raises on duplicates.
 
-**Hard-deny rules shouldn't have `@approval_timeout_s`.** It has no effect. Engine warns but doesn't reject (backward compatibility if someone moves a rule between tiers).
+**Hard-deny rules shouldn't have `@approval_timeout_s`.** It has no effect. Engine logs WARN but doesn't reject (backward compatibility if someone moves a rule between tiers).
 
 **The default ruleset is shared across all tasks.** Per-task overrides live in the Blueprint and are isolated to tasks on that repo. The engine never allows a task to loosen the default hard-deny set via Blueprint — only add to it.
+
+**`@approval_timeout_s` values below 30 are rejected at load.** There is no way to configure unusably-short approval windows.
 
 ---
 
@@ -371,7 +468,7 @@ from enum import Enum
 
 class Outcome(str, Enum):
     ALLOW = "allow"
-    DENY = "deny"                      # absolute (hard-deny or upstream error)
+    DENY = "deny"                      # absolute (hard-deny or upstream error or cap-exceeded)
     REQUIRE_APPROVAL = "require_approval"  # soft-deny hit
 
 @dataclass(frozen=True)
@@ -383,6 +480,11 @@ class PolicyDecision:
     severity: str | None = None
     matching_rule_ids: tuple[str, ...] = ()
     duration_ms: float = 0
+
+    @property
+    def allowed(self) -> bool:
+        """Backward-compat shim for Phase 1a/1b callers."""
+        return self.outcome == Outcome.ALLOW
 ```
 
 ### 6.2 `evaluate_tool_use` skeleton
@@ -391,6 +493,7 @@ class PolicyDecision:
 def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
     start = time.monotonic()
     base_context = {"task_type": self._task_type, "repo": self._repo}
+    input_sha = _sha256(json.dumps(tool_input, sort_keys=True))
 
     # STEP 1 — Hard-deny (absolute)
     hard = self._eval_tier(self._hard_policies, tool_name, tool_input, base_context)
@@ -399,21 +502,35 @@ def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
                               reason=f"Hard-deny: {hard.rule_ids}",
                               duration_ms=_elapsed(start))
 
-    # STEP 2 — Allowlist fast-path
-    if self._allowlist.matches(tool_name, tool_input, self._rule_id_map):
+    # STEP 2 — Allowlist fast-path (covers tool_type, bash_pattern, write_path, all_session)
+    if self._allowlist.matches(tool_name, tool_input):
         return PolicyDecision(outcome=Outcome.ALLOW,
                               reason="Pre-approved by allowlist",
+                              duration_ms=_elapsed(start))
+
+    # STEP 2.5 — Recent-decision cache (anti-retry-loop, 60s TTL)
+    cached = self._recent_decisions.get((tool_name, input_sha))
+    if cached is not None:
+        return PolicyDecision(outcome=Outcome.DENY,
+                              reason=f"Recent decision ({cached.decision}) within 60s: {cached.reason}",
                               duration_ms=_elapsed(start))
 
     # STEP 3 — Soft-deny (require approval)
     soft = self._eval_tier(self._soft_policies, tool_name, tool_input, base_context)
     if soft.decision == "deny":
+        # Rule-scope allowlist check happens AFTER soft-deny eval (rule_ids
+        # aren't known until Cedar tells us which policies matched)
+        if any(rid in self._allowlist._rule_ids for rid in soft.rule_ids):
+            return PolicyDecision(outcome=Outcome.ALLOW,
+                                  reason=f"Allowlist rule: {soft.rule_ids}",
+                                  duration_ms=_elapsed(start))
+
         annotations = self._merge_annotations(soft.rule_ids)
         return PolicyDecision(
             outcome=Outcome.REQUIRE_APPROVAL,
             reason=f"Soft-deny: {', '.join(annotations['rule_ids'])}",
-            timeout_s=annotations["timeout_s"],       # min across matches, capped by task default
-            severity=annotations["severity"],         # max across matches
+            timeout_s=annotations["timeout_s"],
+            severity=annotations["severity"],
             matching_rule_ids=tuple(annotations["rule_ids"]),
             duration_ms=_elapsed(start),
         )
@@ -423,7 +540,7 @@ def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
                           duration_ms=_elapsed(start))
 ```
 
-Each `_eval_tier` call does up to three Cedar `is_authorized` calls (invoke_tool + optional write_file + optional execute_bash), identical to today's engine. The only change is returning structured `rule_ids` from `diagnostics.reasons` instead of throwing it away.
+The recent-decision cache is a simple `dict[(tool_name, input_sha), (decision, reason, inserted_at)]` with a 60-second sliding window. Entries are added by the PreToolUse hook whenever an approval resolves to DENIED or TIMED_OUT — not on APPROVED (we don't want to accidentally auto-deny a tool call the user just approved). Cache is in-process, lost on restart.
 
 ### 6.3 Annotation merging
 
@@ -436,22 +553,28 @@ def _merge_annotations(self, policy_ids: list[str]) -> dict:
         ann = self._annotations[pid]
         rule_ids.append(ann.get("rule_id", pid))
         if "approval_timeout_s" in ann:
-            timeouts.append(int(ann["approval_timeout_s"]))
+            try:
+                t = int(ann["approval_timeout_s"])
+                if t >= FLOOR_30S:
+                    timeouts.append(t)
+            except ValueError:
+                log("WARN", f"malformed @approval_timeout_s on {ann.get('rule_id', pid)}")
         severities.append(ann.get("severity", "medium"))
 
-    # Task default is applied if a matched rule has no annotation.
+    # Task default always eligible
     timeouts.append(self._task_default_timeout_s)
 
+    raw_min_timeout = min(timeouts)
     return {
         "rule_ids": rule_ids,
-        "timeout_s": min(timeouts),  # stricter wins
-        "severity": _max_severity(severities),  # "high" > "medium" > "low"
+        "timeout_s": max(FLOOR_30S, raw_min_timeout),  # floor enforcement
+        "severity": _max_severity(severities),          # "high" > "medium" > "low"
     }
 ```
 
 **Rationale for min/max choices**:
-- **Timeout → min**: multiple rules matching means multiple concerns. Users should have *less* time to decide when stakes are higher. A 60s `@approval_timeout_s` rule for `DROP TABLE` combined with a 600s rule for `write_file` means: "we have two reasons to be cautious, decide faster".
-- **Severity → max**: likewise — the most severe concern governs the UX coloring.
+- **Timeout → min (above floor)**: multiple rules matching means multiple concerns. Users should have *less* time to decide when stakes are higher. Floor prevents unusable 5s windows.
+- **Severity → max**: the most severe concern governs the UX coloring.
 
 ### 6.4 Allowlist data structure
 
@@ -460,74 +583,64 @@ class ApprovalAllowlist:
     def __init__(self, initial_scopes: list[str]):
         self._all_session = False
         self._tool_types: set[str] = set()
+        self._tool_groups: set[str] = set()         # file_write → {Write, Edit}
         self._rule_ids: set[str] = set()
-        self._bash_patterns: list[str] = []  # glob patterns, matched via fnmatch
+        self._bash_patterns: list[str] = []         # glob patterns
+        self._write_path_patterns: list[str] = []   # glob patterns, for Write/Edit file_path
 
         for scope in initial_scopes:
             self.add(scope)
+
+    TOOL_GROUPS = {"file_write": {"Write", "Edit"}}
 
     def add(self, scope: str) -> None:
         if scope == "all_session":
             self._all_session = True
         elif scope.startswith("tool_type:"):
             self._tool_types.add(scope.split(":", 1)[1])
+        elif scope.startswith("tool_group:"):
+            group = scope.split(":", 1)[1]
+            if group not in self.TOOL_GROUPS:
+                raise ValueError(f"unknown tool_group: {group!r}")
+            self._tool_groups.add(group)
         elif scope.startswith("rule:"):
             self._rule_ids.add(scope.split(":", 1)[1])
         elif scope.startswith("bash_pattern:"):
             self._bash_patterns.append(scope.split(":", 1)[1])
+        elif scope.startswith("write_path:"):
+            self._write_path_patterns.append(scope.split(":", 1)[1])
         else:
             raise ValueError(f"unknown scope: {scope!r}")
 
-    def matches(self, tool_name: str, tool_input: dict,
-                rule_id_map: dict[str, str]) -> bool:
+    def matches(self, tool_name: str, tool_input: dict) -> bool:
         if self._all_session:
             return True
         if tool_name in self._tool_types:
             return True
+        for group in self._tool_groups:
+            if tool_name in self.TOOL_GROUPS[group]:
+                return True
         if tool_name == "Bash":
             cmd = tool_input.get("command", "")
             if any(fnmatch(cmd, pat) for pat in self._bash_patterns):
                 return True
-        # rule_ids are matched against the soft-deny rules that WOULD have
-        # fired — checked after soft-deny eval, not before. See note in
-        # evaluate_tool_use step 3 (rule-match allowlist interleave).
+        if tool_name in ("Write", "Edit"):
+            path = tool_input.get("file_path", "")
+            if any(fnmatch(path, pat) for pat in self._write_path_patterns):
+                return True
+        # rule_ids matched after soft-deny eval — see evaluate_tool_use
         return False
 ```
 
-**Note on `rule:` scope matching**: unlike `tool_type` / `bash_pattern` / `all_session` which can be checked before Cedar, `rule:X` needs to know *which rule* would have fired. We handle this by running soft-deny eval unconditionally and checking `rule_id ∈ allowlist._rule_ids` before returning REQUIRE_APPROVAL:
-
-```python
-# Inside evaluate_tool_use STEP 3 (soft-deny):
-if soft.decision == "deny":
-    annotations = self._merge_annotations(soft.rule_ids)
-    # Rule-scope allowlist check happens AFTER soft-deny eval
-    if any(rid in self._allowlist._rule_ids for rid in annotations["rule_ids"]):
-        return PolicyDecision(outcome=Outcome.ALLOW,
-                              reason=f"Allowlist rule: {annotations['rule_ids']}")
-    return PolicyDecision(outcome=Outcome.REQUIRE_APPROVAL, ...)
-```
-
-This means `rule:` scopes cost one extra soft-deny eval compared to `tool_type:` scopes. Acceptable — soft-deny eval is the same sub-ms Cedar call.
-
 ### 6.5 PreToolUse hook changes
 
-Current (Phase 1a/1b):
-```python
-async def pre_tool_use_hook(...) -> dict:
-    decision = engine.evaluate_tool_use(tool_name, tool_input)
-    if decision.allowed:
-        return {"hookSpecificOutput": {"permissionDecision": "allow"}}
-    return {"hookSpecificOutput": {
-        "permissionDecision": "deny",
-        "permissionDecisionReason": decision.reason,
-    }}
-```
+Phase 3 PreToolUse hook (compressed for doc; implementation will be richer):
 
-Phase 3:
 ```python
 async def pre_tool_use_hook(hook_input, tool_use_id, ctx, *,
-                            engine, task_id, progress, sse_adapter,
+                            engine, task_id, user_id, progress, sse_adapter,
                             task_default_timeout_s):
+    tool_name, tool_input = _extract(hook_input)
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
     if decision.outcome == Outcome.ALLOW:
@@ -535,62 +648,117 @@ async def pre_tool_use_hook(hook_input, tool_use_id, ctx, *,
     if decision.outcome == Outcome.DENY:
         return _deny(decision.reason)
 
-    # REQUIRE_APPROVAL path
+    # REQUIRE_APPROVAL path.
+    # Cap + rate-limit check.
+    if engine.approval_gate_count >= APPROVAL_GATE_CAP_PER_TASK:
+        return _deny("approval-gate cap exceeded (50/task)")
+    if engine.approvals_in_last_minute >= APPROVAL_RATE_LIMIT:
+        return _deny("approval-gate rate limit exceeded (20/min)")
+
+    # Compute effective timeout with floor/ceiling.
+    remaining = _remaining_maxlifetime_s()
+    effective_timeout = max(
+        FLOOR_30S,
+        min(decision.timeout_s or task_default_timeout_s,
+            task_default_timeout_s,
+            remaining - CLEANUP_MARGIN_120S),
+    )
+    if remaining - CLEANUP_MARGIN_120S < FLOOR_30S:
+        return _deny(f"insufficient maxLifetime remaining ({remaining}s) for approval")
+
     request_id = _ulid()
-    timeout_s = min(decision.timeout_s or task_default_timeout_s,
-                    task_default_timeout_s)
+    engine.approval_gate_count += 1
 
-    await _write_approval_request(
-        task_id, request_id, tool_name, tool_input,
-        reason=decision.reason, severity=decision.severity,
-        matching_rule_ids=decision.matching_rule_ids, timeout_s=timeout_s)
-    await _transition_to_awaiting_approval(task_id)
+    row = {
+        "task_id": task_id, "request_id": request_id,
+        "tool_name": tool_name,
+        "tool_input_preview": _strip_ansi(_preview(tool_input))[:256],
+        "tool_input_sha256": _sha256(_serialize(tool_input)),
+        "reason": decision.reason, "severity": decision.severity,
+        "matching_rule_ids": list(decision.matching_rule_ids),
+        "status": "PENDING",
+        "created_at": _iso_now(),
+        "timeout_s": effective_timeout,
+        "ttl": int(time.time()) + effective_timeout + CLEANUP_MARGIN_120S,
+        "user_id": user_id, "repo": engine.repo,
+    }
 
-    progress.write_agent_milestone("approval_requested", {
+    # ATOMIC: put approval row + transition TaskTable status in one transaction.
+    try:
+        await _transact_write_approval_request(task_id, request_id, row)
+    except TransactionCanceledException as exc:
+        # Either the task was concurrently cancelled, or status wasn't RUNNING.
+        _emit("approval_write_failed", {"request_id": request_id, "reason": str(exc)})
+        return _deny("approval system unavailable")
+
+    _emit("approval_requested", {
         "request_id": request_id, "tool_name": tool_name,
-        "input_preview": _preview(tool_input), "reason": decision.reason,
-        "severity": decision.severity, "timeout_s": timeout_s,
+        "input_preview": row["tool_input_preview"],
+        "reason": decision.reason, "severity": decision.severity,
+        "timeout_s": effective_timeout,
         "matching_rule_ids": list(decision.matching_rule_ids),
     })
-    sse_adapter.write_agent_milestone(...)  # same payload
 
-    outcome = await _poll_for_decision(task_id, request_id, timeout_s)
-    await _transition_to_running(task_id)  # always, whether approved or denied
+    outcome = await _poll_for_decision(task_id, request_id, effective_timeout)
+
+    # On TIMED_OUT, attempt to write the row to TIMED_OUT so future reads see
+    # a terminal state (not orphaned PENDING).
+    if outcome.status == "TIMED_OUT":
+        await _best_effort_update_status(task_id, request_id, "TIMED_OUT",
+                                         reason=outcome.reason)
+
+    # ATOMIC: resume TaskTable status RUNNING, conditional on awaiting_approval_request_id matching.
+    try:
+        await _transact_resume(task_id, request_id)
+    except TransactionCanceledException:
+        # User cancelled (or some other path) during poll; abandon gracefully.
+        _emit("approval_resume_failed", {"request_id": request_id})
+        return _deny("task no longer awaiting approval")
 
     if outcome.status == "APPROVED":
-        progress.write_agent_milestone("approval_granted", {...})
         if outcome.scope and outcome.scope != "this_call":
             engine._allowlist.add(outcome.scope)
+        _emit("approval_granted", {"request_id": request_id,
+                                   "scope": outcome.scope or "this_call",
+                                   "decided_at": outcome.decided_at})
         return _allow()
 
-    # DENIED or TIMED_OUT
-    reason = outcome.reason or f"timeout (no response in {timeout_s}s)"
-    progress.write_agent_milestone(
-        "approval_denied" if outcome.status == "DENIED" else "approval_timed_out",
-        {...})
-    return _deny(f"User {outcome.status.lower()}: {reason}")
+    # DENIED or TIMED_OUT — cache for 60s + inject denial via Stop hook path.
+    engine._recent_decisions.record(
+        tool_name, _sha256(_serialize(tool_input)),
+        decision="DENIED" if outcome.status == "DENIED" else "TIMED_OUT",
+        reason=outcome.reason,
+    )
+    if outcome.status == "DENIED":
+        # Queue steering injection via Stop hook's between_turns_hooks.
+        engine._queue_denial_injection(
+            request_id=request_id,
+            reason=outcome.reason,  # already sanitized by DenyTaskFn
+            decided_at=outcome.decided_at,
+        )
+    _emit("approval_denied" if outcome.status == "DENIED" else "approval_timed_out",
+          {"request_id": request_id, "reason": outcome.reason})
+    return _deny(f"User {outcome.status.lower()}: see next turn context for details")
 ```
 
-Cedar policy eval latency stays sub-millisecond. The "wait" is a coroutine park — the agent's asyncio loop continues processing other things (SSE queue drain, health checks, keepalives).
+`engine._queue_denial_injection` appends to a list consumed by a new `_denial_between_turns_hook` — registered alongside `_nudge_between_turns_hook` in the Phase 2 `between_turns_hooks` list. At the next Stop hook fire, the denial is emitted as `<user_denial>…</user_denial>` XML (sanitized via `_xml_escape` from the shared utility introduced with Phase 2).
 
 ---
 
 ## 7. REST API contract
 
-Two new endpoints. Both Cognito JWT-authenticated on API Gateway (same pattern as existing `/tasks/*`).
-
 ### 7.1 `POST /v1/tasks/{task_id}/approve`
 
 **Request** (CLI → API Gateway → `ApproveTaskFn`):
 ```http
-POST /v1/tasks/01KPW.../approve HTTP/1.1
+POST /v1/tasks/01KPW.../approve
 Authorization: Bearer <cognito_id_token>
 Content-Type: application/json
 
 {
   "request_id": "01KPR...",
   "decision": "approve",
-  "scope": "tool_type_session"     // optional; defaults to "this_call"
+  "scope": "tool_type_session"
 }
 ```
 
@@ -598,35 +766,59 @@ Content-Type: application/json
 
 | Status | Code | When | Body |
 |---|---|---|---|
-| 202 | (none) | Success | `{task_id, request_id, status: "APPROVED", scope, decided_at}` |
+| 202 | — | Success | `{task_id, request_id, status: "APPROVED", scope, decided_at}` |
 | 400 | `VALIDATION_ERROR` | Bad scope format, missing fields | `{error, message, field}` |
 | 401 | `UNAUTHORIZED` | Missing/invalid JWT | — |
-| 403 | `FORBIDDEN` | Task owned by another user | — |
-| 404 | `REQUEST_NOT_FOUND` | `task_id` + `request_id` row not in `TaskApprovalsTable` | — |
-| 409 | `REQUEST_ALREADY_DECIDED` | Status is not PENDING (already APPROVED / DENIED / TIMED_OUT) | `{error, message, current_status}` |
+| 404 | `REQUEST_NOT_FOUND` | Row missing OR wrong user (both surfaces 404 to prevent enumeration) | — |
+| 409 | `REQUEST_ALREADY_DECIDED` | Status != PENDING | `{error, message, current_status}` |
+| 409 | `TASK_NOT_AWAITING_APPROVAL` | Task's current status is not AWAITING_APPROVAL | `{error, message, current_status}` |
+| 429 | `RATE_LIMIT_EXCEEDED` | Per-user > 30 approve/min | — |
 | 503 | `SERVICE_UNAVAILABLE` | DDB throttled or upstream failure | — |
 
-**Scope validation** (server-side):
-- `this_call` — always allowed
-- `tool_type:<tool_name>` — `tool_name` must be in the known tool list (Read, Bash, Write, Edit, Glob, Grep, WebFetch, ...)
-- `bash_pattern:<glob>` — glob ≤128 chars, no embedded newlines, basic sanity
-- `rule:<rule_id>` — `rule_id` must exist in the loaded soft-deny policy set AND be annotated with `@tier("soft")` (never `@tier("hard")`)
-- `all_session` — allowed unless Blueprint sets `maxPreApprovalScope < all_session`
+**Authorization + state + existence check is a single DDB operation**:
+```python
+response = ddb.update_item(
+  TableName=TASK_APPROVALS_TABLE,
+  Key={"task_id": task_id, "request_id": request_id},
+  UpdateExpression="SET #s = :approved, decided_at = :now, #sc = :scope",
+  ConditionExpression="#s = :pending AND user_id = :caller",
+  ExpressionAttributeNames={"#s": "status", "#sc": "scope"},
+  ExpressionAttributeValues={
+      ":approved": "APPROVED", ":pending": "PENDING",
+      ":now": now_iso, ":scope": scope, ":caller": cognito_sub,
+  },
+  ReturnValuesOnConditionCheckFailure="ALL_OLD",
+)
+```
 
-**Atomicity**: ApproveTaskFn uses a single `UpdateItem` on `TaskApprovalsTable` with `ConditionExpression: #status = :pending`. Either the status flips atomically or the call fails with 409. No read-then-write race. If the row doesn't exist, ConditionalCheckFailedException → we distinguish "not found" vs "already decided" by a `GetItem` retry (or by using `ReturnValuesOnConditionCheckFailure=ALL_OLD`).
+On `ConditionalCheckFailedException`:
+- If `OldImage` is absent → row never existed → 404 `REQUEST_NOT_FOUND`
+- If `OldImage.user_id != caller` → 404 (same code, prevent existence oracle)
+- If `OldImage.status != "PENDING"` → 409 `REQUEST_ALREADY_DECIDED`
+
+In addition, the Lambda does a separate GetItem on `TaskTable` to check `status == "AWAITING_APPROVAL"` — if the task has already moved (e.g., was cancelled), return 409 `TASK_NOT_AWAITING_APPROVAL` before even attempting the update. This check is belt-and-suspenders; the atomic UpdateItem handles the rest.
+
+After successful update, `ApproveTaskFn` writes an audit event to `TaskEventsTable` (`approval_decision_recorded` event_type), ensuring the 90-day audit trail is owned by the Lambda path — not dependent on the agent's milestone emission.
 
 ### 7.2 `POST /v1/tasks/{task_id}/deny`
 
-Mirrors `/approve` but writes `status = "DENIED"` and expects an optional `reason` field:
+Identical shape with `decision: "deny"` and optional `reason`:
 
 ```json
 {
   "request_id": "01KPR...",
-  "reason": "use force-with-lease instead; force is too risky"   // optional, ≤1000 chars
+  "reason": "use force-with-lease instead; force is too risky"
 }
 ```
 
-The reason is stored on the row and surfaced to the agent verbatim when it reads the denial. This is effectively **steering via denial** — the agent gets the text and can adjust.
+`DenyTaskFn`:
+1. Auth check (Cognito JWT)
+2. Run `output_scanner.scan(reason)` — redacts AWS keys, GitHub PATs, API tokens, etc. from the reason text before persisting
+3. Truncate sanitized reason to 2000 chars (matches Phase 2 nudge limit for consistency)
+4. Atomic conditional update (same shape as approve)
+5. Write audit event to TaskEventsTable
+
+The agent reads the sanitized reason from DDB. It never sees unscanned user text.
 
 ### 7.3 `POST /v1/tasks` — new optional fields
 
@@ -637,22 +829,79 @@ Extended request shape:
   "repo": "my-org/my-app",
   "task": "...",
   "task_type": "new_task",
-  "approval_timeout_s": 600,              // optional, default 300, range [30, maxLifetime - 300]
-  "initial_approvals": [                  // optional, max 20 entries, each ≤128 chars
+  "approval_timeout_s": 600,
+  "initial_approvals": [
     "tool_type:Read",
     "bash_pattern:git status*",
-    "rule:safe_read_config"
+    "write_path:docs/**",
+    "rule:safe_read_config",
+    "tool_group:file_write"
   ]
 }
 ```
 
 `CreateTaskFn` validations:
-1. Length cap (20 entries)
-2. Per-entry length cap (128 chars)
-3. Scope format parsing (same rules as §7.1)
-4. `rule:<id>` must name a soft-deny rule (not hard-deny)
-5. `maxPreApprovalScope` ceiling from blueprint
-6. `approval_timeout_s` within `[30, maxLifetime - 300]` — the lower bound prevents unusable timeouts; upper bound leaves 5 min after max approval for cleanup
+1. Length cap: ≤20 entries
+2. Per-entry length cap: ≤128 chars
+3. Scope format parsing: normalized to known shape; leading/trailing whitespace trimmed
+4. Scope value validation:
+   - `tool_type:X` — X must be in known tool set (Read, Bash, Write, Edit, Glob, Grep, WebFetch, ...)
+   - `tool_group:X` — X must be in known group set (currently `file_write`)
+   - `bash_pattern:X` — X ≤128 chars; reject if X is degenerate (`*`, `**`, `?*`, or patterns where wildcard-char ratio exceeds 50%) — see §7.4
+   - `write_path:X` — same rules as bash_pattern
+   - `rule:X` — X must exist in the (built-in + target repo's blueprint) soft-deny policy set per the shared policy-parsing library; hard-deny rule IDs rejected
+   - `all_session` — rejected if `Blueprint.security.maxPreApprovalScope` forbids
+5. `approval_timeout_s` within `[30, min(3600, maxLifetime - 300)]` — cap at 1 hour OR (maxLifetime - 5min), whichever is smaller. Prevents multi-hour slot-exhaustion attacks and keeps approval windows within the TTL budget.
+
+### 7.4 Degenerate-pattern detection
+
+A pattern is considered degenerate if:
+- Length ≤ 2, OR
+- Consists only of `*`, `?`, and whitespace, OR
+- Ratio of wildcard chars (`*` + `?`) to literal chars exceeds 50%
+
+Degenerate `bash_pattern:` and `write_path:` scopes are rejected at submit with 400 `VALIDATION_ERROR`. Users wanting broad permission must use the explicit `all_session` scope (which is subject to `maxPreApprovalScope` blueprint cap).
+
+### 7.5 `maxPreApprovalScope` ordering
+
+Blueprint's `maxPreApprovalScope` is a partial order:
+
+```
+this_call  <  { tool_type_session, tool_group, bash_pattern, write_path, rule }  <  all_session
+```
+
+If `maxPreApprovalScope: "tool_type_session"`, `all_session` is rejected. All other scopes pass. Setting it to `"this_call"` (meaningless) is rejected at blueprint load. Blueprint absence defaults to unbounded (except `all_session` requires explicit `--yes` on CLI).
+
+### 7.6 `GET /v1/repos/{repo_id}/policies`
+
+New read-only endpoint for rule discovery and `bgagent policies list`:
+
+**Response** (200):
+```json
+{
+  "repo_id": "my-org/my-app",
+  "policies": {
+    "hard": [
+      {"rule_id": "rm_slash", "category": "destructive",
+       "summary": "Reject rm -rf / and similar"},
+      ...
+    ],
+    "soft": [
+      {"rule_id": "force_push_any", "severity": "medium",
+       "category": "destructive", "approval_timeout_s": 300,
+       "summary": "Force push to any branch"},
+      {"rule_id": "write_env_files", "severity": "high",
+       "category": "filesystem", "approval_timeout_s": 600,
+       "summary": "Write to *.env files"},
+      ...
+    ]
+  }
+}
+```
+
+Loaded by the Lambda on demand from the target repo's blueprint + built-in policies. `summary` is a human-readable annotation `@summary("...")` if present, else falls back to the first line of the `when` clause rendered as text.
+
+Rate-limited 30/min/user; cached 5min per repo in-Lambda.
 
 ---
 
@@ -664,8 +913,15 @@ Extended request shape:
 # Approve a specific pending request
 bgagent approve <task_id> <request_id> [--scope <scope>] [--output text|json]
 
-# Deny a specific pending request, optionally with a reason the agent sees
-bgagent deny <task_id> <request_id> [--reason "..."] [--output text|json]
+# Deny a specific pending request, optionally with a reason the agent sees (sanitized server-side)
+bgagent deny <task_id> <request_id> [--reason "..."|--reason-file <path>] [--output text|json]
+
+# List all pending approvals across the user's active tasks (solves request-id lookup)
+bgagent pending [--output text|json]
+
+# Discover policies for a repo (solves rule-id lookup)
+bgagent policies list --repo <repo_id> [--tier hard|soft] [--output text|json]
+bgagent policies show --repo <repo_id> --rule <rule_id> [--output text|json]
 ```
 
 ### 8.2 Extended `submit` / `run` flags
@@ -676,56 +932,68 @@ bgagent submit \
   --task "..." \
   --approval-timeout 600 \
   --pre-approve tool_type:Read \
-  --pre-approve bash_pattern:"git status*" \
-  --pre-approve rule:safe_file_read
+  --pre-approve write_path:"docs/**" \
+  --pre-approve tool_group:file_write \
+  --pre-approve rule:safe_file_read \
+  --pre-approve-file ./approvals.yaml
 
 # Shorthand for no approval gates (requires --yes):
 bgagent submit --task "..." --pre-approve all_session --yes
 ```
 
-### 8.3 Streaming UX changes
+`--pre-approve-file` reads a YAML/JSON array of scope strings — supports the 20-entry cap without command-line bloat.
 
-No interactive prompts in `bgagent run` streaming. Approval requests surface as:
+### 8.3 Streaming UX
+
+Approval requests surface as:
 
 ```text
-[14:00:00]  ★ approval_requested: Bash "git push --force origin feature-x" (severity=medium)
+[14:00:00]  ★ approval_requested: Bash "git push --force origin feature-x" (severity=high)
             reason:   Cedar soft-deny: force_push_any
             respond:  bgagent approve <task-id> 01KPR... [--scope tool_type_session]
                       bgagent deny    <task-id> 01KPR... [--reason "..."]
-            timeout:  300s
+            timeout:  300s   (or "bgagent pending" to list all)
 ```
 
-Terminal B (or a different window/tab) runs `bgagent approve` / `deny`. Terminal A continues streaming.
+Severity colors the line (respecting `NO_COLOR` env var). When `NO_COLOR` is set, severity is emitted as `[HIGH]` prefix.
 
-Severity colors the line:
-- `high` → red background or bold-red prefix
-- `medium` → yellow prefix
-- `low` → default
+No interactive prompts in `bgagent run` streaming — the user runs `bgagent approve / deny` in a second terminal.
 
 ### 8.4 Safety UX
 
-When the user passes `--pre-approve all_session`:
+When `--pre-approve all_session` is passed without `--yes`:
 
 ```bash
 $ bgagent submit --task "apply terraform plan" --pre-approve all_session
-WARNING: --pre-approve all_session disables all approval gates for this task.
-         The agent will run tools autonomously without any confirmation,
-         subject only to hard-deny policies (rm -rf /, write to .git/, etc).
+WARNING: --pre-approve all_session disables Cedar soft-deny approval gates
+         for this task. Hard-deny policies (rm -rf /, write to .git/, DROP
+         TABLE, etc.) still apply.
          Add --yes to skip this prompt.
 Continue? [y/N]
 ```
 
-Unless `--yes` is present. Hard confirmation stops accidental auto-submit.
+Hard-deny enforcement is clearly called out so users don't mistake `all_session` for root.
 
-### 8.5 Denying with a reason is steering
+### 8.5 `bgagent pending` output
 
-A common pattern: user says no, but suggests an alternative.
+```text
+Pending approvals (3):
 
-```bash
-bgagent deny 01KPW... 01KPR... --reason "use --force-with-lease instead; it's safer"
+  01KPW0...(task) / 01KPR0...(request)
+  ├─ Bash: git push --force origin feature-x
+  ├─ severity: high
+  ├─ reason: Cedar soft-deny: force_push_any
+  ├─ timeout: 4m 32s remaining
+  └─ approve|deny
+
+  01KPW1.../01KPR1...
+  ├─ Write: /workspace/.../src/.env
+  ├─ severity: high
+  ├─ timeout: 9m 12s remaining
+  ...
 ```
 
-The agent reads `"User DENIED: use --force-with-lease instead; it's safer"` as its next tool-use context. It adapts. This is the approval equivalent of a Phase 2 nudge — mid-task steering through a denial channel.
+Picking one (`bgagent approve` or `bgagent deny` with the listed IDs) is straightforward. Shell completion (tab-complete task_id + request_id from `bgagent pending` output) is a Phase 3b enhancement.
 
 ---
 
@@ -736,53 +1004,61 @@ The agent reads `"User DENIED: use --force-with-lease instead; it's safer"` as i
 Transitions added (extending §7 of INTERACTIVE_AGENTS.md):
 
 ```
-RUNNING → AWAITING_APPROVAL  (on REQUIRE_APPROVAL from engine)
-AWAITING_APPROVAL → RUNNING  (on approve OR deny OR timeout; the hook returns
-                              to SDK in all three cases and the turn continues)
+RUNNING → AWAITING_APPROVAL  (on REQUIRE_APPROVAL; via TransactWriteItems)
+AWAITING_APPROVAL → RUNNING  (on approve OR deny OR timeout; via TransactWriteItems)
 AWAITING_APPROVAL → CANCELLED (on explicit `bgagent cancel`)
+AWAITING_APPROVAL → FAILED   (on reconciler detecting stranded approval; new edge)
+HYDRATING → AWAITING_APPROVAL  (if a soft-deny gate fires during hydration; rare but possible)
 ```
 
-No direct `AWAITING_APPROVAL → COMPLETED/FAILED`. Terminal transitions always flow through `RUNNING → FINALIZING → terminal`.
+No direct `AWAITING_APPROVAL → COMPLETED/FINALIZING` without RUNNING in between.
 
 ### 9.2 Orchestrator impact
 
-The durable orchestrator (`orchestrate-task.ts`) polls `TaskTable.status` every 30s looking for terminal states. Three updates needed:
-
-1. `waitStrategy` adds `AWAITING_APPROVAL` as a valid non-terminal state.
-2. `finalizeTask` recognizes `AWAITING_APPROVAL` — must NOT hit "Unexpected state" fallback.
-3. `ACTIVE_STATUSES` set (used by `GET /tasks?status=active` and `reconcile-concurrency.ts`) gains `AWAITING_APPROVAL`.
-4. `task_state.py::write_terminal` condition expression accepts `AWAITING_APPROVAL` as a valid source state (currently only allows RUNNING/HYDRATING/FINALIZING).
+- `waitStrategy` adds `AWAITING_APPROVAL` as non-terminal.
+- `finalizeTask` recognizes `AWAITING_APPROVAL`.
+- `ACTIVE_STATUSES` (used by `GET /tasks?status=active` and `reconcile-concurrency.ts`) gains `AWAITING_APPROVAL`.
+- `task_state.py::write_terminal` condition expression accepts `AWAITING_APPROVAL` as a valid source state.
 
 ### 9.3 Concurrency slot semantics
 
 **AWAITING_APPROVAL holds the user's concurrency slot.**
 
-Rationale: the Docker container is alive. Memory is allocated. The AgentCore microVM pool is committed to it. Releasing the slot while the resource is still held lies to the concurrency accounting and opens up a resource-exhaustion vector (see discussion log in `project_phase3_cedar_hitl_design.md`).
+Rationale: the Docker container is alive. Memory allocated. The AgentCore microVM pool is committed. Releasing the slot while the resource is still held lies to accounting and opens a resource-exhaustion vector.
 
 Concrete behavior:
 
 ```text
 Bob's per-user cap: 10.
 t=0:    Bob submits 10 tasks. count=10. 11th submit → 429.
-t=2m:   Task #1 hits AWAITING_APPROVAL. count still 10.
+t=2m:   Task #1 → AWAITING_APPROVAL. count still 10.
         Bob's 12th submit → 429. He must approve, cancel, or wait.
 t=30m:  Bob approves task #1. task → RUNNING. count still 10.
 t=45m:  Task #1 completes. count → 9. Bob can submit task #11.
 ```
 
-**No escape hatch in v1.** If Bob can't respond for hours, he either times out (→ denied, task resumes with denial context) or `bgagent cancel`s the task to free the slot.
+### 9.4 `maxLifetime` clock does not pause
 
-Future work: `bgagent approve --defer` = "I can't respond right now, cancel the task and release the slot". Clearer than silent timeout. Deferred.
+AgentCore Runtime's `maxLifetime = 28800s` (8h) is an absolute timer from session start. It does NOT pause during `AWAITING_APPROVAL`.
 
-### 9.4 `maxLifetime` clock keeps ticking
+This has a concrete implication: the hook computes an `effective_timeout` bounded by `maxLifetime - remaining - CLEANUP_MARGIN_120S`. If the task has been running 7h55m and hits a soft-deny gate, the effective timeout might be clamped to a much shorter value than the task default. Below the 30s floor → immediate DENY with reason `"insufficient lifetime"`.
 
-AgentCore Runtime's `maxLifetime = 28800s` (8h) is an absolute timer from session start. It does NOT pause during `AWAITING_APPROVAL`. If a user takes 7 hours to approve, only 1 hour remains. The approval timeout is also bounded: `approval_timeout_s ≤ maxLifetime - 300` (5-min cleanup margin) at submit time so we can't configure a timeout that can't fit.
+### 9.5 Stranded-approval reconciliation
 
-### 9.5 Reconciliation
+`reconcile-stranded-tasks.ts` gains an AWAITING_APPROVAL-aware branch:
 
-`reconcile-concurrency.ts` (scheduled every 5 min) already scans for orphaned concurrency counters. With `AWAITING_APPROVAL` added to `ACTIVE_STATUSES`, it'll correctly count awaiting tasks as active.
+- Detects tasks in AWAITING_APPROVAL with `age > 2 * timeout_s`
+- Best-effort conditional-updates TaskApprovalsTable row → `STRANDED` status
+- Transitions TaskTable → `FAILED` with reason `"approval stranded (container eviction)"`
+- Emits `approval_stranded` event to TaskEventsTable
 
-`reconcile-stranded-tasks.ts` (Phase 1b) fails interactive tasks stuck without an SSE subscriber for ≥300s. Doesn't apply to AWAITING_APPROVAL — the task isn't stranded; it's waiting on the user. Reconciler must skip `AWAITING_APPROVAL` tasks (add to exclusion list).
+This closes the Phase 3a container-eviction gap. Without this, a container restart mid-approval would leave the task hanging until the user manually cancelled.
+
+`reconcile-concurrency.ts` (scheduled every 5 min) already scans for orphaned concurrency counters; with `AWAITING_APPROVAL` added to `ACTIVE_STATUSES` it correctly counts awaiting tasks as active.
+
+### 9.6 Attended vs unattended mode
+
+The design assumes a human is watching. For truly unattended tasks (scheduled automation, cron-driven runs) the `--pre-approve all_session` path skips soft-deny entirely. No additional mode flag needed — the set of scopes in `initial_approvals` dictates the attendance expectation.
 
 ---
 
@@ -791,14 +1067,13 @@ AgentCore Runtime's `maxLifetime = 28800s` (8h) is an absolute timer from sessio
 ### 10.1 New DynamoDB table: `TaskApprovalsTable`
 
 ```typescript
-// cdk/src/constructs/task-approvals-table.ts
 new dynamodb.Table(this, 'Table', {
   partitionKey: { name: 'task_id',   type: dynamodb.AttributeType.STRING },
   sortKey:      { name: 'request_id', type: dynamodb.AttributeType.STRING },  // ULID
   billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
   pointInTimeRecovery: true,
-  timeToLiveAttribute: 'ttl',  // 1h retention
-  stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,  // for fan-out hooks (§11)
+  timeToLiveAttribute: 'ttl',
+  stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,  // (evaluated — may drop; see §11)
   removalPolicy: RemovalPolicy.RETAIN,
 });
 ```
@@ -810,44 +1085,45 @@ Attributes:
 | `task_id` | S | Yes | PK; ULID matching TaskTable |
 | `request_id` | S | Yes | SK; ULID minted by agent |
 | `tool_name` | S | Yes | "Bash", "Write", etc. |
-| `tool_input_preview` | S | Yes | First 256 chars of serialized tool input |
-| `tool_input_sha256` | S | Yes | Full-input hash for audit |
+| `tool_input_preview` | S | Yes | First 256 chars of serialized tool input, ANSI/control-stripped |
+| `tool_input_sha256` | S | Yes | Full-input hash for audit + recent-decision cache |
 | `reason` | S | Yes | Cedar matching rule description |
 | `severity` | S | Yes | "low" \| "medium" \| "high" |
-| `matching_rule_ids` | SS | Yes | Set of soft-deny rule IDs that matched |
-| `status` | S | Yes | PENDING \| APPROVED \| DENIED \| TIMED_OUT |
+| `matching_rule_ids` | L | Yes | List (not Set — can be empty) of soft-deny rule IDs |
+| `status` | S | Yes | PENDING \| APPROVED \| DENIED \| TIMED_OUT \| STRANDED |
 | `created_at` | S | Yes | ISO8601 |
 | `decided_at` | S | No | Set when status != PENDING |
-| `scope` | S | No | Set on APPROVED; one of this_call \| tool_type:X \| bash_pattern:X \| rule:X \| all_session |
-| `deny_reason` | S | No | Set on DENIED; user-provided message |
+| `scope` | S | No | Set on APPROVED |
+| `deny_reason` | S | No | Set on DENIED; sanitized user text |
 | `timeout_s` | N | Yes | Resolved timeout for audit |
-| `ttl` | N | Yes | Unix epoch seconds; `created_at + 3600` |
-| `user_id` | S | Yes | For GSI and ownership checks |
+| `ttl` | N | Yes | `created_at_epoch + timeout_s + CLEANUP_MARGIN_120S` — always covers the decision window |
+| `user_id` | S | Yes | Used in ownership check `ConditionExpression` |
 | `repo` | S | Yes | Denormalized for fan-out |
 
-**Why 1h TTL:** approval rows are never read again once the agent has polled the decision. Keeping them for 1h gives operators a short debugging window without the cost of long retention. Long-term audit goes through `TaskEventsTable` (90d TTL on the `agent_milestone("approval_*")` events).
+**TTL sizing**: the TTL is always `timeout_s + 120s`, so a 300s approval window has a 420s TTL, a 3600s window has a 3720s TTL. The row never expires during the decision window. After the decision + a short grace period, DDB's eventual-consistency TTL reaper cleans up.
 
-**No GSI in v1.** Query pattern is always `(task_id, request_id)` known. If we add a "list all pending approvals for user" endpoint later, add GSI on `user_id`.
+**Why a list, not a StringSet, for `matching_rule_ids`**: DDB string sets cannot be empty. Pathological no-match soft-deny hits would fail to persist. Lists handle empty gracefully.
+
+**Why no GSI in v1**: query pattern is always `(task_id, request_id)` for agent polls; the `bgagent pending` listing is implemented as a Scan with FilterExpression `user_id = :caller AND status = :pending` — acceptable at current scale. When pending-approval volume grows, add a GSI on `user_id`.
 
 ### 10.2 `TaskTable` additions
 
-Three new attributes on the existing task row:
+Four new attributes on the existing task row:
 
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `approval_timeout_s` | N | No | Default timeout for soft-deny gates. Default 300. |
-| `initial_approvals` | SS | No | Scope strings from submit time |
-| `awaiting_approval_request_id` | S | No | Set when status = AWAITING_APPROVAL; cleared on transition back |
+| `initial_approvals` | L | No | List of scope strings from submit time |
+| `awaiting_approval_request_id` | S | No | Set when status = AWAITING_APPROVAL; cleared on transition back (via joint `UpdateExpression`) |
+| `approval_gate_count` | N | No | Running counter of approval gates fired on this task; used to enforce the 50-gate cap |
 
-`awaiting_approval_request_id` is a convenience pointer so consumers (dashboards, orchestrator) can resolve the active request without scanning `TaskApprovalsTable`.
+Joint updates on AWAITING_APPROVAL transitions always set/clear `awaiting_approval_request_id` in the same `UpdateExpression` as the status change — either within the TransactWriteItems Put+Update, or in the single UpdateItem on resume.
 
 ### 10.3 TaskTable status enum update
 
-Add `AWAITING_APPROVAL` to the `TaskStatus` enum in `cdk/src/constructs/task-status.ts`:
-
 ```typescript
 export const TASK_STATUSES = [
-  'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL',  // NEW
+  'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL',
   'FINALIZING', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT',
 ] as const;
 
@@ -857,9 +1133,9 @@ export const ACTIVE_STATUSES = new Set([
 
 export const VALID_TRANSITIONS = {
   // ...existing...
-  RUNNING: ['FINALIZING', 'CANCELLED', 'TIMED_OUT', 'FAILED',
-            'AWAITING_APPROVAL'],
-  AWAITING_APPROVAL: ['RUNNING', 'CANCELLED'],
+  RUNNING:           ['FINALIZING', 'CANCELLED', 'TIMED_OUT', 'FAILED', 'AWAITING_APPROVAL'],
+  AWAITING_APPROVAL: ['RUNNING', 'CANCELLED', 'FAILED'],  // FAILED via reconciler only
+  HYDRATING:         ['RUNNING', 'FAILED', 'CANCELLED', 'AWAITING_APPROVAL'],  // rare but possible
   // ...
 };
 ```
@@ -870,47 +1146,56 @@ export const VALID_TRANSITIONS = {
 
 ### 11.1 New `agent_milestone` event types
 
-Emitted by the PreToolUse hook to both `ProgressWriter` (DDB, 90d) and `sse_adapter` (live stream). See §8.4 of INTERACTIVE_AGENTS.md for the event type taxonomy.
+Emitted to both `ProgressWriter` (DDB, 90d) and `sse_adapter` (live stream). Plus audit events emitted by the REST Lambdas directly to TaskEventsTable.
 
-| Event | Metadata | Purpose |
+| Event | Source | Metadata |
 |---|---|---|
-| `pre_approvals_loaded` | `{count, scopes[]}` | Emit at container start so the stream shows the starting posture |
-| `approval_requested` | `{request_id, tool_name, input_preview, reason, severity, timeout_s, matching_rule_ids[]}` | Stream marker for Terminal A + DDB audit |
-| `approval_granted` | `{request_id, scope, decided_at}` | Shown in stream when agent resumes |
-| `approval_denied` | `{request_id, reason, decided_at}` | Shown in stream when agent resumes |
-| `approval_timed_out` | `{request_id, timeout_s}` | Shown in stream when agent resumes |
-| `approval_write_failed` | `{request_id, error}` | Fired when DDB write to TaskApprovalsTable fails (fail-closed → deny) |
+| `pre_approvals_loaded` | Agent | `{count, scopes[]}` |
+| `approval_requested` | Agent | `{request_id, tool_name, input_preview, reason, severity, timeout_s, matching_rule_ids[]}` |
+| `approval_granted` | Agent | `{request_id, scope, decided_at}` |
+| `approval_denied` | Agent | `{request_id, reason, decided_at}` |
+| `approval_timed_out` | Agent | `{request_id, timeout_s}` |
+| `approval_stranded` | Reconciler | `{request_id, age_s, reason}` |
+| `approval_write_failed` | Agent | `{request_id?, error}` |
+| `approval_resume_failed` | Agent | `{request_id, error}` |
+| `approval_poll_degraded` | Agent | `{request_id, consecutive_failures}` |
+| `approval_timeout_capped` | Agent | `{requested: N, effective: M, reason}` — surfaces when min-wins clips user's requested timeout |
+| `approval_cap_exceeded` | Agent | `{request_id, count, cap}` — when 50-gate cap fires |
+| `approval_rate_limit_exceeded` | Agent | `{request_id, rate, limit}` |
+| `approval_decision_recorded` | ApproveTaskFn / DenyTaskFn | `{request_id, status, scope?, reason?, decided_at, caller_user_id}` — authoritative audit record |
 
-### 11.2 Fan-out hook event types
+### 11.2 Fan-out plane interaction
 
-`TaskApprovalsTable` has DDB Streams enabled. `fanout-task-events.ts` consumes the stream and dispatches to slack/github/email stubs. New dispatch rules:
+Approval events flow to the fan-out Lambda via TaskEventsTable Streams (the existing Phase 1b path). They are dispatched to Slack / GitHub / Email stubs.
 
-- Slack: on `status: PENDING → *` — "Agent @task_id requests approval for Bash: `git push --force`"
-- Email: on `status: PENDING` with `severity: high` — only high-severity approvals generate emails to prevent noise
-- GitHub: none (not applicable)
+**TaskApprovalsTable Streams are not consumed by the fan-out Lambda**. The approval row is working state; the audit trail is in TaskEventsTable. Enabling Streams on TaskApprovalsTable would be redundant and add noise. Final design: TaskApprovalsTable DOES NOT have Streams enabled. (Retains the `stream` attribute commented out for future use if needed.)
 
-These are stubs in Phase 3a (fan-out plane from Phase 1b §8.9 is already "skeletal" — approvals ride the same shape). Real integrations later.
+Fan-out dispatch rules (extending Phase 1b stubs):
+- Slack: on `approval_requested` OR `approval_stranded` — "Agent @task_id requests approval for Bash: `git push --force`"
+- Email: on `approval_requested` with `severity: high`
+- GitHub: none
+
+**Rate-limited per-user**: 10 approval-related fan-out messages per user per minute. Prevents notification-spam from malicious users driving up approval-gate count.
 
 ### 11.3 Dashboard additions
 
-Extend `TaskDashboard` (`cdk/src/constructs/task-dashboard.ts`):
-
+Extend `TaskDashboard`:
 - **Approval request rate**: count of `approval_requested` per hour
-- **Approval response time**: p50/p99 of (`decided_at - created_at`)
-- **Approval outcome distribution**: granted vs denied vs timed-out (stacked bar)
-- **Tasks stuck in AWAITING_APPROVAL**: alarm when a task has been awaiting >timeout_s + 1min
+- **Approval response time**: p50/p99 of `decided_at - created_at`
+- **Approval outcome distribution**: granted vs denied vs timed_out vs stranded
+- **Tasks stuck in AWAITING_APPROVAL**: alarm when age > `timeout_s + 60s`
+- **Active approval-gate count per task**: heatmap to spot anomalous loops
 
 ### 11.4 Alarms
 
-New CloudWatch alarms in `task-dashboard.ts`:
-
-- `HighApprovalTimeoutRate`: >50% of approval_requested in 1h end in TIMED_OUT → "users not responding, check notifications or reduce gating"
-- `StuckAwaitingApproval`: task in AWAITING_APPROVAL >timeout_s + 1min → "approval poll may be hung"
-- `HighApprovalWriteFailureRate`: >1% of approval_write_failed events → "DDB throttled or IAM drift"
+- `HighApprovalTimeoutRate`: >50% of approval_requested in 1h end in TIMED_OUT
+- `StuckAwaitingApproval`: task in AWAITING_APPROVAL > `timeout_s + 60s`
+- `HighApprovalWriteFailureRate`: >1% of approval_write_failed events
+- `ApprovalGateCapHit`: approval_cap_exceeded > 1/hr/user — suspicious loop
 
 ### 11.5 OTEL trace integration
 
-Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id` (§8.5 existing). A span `hitl.approval_wait` bracketing the PreToolUse poll loop makes approval latency visible in X-Ray: `span.duration = decided_at - created_at`.
+Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id`. A span `hitl.approval_wait` brackets the PreToolUse poll loop: `span.duration = decided_at - created_at`. `hitl.approval_race_loss` emitted when the agent's local timeout fired <5s before a late user decision (useful for tuning).
 
 ---
 
@@ -918,92 +1203,117 @@ Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id` (§8.
 
 ### 12.1 Trust boundaries
 
-- **Agent container ↔ TaskApprovalsTable (write pending, poll decisions)**: IAM role on the runtime has `GetItem` / `PutItem` on the table, scoped by `task_id` partition key (see 12.4).
-- **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as /tasks/*).
-- **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable**: Lambda IAM policy allows `UpdateItem` conditional on `user_id == caller`.
+- **Agent container ↔ TaskApprovalsTable**: IAM role on the runtime has `GetItem` / `PutItem` / conditional `UpdateItem` on the table. Agent writes pending, reads decisions, writes TIMED_OUT on internal timeout.
+- **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as `/tasks/*`).
+- **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable**: Lambda IAM policy allows `UpdateItem` with authorization condition (`user_id = :caller`) built into the ConditionExpression.
+- **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated.
 
-### 12.2 Ownership enforcement
+### 12.2 Ownership encoded in ConditionExpression
 
-Before flipping an approval row to APPROVED/DENIED, `ApproveTaskFn` must verify the caller owns the task:
+No TOCTOU window. The single `UpdateItem` on `TaskApprovalsTable` encodes:
 
-1. `GetItem` on `TaskTable` by `task_id`.
-2. Check `TaskTable.user_id == cognito_sub_from_jwt`.
-3. If mismatch → return 403 FORBIDDEN. Log `approval_unauthorized` event on TaskEventsTable (not TaskApprovalsTable — don't leak that a row exists).
+```
+#status = :pending AND user_id = :caller
+```
+
+Authorization and state transition are atomic. A compromised internal caller (Lambda with raw DDB access) or a logic bug in a future refactor that forgets the ownership check still can't flip rows without matching the `user_id`.
 
 ### 12.3 Race prevention
 
-Two potential races:
+**Race 1 — user approves at T, agent times out at T+ε**:
+- Agent's poll loop times out → best-effort conditional update `status = TIMED_OUT WHERE status = :pending`
+- User's CLI writes `APPROVED WHERE status = :pending`
+- One wins atomically
+- The loser:
+  - If TIMED_OUT wins: user gets 409 `REQUEST_ALREADY_DECIDED`. User sees "approval expired".
+  - If APPROVED wins: agent's poll reads APPROVED on next tick. Agent proceeds.
 
-**Race 1: user approves at T while agent times out at T+ε.**
-- Agent's poll times out → hook writes `TIMED_OUT` via conditional update `status = :pending`.
-- User's CLI writes `APPROVED` via conditional update `status = :pending`.
-- **Only one succeeds atomically** (DDB conditional write). Second call gets ConditionalCheckFailedException → 409.
-- If APPROVED wins: user gets 202, agent reads APPROVED on next poll (hasn't timed out yet from agent's perspective if poll happens in the <1s window). Agent proceeds.
-- If TIMED_OUT wins: user gets 409 REQUEST_ALREADY_DECIDED with `current_status: "TIMED_OUT"`. User sees "approval expired". Agent already denied the tool call.
+**Race 2 — double-approve**:
+- Two concurrent CLI invocations. Second gets 409 `REQUEST_ALREADY_DECIDED`. Idempotent.
 
-**Race 2: user approves twice in rapid succession (double-click).**
-- Same mechanism: second UpdateItem fails with ConditionalCheckFailedException. Second CLI invocation gets 409. Idempotent.
+**Race 3 — cancel during AWAITING_APPROVAL**:
+- Agent writes `RUNNING WHERE status = :awaiting AND awaiting_approval_request_id = :rid`
+- User writes `CANCELLED WHERE status = :awaiting` (via `bgagent cancel`)
+- If CANCELLED wins: agent's resume fails with TransactionCanceledException. Hook emits `approval_resume_failed` and returns DENY. Task is already CANCELLED; agent's turn is aborted.
+- If RUNNING wins: `bgagent cancel` gets 409 `TASK_ALREADY_RUNNING` (or similar) — user sees "task resumed before cancel landed".
 
-**Race 3: agent resumes task (AWAITING_APPROVAL → RUNNING) concurrently with user cancel.**
-- Agent writes `RUNNING` via conditional update `status = :awaiting`.
-- User writes `CANCELLED` via conditional update `status = :awaiting`.
-- One wins. If CANCELLED wins: agent's conditional-update fails → agent sees it was cancelled → aborts remaining work. If RUNNING wins: CLI gets 409 TASK_ALREADY_RUNNING → tells user "task resumed before cancel landed".
+### 12.4 Blueprint content safety
 
-### 12.4 IAM least-privilege
+The blueprint trust model (§12.1) means blueprint Cedar policies are trusted by construction. Nonetheless the engine enforces:
 
-`RuntimeIam` and `RuntimeJwt` IAM roles get new grants for `TaskApprovalsTable`:
+- Cedar syntax validation at load → fail-on-error
+- Duplicate `@rule_id` → fail-on-error
+- `@tier` mismatch with physical file/section → fail-on-error
+- `@approval_timeout_s < 30` → fail-on-error
+- Missing `@rule_id` on soft-deny rule → fail-on-error
 
-```typescript
-table.grantReadWriteData(runtimeRole);  // agent writes pending, reads decisions
-```
+These guard against blueprint misconfiguration, not malicious intent. If the blueprint model ever changes to user-uploadable, additional safeguards needed: per-blueprint policy count cap (50), total policy text size cap (64KB), per-eval timeout on `is_authorized` (100ms).
 
-But NOT:
-- `Scan` (never needed; always known key)
-- `DeleteItem` (TTL handles cleanup; no programmatic delete)
+### 12.5 `all_session` does not override hard-deny
 
-`ApproveTaskFn` / `DenyTaskFn` roles:
+Hard-deny is evaluated FIRST, before the allowlist fast-path (§6.2). No `initial_approvals` scope can bypass it. `CreateTaskFn` rejects `rule:<hard_deny_rule_id>` at submit.
 
-```typescript
-table.grant(approveRole, 'dynamodb:UpdateItem');
-taskTable.grant(approveRole, 'dynamodb:GetItem');   // for ownership check
-```
+### 12.6 Denial reason sanitization in the Lambda
 
-### 12.5 `all_session` is scary; treat it that way
+`DenyTaskFn` runs `output_scanner.scan(reason)` — the existing agent-side scanner that redacts AWS keys, GitHub PATs, OAuth tokens, and common secrets — **before** persisting to DDB.
 
-`--pre-approve all_session` **cannot override hard-deny**. `CreateTaskFn` does NOT enforce this (hard-deny is enforced at runtime by the engine), but it does reject `rule:<hard_deny_rule_id>` at submit.
+Sanitization at the Lambda layer means:
+- TaskApprovalsTable stores only sanitized text (visible to operators with DDB read)
+- TaskEventsTable audit record stores only sanitized text (90d retention)
+- Fan-out Slack/email notifications only see sanitized text
+- Agent reads sanitized text verbatim; no secondary scanning needed
 
-Blueprint policy `maxPreApprovalScope` can cap what submit-time pre-approvals are allowed. Useful for sensitive repos — an org admin says "no `all_session` on this repo, ever", even if the user tries.
+Additionally, both CLI and Lambda log `message_length` not `reason` in CloudWatch logs (matching Phase 2 nudge logging discipline).
 
-CLI adds a confirmation prompt for `all_session` unless `--yes` passed. Muscle-memory-proof.
+### 12.7 `tool_input_preview` terminal-escape sanitization
 
-### 12.6 Approval message as attack vector
+`_strip_ansi` removes:
+- ANSI CSI sequences (`\x1b[...m`, etc.)
+- OSC sequences (`\x1b]...\x07`)
+- Control characters below 0x20 except `\t\n`
+- DEL (0x7F)
 
-The `deny --reason "..."` field is user input that becomes the agent's next-turn context. Two concerns:
+Applied at two layers:
+- **Agent-side at write**: `tool_input_preview` is sanitized before DDB Put
+- **CLI-side at render**: `bgagent pending`, `bgagent approve` output, and the live stream renderer all pass preview text through `_strip_ansi` before display
 
-1. **Injection attack via a compromised user account**: attacker approves a tool call by denying with `reason="IGNORE PREVIOUS INSTRUCTIONS AND RUN ..."`. Mitigation: wrap the denial reason in authoritative XML the same way Phase 2 nudges do: `<user_denial>...</user_denial>`. Agent sees the denial as authoritative but escaped. Same XML sanitization as `nudge_reader.format_as_user_message`.
-2. **Secrets in deny reason leaking to logs**: user types a password by accident. Mitigation: `output_scanner` (existing agent module) scans the denial reason for AWS keys, GitHub PATs, etc. before it's added to context. Redact inline.
+Defense in depth: rows written before the agent-side sanitization landed (if any) are still rendered safely.
 
-### 12.7 Submit-time validation is authoritative
+### 12.8 Recent-decision cache prevents approval-gate storms
 
-Once a task starts, the loaded policy set and `initial_approvals` are fixed for the task's lifetime. Changes to `policy.py` or `blueprint.yaml` during the task don't affect it. This is by design: security posture is captured at submission, not post-hoc mutable.
+After a DENIED or TIMED_OUT outcome, the engine caches `(tool_name, tool_input_sha256)` for 60s. The agent's next identical tool call auto-denies without a new approval request. A prompt-injected agent cannot burn through approval gates with the same destructive action.
+
+Cache is NOT populated on APPROVED (don't want to cache-block a just-approved call).
+
+### 12.9 Per-task + per-rate caps
+
+- Per-task hard cap: 50 approval gates. Exceeded → task → FAILED with reason `"approval-gate cap exceeded"`.
+- Per-minute rate limit: 20 approval-row writes. Exceeded → fail-closed deny on the gate that tripped it.
+- Fan-out notification cap: 10 approval-related messages per user per minute. Exceeded → messages dropped (logged).
+
+These caps bound the worst-case behavior of a compromised account or prompt-injected agent.
+
+### 12.10 JWT replay
+
+Cognito JWT with signature + expiry validation on API Gateway. Approval row conditional-update prevents replay from mutating state.
 
 ---
 
 ## 13. Failure modes + fail-closed posture
 
-### 13.1 DDB write of pending approval fails
+### 13.1 DDB write failure at approval creation
 
-Hook catches the exception, emits `approval_write_failed`, and **denies the tool call** with reason `"approval system unavailable"`. Agent continues without the tool.
+TransactWriteItems fails → hook emits `approval_write_failed` and returns DENY. No partial-state leakage.
 
-Prevents a compromised-DDB scenario from letting approval-required tools run by accident.
+### 13.2 Poll read failures
 
-### 13.2 Poll read fails transiently
+- Single failed GetItem: log WARN, continue polling
+- After 3 consecutive failures: emit `approval_poll_degraded` event
+- After 10 consecutive failures: treat as TIMED_OUT, best-effort UpdateItem to TIMED_OUT, fail-closed deny to SDK
 
-Single failed GetItem: log WARN, continue polling. After 3 consecutive failures: emit `approval_poll_degraded` event (not fatal; cosmetic warning). After 10 consecutive failures: treat as timeout, fail-closed deny. The agent adapts.
+### 13.3 Ownership mismatch
 
-### 13.3 Ownership mismatch during race
-
-`ApproveTaskFn` sees a JWT whose sub doesn't match `TaskTable.user_id`: return 403, no row update. Log auth failure. Does NOT tell the caller whether the row exists (generic error).
+ApproveTaskFn sees JWT whose sub doesn't match row's user_id: atomic conditional-update fails → returns 404 `REQUEST_NOT_FOUND` (no existence oracle).
 
 ### 13.4 Cedar engine crash mid-evaluation
 
@@ -1011,19 +1321,23 @@ Single failed GetItem: log WARN, continue polling. After 3 consecutive failures:
 
 ### 13.5 Multiple matching rules with conflicting annotations
 
-Already covered in §6.3 (min timeout, max severity). Deterministic.
+Covered in §6.3 (min timeout clamped by floor; max severity).
 
-### 13.6 Container restart while awaiting approval
+### 13.6 Container restart mid-approval
 
-If the AgentCore Runtime evicts the container between the approval request being written and the decision being read (rare — idleRuntimeSessionTimeout = 8h, and we return HealthyBusy during wait), the poll coroutine is killed. No graceful handoff.
+Detected by `reconcile-stranded-tasks.ts` (§9.5). Transitions task to FAILED with reason `"approval stranded (container eviction)"`. User sees clear failure, can resubmit. No silent hang.
 
-Detection: `reconcile-stranded-tasks.ts` detects tasks in AWAITING_APPROVAL with no active session observer. Not currently implemented — but the existing reconciler for interactive tasks without SSE has the same shape and can be extended.
+### 13.7 Insufficient lifetime remaining for approval
 
-For v1: accept restart → stranded-approval loss, require user to `bgagent cancel` and resubmit. Document as a known gap.
+If `remaining_maxLifetime - CLEANUP_MARGIN_120S < FLOOR_30S`, hook immediately returns DENY with reason `"insufficient maxLifetime for approval"`. Task continues without a gate — or, if the gate was load-bearing, fails gracefully in RUNNING state.
 
-### 13.7 User approves a task that's already transitioned
+### 13.8 PreToolUse hook itself crashes
 
-E.g., task failed while user was typing the approve command. `ApproveTaskFn` checks `TaskTable.status == AWAITING_APPROVAL` before updating. On mismatch → 409 TASK_NOT_AWAITING_APPROVAL.
+Existing behavior: hook's outer try/except returns fail-closed deny. Extended in Phase 3 to log hook crash with context (request_id if available) for triage.
+
+### 13.9 Resume transition fails (user cancelled during poll)
+
+Hook emits `approval_resume_failed` and returns DENY. Task is already in its new state (CANCELLED); hook doesn't attempt to resume.
 
 ---
 
@@ -1031,7 +1345,7 @@ E.g., task failed while user was typing the approve command. `ApproveTaskFn` che
 
 ### 14.1 Scenario A: force-push with per-rule timeout
 
-**Setup**: Repo `my-org/my-app` blueprint extends soft-deny with `force_push_main` (@approval_timeout_s=600). Task default is 300s.
+Setup: repo `my-org/my-app` blueprint extends soft-deny with `force_push_main` (@approval_timeout_s=600). Task default is 300s.
 
 ```bash
 $ bgagent run --repo my-org/my-app \
@@ -1039,73 +1353,44 @@ $ bgagent run --repo my-org/my-app \
     --approval-timeout 300
 ```
 
-At the point the agent wants to force-push:
+Agent force-pushes. Both `force_push_any` and `force_push_main` match. Annotation merge: `min(300, 600, 300) = 300s`, `max(medium, high) = high`.
 
 ```
 [14:00:00]  ★ approval_requested: Bash "git push --force origin main" (severity=high)
-            reason:   Cedar soft-deny: force_push_any, force_push_main
-            respond:  bgagent approve <task-id> 01KPR... [--scope tool_type_session]
-            timeout:  300s   # min(300, 600) — stricter rule wins
+            reason: Cedar soft-deny: force_push_any, force_push_main
+            respond: bgagent approve <task-id> 01KPR... [--scope tool_type_session]
+            timeout: 300s
 ```
 
-User approves:
-```bash
-$ bgagent approve 01KPW... 01KPR... --scope tool_type_session
-Approved: tool_type_session scope granted; all subsequent Bash calls auto-approved for this task.
-```
+User approves with `tool_type_session`. Stream:
 
-Stream:
 ```
 [14:00:08]  ★ approval_granted: request_id=01KPR... scope=tool_type_session
 [14:00:08]  ▶ Bash: git push --force origin main
 [14:00:10]  ◀ Bash: remote: Force pushed.
 ```
 
-Later in the task: agent runs `Bash: git status`. Allowlist fast-path fires. No new approval.
+Later `git status` call → allowlist fast-path → no new approval.
 
 ### 14.2 Scenario B: DROP TABLE hits hard-deny
 
-```bash
-$ bgagent run --repo my-org/my-db --task "clean up test tables"
-```
+Agent proposes `Bash: psql -c "DROP TABLE test_users;"`. Hard-deny rule `drop_table` matches → immediate DENY with reason `"Hard-deny: drop_table"`. No approval request. Task stays in RUNNING.
 
-Agent writes and tries to run a SQL script:
-```
-[14:10:00]  ▶ Bash: psql -c "DROP TABLE test_users;"
-```
+Recent-decision cache now has `(Bash, sha256(DROP TABLE ...))` for 60s — a retry would auto-deny without re-running Cedar.
 
-PreToolUse hook:
-- Hard-deny eval → matches `drop_table_any` rule (`like "*DROP TABLE*"`).
-- Returns `DENY` immediately. No approval request created. No state transition.
-
-Agent receives deny with reason `"Hard-deny: drop_table_any"`. Tries a different approach:
-```
-[14:10:01]  ▶ Bash: psql -c "DELETE FROM test_users; VACUUM test_users;"
-```
-
-This one doesn't match any rule. Tool runs. Task completes.
-
-**Key property demonstrated**: hard-deny is not a friction point — it's a boundary. The user never sees it. The agent adapts.
+Agent adapts, proposes `Bash: psql -c "DELETE FROM test_users; VACUUM test_users;"`. No rule matches. Tool runs.
 
 ### 14.3 Scenario C: Trusted automation with `all_session`
 
 ```bash
 $ bgagent submit --repo my-org/infra \
     --task "apply approved terraform plan for staging-v2" \
-    --pre-approve all_session \
-    --yes   # skip the warning prompt
-
-Submitted: 01KPW...
+    --pre-approve all_session --yes
 ```
 
-Blueprint on `my-org/infra` has `security.maxPreApprovalScope: "all_session"` (explicitly allowed on this repo).
+Blueprint on `my-org/infra` allows `maxPreApprovalScope: "all_session"`. Task runs fully autonomously. Zero approval gates. Hard-deny still enforces.
 
-Task starts, container loads:
-```
-[14:20:00]  ★ pre_approvals_loaded: count=1 scopes=[all_session]
-```
-
-Agent runs terraform apply, opens a PR with the plan output, task → COMPLETED. **Zero approval gates fire.** Hard-deny would still enforce if the agent tried to `rm -rf /` but no soft-deny rule gates anything.
+Stream shows `[14:20:00]  ★ pre_approvals_loaded: count=1 scopes=[all_session]` at startup so operators see the starting posture.
 
 ### 14.4 Scenario D: Denying with steering reason
 
@@ -1115,40 +1400,40 @@ $ bgagent run --repo my-org/my-app \
     --approval-timeout 600
 ```
 
-Agent decides to run `Bash: rm -rf src/dashboard/v1` (hits `rm_rf_path` soft-deny rule).
+Agent tries `Bash: rm -rf src/dashboard/v1`. Soft-deny rule `rm_rf_path` hits. `approval_requested` → user:
 
-```
-[14:30:00]  ★ approval_requested: Bash "rm -rf src/dashboard/v1" (severity=medium)
-```
-
-User knows better:
 ```bash
 $ bgagent deny 01KPW... 01KPR... \
     --reason "move it to src/dashboard/v1.deprecated instead of deleting; we may need to reference it in migrations"
 ```
 
-Agent reads the denial in its next-turn context:
+`DenyTaskFn` sanitizes (no secrets in this reason, passes through unchanged), writes to DDB. Agent's poll reads DENIED.
+
+Hook executes: atomic resume to RUNNING → queue denial injection via `between_turns_hooks` → return to SDK with fallback deny reason.
+
+Next Stop seam fires. The between-turns injector emits:
+
+```xml
+<user_denial request_id="01KPR..." timestamp="2026-04-23T14:30:08Z">
+move it to src/dashboard/v1.deprecated instead of deleting; we may need to reference it in migrations
+</user_denial>
 ```
-User DENIED this tool call. Reason: move it to src/dashboard/v1.deprecated
-instead of deleting; we may need to reference it in migrations
+
+Agent reads the denial on its next turn, adapts:
+
+```
+[14:30:12]  ▶ Bash: git mv src/dashboard/v1 src/dashboard/v1.deprecated
+[14:30:13]  ◀ Bash: (success)
 ```
 
-Agent adapts:
-```
-[14:30:08]  ▶ Bash: git mv src/dashboard/v1 src/dashboard/v1.deprecated
-[14:30:09]  ◀ Bash: (success)
-```
+Task proceeds. Denial-as-steering worked via the same robust path Phase 2 nudges use.
 
-Task proceeds down the new path.
+### 14.5 Scenario E: AI-DLC phased pre-approvals
 
-**Key property demonstrated**: denying is steering. Users shouldn't feel like saying "no" is a refusal; it's a redirect.
-
-### 14.5 Scenario E: AI-DLC pattern with per-phase pre-approvals
-
-A workflow that runs three agents in sequence, with escalating trust:
+Three-phase workflow with escalating trust:
 
 ```bash
-# Phase 1: read-only analysis — gate all writes
+# Phase 1 — analysis only
 $ bgagent submit --repo my-org/new-feature \
     --task "analyze the existing auth module and produce a design doc" \
     --pre-approve tool_type:Read \
@@ -1156,26 +1441,23 @@ $ bgagent submit --repo my-org/new-feature \
     --pre-approve tool_type:Grep \
     --pre-approve bash_pattern:"ls *" \
     --pre-approve bash_pattern:"find *"
-# Any Write or destructive Bash hits soft-deny → gate
 
-# Phase 2: documentation updates — open filesystem writes to docs/
+# Phase 2 — documentation writes
 $ bgagent submit --repo my-org/new-feature \
     --task "update docs/auth.md per the approved design doc" \
     --pre-approve tool_type:Read \
-    --pre-approve tool_type:Write \
+    --pre-approve write_path:"docs/**" \
+    --pre-approve tool_group:file_write \
     --pre-approve bash_pattern:"git add docs/**" \
     --pre-approve bash_pattern:"git commit *"
-# Writes to infrastructure/ or .env still gate. Pushes still gate.
 
-# Phase 3: full implementation — relaxed, with reviewer safety net
+# Phase 3 — full implementation
 $ bgagent submit --repo my-org/new-feature \
     --task "implement the auth module per approved design + docs" \
-    --pre-approve all_session
-    # (repo blueprint bans all_session for sensitive repos; rejected here
-    #  if applied to prod repos)
+    --pre-approve all_session --yes
 ```
 
-Each task's security posture is declared at submission. No interactive gating needed for the routine parts. Mirrors real-world review workflows.
+Each phase has explicit scope. Matches real-world review workflows. Visible in audit via `pre_approvals_loaded` event.
 
 ---
 
@@ -1183,143 +1465,240 @@ Each task's security posture is declared at submission. No interactive gating ne
 
 ### 15.1 Milestone structure
 
-Ship as two milestones:
-
-**Phase 3a** — core feature (3-4 weeks of work)
-- Engine extension (hard + soft policy sets, annotations, three-outcome model)
-- TaskApprovalsTable + new Lambdas + routes
-- PreToolUse hook async wait
-- `bgagent approve/deny` CLI commands
-- `--pre-approve` on `submit` / `run`
+**Phase 3a** — core feature (3-4 weeks of work):
+- Day 1: spike cedarpy annotation round-trip (decision 22). Confirm the exact JSON shape `policies_to_json_str()` returns and adjust §6.3 if needed.
+- Engine refactor (hard + soft + annotations + allowlist + recent-decisions)
+- New DDB table, new Lambdas, new CLI commands
+- PreToolUse hook extension (atomic transitions)
+- `bgagent policies list` + `bgagent pending` (support UX that unblocks real usage)
 - Happy path + fail-closed tests
 - E2E on `backgroundagent-dev`
 
-**Phase 3b** — polish (1-2 weeks)
-- CLI inline streaming prompt (if UX research says yes)
-- `approve --defer` escape hatch
-- Dashboard additions + CloudWatch alarms
+**Phase 3b** — polish (1-2 weeks):
+- CLI inline streaming prompt (UX research first)
+- `approve --defer` / allowlist revocation (`bgagent revoke-approval`)
+- Dashboard additions + CloudWatch alarms polishing
 - More soft-deny policies in the default set based on real usage
 
 ### 15.2 Phase 3a task list
 
-Roughly maps to the old §11 list but updated for the Cedar model. Order matters — later tasks depend on earlier ones.
+~35 focused items. Ordered by dependency.
 
 | # | Package | File | Change |
 |---|---|---|---|
-| 1 | agent | `src/policy.py` | Extend `PolicyDecision` with `outcome/timeout_s/severity/matching_rule_ids`. Split `_DEFAULT_POLICIES` into `_HARD_DENY_POLICIES` + `_SOFT_DENY_POLICIES`. Add annotation parsing via `policies_to_json_str`. Implement `ApprovalAllowlist` class. |
-| 2 | agent | `policies/hard_deny.cedar` (new) | Move current hard-deny rules (rm-rf, .git writes, force-push removed); add `@tier("hard")` + `@rule_id` annotations. |
-| 3 | agent | `policies/soft_deny.cedar` (new) | Seed with force-push, `*.env`, `infrastructure/**`, credentials paths. Full annotations. |
-| 4 | agent | `tests/test_policy.py` | Extend existing tests: three-outcome model, annotation merging, allowlist, pre-approval seeding. |
-| 5 | cdk | `src/constructs/task-approvals-table.ts` (new) | DDB table construct with DDB Streams. |
-| 6 | cdk | `src/handlers/approve-task.ts` (new) | POST /approve Lambda handler. |
-| 7 | cdk | `src/handlers/deny-task.ts` (new) | POST /deny Lambda handler. |
-| 8 | cdk | `src/handlers/shared/types.ts` | Add `ApprovalRequest`/`ApprovalResponse`/`DenyRequest`/scope validation types. |
-| 9 | cdk | `src/handlers/shared/response.ts` | Add `REQUEST_ALREADY_DECIDED`, `REQUEST_NOT_FOUND`, `TASK_NOT_AWAITING_APPROVAL` codes. |
-| 10 | cdk | `src/constructs/task-api.ts` | Wire `/approve` + `/deny` routes. Add grants. |
-| 11 | cdk | `src/stacks/agent.ts` | Instantiate TaskApprovalsTable; pass table name as env to both runtimes. |
-| 12 | cdk | `src/constructs/task-status.ts` | Add `AWAITING_APPROVAL` to status enum, ACTIVE_STATUSES, VALID_TRANSITIONS. |
-| 13 | cdk | `src/handlers/create-task.ts` | Validate `initial_approvals` (scope syntax, cap, hard-deny rejection, blueprint max). Persist on TaskTable. |
-| 14 | cdk | `src/handlers/shared/types.ts` | Extend `CreateTaskRequest` with `approval_timeout_s` + `initial_approvals`. |
-| 15 | cdk | `src/handlers/orchestrate-task.ts` | Add `AWAITING_APPROVAL` to `waitStrategy` + `finalizeTask`. |
-| 16 | cdk | `src/constructs/stranded-task-reconciler.ts` | Exclude `AWAITING_APPROVAL` tasks from stranded detection. |
-| 17 | cdk | `src/handlers/fanout-task-events.ts` | Add dispatch rules for `approval_requested` + `approval_granted`/`denied`/`timed_out`. |
-| 18 | agent | `src/hooks.py` | PreToolUse hook: handle REQUIRE_APPROVAL path — write row, transition status, poll loop, emit milestones. |
-| 19 | agent | `src/task_state.py` | Add `AWAITING_APPROVAL` to state-transition helpers. |
-| 20 | agent | `src/progress_writer.py` | Add `write_approval_request` / `write_approval_decision` convenience methods (thin wrappers around `write_agent_milestone`). |
-| 21 | cli | `src/commands/approve.ts` (new) | `bgagent approve` command. |
-| 22 | cli | `src/commands/deny.ts` (new) | `bgagent deny` command. |
-| 23 | cli | `src/commands/submit.ts` + `run.ts` | Add `--approval-timeout` + `--pre-approve` flags. Client-side scope validation + all_session confirmation. |
-| 24 | cli | `src/api-client.ts` | Add `approveTask` + `denyTask` + extended `createTask` methods. |
-| 25 | cli | `src/types.ts` | Mirror CDK type changes. `Scope` union type + validator. |
-| 26 | cdk | `test/handlers/approve-task.test.ts` (new) | Unit tests: happy path, race, ownership, scope validation. |
-| 27 | cdk | `test/handlers/deny-task.test.ts` (new) | Same shape. |
-| 28 | cdk | `test/handlers/create-task.test.ts` | Extend with `initial_approvals` validation tests. |
-| 29 | cli | `test/commands/approve.test.ts` (new) | CLI command tests. |
-| 30 | cli | `test/commands/deny.test.ts` (new) | CLI command tests. |
-| 31 | agent | `tests/test_hooks.py` | Extend with REQUIRE_APPROVAL path tests (DDB mock). |
-| 32 | docs | `docs/design/INTERACTIVE_AGENTS.md` | Replace §9.3 with cross-link to this doc. Update §7 (state machine) if needed. |
-
-That's ~32 focused items. Typical size — Phase 2 was ~28.
+| 1 | agent | Spike | Validate cedarpy.policies_to_json_str() returns annotations. Confirm `diagnostics.reasons` shape for multi-match. If API diverges, update §6 before proceeding. |
+| 2 | agent | `src/policy.py` | Extend `PolicyDecision` (outcome/timeout_s/severity/matching_rule_ids/allowed-property). Split `_DEFAULT_POLICIES` into hard + soft. Add annotation parsing. Implement `ApprovalAllowlist` + `RecentDecisionCache`. Load-time validation (rule_id uniqueness, tier mismatch, annotation floor). |
+| 3 | agent | `policies/hard_deny.cedar` (new) | Migrate current hard-deny rules + add DROP TABLE. Annotations. |
+| 4 | agent | `policies/soft_deny.cedar` (new) | force-push, *.env, infrastructure/**, credentials. Annotations. |
+| 5 | agent | `tests/test_policy.py` | Three-outcome, annotation merging, allowlist (incl. write_path, tool_group), recent-decision cache, pre-approval seeding, annotation round-trip. |
+| 6 | cdk | `src/constructs/task-approvals-table.ts` (new) | Table + TTL + PITR (no Streams). |
+| 7 | cdk | `src/handlers/shared/cedar-policy.ts` (new) | Shared policy-parsing library for Lambda-side rule-id validation. |
+| 8 | cdk | `src/handlers/approve-task.ts` (new) | POST /approve with ownership-in-condition + audit event. |
+| 9 | cdk | `src/handlers/deny-task.ts` (new) | POST /deny with output_scanner sanitization + audit event. |
+| 10 | cdk | `src/handlers/get-policies.ts` (new) | GET /v1/repos/{repo}/policies. |
+| 11 | cdk | `src/handlers/shared/types.ts` | ApprovalRequest/Response/DenyRequest + Scope union + extended CreateTaskRequest. |
+| 12 | cdk | `src/handlers/shared/response.ts` | New error codes (REQUEST_NOT_FOUND, REQUEST_ALREADY_DECIDED, TASK_NOT_AWAITING_APPROVAL). |
+| 13 | cdk | `src/constructs/task-api.ts` | Wire /approve, /deny, /repos/{}/policies routes. Grants. |
+| 14 | cdk | `src/stacks/agent.ts` | Instantiate TaskApprovalsTable. Env var on runtimes. |
+| 15 | cdk | `src/constructs/task-status.ts` | AWAITING_APPROVAL enum + transitions. |
+| 16 | cdk | `src/handlers/create-task.ts` | Validate initial_approvals + approval_timeout_s with all safeguards (degenerate patterns, hard-deny rule rejection, maxPreApprovalScope ceiling, blueprint-resolved rule lookup). |
+| 17 | cdk | `src/handlers/orchestrate-task.ts` | waitStrategy + finalizeTask handle AWAITING_APPROVAL. |
+| 18 | cdk | `src/constructs/stranded-task-reconciler.ts` | Detect + transition stranded AWAITING_APPROVAL tasks. |
+| 19 | cdk | `src/handlers/fanout-task-events.ts` | Dispatch rules for approval_* events + per-user notification rate limit. |
+| 20 | agent | `src/hooks.py` | PreToolUse REQUIRE_APPROVAL path: atomic transitions, caps, poll, resume, denial-injection queue. |
+| 21 | agent | `src/hooks.py` | `_denial_between_turns_hook` registered alongside `_nudge_between_turns_hook`. Shared `_xml_escape`. |
+| 22 | agent | `src/task_state.py` | AWAITING_APPROVAL in transition helpers (TransactWriteItems primitive). |
+| 23 | agent | `src/progress_writer.py` | `write_approval_*` convenience methods over `write_agent_milestone`. |
+| 24 | cli | `src/commands/approve.ts` (new) | + 429 handling, `NO_COLOR` check. |
+| 25 | cli | `src/commands/deny.ts` (new) | + `--reason-file` support. |
+| 26 | cli | `src/commands/pending.ts` (new) | `bgagent pending` listing across active tasks. |
+| 27 | cli | `src/commands/policies.ts` (new) | `bgagent policies list` + `policies show`. |
+| 28 | cli | `src/commands/submit.ts` + `run.ts` | --approval-timeout, --pre-approve (repeatable), --pre-approve-file, all_session confirmation with --yes bypass. |
+| 29 | cli | `src/api-client.ts` | approveTask, denyTask, listPending, listPolicies, extended createTask. |
+| 30 | cli | `src/types.ts` | Mirror CDK types. Scope union + validator. |
+| 31 | cdk | `test/handlers/approve-task.test.ts` (new) | Happy path, race, ownership-in-condition, scope validation, 409/404 distinction. |
+| 32 | cdk | `test/handlers/deny-task.test.ts` (new) | Same shape + output_scanner integration. |
+| 33 | cdk | `test/handlers/get-policies.test.ts` (new) | Discovery endpoint tests. |
+| 34 | cdk | `test/handlers/create-task.test.ts` | initial_approvals validation (degenerate patterns, hard-deny rule rejection, blueprint resolution). |
+| 35 | cli | `test/commands/*.test.ts` | CLI command tests. |
+| 36 | agent | `tests/test_hooks.py` | REQUIRE_APPROVAL path, atomic transitions, caps, recent-decision cache, denial injection. |
+| 37 | docs | `docs/design/INTERACTIVE_AGENTS.md` | Update §7 if needed. Confirm §9.3 cross-link. |
 
 ### 15.3 Testing strategy
 
-- **Unit tests**: every module gets direct tests. ~80% coverage target, matching Phase 2.
-- **Integration tests**: Cedar eval + annotation merging, allowlist seeding, full PreToolUse-to-PolicyDecision pipeline.
-- **E2E**: submit a task on `backgroundagent-dev`, trigger a soft-deny-matching tool, approve via CLI, verify flow. Repeat for deny, timeout, pre-approval.
-- **Race tests**: parallel approve+timeout calls; assert only one wins.
-- **Security tests**: call `/approve` with wrong user's JWT → 403.
+- **Unit**: ~80% coverage target, matching Phase 2.
+- **Integration**:
+  - Cedar annotation round-trip test (write, parse, recover all 5 annotations)
+  - Full PreToolUse → PolicyDecision → DDB pipeline
+  - Allowlist seeding from initial_approvals
+  - Shared policy-parsing library consistency (Lambda side == agent side)
+- **E2E** on `backgroundagent-dev`: 5 scenarios (A-E from §14). Both RuntimeJwt and Runtime-IAM paths.
+- **Race tests**:
+  - Approve vs. timeout concurrent
+  - Deny vs. timeout concurrent
+  - Double-approve
+  - Cancel during AWAITING_APPROVAL
+  - Late approval after TIMED_OUT (expect 409)
+- **Chaos tests**:
+  - Container restart mid-approval (simulated via kill + reconciler)
+  - DDB throttle during poll (simulated via mock)
+  - Bash retry loop after DENIED (expect recent-decision cache auto-deny)
+- **Security tests**:
+  - Wrong user JWT → 404 (not 403)
+  - ANSI-injected tool_input_preview → stripped at both layers
+  - Malformed Cedar annotations → task fails to start
+  - Degenerate bash_pattern → 400 at submit
+  - Sanitizer-removing-secret test (OUTPUT_SCANNER integration)
 
-### 15.4 Deployment order
+### 15.4 Feature flag + rollout
 
-Same pattern as Phase 2: ship as one atomic commit with feature flag default-off (`Blueprint.features.hitl_approval: false`). Enable per-repo for pilot. Observe. Roll out.
+Blueprint-level: `security.hitl_approval.enabled: bool` (default false initially, default true once stable).
+
+When disabled: `PolicyEngine.__init__` loads SOFT_DENY_POLICIES as empty. No soft-deny eval fires. Engine reverts to Phase 1a two-outcome behavior.
+
+Rollout:
+1. Ship code with flag default false globally
+2. Enable on `backgroundagent-dev` — Scenarios A-E validated
+3. Enable on one pilot production repo — monitor dashboards + alarms for 2 weeks
+4. Enable by default; blueprint opt-out for repos that want to skip
 
 ### 15.5 Backward compatibility
 
-- Existing tasks without `initial_approvals` → empty list → no pre-approvals, default approval_timeout_s = 300
-- Existing policies without `@rule_id` / `@tier` → engine logs WARN and treats them as hard-deny (safest default). Users should migrate.
-- `pre_tool_use_hook` stays synchronous-compatible until a soft-deny hit; adding async wait is a behavior change but not a contract change (hook still returns the same dict shape).
+- Existing tasks without `initial_approvals` → empty list → no pre-approvals, default `approval_timeout_s = 300`
+- Existing policies without `@rule_id` / `@tier` → engine fails to start (fail-closed). Blueprint authors must add annotations explicitly during migration.
+- `PolicyDecision.allowed` property provides backward compat for existing `if not decision.allowed` callers
+- Hook return shape unchanged — Phase 1a/1b tests continue to pass
 
 ---
 
-## 16. Open questions / deferred
+## 16. Implementation notes (carry-forward tasks)
 
-### 16.1 Multi-user approval
+Items from the 2026-04-24 design review not captured above as design changes — to be addressed during implementation and removed from this list once completed. These are P1-P2 findings; P0s have been integrated into the main design body.
 
-Today: task has one owner; they approve. Future: multi-user approval (e.g., two of three reviewers must approve for `rule:deploy_prod`). Defer — multi-user is §9.8 of INTERACTIVE_AGENTS.md, scoped for Iteration 5.
+**IMPL-1** (data-flow P1-5): Scope string normalization. CLI + Lambda must agree. Document: trim whitespace, preserve case on `tool_type:` (Bash/Read/Write are canonical; reject case-shifted variants).
 
-### 16.2 Per-rule auto-approve on timeout
+**IMPL-2** (data-flow P1-7): Dual-write ordering between `progress_writer` and `sse_adapter` is best-effort; canonical source is TaskEventsTable. Document this in the implementation guide alongside Phase 2.
 
-For low-stakes rules, "timeout → auto-approve" could be useful. But it's a safety footgun that's hard to reverse. Shipped *without* this opt-in; revisit in 3b if there's demand. `@on_timeout("allow")` annotation sketched but not implemented.
+**IMPL-3** (data-flow P2-1): Catch `ValueError` in `_merge_annotations` on malformed `@approval_timeout_s`; skip the annotation, log WARN. Engine already fails the task at load time if below floor, so this is a belt-and-suspenders.
 
-### 16.3 Interactive stream prompts
+**IMPL-4** (data-flow P2-4): Test constraint — tests MUST NOT assert specific positional Cedar policy IDs. Use `@rule_id` annotations exclusively.
 
-In Phase 2 we deferred terminal UX research. Same question applies here: should `bgagent run` prompt interactively on approval requests? Probably yes eventually, but needs UX research. Phase 3b.
+**IMPL-5** (security SA-11 residual): Both the Lambda (audit event) and the agent (milestone) write approval decisions. The Lambda's write is canonical; the agent's is observational. Tests should verify the Lambda write completes even if agent milestone fails.
 
-### 16.4 Persistent allowlist across container restarts
+**IMPL-6** (security P1-8): Audit trail ownership. `ApproveTaskFn` / `DenyTaskFn` write `approval_decision_recorded` to TaskEventsTable directly (not via agent milestone). Implement as part of the Lambda request flow.
 
-Currently: in-process. If a container gets evicted mid-task, allowlist is lost. Phase 3b could persist allowlist state to TaskTable and hydrate on restart. Not critical given rare restarts.
+**IMPL-7** (security blind-spot #5): PolicyEngine MUST be instantiated per task, NOT per container. Verify in server.py bootstrap that a new instance is created on each task invocation (even when attach-don't-spawn logic reuses the container).
 
-### 16.5 `bgagent approve --defer`
+**IMPL-8** (security blind-spot #6): TaskApprovalsTable Streams — confirmed off (§11.2). Do not subscribe any consumer.
 
-Escape hatch: "I can't respond, cancel + release slot". Clearer UX than silent timeout. Phase 3b.
+**IMPL-9** (functional P1-3): Runtime allowlist revocation. Not shipped in 3a. Placeholder: `bgagent revoke-approval <task_id> <scope>` noted in §17.
 
-### 16.6 Policy hot-reload
+**IMPL-10** (functional P1-12): `approval_timeout_s` default 300 documented consistently in §3 #6, §7.3 table, §10.2 attribute description.
 
-Today: policies loaded at task start, immutable for task lifetime. A long-running task (7h) can't benefit from a fresh soft-deny rule added mid-task. Probably fine — submission is the authoritative moment. Not a Phase 3 goal.
+**IMPL-11** (functional P2-8): CLI `run.ts` command exists from Phase 1b. `submit.ts` also exists. `--pre-approve` / `--approval-timeout` flags added to both.
 
-### 16.7 Severity-based routing
+**IMPL-12** (functional P2-9): Poll cadence in §3 #3 reconciled — describe as "initial 2s for 30s, then 5s" without specific call count math (it varies with timeout_s).
 
-CLI could filter approvals: `bgagent approve --severity high` auto-approves high only, leaves medium/low. Useful for triage. Phase 3b.
+**IMPL-13** (functional FC-5): `bgagent status <task_id> --allowlist` — inspects current in-process allowlist state. Useful for debugging "why is this tool being gated again?". Low priority; add to `bgagent status` if cheap.
 
-### 16.8 Cedar annotations for things we haven't thought of yet
+**IMPL-14** (functional FC-6): Tool_use_id correlation. SDK handles internally. No hook-side changes needed; tests should verify the hook does not echo tool_use_id in its response.
 
-`@category`, `@severity`, `@approval_timeout_s`, `@tier`, `@rule_id` are shipped. Future: `@approval_requires_mfa("true")` for sensitive actions that need step-up auth. Great idea; deferred.
+**IMPL-15** (functional FC-9): Recent-decision cache 60s window — tune after observation. Default 60s is a reasonable starting point.
+
+**IMPL-16** (CLI UX): ULID length is 26 chars, not 33. Update all CLI help text and error messages.
+
+**IMPL-17** (CLI UX): Shell completion (tab-complete task_id + request_id from `bgagent pending`). Deferred to 3b; document in §17.
+
+**IMPL-18** (FC-7): PolicyEngine freezing is implicit (single `__init__` call, no reload path). Add a test: assert that no code path calls `load_policies` after `__init__` completes.
 
 ---
 
-## Appendix A — File change map
+## 17. Deferred / out of scope
 
-(Tentative; refine during implementation.)
+### 17.1 Multi-user approval
 
-See §15.2 table. Net new files: 10. Net modified files: 13. Total LOC estimate: ~2500 lines production + ~1500 lines test = ~4000 lines. Comparable to Phase 2 (+2950 / -34).
+Future: multi-user approval (e.g., two of three reviewers must approve for `rule:deploy_prod`). Scope: §9.8 INTERACTIVE_AGENTS.md, Iteration 5.
 
-## Appendix B — Review checklist
+### 17.2 Per-rule auto-approve on timeout
 
-Before merging:
+`@on_timeout("allow")` annotation sketched. Safety footgun. Revisit in 3b if demand.
 
-- [ ] All 8 Cedar annotations parse + recover via `policies_to_json_str()` round-trip test
+### 17.3 Interactive streaming prompts
+
+UX research first (Phase 2 deferred the same question). Phase 3b.
+
+### 17.4 Persistent allowlist across container restarts
+
+Today: in-process; reconciler fails stranded tasks. Phase 3b could persist to TaskTable + hydrate on restart. Not critical given rare restarts.
+
+### 17.5 `bgagent approve --defer`
+
+Escape hatch: "cancel + release slot". Clearer than silent timeout. Phase 3b.
+
+### 17.6 Policy hot-reload
+
+Today: policies frozen at task start. A long-running task can't benefit from a fresh soft-deny rule added mid-task. Probably fine; submission is the authoritative moment. Not a Phase 3 goal.
+
+### 17.7 Severity-based routing
+
+CLI: `bgagent approve --severity high` auto-approves high only, leaves medium/low. Phase 3b.
+
+### 17.8 Runtime allowlist revocation
+
+`bgagent revoke-approval <task_id> <scope>`. User realization "oh wait, I didn't mean to approve ALL Bash". Phase 3b — implementation is straightforward (remove from in-process allowlist + emit `approval_revoked` milestone).
+
+### 17.9 Bulk approve
+
+`bgagent approve --all-pending` to approve everything pending. Power-user. Low priority; users WILL ask.
+
+### 17.10 Shell completion for task_id / request_id
+
+Tab-complete from `bgagent pending`. Deferred to 3b.
+
+### 17.11 Policy linting
+
+`bgagent lint-policies --repo <repo>` to validate blueprint Cedar before submission. Catches annotation errors in development rather than at container start. Phase 3b.
+
+### 17.12 Richer approval annotations
+
+`@approval_requires_mfa("true")`, `@approval_channel("slack")` for enterprise workflows (step-up auth, audit channel). Good ideas; deferred.
+
+### 17.13 Cross-task scope inheritance
+
+"Apply the same pre-approvals I used on my last task." Convenience. Phase 3b.
+
+---
+
+## Appendix A — Key file change map
+
+See §15.2. Net new files: ~13. Net modified files: ~15. Total LOC estimate: ~3500 production + ~2000 test = ~5500 lines. Larger than Phase 2 (+2950 / -34) because of the new Lambda × 3 + discovery endpoint + shared parser + state machine + reconciler updates.
+
+## Appendix B — Review checklist (pre-merge)
+
+- [ ] Day-1 cedarpy spike run; annotation round-trip confirmed
+- [ ] All 5 Cedar annotations parse + recover via `policies_to_json_str()` round-trip test
 - [ ] Every hard-deny rule has `@tier("hard")` + `@rule_id`
 - [ ] Every soft-deny rule has `@tier("soft")` + `@rule_id` + `@severity` (default medium if missing)
-- [ ] `@rule_id` uniqueness enforced at engine load
-- [ ] Scope validation rejects `rule:<hard_deny_id>` at `CreateTaskFn`
-- [ ] `maxPreApprovalScope` honored
-- [ ] Race tests pass: approve+timeout, double-approve, cancel-during-awaiting
-- [ ] E2E on `backgroundagent-dev`: scenarios A, B, C, D, E from §14
-- [ ] Dashboard additions emit on schedule
-- [ ] `reconcile-stranded-tasks` does NOT flag `AWAITING_APPROVAL` tasks
-- [ ] DDB Streams on TaskApprovalsTable wired to fan-out Lambda
-- [ ] CLI confirmation prompt on `--pre-approve all_session`
+- [ ] `@rule_id` uniqueness enforced at engine load (fail-on-error, not fall-back)
+- [ ] `@approval_timeout_s < 30` rejected at load
+- [ ] Atomic TransactWriteItems for approval-request creation and resume transitions
+- [ ] Ownership encoded in ConditionExpression on ApproveTaskFn / DenyTaskFn
+- [ ] Scope validation: rejects `rule:<hard_deny_id>`, degenerate patterns, blueprint-maxPreApprovalScope violations
+- [ ] ANSI/control-char stripping in `tool_input_preview` (both layers)
+- [ ] `output_scanner.scan` runs in DenyTaskFn before persisting `reason`
+- [ ] Recent-decision cache blocks 60s retries
+- [ ] Per-task cap (50) + per-minute rate limit (20) + per-user notification cap (10/min)
+- [ ] Denial injection via Stop hook `between_turns_hooks` (not `permissionDecisionReason` alone)
+- [ ] Stranded-task reconciler transitions AWAITING_APPROVAL > 2×timeout_s to FAILED
+- [ ] Race tests pass: approve+timeout, deny+timeout, double-approve, cancel-during-awaiting, late-approval-after-TIMED_OUT
+- [ ] E2E on `backgroundagent-dev`: Scenarios A-E, both runtime paths
+- [ ] `bgagent pending` + `bgagent policies list` functional
+- [ ] Dashboard emits all approval-* metrics; alarms wired
+- [ ] `bgagent status <task_id> --allowlist` (if IMPL-13 shipped)
+- [ ] Feature flag default false; enable explicitly on `backgroundagent-dev` only
+- [ ] Backward compat: Phase 1a/1b tests pass without modification
+- [ ] ULID length references are 26 chars throughout CLI + docs
 
 ---
 
-*End of Phase 3 design doc.*
+*End of Phase 3 design doc, rev 2.*
