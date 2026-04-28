@@ -9,12 +9,12 @@ experimental = true
 
 [tools]
 node = "22"
-prek = "0.3.8"
+prek = "latest"
 gitleaks = "latest"
 semgrep = "latest"
 osv-scanner = "latest"
-"grype" = "0.110.0"
-"aqua:zizmorcore/zizmor" = "1.23.1"
+"grype" = "latest"
+"aqua:zizmorcore/zizmor" = "latest"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs"]
