@@ -2,7 +2,7 @@
 
 > **Status:** Detailed design, pre-implementation.
 > **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (pointing here), §7 (state machine).
-> **Visual:** [`../phase3-cedar-hitl.drawio`](../phase3-cedar-hitl.drawio) (12 pages).
+> **Visual:** [`../diagrams/phase3-cedar-hitl.drawio`](../diagrams/phase3-cedar-hitl.drawio) (12 pages).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 2 (2026-04-24 — rewrite integrating review findings).
 > **Implementation:** not started.
@@ -123,7 +123,7 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 
 ## 4. End-to-end request flow
 
-Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hitl.drawio pages 3-6](../phase3-cedar-hitl.drawio).
+Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hitl.drawio pages 3-6](../diagrams/phase3-cedar-hitl.drawio).
 
 ### Setup (task start)
 

@@ -986,7 +986,7 @@ See §9.12 for the full constraint table on AgentCore streaming limits.
 >
 > The rev-3 3-tier model (`autonomous`/`smart`/`gated`) below is **superseded**. Phase 3 now uses Cedar-policy-driven HITL that extends the existing in-process Cedar engine (`agent/src/policy.py`) with a third outcome — `REQUIRE_APPROVAL` — by running evaluations against two policy sets (hard-deny / soft-deny). Same policy language, broader semantics. The detailed design covers policy authoring, REST contract, CLI UX, state machine, concurrency, security model, sample scenarios, and the implementation plan.
 >
-> Companion draw.io file: [`../phase3-cedar-hitl.drawio`](../phase3-cedar-hitl.drawio) (12 pages).
+> Companion draw.io file: [`../diagrams/phase3-cedar-hitl.drawio`](../diagrams/phase3-cedar-hitl.drawio) (12 pages).
 >
 > The rev-3 section below is retained for historical context only.
 >
@@ -1378,7 +1378,7 @@ Phase 4:  Pause/Resume           → Lifecycle control (leverages 8-hour timeout
 
 **Goal:** Users can send course corrections to a running agent between turns.
 
-**Transport:** REST `POST /v1/tasks/{task_id}/nudge` through our API Gateway (existing Cognito auth). Works identically on both runtime paths (Runtime-IAM / orchestrator, Runtime-JWT / interactive-SSE). **No dependency on WebSocket.** See `docs/interactive-agents-phases-v4.drawio` page 8 for the architecture.
+**Transport:** REST `POST /v1/tasks/{task_id}/nudge` through our API Gateway (existing Cognito auth). Works identically on both runtime paths (Runtime-IAM / orchestrator, Runtime-JWT / interactive-SSE). **No dependency on WebSocket.** See `docs/diagrams/interactive-agents-phases.drawio` page 8 for the architecture.
 
 **Data path:**
 - Client authenticates with Cognito, POSTs `{ "message": "<free text>" }`.
