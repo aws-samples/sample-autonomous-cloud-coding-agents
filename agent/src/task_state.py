@@ -152,19 +152,29 @@ def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) ->
 
 
 def write_running(task_id: str) -> None:
-    """Transition a task to RUNNING (called at agent start)."""
+    """Transition a task to RUNNING (called at agent start).
+
+    Updates ``status_created_at`` alongside ``status`` so the
+    ``UserStatusIndex`` GSI sort key reflects the current status.  Writers
+    that transition the task (``create-task-core``, ``cancel-task``,
+    ``reconcile-stranded-tasks``) all rewrite this field; keeping Python
+    in sync is required for ``bga list`` to return tasks in the expected
+    order.
+    """
     try:
         table = _get_table()
         if table is None:
             return
+        now = _now_iso()
         expr_names = {"#s": "status"}
         expr_values = {
             ":s": "RUNNING",
-            ":t": _now_iso(),
+            ":t": now,
+            ":sca": f"RUNNING#{now}",
             ":submitted": "SUBMITTED",
             ":hydrating": "HYDRATING",
         }
-        update_parts = ["#s = :s", "started_at = :t"]
+        update_parts = ["#s = :s", "started_at = :t", "status_created_at = :sca"]
 
         logs_url = _build_logs_url(task_id)
         if logs_url:
@@ -191,20 +201,26 @@ def write_running(task_id: str) -> None:
 
 
 def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:
-    """Transition a task to a terminal state (COMPLETED or FAILED)."""
+    """Transition a task to a terminal state (COMPLETED or FAILED).
+
+    Updates ``status_created_at`` alongside ``status`` — see
+    :func:`write_running` for why.
+    """
     try:
         table = _get_table()
         if table is None:
             return
+        now = _now_iso()
         expr_names = {"#s": "status"}
         expr_values = {
             ":s": status,
-            ":t": _now_iso(),
+            ":t": now,
+            ":sca": f"{status}#{now}",
             ":running": "RUNNING",
             ":hydrating": "HYDRATING",
             ":finalizing": "FINALIZING",
         }
-        update_parts = ["#s = :s", "completed_at = :t"]
+        update_parts = ["#s = :s", "completed_at = :t", "status_created_at = :sca"]
 
         if result:
             if result.get("pr_url"):

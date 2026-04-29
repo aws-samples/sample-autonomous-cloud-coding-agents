@@ -168,3 +168,81 @@ class TestWriteSessionInfo:
         assert len(calls) == 1
         assert "session_id = :sid" in calls[0]["UpdateExpression"]
         assert "agent_runtime_arn" not in calls[0]["UpdateExpression"]
+
+
+class TestWriteRunningMaintainsStatusCreatedAt:
+    """Regression guard: ``write_running`` must rewrite ``status_created_at``
+    so the ``UserStatusIndex`` GSI sort key reflects the current status.
+    Without this, ``bga list`` sorts by the stale SUBMITTED prefix and newly
+    running / completed / cancelled tasks appear after stale SUBMITTED rows.
+    """
+
+    def test_writes_status_created_at_with_running_prefix(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_running("t-run")
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert "status_created_at = :sca" in call["UpdateExpression"]
+        sca = call["ExpressionAttributeValues"][":sca"]
+        assert sca.startswith("RUNNING#")
+        # The timestamp after the '#' matches _now_iso()'s ISO-Z format.
+        ts = sca.split("#", 1)[1]
+        assert ts.endswith("Z")
+        assert len(ts) == 20
+
+
+class TestWriteTerminalMaintainsStatusCreatedAt:
+    def test_completed_rewrites_sca_with_completed_prefix(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-done", "COMPLETED")
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert "status_created_at = :sca" in call["UpdateExpression"]
+        sca = call["ExpressionAttributeValues"][":sca"]
+        assert sca.startswith("COMPLETED#")
+
+    def test_failed_rewrites_sca_with_failed_prefix(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-fail", "FAILED", {"error": "boom"})
+
+        assert len(calls) == 1
+        sca = calls[0]["ExpressionAttributeValues"][":sca"]
+        assert sca.startswith("FAILED#")
+
+    def test_sca_and_completed_at_share_timestamp(self, monkeypatch):
+        """The SCA timestamp and completed_at should match so operators can
+        cross-reference the GSI row against the base table without wondering
+        which write happened first."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-sync", "COMPLETED")
+
+        values = calls[0]["ExpressionAttributeValues"]
+        sca_ts = values[":sca"].split("#", 1)[1]
+        completed_at = values[":t"]
+        assert sca_ts == completed_at
