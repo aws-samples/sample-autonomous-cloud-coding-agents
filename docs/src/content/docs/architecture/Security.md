@@ -75,6 +75,8 @@ The blueprint framework ([REPO_ONBOARDING.md](/architecture/repo-onboarding)) al
 
 **Deployment control** - Custom steps are defined in the `Blueprint` CDK construct and deployed via `cdk deploy`. Only principals with CDK deployment permissions can add or modify them. There is no runtime API for custom step CRUD.
 
+The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. Phase 3 (Cedar-driven HITL approval gates — see [`PHASE3_CEDAR_HITL.md`](/architecture/phase3-cedar-hitl)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, Phase 3's §12 trust model must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
+
 **Input filtering** - The framework strips credential ARNs (`github_token_secret_arn`) and networking configuration (`egress_allowlist`) from the config before passing it to custom Lambda steps. If a custom step needs secrets, it must declare them explicitly and the operator must grant IAM permissions.
 
 **What a custom step can do:**

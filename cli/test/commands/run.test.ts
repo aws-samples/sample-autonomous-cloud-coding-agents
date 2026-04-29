@@ -365,7 +365,7 @@ describe('run command', () => {
       revokeWebhook: jest.fn(),
     }) as unknown as ApiClient);
 
-    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const localStderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const cmd = makeRunCommand();
       await expect(cmd.parseAsync([
@@ -377,11 +377,11 @@ describe('run command', () => {
       // Task must be cancelled so it doesn't sit stranded in SUBMITTED.
       expect(mockCancelTask).toHaveBeenCalledWith(TASK_DETAIL_RUNNING.task_id);
       // Stderr must carry a resume hint referencing the task id.
-      const stderr = stderrSpy.mock.calls.map(c => String(c[0])).join('');
+      const stderr = localStderrSpy.mock.calls.map(c => String(c[0])).join('');
       expect(stderr).toContain(TASK_DETAIL_RUNNING.task_id);
       expect(stderr).toMatch(/bgagent status/);
     } finally {
-      stderrSpy.mockRestore();
+      localStderrSpy.mockRestore();
     }
   });
 
@@ -407,7 +407,7 @@ describe('run command', () => {
       revokeWebhook: jest.fn(),
     }) as unknown as ApiClient);
 
-    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const localStderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const cmd = makeRunCommand();
       // Must still reject with the SSE error, not the cancel error.
@@ -418,7 +418,7 @@ describe('run command', () => {
       ])).rejects.toThrow(/ECONNREFUSED|run failed/);
       expect(mockCancelTask).toHaveBeenCalledTimes(1);
     } finally {
-      stderrSpy.mockRestore();
+      localStderrSpy.mockRestore();
     }
   });
 

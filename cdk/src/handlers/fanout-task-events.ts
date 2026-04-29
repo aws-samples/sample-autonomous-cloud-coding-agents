@@ -216,7 +216,10 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
 
     // Run all dispatchers in parallel for this event. Each catches
     // its own errors so one channel's failure doesn't block the
-    // others.
+    // others. The parallelism is bounded by the dispatcher list (3
+    // hardcoded channels), not by program input, so
+    // promiseall-no-unbounded-parallelism does not apply.
+    // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
     await Promise.all([
       dispatchToSlack(ev),
       dispatchToGitHubComment(ev),

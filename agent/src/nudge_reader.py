@@ -175,10 +175,13 @@ def mark_consumed(task_id: str, nudge_id: str, table: Any | None = None) -> bool
     now_iso = datetime.now(UTC).isoformat()
 
     # Lazy import so tests without boto3 installed still load the module.
+    ClientError: type[Exception] | None
     try:
-        from botocore.exceptions import ClientError
+        from botocore.exceptions import ClientError as _CE
+
+        ClientError = _CE
     except Exception:  # pragma: no cover — boto3/botocore always present at runtime
-        ClientError = None  # type: ignore[assignment]
+        ClientError = None
 
     try:
         tbl.update_item(
@@ -216,9 +219,11 @@ def mark_consumed(task_id: str, nudge_id: str, table: Any | None = None) -> bool
         # Also handle fake ClientError duck-types carrying response["Error"]["Code"].
         response = getattr(exc, "response", None)
         if isinstance(response, dict):
-            code = response.get("Error", {}).get("Code") if isinstance(
-                response.get("Error"), dict
-            ) else None
+            code = (
+                response.get("Error", {}).get("Code")
+                if isinstance(response.get("Error"), dict)
+                else None
+            )
             if code == "ConditionalCheckFailedException":
                 log("DEBUG", f"Nudge {nudge_id} already consumed (conditional check)")
                 return False
@@ -238,10 +243,7 @@ def _xml_escape(text: str) -> str:
     containing ``don't`` etc. stays readable in logs.
     """
     return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )
 
 
@@ -260,7 +262,5 @@ def format_as_user_message(nudges: list[PendingNudge]) -> str:
         ts = _xml_escape(str(n.get("created_at", "")))
         nid = _xml_escape(str(n.get("nudge_id", "")))
         body = _xml_escape(str(n.get("message", "")))
-        blocks.append(
-            f'<user_nudge timestamp="{ts}" nudge_id="{nid}">\n{body}\n</user_nudge>'
-        )
+        blocks.append(f'<user_nudge timestamp="{ts}" nudge_id="{nid}">\n{body}\n</user_nudge>')
     return "\n".join(blocks)

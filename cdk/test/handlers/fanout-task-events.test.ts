@@ -111,10 +111,10 @@ describe('fanout-task-events: handler', () => {
   test('dispatches only filtered events', async () => {
     const event: DynamoDBStreamEvent = {
       Records: [
-        mkEvent('agent_turn'),        // dropped (verbose)
-        mkEvent('task_completed'),    // dispatched
+        mkEvent('agent_turn'), // dropped (verbose)
+        mkEvent('task_completed'), // dispatched
         mkEvent('agent_cost_update'), // dropped
-        mkEvent('pr_created'),        // dispatched
+        mkEvent('pr_created'), // dispatched
       ],
     };
     // Must not throw; the log-only dispatchers just call logger.info.

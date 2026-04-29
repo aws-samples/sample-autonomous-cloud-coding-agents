@@ -330,6 +330,7 @@ def test_sse_attach_does_not_spawn_second_pipeline(monkeypatch):
 
     Rev-5 attach-don't-spawn (§9.13.3).
     """
+
     # Pre-populate the registry as if a pipeline is already running for this task.
     async def scenario():
         adapter = _SSEAdapter("t-attach")
@@ -385,6 +386,7 @@ def test_sse_attach_does_not_spawn_second_pipeline(monkeypatch):
 
 def test_multi_subscriber_broadcast():
     """Two subscribers on one adapter both receive every event."""
+
     async def scenario():
         adapter = _SSEAdapter("t-multi")
         adapter.attach_loop(asyncio.get_running_loop())
@@ -408,6 +410,7 @@ def test_multi_subscriber_broadcast():
 
 def test_multi_subscriber_close_sentinel_fans_out():
     """close() delivers the sentinel to every subscriber."""
+
     async def scenario():
         adapter = _SSEAdapter("t-multi-close")
         adapter.attach_loop(asyncio.get_running_loop())
@@ -471,6 +474,7 @@ def test_sse_run_elsewhere_returns_409_for_orchestrator_task(monkeypatch):
     ``bgagent watch --transport auto`` against a task that was submitted
     via plain ``bgagent submit`` (orchestrator → Runtime-IAM).
     """
+
     async def scenario():
         spawn_calls: list = []
         monkeypatch.setattr(
@@ -488,7 +492,7 @@ def test_sse_run_elsewhere_returns_409_for_orchestrator_task(monkeypatch):
         resp = await server._invoke_sse(params)
 
         assert resp.status_code == 409
-        body = json.loads(resp.body.decode())
+        body = json.loads(bytes(resp.body).decode())
         assert body["code"] == "RUN_ELSEWHERE"
         assert body["execution_mode"] == "orchestrator"
         # Critical: no pipeline spawned.
@@ -502,6 +506,7 @@ def test_sse_run_elsewhere_returns_409_for_orchestrator_task(monkeypatch):
 
 def test_sse_run_elsewhere_allows_interactive_task(monkeypatch):
     """SSE invoke for an interactive-mode task proceeds to spawn."""
+
     async def scenario():
         spawn_calls: list = []
         monkeypatch.setattr(
@@ -535,6 +540,7 @@ def test_sse_run_elsewhere_fails_open_when_record_missing(monkeypatch):
     Preserves backward compat for tasks that predate rev 5 and blueprints
     that aren't persisted at create time.
     """
+
     async def scenario():
         spawn_calls: list = []
         monkeypatch.setattr(
@@ -565,6 +571,7 @@ def test_sse_run_elsewhere_fails_closed_on_taskfetch_error(monkeypatch):
 
     Expected: HTTP 503 TASK_STATE_UNAVAILABLE so the client retries.
     """
+
     async def scenario():
         spawn_calls: list = []
         monkeypatch.setattr(
@@ -582,7 +589,7 @@ def test_sse_run_elsewhere_fails_closed_on_taskfetch_error(monkeypatch):
         resp = await server._invoke_sse(params)
 
         assert resp.status_code == 503
-        body = json.loads(resp.body.decode())
+        body = json.loads(bytes(resp.body).decode())
         assert body["code"] == "TASK_STATE_UNAVAILABLE"
         assert spawn_calls == []
         with server._threads_lock:
@@ -597,6 +604,7 @@ def test_sse_hydrates_missing_params_from_task_table(monkeypatch):
     task_description + max_turns + max_budget_usd + task_type + branch_name
     from the TaskTable record before spawning the pipeline.
     """
+
     async def scenario():
         captured_params: dict = {}
 
@@ -653,6 +661,7 @@ def test_sse_hydration_does_not_overwrite_caller_values(monkeypatch):
     must NOT overwrite it with the TaskTable value. Only empty fields are
     filled from the record.
     """
+
     async def scenario():
         captured_params: dict = {}
 
@@ -696,6 +705,7 @@ def test_sse_returns_500_task_record_incomplete_on_missing_required(monkeypatch)
     (repo_url + either issue/description), return 500 TASK_RECORD_INCOMPLETE
     instead of letting the pipeline fail deep in setup_repo.
     """
+
     async def scenario():
         spawn_calls: list = []
         monkeypatch.setattr(
@@ -718,7 +728,7 @@ def test_sse_returns_500_task_record_incomplete_on_missing_required(monkeypatch)
         resp = await server._invoke_sse(params)
 
         assert resp.status_code == 500
-        body = json.loads(resp.body.decode())
+        body = json.loads(bytes(resp.body).decode())
         assert body["code"] == "TASK_RECORD_INCOMPLETE"
         assert "repo_url" in body["missing"]
         assert spawn_calls == []
@@ -737,6 +747,7 @@ def test_adapter_registry_insert_conflict_raises(monkeypatch):
     # Idempotent re-insert of the same adapter.
     registry.insert("t-conflict", a)
     import pytest
+
     with pytest.raises(RuntimeError, match="registry conflict"):
         registry.insert("t-conflict", b)
 
@@ -767,32 +778,40 @@ def test_normalize_execution_mode_legacy_default():
 
 def test_validate_required_params_pr_types_require_pr_number():
     """PR-iteration and PR-review task_types need a pr_number regardless."""
-    missing = server._validate_required_params({
-        "repo_url": "o/r",
-        "task_type": "pr_iteration",
-        "pr_number": "",
-    })
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "task_type": "pr_iteration",
+            "pr_number": "",
+        }
+    )
     assert missing == ["pr_number"]
 
-    missing = server._validate_required_params({
-        "repo_url": "o/r",
-        "task_type": "pr_review",
-        "pr_number": "42",
-    })
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "task_type": "pr_review",
+            "pr_number": "42",
+        }
+    )
     assert missing == []
 
     # new_task needs issue OR description.
-    missing = server._validate_required_params({
-        "repo_url": "o/r",
-        "task_type": "new_task",
-    })
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "task_type": "new_task",
+        }
+    )
     assert missing == ["issue_number_or_task_description"]
 
-    missing = server._validate_required_params({
-        "repo_url": "o/r",
-        "task_type": "new_task",
-        "task_description": "do the thing",
-    })
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "task_type": "new_task",
+            "task_description": "do the thing",
+        }
+    )
     assert missing == []
 
 
@@ -806,6 +825,7 @@ def test_sse_attach_subscribe_failure_returns_503_no_spawn(monkeypatch):
     must NOT fall through to spawn — that would duplicate the pipeline.
     Return 503 SSE_ATTACH_RACE instead so the client retries.
     """
+
     async def scenario():
         adapter = _SSEAdapter("t-race")
         adapter.attach_loop(asyncio.get_running_loop())
@@ -833,7 +853,7 @@ def test_sse_attach_subscribe_failure_returns_503_no_spawn(monkeypatch):
 
             # Must return a JSONResponse (not StreamingResponse).
             assert resp.status_code == 503
-            body = json.loads(resp.body.decode())
+            body = json.loads(bytes(resp.body).decode())
             assert body["code"] == "SSE_ATTACH_RACE"
             # Critical: no duplicate spawn.
             assert spawn_calls == []
@@ -853,6 +873,7 @@ def test_sse_spawn_interactive_writes_session_info(monkeypatch):
     task_state.write_session_info so TaskTable has session_id +
     agent_runtime_arn for cancellation and observability.
     """
+
     async def scenario():
         session_info_calls: list[tuple] = []
         monkeypatch.setattr(
@@ -870,7 +891,10 @@ def test_sse_spawn_interactive_writes_session_info(monkeypatch):
             "_spawn_background",
             lambda *a, **kw: None,  # no-op; we only care about the session write
         )
-        monkeypatch.setenv("AGENT_RUNTIME_ARN", "arn:aws:bedrock-agentcore:us-east-1:9:runtime/jwt-obs4")
+        monkeypatch.setenv(
+            "AGENT_RUNTIME_ARN",
+            "arn:aws:bedrock-agentcore:us-east-1:9:runtime/jwt-obs4",
+        )
 
         params = {
             "task_id": "t-obs4",
@@ -896,6 +920,7 @@ def test_sse_spawn_interactive_writes_session_info(monkeypatch):
 
 def test_sse_emits_attach_route_metric(monkeypatch):
     """OBS-1: attach path emits `SSE_ROUTE` metric with route='attach'."""
+
     async def scenario():
         adapter = _SSEAdapter("t-metric-attach")
         adapter.attach_loop(asyncio.get_running_loop())
@@ -924,6 +949,7 @@ def test_sse_emits_attach_route_metric(monkeypatch):
 
 def test_sse_emits_spawn_route_metric(monkeypatch):
     """OBS-1: spawn path emits `SSE_ROUTE` metric with route='spawn'."""
+
     async def scenario():
         metric_calls: list[tuple] = []
         monkeypatch.setattr(
@@ -957,6 +983,7 @@ def test_sse_logs_full_post_hydration_keyset(monkeypatch, capsys):
     Used to distinguish "ran with wrong repo because hydration overwrote
     caller value" from "caller passed wrong repo" during triage.
     """
+
     async def scenario():
         monkeypatch.setattr(server, "_spawn_background", lambda *a, **kw: None)
         monkeypatch.setattr(
@@ -988,8 +1015,8 @@ def test_sse_logs_full_post_hydration_keyset(monkeypatch, capsys):
     # and origin mapping so operators can see where each field came from.
     assert "post-hydration params" in out
     assert "repo_url" in out
-    assert "'record'" in out or 'record' in out
-    assert "'caller'" in out or 'caller' in out
+    assert "'record'" in out or "record" in out
+    assert "'caller'" in out or "caller" in out
 
 
 def test_sse_spawn_interactive_skips_session_write_when_env_and_header_missing(monkeypatch):
@@ -997,6 +1024,7 @@ def test_sse_spawn_interactive_skips_session_write_when_env_and_header_missing(m
     should NOT call write_session_info (empty write would be a no-op but
     we prefer to skip entirely for clarity).
     """
+
     async def scenario():
         session_info_calls: list[tuple] = []
         monkeypatch.setattr(

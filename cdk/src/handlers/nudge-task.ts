@@ -26,8 +26,7 @@ import { GuardrailScreeningError, screenWithGuardrail } from './shared/context-h
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { NUDGE_MAX_MESSAGE_LENGTH } from './shared/types';
-import type { NudgeRecord, NudgeRequest, TaskRecord } from './shared/types';
+import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;

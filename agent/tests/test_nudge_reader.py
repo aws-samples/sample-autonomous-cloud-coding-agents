@@ -158,9 +158,7 @@ class TestMarkConsumed:
         # with ``ValidationException: reserved keyword: consumed``.
         assert "ExpressionAttributeNames" in kwargs
         names = kwargs["ExpressionAttributeNames"]
-        assert "consumed" in names.values(), (
-            f"Expected 'consumed' to be aliased; got {names!r}"
-        )
+        assert "consumed" in names.values(), f"Expected 'consumed' to be aliased; got {names!r}"
         # The raw attribute name must NOT appear in the update/condition
         # expressions (DDB will reject it).
         update_expr = kwargs["UpdateExpression"]
@@ -208,6 +206,7 @@ class TestMarkConsumed:
                 "UpdateItem",
             )
         except Exception:  # pragma: no cover
+
             class FakeClientError(Exception):
                 def __init__(self) -> None:
                     super().__init__("boom")
@@ -299,7 +298,7 @@ class TestXmlEscape:
         # attributes are always double-quoted and unescaped `'` keeps
         # pasted text readable in logs (e.g. don't → don't, not
         # don&apos;t).
-        assert _xml_escape("&<>\"") == "&amp;&lt;&gt;&quot;"
+        assert _xml_escape('&<>"') == "&amp;&lt;&gt;&quot;"
 
     def test_apostrophe_is_not_escaped(self):
         assert _xml_escape("don't") == "don't"

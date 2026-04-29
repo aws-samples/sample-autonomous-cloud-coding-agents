@@ -216,12 +216,12 @@ class TestRoundTrip:
         adapter = _make_adapter()
         adapter.attach_loop(loop)
 
-        undelivered_before = adapter._undelivered_count  # noqa: SLF001
+        undelivered_before = adapter._undelivered_count
         with mock.patch.object(adapter, "_enqueue", side_effect=RuntimeError("boom")):
             # Must NOT raise — this is the "last-ditch" safety net.
             adapter.write_agent_error(error_type="X", message="y")
 
-        assert adapter._undelivered_count == undelivered_before + 1  # noqa: SLF001
+        assert adapter._undelivered_count == undelivered_before + 1
 
 
 # ---------------------------------------------------------------------------

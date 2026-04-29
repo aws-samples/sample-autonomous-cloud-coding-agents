@@ -53,6 +53,7 @@ import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
+from shell import log
 
 # ---------------------------------------------------------------------------
 # Rev-5 TDA-5: semantic-event TypedDicts.
@@ -118,8 +119,6 @@ SemanticEvent = (
     | AgentErrorEvent
 )
 
-from shell import log
-
 
 @dataclass
 class _Subscriber:
@@ -130,10 +129,11 @@ class _Subscriber:
     per-subscriber observability.
     """
 
-    queue: "asyncio.Queue[Any]"
+    queue: asyncio.Queue[Any]
     dropped_count: int = 0
     # Reserved for future per-subscriber filters / transforms. Currently unused.
     tags: dict[str, str] = field(default_factory=dict)
+
 
 # Default ceiling: ~1000 events is several minutes of heavy agent activity at
 # current emission rates (turn + several tool calls per turn).  Bounded so a
@@ -253,7 +253,7 @@ class _SSEAdapter:
 
     # ------------------------------------------------------------------ consumer API
 
-    def subscribe(self) -> "asyncio.Queue[Any]":
+    def subscribe(self) -> asyncio.Queue[Any]:
         """Register a new subscriber queue; returns the queue.
 
         Multiple observers (e.g. two CLI watchers attached to the same task)
@@ -276,7 +276,7 @@ class _SSEAdapter:
                 sub.queue.put_nowait(_CLOSE_SENTINEL)
         return sub.queue
 
-    def unsubscribe(self, queue: "asyncio.Queue[Any]") -> None:
+    def unsubscribe(self, queue: asyncio.Queue[Any]) -> None:
         """Remove a subscriber. Call when the observer disconnects."""
         before = len(self._subscribers)
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
@@ -523,4 +523,3 @@ class _SSEAdapter:
     # the canonical path.
     def _put_from_loop(self, event: dict) -> None:  # pragma: no cover - compat shim
         self._broadcast_from_loop(event)
-

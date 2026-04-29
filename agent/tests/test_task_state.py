@@ -69,7 +69,7 @@ class TestGetTask:
 
     def test_returns_item_when_found(self, monkeypatch):
         class _FakeTable:
-            def get_item(self, Key):  # noqa: N803 — boto kwarg name
+            def get_item(self, Key):
                 assert Key == {"task_id": "t-present"}
                 return {"Item": {"task_id": "t-present", "status": "RUNNING"}}
 
@@ -79,7 +79,7 @@ class TestGetTask:
 
     def test_returns_none_when_item_absent(self, monkeypatch):
         class _FakeTable:
-            def get_item(self, Key):  # noqa: N803
+            def get_item(self, Key):
                 return {}  # DDB returns no "Item" key when not found.
 
         monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
@@ -87,7 +87,7 @@ class TestGetTask:
 
     def test_raises_TaskFetchError_on_ddb_failure(self, monkeypatch):
         class _FakeTable:
-            def get_item(self, Key):  # noqa: N803
+            def get_item(self, Key):
                 raise RuntimeError("ProvisionedThroughputExceededException")
 
         monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
@@ -125,7 +125,9 @@ class TestWriteSessionInfo:
         assert values[":sid"] == "sess-abc123"
         assert values[":arn"] == "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
         assert values[":ct"] == "agentcore"
-        assert values[":cm"] == {"runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"}
+        assert values[":cm"] == {
+            "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
+        }
 
     def test_noop_when_both_empty(self, monkeypatch):
         calls: list[dict] = []

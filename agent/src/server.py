@@ -17,10 +17,20 @@ The /invocations handler accepts the task and either:
 
 import asyncio
 import contextlib
+
+# DEBUG LOGGING IS ENABLED BY DEFAULT during Phase 1b development.
+# AgentCore Runtime does NOT forward container stdout to APPLICATION_LOGS.
+# Only explicit CloudWatch Logs API writes land there (see how
+# telemetry.py's _emit_metrics_to_cloudwatch uses boto3). To get debug
+# visibility for the SSE path we mirror that pattern via _debug_cw below.
+# The print() calls are retained for local docker-compose runs (DDB Local
+# flow from agent/docker-compose.yml) where stdout is directly visible.
+import contextlib as _ctx_for_debug
 import json
 import logging
 import os
 import threading
+import time as _time_for_debug
 import traceback
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -43,17 +53,6 @@ from sse_wire import (
     make_run_started,
     translate,
 )
-
-# DEBUG LOGGING IS ENABLED BY DEFAULT during Phase 1b development.
-# AgentCore Runtime does NOT forward container stdout to APPLICATION_LOGS.
-# Only explicit CloudWatch Logs API writes land there (see how
-# telemetry.py's _emit_metrics_to_cloudwatch uses boto3). To get debug
-# visibility for the SSE path we mirror that pattern via _debug_cw below.
-# The print() calls are retained for local docker-compose runs (DDB Local
-# flow from agent/docker-compose.yml) where stdout is directly visible.
-
-import contextlib as _ctx_for_debug
-import time as _time_for_debug
 
 
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
@@ -117,7 +116,9 @@ _debug_cw_failures_lock = threading.Lock()
 _DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
 
-def _emit_sse_route_metric(task_id: str, route: str, *, subscriber_count: int | None = None) -> None:
+def _emit_sse_route_metric(
+    task_id: str, route: str, *, subscriber_count: int | None = None
+) -> None:
     """Emit an SSE_ROUTE metric so operators can alarm on attach-vs-spawn drift.
 
     Rev-5 OBS-1: ``route ∈ {'attach', 'spawn'}`` per ``/invocations`` SSE
@@ -151,21 +152,25 @@ def _emit_sse_route_metric(task_id: str, route: str, *, subscriber_count: int | 
 
 def _emit_sse_route_metric_blocking(log_group: str, task_id: str, payload: dict) -> None:
     try:
-        import boto3  # noqa: PLC0415
+        import boto3
+
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = boto3.client("logs", region_name=region)
         stream = f"sse_routing/{task_id}"
         with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
             client.create_log_stream(logGroupName=log_group, logStreamName=stream)
-        import json as _json  # noqa: PLC0415
-        import time as _time  # noqa: PLC0415
+        import json as _json
+        import time as _time
+
         client.put_log_events(
             logGroupName=log_group,
             logStreamName=stream,
-            logEvents=[{
-                "timestamp": int(_time.time() * 1000),
-                "message": _json.dumps(payload),
-            }],
+            logEvents=[
+                {
+                    "timestamp": int(_time.time() * 1000),
+                    "message": _json.dumps(payload),
+                }
+            ],
         )
     except Exception as exc:
         # Best-effort metric emission; never cascade a metric failure.
@@ -175,7 +180,7 @@ def _emit_sse_route_metric_blocking(log_group: str, task_id: str, payload: dict)
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
-        import boto3  # noqa: PLC0415  (intentional lazy import, mirrors telemetry.py)
+        import boto3
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = boto3.client("logs", region_name=region)
@@ -189,7 +194,7 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             logStreamName=stream,
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
-    except Exception as _exc:  # noqa: BLE001
+    except Exception as _exc:
         # Never let debug logging break the request path. Bump the failure
         # counter (P1-4) so operators can alarm on a blind rev-5 debug
         # path; emit a structured log line every N failures so one appears
@@ -200,19 +205,25 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             _debug_cw_failures += 1
             if _debug_cw_failures == 1 or _debug_cw_failures % _DEBUG_CW_FAILURE_EMIT_EVERY == 0:
                 emit_snapshot = _debug_cw_failures
-        print(f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}", flush=True)
+        print(
+            f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
         if emit_snapshot is not None:
             # Best-effort: emit a metric to the sse_routing stream (which
             # uses a separate code path, so less likely to be broken the
-            # same way).
-            try:
-                _emit_sse_route_metric_blocking(log_group, task_id or 'server', {
-                    "event": "DEBUG_CW_WRITE_FAILURES",
-                    "count": _debug_cw_failures,
-                    "last_error_type": type(_exc).__name__,
-                })
-            except Exception:
-                pass
+            # same way).  Suppress any exception — this branch is itself
+            # a last-ditch reporter and must not itself page oncall.
+            with contextlib.suppress(Exception):
+                _emit_sse_route_metric_blocking(
+                    log_group,
+                    task_id or "server",
+                    {
+                        "event": "DEBUG_CW_WRITE_FAILURES",
+                        "count": _debug_cw_failures,
+                        "last_error_type": type(_exc).__name__,
+                    },
+                )
 
 
 # Log the active event loop policy at import time.
@@ -242,6 +253,7 @@ logging.getLogger("uvicorn.access").addFilter(_PingFilter())
 # Track active background threads for graceful shutdown
 _active_threads: list[threading.Thread] = []
 _threads_lock = threading.Lock()
+
 
 # Rev-5 Branch A (design doc §9.13.3): per-microVM registry of active
 # ``_SSEAdapter`` instances by ``task_id``. A second SSE invocation for a
@@ -432,7 +444,7 @@ async def ping():
       thread crashed (Phase 1a contract); the orchestrator's reconciler takes
       over to transition the task to FAILED.
     """
-    global _last_ping_status  # noqa: PLW0603
+    global _last_ping_status
 
     if _background_pipeline_failed:
         status = "unhealthy"
@@ -480,7 +492,8 @@ def _run_task_background(
 
     _debug_cw(
         f"_run_task_background ENTERED task_id={task_id!r} "
-        f"sse_adapter_attached={sse_adapter is not None} thread={threading.current_thread().name!r}",
+        f"sse_adapter_attached={sse_adapter is not None} "
+        f"thread={threading.current_thread().name!r}",
         task_id=task_id,
     )
 
@@ -550,13 +563,15 @@ def _run_task_background(
         # completion, but guards against test re-entry and future restart
         # semantics) takes the spawn path rather than attaching to a closed
         # adapter.
-        if task_id:
-            if _active_sse_adapters.remove_if_current(task_id, sse_adapter):
-                _debug_cw(
-                    f"registry: removed task_id={task_id!r} "
-                    f"active_count={_active_sse_adapters.size()}",
-                    task_id=task_id,
-                )
+        if (
+            task_id
+            and sse_adapter is not None
+            and _active_sse_adapters.remove_if_current(task_id, sse_adapter)
+        ):
+            _debug_cw(
+                f"registry: removed task_id={task_id!r} active_count={_active_sse_adapters.size()}",
+                task_id=task_id,
+            )
 
 
 def _extract_invocation_params(inp: dict, request: Request) -> dict:
@@ -857,7 +872,8 @@ def _adapter_close_sentinel() -> Any:
     Kept as a tiny helper so ``_sse_event_stream`` can identify the sentinel
     without reaching into the private name directly at every comparison.
     """
-    from sse_adapter import _CLOSE_SENTINEL as sentinel  # noqa: PLC0415
+    from sse_adapter import _CLOSE_SENTINEL as sentinel
+
     return sentinel
 
 
@@ -905,9 +921,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                 status_code=503,
                 content={
                     "code": "SSE_ATTACH_RACE",
-                    "message": (
-                        "Pipeline adapter is transitioning; retry in a moment."
-                    ),
+                    "message": ("Pipeline adapter is transitioning; retry in a moment."),
                 },
             )
         else:
@@ -947,9 +961,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
                 status_code=503,
                 content={
                     "code": "TASK_STATE_UNAVAILABLE",
-                    "message": (
-                        "Could not verify task execution_mode; retry shortly."
-                    ),
+                    "message": ("Could not verify task execution_mode; retry shortly."),
                 },
             )
         if record is not None:
@@ -992,13 +1004,17 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
             if not params.get("max_turns") and record.get("max_turns"):
                 params["max_turns"] = int(record["max_turns"])
                 hydrated_from_record["max_turns"] = params["max_turns"]
-            if params.get("max_budget_usd") in (None, 0, 0.0) and record.get("max_budget_usd") is not None:
+            if (
+                params.get("max_budget_usd") in (None, 0, 0.0)
+                and record.get("max_budget_usd") is not None
+            ):
                 params["max_budget_usd"] = float(record["max_budget_usd"])
                 hydrated_from_record["max_budget_usd"] = params["max_budget_usd"]
-            if not params.get("task_type") or params.get("task_type") == "new_task":
-                if record.get("task_type"):
-                    params["task_type"] = record["task_type"]
-                    hydrated_from_record["task_type"] = record["task_type"]
+            if (
+                not params.get("task_type") or params.get("task_type") == "new_task"
+            ) and record.get("task_type"):
+                params["task_type"] = record["task_type"]
+                hydrated_from_record["task_type"] = record["task_type"]
             if not params.get("branch_name") and record.get("branch_name"):
                 params["branch_name"] = record["branch_name"]
                 hydrated_from_record["branch_name"] = record["branch_name"]
@@ -1015,7 +1031,9 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
             # + hydration origin for each so "ran with wrong repo" triage
             # can distinguish a hydration miss from a wrong caller value.
             populated_keys = sorted(k for k, v in params.items() if v not in (None, "", 0, 0.0, []))
-            origin = {k: ("record" if k in hydrated_from_record else "caller") for k in populated_keys}
+            origin = {
+                k: ("record" if k in hydrated_from_record else "caller") for k in populated_keys
+            }
             _debug_cw(
                 f"post-hydration params: populated={populated_keys} origin={origin}",
                 task_id=task_id,
@@ -1050,8 +1068,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
             missing_fields = _validate_required_params(params)
             if missing_fields:
                 _debug_cw(
-                    f"TASK_RECORD_INCOMPLETE: task_id={task_id!r} "
-                    f"missing={missing_fields!r}",
+                    f"TASK_RECORD_INCOMPLETE: task_id={task_id!r} missing={missing_fields!r}",
                     task_id=task_id,
                 )
                 return JSONResponse(
@@ -1088,8 +1105,7 @@ async def _invoke_sse(params: dict) -> StreamingResponse | JSONResponse:
     # adapter instead of double-spawning.
     _active_sse_adapters.insert(task_id, sse_adapter)
     _debug_cw(
-        f"registry: inserted task_id={task_id!r} "
-        f"active_count={_active_sse_adapters.size()}",
+        f"registry: inserted task_id={task_id!r} active_count={_active_sse_adapters.size()}",
         task_id=task_id,
     )
 

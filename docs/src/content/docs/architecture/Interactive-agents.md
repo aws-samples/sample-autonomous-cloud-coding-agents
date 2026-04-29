@@ -7,7 +7,7 @@ title: Interactive agents
 > **Status:** Draft — research phase
 > **Branch:** `feature/interactive-background-agents`
 > **Roadmap:** Pulls forward items from Iteration 4 (WebSocket + nudge) and Iteration 6 (iterative feedback + HITL approval)
-> **Last updated:** 2026-04-16 (rev 3 — adds local testing infrastructure for Phase 1a)
+> **Last updated:** 2026-04-17 (rev 4 — Phase 1b decisions D1/D2/D3 resolved; incorporates AWS primary-source research on AgentCore streaming caps and lifecycle timers; adds control/streaming/fan-out plane framing)
 
 ---
 
@@ -24,11 +24,23 @@ This design adds **bidirectional interactivity** through two core capabilities:
 
 | Area | Finding | Impact |
 |------|---------|--------|
-| **AgentCore Runtime — AG-UI protocol** | AgentCore supports both **SSE** (`/invocations`) and **WebSocket** (`/ws`) with identical AG-UI event types. SSE is simpler and has no 60-min reconnection limit. AG-UI interrupt/resume pattern enables bidirectional interaction over SSE via sequential POST requests. | **SSE is our primary transport.** WebSocket is an optional upgrade path. |
+| **AgentCore Runtime — AG-UI protocol** | AgentCore supports both **SSE** (`/invocations`) and **WebSocket** (`/ws`) with identical AG-UI event types. SSE is simpler to implement and operate. Both transports share AgentCore's hard 60-minute streaming cap — §9.12 covers the reconnect + DDB catch-up pattern. AG-UI interrupt/resume pattern enables bidirectional interaction over SSE via sequential POST requests. | **SSE is our primary transport.** WebSocket is the Phase 1c+ upgrade path for bidirectional nudges. |
 | **AgentCore Runtime — Lifecycle** | `idleRuntimeSessionTimeout` configurable up to 8 hours. `maxLifetime` up to 8 hours. CPU billing stops during I/O wait (paused sessions cost ~70% less). `/ping` returning `"HealthyBusy"` prevents platform termination. | **Long pauses are economically viable.** Set both timeouts to 8 hours. |
 | **AgentCore Identity** | Separate service from AgentCore Runtime. Supports **Cognito User Pool as inbound IdP** — users authenticate with existing Cognito JWT as OAuth bearer token. No IAM credentials or Identity Pool needed. | **Same JWT for REST API and AgentCore direct access.** Single auth credential for users. |
 | **Claude Agent SDK** | `ClaudeSDKClient` supports bidirectional multi-turn conversations. `client.query()` injects messages between turns. `can_use_tool` callback enables HITL approval gates. Hooks fire per-tool-call. | **The SDK natively supports everything we need for agent-side interactivity.** |
 | **Transport decision** | SSE for streaming (agent→client), REST for commands (client→agent). All commands go through our API Gateway with existing Cognito auth. No new auth infrastructure for Phase 1a. | **Simplest possible architecture for initial delivery.** |
+
+---
+
+## Revision history
+
+| Rev | Date | Summary |
+|-----|------|---------|
+| 1 | 2026-04-xx | Initial draft — research on AgentCore, Claude Agent SDK, AG-UI, competitive landscape. |
+| 2 | 2026-04-xx | Design review outcomes: SSE-first transport, Cognito-direct auth, 3-tier HITL, nudge rate limits, PAUSED viability confirmed, testing strategy. |
+| 3 | 2026-04-16 | Phase 1a scope locked (DDB + REST polling). Adds local testing infrastructure (DynamoDB Local via `docker compose`, `run.sh --local-events`, `mise run local:*` tasks). |
+| 4 | 2026-04-17 | Phase 1b decisions **D1 / D2 / D3 resolved** (two-runtime split, background-thread + `asyncio.Queue` SSE, hybrid CLI SSE client). Incorporates AWS primary-source research on the three AgentCore streaming duration ceilings (15 min sync / **60 min streaming** / 8 h async) and the two adjustable session timers (`idleRuntimeSessionTimeout`, `maxLifetime`). Adds the **control plane / streaming plane / fan-out plane** framing (§8.9) and channel-fit matrix. Records the Phase 3 ADR trigger for revisiting a full-async `server.py` refactor. Marks §9.3 (HITL) as still pending Cedar-driven rev (Phase 2/3 scope). |
+| 5 | 2026-04-21 | **Execution-location clarification (§9.13):** first live SSE bring-up against the deployed stack revealed that the initial Phase 1b design conflated three distinct interaction modes, causing duplicate pipeline execution when a CLI opened SSE for a task that was already spawned via the orchestrator path. Resolved by adopting **Branch A** from a competitive-architecture study (LangGraph Platform, Vercel `resumable-stream`, CopilotKit, Mastra, OpenAI Assistants — see `docs/research/agent-streaming-patterns.md`): introduce a direct **`submit --watch` / `bgagent run`** path where the CLI POSTs straight to Runtime-JWT and the pipeline runs **same-process** with the SSE stream (real-time, no orchestrator). Plain `submit` (no watch) continues to go via the orchestrator for fire-and-forget / non-interactive flows. `watch` against a task started elsewhere degrades to **polling** — real-time cross-runtime attach is deferred to **Phase 1c** (pub/sub layer: IoT Core MQTT or ElastiCache Redis). Also lands the **attach-don't-spawn** logic in `server.py` (same-session-ID re-invocations observe the existing in-process pipeline rather than spawning a duplicate) and the **`/ping HealthyBusy`** idle-eviction guard while a task's pipeline is active. Three SSE-path production bugs fixed in the same cycle: access-token vs ID-token routing, 33-char session-ID minimum (`bgagent-watch-<task_id>` prefix), and CloudWatch debug writes running on a daemon thread so uvicorn binds port 8080 before AgentCore's health check fires. |
 
 ---
 
@@ -41,8 +53,8 @@ This design adds **bidirectional interactivity** through two core capabilities:
 5. [Bidirectional communication architecture](#5-bidirectional-communication-architecture)
 6. [Security and trust model](#6-security-and-trust-model)
 7. [State machine extensions](#7-state-machine-extensions)
-8. [Error handling and observability](#8-error-handling-and-observability) — error propagation, unified debugging, OTEL traces, dashboard, alarms
-9. [Design decisions (rev 2)](#9-design-decisions-rev-2) — transport, auth, HITL modes, nudge limits, memory, pause, testing
+8. [Error handling and observability](#8-error-handling-and-observability) — error propagation, unified debugging, OTEL traces, dashboard, alarms, control/streaming/fan-out planes
+9. [Design decisions (rev 4)](#9-design-decisions-rev-4) — transport, auth, HITL modes, nudge limits, memory, pause, testing, D1/D2/D3 resolutions, AgentCore streaming limits
 10. [Implementation plan](#10-implementation-plan)
 11. [Proof-of-concept scope](#11-proof-of-concept-scope)
 12. [Open questions](#12-open-questions)
@@ -402,6 +414,16 @@ Only if SSE proves insufficient (e.g., mid-turn cancellation needed, SSE keepali
 | **Reconnection** | `EventSource` auto-reconnects | Manual reconnect logic needed |
 | **All features supported?** | **Yes** — nudges/approvals/pause via REST endpoints | Yes — all in-band |
 
+### Phase 1b: resolved design parameters
+
+Three architectural decisions were resolved on 2026-04-17 after primary-source AWS research and CDK/SDK code inspection. Full rationale in §9.1.1, §9.10, and §9.11; §9.12 documents the AgentCore streaming constraints that shape them.
+
+**D1 — Two AgentCore Runtimes, shared Docker image (§9.1.1).** Deploy a second AgentCore Runtime alongside the existing one. `Runtime-IAM` preserves the orchestrator path (SigV4 from `OrchestratorFn` Lambda, Phase 1a behavior intact). `Runtime-JWT` is new, with `authorizerConfiguration: customJWTAuthorizer` pointing at the Cognito User Pool JWKS URL plus allowed audiences — this is the CLI's direct SSE path. Both runtimes consume the **same `AgentRuntimeArtifact`** / Docker image. Sessions are scoped to a single runtime ARN and cannot transfer across runtimes; cross-path *observation* still works because `ProgressWriter` writes to the same `TaskEventsTable` from inside the container regardless of which runtime invoked it. An API-Gateway JWT→IAM bridge (Option B in exploration) was rejected because it defeats the "direct CLI→AgentCore" latency goal and re-introduces the very failure point we are routing around.
+
+**D2 — Background thread + `asyncio.Queue` bridge in `server.py` (§9.10).** The synchronous `run_task` stays on a background thread, keeping the Phase 1a REST path regression-free (305 passing tests). A new `agent/src/sse_adapter.py` is added as a **sibling of `agent/src/progress_writer.py`**; both receive events at the same call sites in `pipeline.py` and `runner.py`. `ProgressWriter` writes to DynamoDB (durable, auditable, catch-up source); `SSEAdapter` pushes to a per-session `asyncio.Queue`. A new SSE handler drains the queue, emits AG-UI-formatted `data: <json>\n\n` frames, and injects `: ping\n\n` keepalives every ~15 s. A full-async refactor (Option A) would require the orchestrator path — which is a synchronous `InvokeAgentRuntimeCommand` inside a 15-minute Lambda — to hold open streams of up to 60 minutes, which is incompatible. The queue boundary makes the producer agnostic: thread today, coroutine tomorrow.
+
+**D3 — Hybrid CLI SSE client (§9.11).** Import `@ag-ui/core` for the 17 event **types and Zod schemas only**. Own the transport via native `fetch` plus `eventsource-parser` (32.7 M weekly npm downloads). A CLI-side wrapper handles reconnection with exponential backoff, JWT refresh, and the mandatory 60-minute stream restart. **Do not use `@ag-ui/client` `HttpAgent`** — it is 0.0.x pre-1.0, single-shot request model, with no built-in reconnection, backoff, or token refresh (a 60-minute stream with a blip terminates as `RUN_ERROR`; we would wrap it anyway). Betting on the wire format is cheap (AG-UI is the multi-framework standard, officially supported by AgentCore as of March 2026); hand-maintaining the type catalog is a losing bet because the event set grew from 4→16 types in 2025.
+
 ---
 
 ## 5. Bidirectional communication architecture
@@ -421,8 +443,9 @@ The core change is in `agent/entrypoint.py::run_agent()`. Instead of a simple on
 async def run_agent(prompt, system_prompt, config, cwd):
     # ... existing setup ...
 
-    progress_writer = _ProgressWriter(config["task_id"])
-    nudge_reader = _NudgeReader(config["task_id"])
+    progress_writer = _ProgressWriter(config["task_id"])  # DDB durability (Phase 1a, unchanged)
+    sse_adapter   = _SSEAdapter(config["task_id"])        # Phase 1b: sibling, pushes to asyncio.Queue
+    nudge_reader  = _NudgeReader(config["task_id"])
 
     async def approval_gate(tool_name, tool_input, context):
         if not _needs_approval(tool_name, tool_input, config):
@@ -444,10 +467,14 @@ async def run_agent(prompt, system_prompt, config, cwd):
         # Existing trajectory writing
         trajectory.write_turn(...)
 
-        # NEW: Write progress event to DynamoDB for WebSocket fan-out
+        # Write progress event (Phase 1a): durable, auditable, catch-up source for reconnects.
         progress_writer.write_event(message)
 
-        # NEW: Check for pending nudges between turns
+        # Phase 1b: ALSO push to the per-session asyncio.Queue for the SSE handler to drain.
+        # Both writers receive events at identical call sites; they are siblings, not a chain.
+        sse_adapter.emit(message)
+
+        # Check for pending nudges between turns
         if isinstance(message, AssistantMessage):
             nudge = await nudge_reader.check_pending()
             if nudge:
@@ -457,6 +484,8 @@ async def run_agent(prompt, system_prompt, config, cwd):
         if isinstance(message, ResultMessage):
             break
 ```
+
+**Architectural note (rev 4):** `ProgressWriter` is the Phase 1a deployed code and is **not modified** in Phase 1b. `SSEAdapter` is added as a peer (same call sites in `pipeline.py` and `runner.py`), so the durable DDB path and the live SSE push path cannot diverge. The SSE handler in `server.py` drains the queue asynchronously; if no clients are attached the queue is bounded and events are dropped silently (DDB remains authoritative). See §9.10 for the full producer-consumer architecture.
 
 ### New DynamoDB tables
 
@@ -689,12 +718,20 @@ ProgressWriter DDB write fails
   → Agent continues — no impact on task outcome
   → Client sees gap in events, catches up on next successful write
 
-SSE connection drops (Phase 1b: network, 60-min limit, proxy timeout)
-  → EventSource auto-reconnects (built-in client behavior)
-  → On reconnect: GET /tasks/{id}/events?after={last_event_id} for catch-up
-  → Merge DDB events with new SSE stream
+SSE connection drops (Phase 1b: network, 60-min streaming cap, proxy timeout)
+  → CLI wrapper (own `fetch` + eventsource-parser, see §9.11) detects close and
+    reconnects with exponential backoff; JWT is refreshed if expiring
+  → On reconnect: GET /tasks/{id}/events?after=<event_id> for app-level catch-up
+    (this is the ONLY reconnection mechanism — AgentCore does not support
+     Last-Event-ID or any SSE-native resume; see §9.12)
+  → Merge DDB events with the new SSE stream (deduplicate by event_id)
   → DDB is source of truth; SSE is the fast path
+  → Behavior at the 60-min streaming cap is partially documented by AWS:
+    may arrive as a clean `RUN_ERROR` SSE frame OR an abrupt TCP close.
+    The CLI handles both cases identically (reconnect + catch-up)
 ```
+
+**AgentCore streaming hard cap (new in rev 4).** Three independent duration ceilings apply to `InvokeAgentRuntime`, all **hard / non-adjustable**: 15 min for sync invocations, **60 min for streaming invocations** (the SSE-relevant one), and 8 h for async jobs. These are orthogonal to the two session-level timers (`idleRuntimeSessionTimeout` default 900 s, `maxLifetime` default 28,800 s — both adjustable via `LifecycleConfiguration`, see §9.12). A 60-minute streaming cap means every long-running CLI watcher **must** reconnect at least once per hour even on a healthy connection; catch-up via `GET /tasks/{id}/events?after=<event_id>` is therefore a required path, not a degraded path. Sources: [Quotas for Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html), [Runtime lifecycle settings](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-lifecycle-settings.html).
 
 #### Nudges (Phase 2)
 
@@ -861,9 +898,37 @@ New widgets for the existing `BackgroundAgent-Tasks` CloudWatch Dashboard:
 | **Claude Code SDK per-tool telemetry disabled** | Medium — can't see individual API calls or tool decisions within a turn | Enable `ENABLE_CLI_TELEMETRY=1` in Phase 3 |
 | **API handler structured logging** | Low — create-task and nudge handlers use default Lambda logging | Add `task_id`-tagged structured logging to all new handlers |
 
+### 8.9 Control plane vs streaming plane vs fan-out plane
+
+A recurring source of confusion in the rev 1–3 drafts was the label "REST path" for the non-SSE code. That framing is misleading: the REST control plane is not a legacy fallback — it is the persistent backbone that every channel (interactive and non-interactive) uses. SSE and DDB-Stream fan-out are additive delivery layers on top of it, not replacements. Rev 4 makes the three planes explicit.
+
+**Three orthogonal planes:**
+
+1. **Control plane — REST (always on).** `POST /tasks` submission is fire-and-forget and channel-agnostic: CLI, Slack bot, GitHub webhook handler, cron job, and agent-to-agent callers all use it. Admission control (guardrail screening, idempotency keys, repo-onboarded check, concurrency caps), `GET /tasks/{id}` status, cancellation, onboarding, and webhook config all live here. Crucially, **`GET /tasks/{id}/events?after=<event_id>` is the only event reconnection mechanism** — because AgentCore SSE has no `Last-Event-ID` and no native resume (§9.12), any SSE client that drops must come back through the control plane to catch up.
+
+2. **Streaming plane — SSE (consumption-only, for interactive watchers).** SSE adds real-time server→client delivery for CLI and web-SPA clients who are watching a task live. It does **not** replace the control plane — it augments it. Clients always submit through `POST /tasks` and always catch up through `GET /tasks/{id}/events?after=<event_id>`; SSE sits between those two control-plane calls. The streaming plane is bounded by the AgentCore 60-minute hard cap (§9.12) and is only useful while a human (or interactive agent) is attached.
+
+3. **Fan-out plane — DDB Stream → destination APIs (for async consumers).** Non-interactive channels (Slack bot, GitHub PR comments, email, SMS, cron, archival) consume from the `TaskEventsTable` DynamoDB Stream via a fan-out Lambda that posts to the destination API (`chat.postMessage`, GitHub `POST /issues/{n}/comments`, SES `SendEmail`, SNS publish). The fan-out plane is **additive to Phase 1b** — at minimum Phase 1b ensures DynamoDB Streams are enabled on `TaskEventsTable`; the fan-out Lambda itself can ship later without any change to the agent or CLI. This is the right delivery mechanism for ack-in-3-seconds channels (Slack) and one-shot-on-completion channels (email/SMS).
+
+**WebSocket (Phase 1c+) is complementary, not a replacement.** AgentCore exposes `/ws` alongside `/invocations`; a future upgrade to bidirectional nudges (real-time mid-turn steering, mid-turn cancellation) needs WebSocket because SSE is server→client only. WebSocket sits next to REST + SSE in the channel matrix — it does not subsume them. Not in Phase 1b scope.
+
+**Channel-fit matrix:**
+
+| Channel | Submission | Consumption pattern | Consumption transport |
+|---|---|---|---|
+| CLI | `POST /tasks` (sync reply) | User watches live | SSE direct to Runtime-JWT |
+| Web SPA | `POST /tasks` | User watches live | SSE direct to Runtime-JWT |
+| Slack bot | `POST /tasks` (must ack in 3 s) | Async push into channel | DDB Stream → `chat.postMessage` |
+| GitHub webhook | internal `POST /tasks` | Async PR comment on completion | DDB Stream → PR comment |
+| Email / SMS | `POST /tasks` | One-shot on completion | DDB Stream → SES / SNS |
+| Cron / CI | `POST /tasks` | Status check later | REST `GET` polling |
+| Agent-to-agent | either | either | SSE or polling |
+
+**Implication for Phase 1b implementation:** the streaming plane requires the Runtime-JWT construct (D1) and the SSE adapter (D2); the fan-out plane requires only that `TaskEventsTable` has DynamoDB Streams enabled (and optionally a skeleton fan-out Lambda — the actual Slack/email/GitHub integrations can follow in later iterations without any breaking change).
+
 ---
 
-## 9. Design decisions (rev 2)
+## 9. Design decisions (rev 4)
 
 Decisions made during design review, superseding earlier proposals where noted.
 
@@ -871,7 +936,7 @@ Decisions made during design review, superseding earlier proposals where noted.
 
 **Decision:** Use AG-UI over SSE (`/invocations`) as the primary transport. WebSocket (`/ws`) is an optional upgrade.
 
-**Rationale:** SSE is simpler (just HTTP), has better proxy/firewall compatibility, and `EventSource` clients auto-reconnect. Both SSE and WebSocket share the same 60-minute streaming limit ([AWS quotas](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)), so neither has an advantage there — both need reconnection logic for long tasks. The AG-UI event types are identical on both transports. Client → agent commands go through our REST API regardless of transport.
+**Rationale:** SSE is simpler (just HTTP), has better proxy/firewall compatibility, and properly-written clients can auto-reconnect with app-level catch-up. Both SSE and WebSocket share the same 60-minute streaming limit ([AWS quotas](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)), so neither has an advantage there — both need reconnection logic for long tasks. The AG-UI event types are identical on both transports. Client → agent commands go through our REST API regardless of transport.
 
 > **Note:** The AG-UI interrupt/resume pattern (agent emits `RUN_FINISHED` with `outcome='interrupt'`, client sends new POST with `resume`) is currently a [draft specification](https://docs.ag-ui.com/drafts/interrupts), not finalized. Our design does not depend on it — we use DynamoDB polling for nudges and approvals instead.
 
@@ -881,23 +946,57 @@ Primary:   Client ←SSE── AgentCore /invocations  (progress streaming)
 Upgrade:   Client ←WS→ AgentCore /ws              (bidirectional, mid-turn cancel)
 ```
 
+#### 9.1.1 Two-runtime split (D1 resolved, 2026-04-17)
+
+**Decision:** Deploy **two AgentCore Runtimes** from the same container image, differing only in their `authorizerConfiguration`.
+
+| Runtime | Authorizer | Used by | Replaces |
+|---|---|---|---|
+| `Runtime-IAM` | Default (SigV4 / IAM) | `OrchestratorFn` Lambda (control plane invocations) | Identical to Phase 1a runtime — no behavior change |
+| `Runtime-JWT` (new) | `customJWTAuthorizer` → Cognito User Pool JWKS URL + allowed audiences | CLI direct SSE watchers, web SPAs | N/A — new path |
+
+Both runtimes consume the same `AgentRuntimeArtifact` (Docker image). `ProgressWriter` and `SSEAdapter` both run inside the container regardless of which runtime is invoked, and both write to the same `TaskEventsTable`. This means cross-path *observation* works (a task submitted via `Runtime-IAM` is fully visible to a CLI watcher on `Runtime-JWT`'s SSE stream, because events flow through DDB and through the per-session `asyncio.Queue` inside the same container). Cross-path *control* does not: a session is scoped to one runtime ARN and cannot be re-invoked on the other.
+
+**Why not a single runtime?** `authorizerConfiguration` is mutually exclusive on the AgentCore Runtime construct — a runtime either uses IAM or one `customJWTAuthorizer`, never both. This is documented in the AgentCore API reference and enforced in the CDK L2 source.
+
+**Why not an API-Gateway JWT→IAM bridge (Option B)?** That approach puts API Gateway REST in the SSE path, which is incompatible with streaming past 30 seconds (hard integration timeout). It would defeat the "direct CLI→AgentCore" latency goal that motivates Phase 1b in the first place, and it adds a new failure point for no benefit.
+
+**Lifecycle configuration for both runtimes (CDK, explicit):**
+
+```typescript
+lifecycleConfiguration: {
+  idleRuntimeSessionTimeout: Duration.hours(8),  // 28,800 s — default is 900 s; max is 28,800 s
+  maxLifetime: Duration.hours(8),                // 28,800 s — default and max both 28,800 s
+}
+```
+
+See §9.12 for the full constraint table on AgentCore streaming limits.
+
 ### 9.2 Auth: Cognito JWT directly to AgentCore (no Identity Pool)
 
-**Decision:** Configure Cognito User Pool as an inbound identity provider in AgentCore Identity. Users authenticate with the same Cognito JWT they already have — no IAM credentials or Identity Pool needed.
+**Decision (rev 4, D1-resolved):** The CLI's Cognito JWT is validated **directly on `Runtime-JWT`** via its `customJWTAuthorizer` (pointing at the Cognito User Pool JWKS URL + allowed audiences). There is no AgentCore Identity indirection and no Identity Pool.
 
 **How it works:**
-1. CDK configures Cognito as an inbound IdP in AgentCore Identity (OIDC discovery URL + clientId)
-2. CLI exchanges email/password for Cognito JWT (existing flow, no change)
-3. CLI passes JWT as `Authorization: Bearer <token>` when connecting to AgentCore SSE/WebSocket
-4. AgentCore validates the JWT against the configured Cognito issuer
+1. CDK deploys `Runtime-JWT` with `authorizerConfiguration: customJWTAuthorizer` — `discoveryUrl` set to the Cognito User Pool's OIDC discovery endpoint, `allowedAudience` set to the app client ID.
+2. CLI exchanges email/password for Cognito JWT (existing flow, no change).
+3. CLI passes JWT as `Authorization: Bearer <token>` when opening the SSE stream on `Runtime-JWT`'s data-plane endpoint.
+4. AgentCore validates the JWT against the configured Cognito issuer/audience before the request reaches the container.
 
-**What stays the same:** REST API auth (Cognito JWT → API Gateway) is unchanged. Orchestrator Lambda still uses IAM to invoke AgentCore.
+**What stays the same:** REST API auth (Cognito JWT → API Gateway) is unchanged — the control plane continues to use the existing authorizer. `OrchestratorFn` Lambda continues to use IAM (SigV4) to invoke `Runtime-IAM` for task execution. The orchestrator path is entirely unchanged from Phase 1a.
 
-### 9.3 HITL approval gates: 3-tier configurable model
+### 9.3 HITL approval gates: Cedar-driven model
 
-> **⚠️ Pending design update (rev 4, tracked 2026-04-17):** This section describes the Phase 3 HITL design as of rev 3. A team discussion (Sam ↔ Alain, 2026-04-17) agreed to replace the hardcoded 3-tier model below with **Cedar policy-driven HITL**, reusing the existing in-process Cedar engine (`agent/src/policy.py` on branch `fix/validate-aws-before-docker-build`, soon to land on main). The existing Cedar decision model (`ALLOW`/`DENY` for tool governance) will be extended with a `REQUIRE_APPROVAL` outcome — same policy language, broader semantics. This enables workflows like AI-DLC where users gate per phase and relax over time.
+> **✅ Design revised and detailed — see [`PHASE3_CEDAR_HITL.md`](/architecture/phase3-cedar-hitl).**
 >
-> **Do not implement Phase 3 from the text below.** The design is being revised. Phase 1a and Phase 1b are unaffected and can proceed.
+> The rev-3 3-tier model (`autonomous`/`smart`/`gated`) below is **superseded**. Phase 3 now uses Cedar-policy-driven HITL that extends the existing in-process Cedar engine (`agent/src/policy.py`) with a third outcome — `REQUIRE_APPROVAL` — by running evaluations against two policy sets (hard-deny / soft-deny). Same policy language, broader semantics. The detailed design covers policy authoring, REST contract, CLI UX, state machine, concurrency, security model, sample scenarios, and the implementation plan.
+>
+> Companion draw.io file: [`/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio`](/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio) (12 pages).
+>
+> The rev-3 section below is retained for historical context only.
+>
+> **Do not implement Phase 3 from the text below — implement from `PHASE3_CEDAR_HITL.md`.**
+>
+> **Scope note (rev 4):** HITL approval gates remain Phase 2/3 scope. Real-time **nudges** (mid-turn steering that interrupts the current tool call) are explicitly **not** in Phase 1b — they require bidirectional transport and trigger the Phase 1c WebSocket upgrade (`/ws`). Phase 1a and Phase 1b cover progress streaming (server→client) and between-turn nudges via REST `POST /tasks/{id}/nudge`; anything that must interrupt an in-flight tool call waits for Phase 1c.
 
 **Decision:** Approval gates are optional. Three modes configurable per-task or per-Blueprint:
 
@@ -1012,6 +1111,188 @@ mise run local:down
 
 **Integration testing:** Deploy to AgentCore, run automated E2E suite via CLI.
 
+### 9.10 SSE architecture inside `server.py` (D2 resolved, 2026-04-17): background thread + `asyncio.Queue`
+
+**Decision:** Keep the synchronous `run_task` on a background thread; add an `agent/src/sse_adapter.py` as a **sibling of `agent/src/progress_writer.py`**; bridge the two worlds through a per-session `asyncio.Queue` that the SSE handler drains.
+
+**Producer-consumer topology:**
+
+```
+pipeline.py / runner.py  (emit events at existing call sites)
+       │
+       ├────────────▶ ProgressWriter.write_event()  ──▶ DynamoDB TaskEventsTable
+       │                                                (durable, auditable,
+       │                                                 catch-up source)
+       │
+       └────────────▶ SSEAdapter.emit()             ──▶ asyncio.Queue (per session)
+                                                         │
+                                                         ▼
+                                              server.py SSE handler
+                                                         │
+                                                         ▼
+                                 `data: <AG-UI JSON>\n\n` frames to client
+                                 + `: ping\n\n` keepalive every ~15 s
+```
+
+**Why this over a full-async refactor (Option A):**
+
+The synchronous `run_task` is not a Phase 1a oversight — it is required by the orchestrator path. `OrchestratorFn` Lambda issues a synchronous `InvokeAgentRuntimeCommand` and is bounded by the 15-minute Lambda execution cap. The SSE path must also support streams held open up to 60 minutes (§9.12). A single `async` handler cannot satisfy both without breaking one or the other. The background-thread + queue design lets each path keep its own timing envelope: the orchestrator gets its synchronous return, the SSE client gets a long-held stream draining the queue, and the agent produces events exactly once for both.
+
+**Sibling placement preserves the 305-test Phase 1a baseline.** `ProgressWriter` is not refactored; it is not moved; its DDB writes are not funnelled through the new queue. `SSEAdapter` is added as a new module that is imported and called at the same existing call sites in `pipeline.py` and `runner.py`. If `SSEAdapter` fails (no clients connected, queue full, handler panicked), the DDB path is unaffected.
+
+**The queue boundary makes the producer agnostic.** Today the producer is a synchronous thread calling `queue.put_nowait()` via `asyncio.run_coroutine_threadsafe`. Tomorrow the producer can be a native coroutine. The SSE handler does not know or care.
+
+**Phase 3 ADR trigger to revisit a full-async refactor.** A future ADR to re-open D2 (full-async `server.py`) is triggered by **any** of:
+- Bidirectional nudges ship and require WebSocket (`/ws`) alongside SSE (i.e., Phase 1c goes from "optional" to "required").
+- Nightly tasks routinely hit the AgentCore 60-minute streaming cap and the overhead of app-level catch-up becomes load-bearing rather than an edge case.
+- Cedar policy engine (§9.3) needs mid-task policy updates that must be pushed into the running container in real time.
+
+Until one of those triggers fires, Option B stands.
+
+**SSE handler endpoint choice (resolved 2026-04-17).** The handler lives at the existing `/invocations` endpoint via content-type negotiation: `Accept: text/event-stream` (anywhere in the header, case-insensitive) routes the request to the SSE flow; any other value (including `application/json`, `*/*`, or a missing header) preserves the existing sync behavior byte-for-byte. One endpoint, one contract, matches AgentCore's documented AG-UI pattern. The orchestrator's existing `InvokeAgentRuntime` calls are unaffected because they do not send `text/event-stream` in `Accept`.
+
+### 9.11 CLI SSE client (D3 resolved, 2026-04-17): hybrid
+
+**Decision:** Import `@ag-ui/core` for its 17 AG-UI event **types and Zod schemas only**. Own the transport with native `fetch` + `eventsource-parser` (32.7 M weekly npm downloads). A CLI-side `cli/src/sse-client.ts` wrapper handles reconnection, exponential backoff, JWT refresh, and the mandatory 60-minute stream restart. **Do not use `@ag-ui/client` `HttpAgent`**.
+
+**What we are betting on vs. against:**
+
+| Bet | Stability signal | Why we can rely on it |
+|---|---|---|
+| **AG-UI wire format** (the event shapes) | Multi-framework standard — 14+ server-side emitters (LangGraph, CrewAI, AG2, Pydantic AI, Microsoft Agent Framework, AWS AgentCore as of March 2026), multi-vendor recognition | If this changes incompatibly, the entire ecosystem breaks; strong coordination cost against that. |
+| **`@ag-ui/core` types/schemas** (not runtime) | Same as above — types track the wire format | Low code surface; Zod schemas give us runtime validation; refactors are mechanical. |
+
+| Bet we **decline** | Instability signal | Why we avoid it |
+|---|---|---|
+| **`@ag-ui/client` `HttpAgent`** (the runtime library) | 0.0.x pre-1.0; single-shot request model; **no built-in reconnection, backoff, or token refresh** | A 60-minute stream with a blip terminates as `RUN_ERROR`. We would have to wrap it anyway — and wrapping a pre-1.0 API is worse than writing to a standard primitive (`fetch` + `eventsource-parser`). |
+| **Hand-maintaining the type catalog** (pure Option B — no `@ag-ui/core` at all) | Event catalog went from 4 → 16 types in 2025; it will keep growing | Type parity drift becomes a perpetual maintenance tax. |
+
+**Concrete module split:**
+
+```
+cli/src/sse-client.ts       # Wrapper: fetch + eventsource-parser + reconnect/backoff
+                            # + JWT refresh + 60-min restart, emits typed events
+cli/src/commands/watch.ts   # Consumes sse-client.ts; falls back to REST polling
+                            # (`GET /tasks/{id}/events?after=<event_id>`)
+                            # when SSE is unavailable or on extended failure
+```
+
+**Dependencies added to `cli/package.json`:**
+
+- `@ag-ui/core` — types + Zod schemas
+- `eventsource-parser` — SSE frame parser
+
+**Explicit call-out:** do **not** add `@ag-ui/client`.
+
+### 9.12 AgentCore streaming limits — design constraints (new in rev 4)
+
+Primary-source AWS research on 2026-04-17 produced a clearer picture of AgentCore Runtime's timing surface. These constraints shape the entire streaming plane design and are load-bearing for D1 / D2 / D3.
+
+**Three independent duration ceilings on `InvokeAgentRuntime` — all hard, non-adjustable:**
+
+| Invocation mode | Maximum duration | Relevance to Phase 1b |
+|---|---|---|
+| Synchronous `InvokeAgentRuntime` | **15 min** | Used by `OrchestratorFn` for control-plane task kickoff. |
+| Streaming `InvokeAgentRuntime` | **60 min** | **The SSE-relevant cap.** CLI watchers must reconnect at least once per hour. |
+| Async job | 8 h | Not used in Phase 1b. |
+
+Sources: [Quotas for Amazon Bedrock AgentCore (devguide)](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html), [endpoints and quotas (general reference)](https://docs.aws.amazon.com/general/latest/gr/bedrock-agentcore.html).
+
+**Two session-level timers — both adjustable via `LifecycleConfiguration` on the Runtime construct:**
+
+| Timer | Default | Range | Reset behavior |
+|---|---|---|---|
+| `idleRuntimeSessionTimeout` | 900 s (15 min) | 60 s – 28,800 s (8 h) | **Resets per invocation** on the session. |
+| `maxLifetime` | 28,800 s (8 h) | 60 s – 28,800 s | Starts when the microVM is created. **Does not reset.** |
+
+Sources: [Runtime lifecycle settings](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-lifecycle-settings.html), [API_LifecycleConfiguration](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_LifecycleConfiguration.html).
+
+Both values must be set explicitly in CDK on **both** `Runtime-IAM` and `Runtime-JWT` — defaults are too tight for long-running background agents.
+
+**Behavior at the 60-minute streaming cap is partially documented.** AWS does not publish whether the connection closes with a clean AG-UI `RUN_ERROR` SSE frame or an abrupt TCP close. The CLI SSE client (§9.11) must handle both cases identically (reconnect + catch-up).
+
+**No SSE-native resume on AgentCore.** There is no `Last-Event-ID` header support and no server-side checkpointing. Reconnection is always an app-level operation:
+
+```
+1. CLI opens a new `InvokeAgentRuntime` streaming call, reusing the same `runtimeSessionId`
+2. CLI issues `GET /tasks/{id}/events?after=<last_event_id>` via the REST control plane
+3. CLI merges the catch-up batch with the new live stream (deduplicate by event_id)
+```
+
+This is the only reconnection mechanism. The handler `cdk/src/handlers/get-task-events.ts` must therefore accept `?after=<event_id>` as a query parameter (in addition to its existing `next_token` support). See Appendix C Phase 1b file change map.
+
+**API Gateway REST is incompatible with SSE past 30 seconds.** API Gateway REST has a hard integration timeout of 30 seconds — streaming cannot be proxied through it. The SSE path must go **direct to the AgentCore data-plane endpoint** on Runtime-JWT (this is why D1 does not use an API Gateway authorizer bridge). Lambda Function URL streaming is an alternative for non-AgentCore streaming workloads, but is not used here.
+
+**Rule: never put API Gateway REST in the SSE path.**
+
+**SDK client defaults will kill streams if not overridden.** Both the server-side and client-side AWS SDKs have default timeouts that are far below the 60-minute cap:
+
+| SDK | Default timeout | Must override to |
+|---|---|---|
+| boto3 (Python, agent-side) | `read_timeout=60` seconds | Effectively unbounded for streaming requests (e.g., `read_timeout=None` or `>= 3700`). |
+| AWS JS SDK v3 (`@aws-sdk/*`) | Request timeout ~2 minutes | `NodeHttp2Handler.requestTimeout: 0` (unlimited) for the streaming invocation. |
+
+These overrides are mandatory in any code path that opens a streaming `InvokeAgentRuntime`.
+
+### 9.13 Execution location: interactive direct-submit vs. orchestrator fan-out (added in rev 5, 2026-04-21)
+
+First live SSE bring-up against the deployed stack revealed a design gap: the rev‑4 plan routed every SSE invocation through `_spawn_background(...)` in `agent/src/server.py`, which meant that after a plain `bgagent submit` fired the orchestrator pipeline on Runtime‑IAM, a subsequent `bgagent watch --transport sse` on Runtime‑JWT would spawn a **second pipeline** for the same task. Both microVMs would clone the repo, run the agent, and create PRs — the observed failure mode. The root cause is that AgentCore's ``same `runtimeSessionId` → same microVM`` routing ([AgentCore sessions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-sessions.html)) is scoped **per runtime ARN**; Runtime‑IAM and Runtime‑JWT are distinct microVM pools, so same-session-ID attach across them is not possible without an external pub/sub layer.
+
+The competitive survey (`docs/research/agent-streaming-patterns.md`) identified three shapes: **same‑process streaming** (CopilotKit, Mastra, OpenAI Assistants), **orchestrator + observer with pub/sub** (LangGraph Platform `join_stream`, Vercel `resumable-stream`), and **pull-based** (Temporal queries, OpenAI fallback). AgentCore sits between the first two — same-session-ID routing provides the substrate for in-process attach within a single runtime, but no managed join-stream across runtimes.
+
+**Decision: Branch A — same-process streaming for interactive flows, polling fallback for cross-runtime observation.**
+
+#### 9.13.1 Two submission paths, three observation modes
+
+| Submission | Runtime | Pipeline lives in | Watcher behaviour |
+|---|---|---|---|
+| `bgagent submit --watch` (or `bgagent run`) | Runtime‑JWT (direct) | The same microVM that serves the SSE stream | **Real-time SSE**, same-process. Reconnect routes to the same microVM via same-session-ID → attaches to the existing `_SSEAdapter`. |
+| `bgagent submit` (plain) | Runtime‑IAM (via orchestrator) | A microVM on Runtime‑IAM (different pool than Runtime‑JWT) | No real-time cross-runtime attach possible. `bgagent watch` on this task falls back to **polling** against DDB (Phase 1a path, now with 500 ms interval instead of 2 s). |
+| Non-interactive (webhook, Slack bot, cron) | Runtime‑IAM (via orchestrator) | A microVM on Runtime‑IAM | DDB Streams fan-out (§8.9) pushes events to the non-interactive consumer (`chat.postMessage`, PR comment, SES, etc.). |
+
+#### 9.13.2 Lifetime semantics (honest trade-off)
+
+A pipeline is a Python background thread **inside a microVM**. Its lifetime is bounded by AgentCore's ``maxLifetime`` (8 h in our CDK — `LifecycleConfiguration`) and ``idleRuntimeSessionTimeout`` (also 8 h). DynamoDB persistence records the event log; it does **not** continue pipeline execution on a fresh microVM.
+
+- **Direct-submit (`submit --watch`)**: task lifetime == microVM lifetime. If the CLI disconnects and does not reconnect before the microVM is evicted (idle timeout or `maxLifetime`), the task dies with the microVM. For coding-agent workloads (minutes to low single-digit hours), the 8 h ceiling is comfortable.
+- **Orchestrator-submit (`submit`)**: task lifetime is similarly bounded on Runtime‑IAM — **also 8 h**. DDB is just the audit log. For tasks that genuinely exceed 8 h, architect outside AgentCore Runtime (Fargate, Step Functions) — out of scope for Phase 1b.
+
+`/ping` returning ``{"status": "HealthyBusy"}`` whenever a pipeline thread is alive is defence-in-depth against idle eviction with non-default `idleRuntimeSessionTimeout`. We set 8 h explicitly, but `HealthyBusy` makes the server correct under any configuration ([runtime service contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-service-contract.html), [long-running agents guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-long-run.html)).
+
+#### 9.13.3 `server.py` attach-don't-spawn logic
+
+A per-process registry `{task_id: _SSEAdapter}` is maintained under `_threads_lock`. The `/invocations` handler:
+
+1. If `Accept: text/event-stream` **and** an `_SSEAdapter` already exists for the requested `task_id` in this microVM → **attach**: return a `StreamingResponse` backed by a new `_sse_event_stream(...)` generator that drains the existing adapter's queue. Do **not** call `_spawn_background`.
+2. Otherwise → **spawn**: create a new `_SSEAdapter`, insert it into the registry, call `_spawn_background(params, sse_adapter=adapter)`. On `run_task` completion (success or failure), the pipeline's `finally` block removes the adapter from the registry.
+
+The registry is process-local; cross-microVM attach is out of scope (that's the polling fallback).
+
+For the sync `Accept: application/json` path (orchestrator → Runtime‑IAM), behaviour is unchanged: always spawn via `_spawn_background`, return 202. The orchestrator never needs to attach.
+
+#### 9.13.4 Admission control with two submission paths
+
+Admission checks (guardrail screening, idempotency, repo-onboarded, concurrency limits) live in `cdk/src/handlers/shared/create-task-core.ts` today and run in the `CreateTask` Lambda. They must run for **both** submission paths. The control-plane REST endpoint stays the authoritative admission gate:
+
+- `POST /v1/tasks` with new optional field `execution_mode` (default `"orchestrator"`, or `"interactive"`). Admission is unconditional.
+- `execution_mode: "orchestrator"` (default, plain `submit`): Lambda writes TaskTable record, fires the orchestrator Lambda via async invoke, returns `202 {task_id}`.
+- `execution_mode: "interactive"` (CLI `submit --watch` / `run`): Lambda writes TaskTable record + initial `task_created` event, **skips** the orchestrator invoke, returns `202 {task_id}`. The CLI then opens SSE directly to Runtime‑JWT's `/invocations` with the returned `task_id`, and server.py executes the pipeline.
+
+Server.py on Runtime‑JWT fetches the TaskTable record by `task_id` to resolve `repo_url`, hydrated context, prompt version, etc. — it does **not** re-admit; the Lambda already did. Unauthenticated/unauthorised requests are blocked earlier by the Cognito JWT authoriser on Runtime‑JWT.
+
+Both paths write to the same `TaskTable` and `TaskEventsTable`, preserving the single source of truth.
+
+#### 9.13.5 Phase 1c: real-time cross-runtime attach (future)
+
+Current polling fallback is acceptable for attach-to-already-running because the common case is "I just submitted; show me live" (direct-submit path handles this natively). The uncommon case ("Slack bot fired a task yesterday; I want to watch it now") uses polling.
+
+Phase 1c adds a pub/sub layer so the uncommon case is real-time too. Two candidates, to be chosen then:
+
+- **IoT Core MQTT** — `tasks/{task_id}/events` topics; SSE microVMs subscribe via MQTT-over-WSS. ~100 ms fan-out, native topic filtering, scales to very large fan-outs. Adds IoT dep.
+- **ElastiCache Redis + port of `vercel/resumable-stream`** — proven pattern (Vercel / LangGraph Platform), pubsub channels + resumable buffer. Adds ElastiCache cluster.
+
+In both cases the orchestrator-spawned pipeline gains a lightweight publisher alongside `ProgressWriter`; the SSE observer on Runtime‑JWT subscribes by `task_id`. Catch-up from DDB continues to be the reconnection backstop. No Branch A code change is required — the observer path on Runtime‑JWT gets a "subscribe to live topic" option in addition to "poll DDB".
+
 ## 10. Implementation plan
 
 ### Overview: phased transport progression
@@ -1052,28 +1333,42 @@ Phase 4:  Pause/Resume           → Lifecycle control (leverages 8-hour timeout
 
 ### Phase 1b: AgentCore SSE (real-time streaming upgrade)
 
-**Goal:** Replace polling with real-time SSE from AgentCore `/invocations`. Measure latency improvement.
+**Goal:** Replace polling with real-time SSE from AgentCore. Measure latency improvement. Reflects resolved D1 (two runtimes), D2 (background-thread + `asyncio.Queue`), and D3 (hybrid CLI SSE client).
 
 | Package | File | Change |
 |---------|------|--------|
-| `agent/` | `server.py` | Add SSE response support to `/invocations` (AG-UI event stream) |
-| `agent/` | `sse_handler.py` | NEW: AG-UI SSE event formatter and stream manager |
-| `agent/` | `tests/test_sse_handler.py` | NEW: Tests |
-| `cdk/` | `src/stacks/agent.ts` | Configure AgentCore Identity with Cognito as inbound IdP |
-| `cli/` | `src/commands/watch.ts` | Add SSE mode: connect to AgentCore `/invocations` with JWT bearer auth |
-| `cli/` | `src/agentcore-auth.ts` | NEW: AgentCore Identity JWT bearer auth for SSE connections |
+| `cdk/` | `src/stacks/agent.ts` | Add **`Runtime-JWT`** alongside existing `Runtime-IAM`. Both share the same `AgentRuntimeArtifact` (Docker image). `Runtime-JWT` uses `authorizerConfiguration: customJWTAuthorizer` pointing at the Cognito User Pool JWKS URL + allowed audiences. Set explicit `LifecycleConfiguration` (`idleRuntimeSessionTimeout: 28800`, `maxLifetime: 28800`) on both runtimes. |
+| `cdk/` | `src/handlers/get-task-events.ts` | Accept **`?after=<event_id>`** query parameter for catch-up reconnection. Current code only supports `next_token`; AG-UI has no Last-Event-ID and AgentCore has no SSE-native resume (§9.12), so DDB catch-up is the only reconnection mechanism. |
+| `cdk/` | `src/stacks/agent.ts` | Ensure DynamoDB Streams are enabled on `TaskEventsTable` (prerequisite for the Phase 1b+ fan-out plane, §8.9). Fan-out Lambda itself can be skeleton / deferred. |
+| `agent/` | `src/sse_adapter.py` | NEW: Sibling of `progress_writer.py`. Pushes events to a per-session `asyncio.Queue` (D2). |
+| `agent/` | `src/server.py` | Content-type-negotiated `/invocations`: `Accept: text/event-stream` routes to new SSE handler (drains the per-session `asyncio.Queue`, emits AG-UI `data: <json>\n\n` frames, injects `: ping\n\n` keepalive every 15 s); any other `Accept` preserves the existing sync path byte-for-byte. |
+| `agent/` | `src/sse_wire.py` | NEW: Pure-function translator from semantic events (SSEAdapter dicts) to AG-UI wire-format frames (TEXT_MESSAGE_*, TOOL_CALL_*, STEP_*, CUSTOM for cost, RUN_ERROR / RUN_FINISHED). Kept separate from transport for testability. |
+| `agent/` | `src/pipeline.py` | Add `SSEAdapter.emit()` call at the existing `ProgressWriter.write_event()` call sites (sibling pattern, §5). |
+| `agent/` | `src/runner.py` | Same as `pipeline.py`: `SSEAdapter.emit()` alongside `ProgressWriter.write_event()` at existing call sites. |
+| `agent/` | `tests/test_sse_adapter.py` | NEW: Unit tests for the adapter (queue semantics, backpressure, no-clients-attached case). |
+| `cli/` | `package.json` | Add runtime deps: **`@ag-ui/core`** (types + Zod schemas only) and **`eventsource-parser`** (transport). Do NOT add `@ag-ui/client` (§9.11). |
+| `cli/` | `src/sse-client.ts` | NEW: SSE wrapper — native `fetch` + `eventsource-parser`, exponential backoff reconnect, JWT refresh, mandatory 60-min stream restart (§9.12). |
+| `cli/` | `src/commands/watch.ts` | SSE primary path via `sse-client.ts`; REST polling (`GET /tasks/{id}/events?after=<event_id>`) as fallback and as the catch-up path after every reconnect. |
+| `cli/` | `src/types.ts` | Add `?after=<event_id>` to the events query request type (keep in sync with CDK handler types). |
+| `cli/` | `src/api-client.ts` | Add catch-up method `getEventsAfter(taskId, afterEventId)`. |
 
-**Auth:** AgentCore Identity (separate service from Runtime) configured with Cognito User Pool as inbound IdP. Users send existing Cognito JWT as `Authorization: Bearer <token>`.
-**Latency target:** ~100ms (compare with Phase 1a's 2-5s).
-**Risk:** Medium. New auth path (AgentCore Identity). SSE keepalive behavior during idle periods needs validation.
+**Auth:** CLI Cognito JWT validated directly by `Runtime-JWT`'s `customJWTAuthorizer` (§9.2, D1). No AgentCore Identity indirection. Orchestrator path continues to use IAM / SigV4 into `Runtime-IAM` — unchanged from Phase 1a.
 
-**60-minute streaming limit:** Both SSE and WebSocket share a 60-minute max streaming duration ([quotas](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)). The CLI must reconnect every ~55 minutes and fetch missed events from DDB (`GET /tasks/{id}/events?after={last_event_id}`) to maintain a seamless experience.
+**Latency target:** ~100 ms streaming event arrival (compare with Phase 1a's 2–5 s poll interval).
+
+**SDK client timeouts (mandatory overrides, §9.12):** boto3 `read_timeout` default 60 s must be raised for streaming invocations (agent side); AWS JS SDK v3 default request timeout (~2 min) must be disabled (`NodeHttp2Handler.requestTimeout: 0`) on the CLI side for the streaming call.
+
+**Risk:** Medium. Dominated by the `asyncio.Queue` bridge (correctness of the threadsafe producer) and the 60-min restart path. Phase 1a's 305 tests must continue to pass — `ProgressWriter` is not modified.
+
+**60-minute streaming cap (§9.12):** Hard AWS cap on streaming `InvokeAgentRuntime`. CLI must reconnect at least once per hour and fetch missed events from `GET /tasks/{id}/events?after=<event_id>` on every reconnect. Behavior at the cap (clean `RUN_ERROR` vs abrupt TCP close) is not fully documented — the client handles both.
 
 **Validation criteria before proceeding:**
-- SSE events arrive with <500ms latency
-- Auth works with existing Cognito JWT (no new credentials for users)
-- Graceful degradation when SSE disconnects (fall back to DDB polling)
-- Reconnection after 60-minute limit works seamlessly (no missed events)
+- SSE events arrive with <500 ms latency end-to-end.
+- CLI Cognito JWT is validated by `Runtime-JWT`'s `customJWTAuthorizer` without touching AgentCore Identity.
+- `ProgressWriter` → DDB path is unchanged and all Phase 1a regression tests pass.
+- Graceful degradation when SSE disconnects: CLI transparently falls back to REST polling.
+- Reconnection after the 60-minute streaming cap works seamlessly (no missed events, exactly-once semantics via event_id deduplication).
+- DynamoDB Streams on `TaskEventsTable` are enabled (prerequisite for fan-out plane).
 
 ---
 
@@ -1087,25 +1382,96 @@ Phase 4:  Pause/Resume           → Lifecycle control (leverages 8-hour timeout
 
 **Goal:** Users can send course corrections to a running agent between turns.
 
-**Transport:** REST `POST /v1/tasks/{id}/nudge` through our API Gateway (existing Cognito auth). Works with both Phase 1a (polling) and Phase 1b (SSE). No dependency on WebSocket.
+**Transport:** REST `POST /v1/tasks/{task_id}/nudge` through our API Gateway (existing Cognito auth). Works identically on both runtime paths (Runtime-IAM / orchestrator, Runtime-JWT / interactive-SSE). **No dependency on WebSocket.** See `docs/diagrams/interactive-agents-phases.drawio` page 8 for the architecture.
+
+**Data path:**
+- Client authenticates with Cognito, POSTs `{ "message": "<free text>" }`.
+- Nudge Lambda: extract `user_id` from JWT → verify task ownership → reject if task status is terminal → **rate-limit** (see below) → **guardrail-screen** the message via the same Bedrock Guardrail path used for `task_description` (`screenWithGuardrail` in `cdk/src/handlers/shared/context-hydration.ts`) → write `NudgeRecord` to `TaskNudgesTable` → return `202 { task_id, nudge_id, submitted_at }`.
+- Agent runtime polls `TaskNudgesTable` at the **between-turns seam**, injects each pending nudge as a `<user_nudge>` XML block into the next `client.query()`, and atomically marks it `consumed=true` via a conditional DDB UpdateItem (`consumed = :false` precondition) for idempotency across restarts.
+
+**Nudge injection format** (what the model sees):
+
+```
+<user_nudge timestamp="2026-04-22T10:55:00Z" nudge_id="01KPT...">
+{free-text message}
+</user_nudge>
+```
+
+The base system prompt includes a one-line note instructing the model to treat `<user_nudge>` blocks as authoritative mid-task steering from the human operator.
+
+**DynamoDB table — `TaskNudgesTable`:**
+- PK: `task_id` (STRING) — groups all nudges for a task.
+- SK: `nudge_id` (STRING, ULID — lexicographic == chronological).
+- Attributes: `message`, `created_at`, `consumed` (BOOL), `consumed_at`, `user_id`, `ttl`.
+- `PAY_PER_REQUEST`, PITR enabled, AWS-owned encryption, no stream (nudges are poll-consumed, not fanned out).
+- **TTL: 30 days.** Gives enough retention to review nudge patterns during dogfooding; can be shortened later via CDK change without data migration.
+
+**Rate limit:** Per-task, per-minute cap. Default **10 nudges/task/minute**. Configurable via the **`NUDGE_RATE_LIMIT_PER_MINUTE`** env var on the nudge Lambda — can be tuned per environment without a code change. Enforced by a conditional DDB counter row (`task_id = RATE#<task_id>`, `nudge_id = MINUTE#<yyyymmddhhmm>`, 120s TTL). Exceeded → `429` with `ErrorCode.RATE_LIMITED`.
+
+**Between-turns hook composition:** The runner exposes `between_turns_hooks: list[Callable[[TurnContext], list[str]]]` so Phase 3 approval-gate polling and other future extensions can register alongside the nudge reader without re-modifying the turn loop. Nudge reader is registered as the first hook.
+
+**Files (as implemented):**
 
 | Package | File | Change |
 |---------|------|--------|
-| `cdk/` | `src/constructs/task-nudges-table.ts` | NEW: DynamoDB table for nudge storage + audit |
-| `cdk/` | `src/handlers/nudge-task.ts` | NEW: `POST /tasks/{id}/nudge` Lambda handler (validate, guardrail screen, write DDB) |
-| `cdk/` | `src/constructs/task-api.ts` | Add `/tasks/{task_id}/nudge` POST route |
-| `agent/` | `nudge_reader.py` | NEW: Polls DDB `TaskNudgesTable` between turns, consumes pending nudges |
-| `agent/` | `entrypoint.py` | Modify `run_agent()`: check nudge_reader between turns, inject via `client.query()` |
-| `agent/` | `tests/test_nudge_reader.py` | NEW: Tests |
-| `cli/` | `src/commands/nudge.ts` | NEW: `bgagent nudge <task_id> "message"` |
-| `cli/` | `test/commands/nudge.test.ts` | NEW: Tests |
+| `cdk/` | `src/handlers/shared/types.ts` | Add `NudgeRequest`, `NudgeResponse`, `NudgeRecord` |
+| `cdk/` | `src/constructs/task-nudges-table.ts` | NEW: DDB table (mirrors `task-events-table.ts`) |
+| `cdk/` | `src/handlers/nudge-task.ts` | NEW: POST handler (ownership, rate-limit, guardrail, PutItem) |
+| `cdk/` | `src/constructs/task-api.ts` | Wire `/v1/tasks/{task_id}/nudge` POST + Lambda + grants |
+| `cdk/` | `src/stacks/agent.ts` | Instantiate nudges table, grant both runtimes, set `NUDGES_TABLE_NAME` env |
+| `agent/` | `src/nudge_reader.py` | NEW: `read_pending`, `mark_consumed`, `format_as_user_message` |
+| `agent/` | `src/runner.py` | Add `between_turns_hooks` machinery + nudge hook registration |
+| `agent/` | `src/prompts/base.py` | One-line system-prompt note on `<user_nudge>` semantics |
+| `agent/` | `tests/test_nudge_reader.py` | NEW: Tests (query, empty, ordering, idempotency, error resilience) |
+| `cli/` | `src/types.ts` | Mirror `NudgeRequest`, `NudgeResponse` |
+| `cli/` | `src/api-client.ts` | Add `nudgeTask(taskId, message)` |
+| `cli/` | `src/commands/nudge.ts` | NEW: `bgagent nudge <task_id> "<message>"` |
+| `cli/` | `src/bin/bgagent.ts` | Register nudge command |
+| `cli/` | `test/commands/nudge.test.ts` | NEW: Tests (happy, 401/400/403/404/429, empty message, `--json`) |
 
 **Testing:**
-- Unit: nudge validation, guardrail screening, DDB consumption logic
-- Integration: submit task → send nudge via REST → verify agent acts on it
-- Security: non-owner cannot nudge, guardrail blocks injection, rate limits enforced
+- **Unit:** nudge validation, ownership check, rate-limit conditional, guardrail screening, DDB put, `mark_consumed` idempotency, nudge-reader resilience to DDB outage, XML formatter handles special chars.
+- **Integration:** submit task → send nudge via REST → verify agent acts on it in its next turn.
+- **Security:** non-owner cannot nudge (403), guardrail blocks injection attempts (400), rate limit enforced (429), terminal-status tasks rejected (409).
 
-**Risk:** Medium-High. Core agent loop modification (`run_agent()`) is the riskiest change.
+**Risk:** Medium-High. Core agent loop modification is the riskiest change; nudge-reader errors must never break the turn loop (fail-open at the reader, reports zero pending nudges on DDB errors).
+
+**Observability:** Every consumed nudge is written as an event to `TaskEventsTable` with `event_type=nudge_consumed` (metadata: `nudge_id`, `created_at`, truncated message prefix). The fan-out Lambda forwards `nudge_consumed` to configured dispatchers.
+
+---
+
+### Phase 2.5: Mid-turn interrupt (deferred — scoped, not implemented)
+
+**Goal:** Stop a running turn *mid-stream* — not just between turns. Complements nudges (which wait for the current turn to finish) for cases where the agent is visibly going off the rails and the user wants to halt NOW.
+
+**Status:** **Deferred.** Viable with today's Claude Agent SDK; scoped during Phase 2 research (see `project_phase25_midturn_interrupt_research.md` in the Claude memory store).
+
+**Key finding:** `ClaudeSDKClient.interrupt()` is supported today on the Python SDK. Signature: `async def interrupt(self) -> None`. Ends the current turn with `ResultMessage(subtype="error_during_execution")`, preserves session state (subsequent `client.query(...)` continues the conversation), no server-side cancel API needed at the Anthropic Messages layer.
+
+**Preconditions (must hold at runtime):**
+- Streaming mode (which we already use).
+- Connected `ClaudeSDKClient` (already true).
+- **A concurrent asyncio task actively consuming `client.receive_response()`** — otherwise the interrupt signal is not processed. Our runner already has this consumer loop; an interrupt trigger runs as a sibling task.
+
+**Proposed integration:**
+- Add a `stop_requested` flag on the `TaskRecord` (or a dedicated side table), toggleable via new `POST /v1/tasks/{task_id}/stop`.
+- Agent runtime runs a sibling asyncio polling task (2–5s cadence) on that flag alongside the existing `receive_response()` consumer.
+- On stop signal: `await client.interrupt()` → drain remaining messages from the stream (mandatory; otherwise the next `query()` reads the interrupted turn's tail) → write a `turn_interrupted` event to `TaskEventsTable` → terminal-stop closes the client, redirect-style stop issues a new `query()` with replacement instructions.
+
+**Critical risks (call out in implementation):**
+- **Side effects are NOT rolled back.** A partially-executed `Bash` or `Edit` tool may already have written files or run `git push`. `agent/src/policy.py` / `hooks.py` sandboxing is the only safety layer — `interrupt()` is not a transaction abort.
+- Tool subprocess may keep running after interrupt until MicroVM kill (e.g. a 10-minute test run). Consider a watchdog SIGTERM on interrupt.
+- Drain-before-next-query is load-bearing; skipping leaves stale tail messages that look like a bug.
+- Partial tool_use blocks may appear in the stream — consumer must tolerate them.
+- Billing for cancelled streams is undocumented; assume already-streamed tokens are billed.
+- `asyncio.Task.cancel()` is NOT an alternative — it kills your reader while the CLI subprocess keeps generating tokens. `interrupt()` first, cancel never.
+
+**Upstream state (as of 2026-04-22):**
+- Python SDK: `interrupt()` supported (anthropics/claude-agent-sdk-python).
+- TS SDK V2: regressed, `interrupt()` not yet re-added — tracked at anthropics/claude-agent-sdk-typescript#120.
+- Feature request for richer interrupt semantics (lifecycle hooks, partial-result preservation): anthropics/claude-code#12439, **closed as not planned**. Don't design around hypothetical richer APIs.
+
+**Not in scope for this design doc:** implementation details. When scheduled, Phase 2.5 gets its own subsection with task breakdown + test plan. The `between_turns_hooks` abstraction introduced in Phase 2 is intentionally compatible with adding a sibling `stop_poller` concurrent task.
 
 ---
 
@@ -1257,17 +1623,41 @@ cli/src/bin/bgagent.ts                           # Register watch command
 ### Phase 1b (AgentCore SSE) — New files
 
 ```
-agent/sse_handler.py                             # AG-UI SSE event formatter + stream manager
-agent/tests/test_sse_handler.py                  # Tests
-cli/src/agentcore-auth.ts                        # AgentCore Identity JWT bearer auth
+agent/src/sse_adapter.py                         # Sibling of progress_writer.py; pushes events
+                                                 # to per-session asyncio.Queue (D2)
+agent/tests/test_sse_adapter.py                  # Tests (queue semantics, backpressure, no-clients case)
+cli/src/sse-client.ts                            # fetch + eventsource-parser wrapper:
+                                                 # reconnect + backoff + JWT refresh + 60-min restart (D3)
+# CDK construct: second AgentCore Runtime.
+# May be inline in cdk/src/stacks/agent.ts (new Runtime-JWT alongside Runtime-IAM),
+# or extracted into a construct if complexity warrants.
 ```
 
 ### Phase 1b — Modified files
 
 ```
-agent/server.py                                  # Add SSE response to /invocations
-cdk/src/stacks/agent.ts                          # Configure AgentCore Identity with Cognito IdP
-cli/src/commands/watch.ts                        # Add SSE mode alongside polling fallback
+cdk/src/stacks/agent.ts                          # Add Runtime-JWT alongside Runtime-IAM
+                                                 # (customJWTAuthorizer → Cognito User Pool JWKS + audiences).
+                                                 # Both runtimes share the same AgentRuntimeArtifact (Docker image).
+                                                 # Set explicit LifecycleConfiguration on both runtimes
+                                                 # (idleRuntimeSessionTimeout: 28800, maxLifetime: 28800).
+                                                 # Enable DynamoDB Streams on TaskEventsTable
+                                                 # (prerequisite for fan-out plane, §8.9).
+cdk/src/handlers/get-task-events.ts              # Accept ?after=<event_id> query param
+                                                 # (only reconnection mechanism — §9.12).
+cli/src/types.ts                                 # Add ?after=<event_id> to events query request type
+                                                 # (keep in sync with CDK handler).
+cli/src/api-client.ts                            # Add getEventsAfter(taskId, afterEventId) catch-up method.
+cli/src/commands/watch.ts                        # SSE primary via sse-client.ts;
+                                                 # REST polling fallback + catch-up path after reconnect.
+cli/package.json                                 # Add @ag-ui/core (types+Zod only) and eventsource-parser.
+                                                 # Do NOT add @ag-ui/client (§9.11).
+agent/src/server.py                              # SSE handler draining the per-session asyncio.Queue;
+                                                 # emits AG-UI `data: <json>\n\n` frames + `: ping\n\n` every ~15 s.
+agent/src/pipeline.py                            # SSEAdapter.emit() alongside ProgressWriter.write_event()
+                                                 # at existing call sites (sibling pattern, §5).
+agent/src/runner.py                              # Same as pipeline.py — SSEAdapter.emit() alongside
+                                                 # ProgressWriter.write_event().
 ```
 
 ### Phase 2 (Nudge) — New files

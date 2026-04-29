@@ -270,10 +270,8 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     # it fits on a single terminal line.
     first_msg = (pending[0].get("message") or "")[:60]
     ids = ",".join(str(n.get("nudge_id", ""))[-8:] for n in pending)
-    details = (
-        f"{count} nudge(s) applied "
-        f"(ids=…{ids}): {first_msg}"
-        + ("…" if count > 1 or len(first_msg) == 60 else "")
+    details = f"{count} nudge(s) applied (ids=…{ids}): {first_msg}" + (
+        "…" if count > 1 or len(first_msg) == 60 else ""
     )
     _emit_nudge_milestone(ctx, "nudge_applied", details)
 
@@ -360,8 +358,7 @@ async def stop_hook(
         except Exception as exc:
             log(
                 "WARN",
-                f"between-turns hook raised (task_id={task_id}): "
-                f"{type(exc).__name__}: {exc}",
+                f"between-turns hook raised (task_id={task_id}): {type(exc).__name__}: {exc}",
             )
             continue
         if produced:
@@ -453,8 +450,7 @@ def build_hook_matchers(
         except Exception as exc:
             log(
                 "ERROR",
-                f"Stop wrapper crashed (task_id={stop_task_id}): "
-                f"{type(exc).__name__}: {exc}",
+                f"Stop wrapper crashed (task_id={stop_task_id}): {type(exc).__name__}: {exc}",
             )
             return SyncHookJSONOutput()
         # Empty dict == allow stop.  SyncHookJSONOutput(**{}) is fine.

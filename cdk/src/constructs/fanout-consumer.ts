@@ -20,9 +20,8 @@
 import * as path from 'path';
 import { Duration } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import { StartingPosition } from 'aws-cdk-lib/aws-lambda';
-import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
-import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
@@ -102,7 +101,7 @@ export class FanOutConsumer extends Construct {
       // poisonous record blows up the Lambda. After 3 retries, send the
       // record batch to the DLQ and advance the iterator.
       retryAttempts: 3,
-      onFailure: new (require('aws-cdk-lib/aws-lambda-event-sources').SqsDlq)(this.dlq),
+      onFailure: new SqsDlq(this.dlq),
       reportBatchItemFailures: true,
     }));
 
