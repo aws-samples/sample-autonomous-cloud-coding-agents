@@ -223,12 +223,14 @@ class TestStopHook:
         assert "two" in result["reason"]
         assert "three" in result["reason"]
 
-    def test_registry_default_first_entry_is_nudge_hook(self):
-        # Freshly-imported registry should start with the nudge reader.
+    def test_registry_default_contains_cancel_then_nudge(self):
+        # Freshly-imported registry: cancel runs first so it short-circuits
+        # nudge injection on cancelled tasks; nudge second for running tasks.
         import importlib
 
         importlib.reload(hooks_mod)
-        assert hooks_mod.between_turns_hooks[0] is hooks_mod._nudge_between_turns_hook
+        assert hooks_mod.between_turns_hooks[0] is hooks_mod._cancel_between_turns_hook
+        assert hooks_mod.between_turns_hooks[1] is hooks_mod._nudge_between_turns_hook
 
 
 class TestInProcessDedup:

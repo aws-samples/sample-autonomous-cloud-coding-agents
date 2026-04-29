@@ -381,3 +381,138 @@ class TestRunnerSSEAdapterKwarg:
         sig = inspect.signature(run_agent)
         assert "sse_adapter" in sig.parameters
         assert sig.parameters["sse_adapter"].default is None
+
+
+class TestCancelSkipsPostHooks:
+    """Cancel short-circuit: if task is CANCELLED when run_agent returns, the
+    pipeline must skip post-hooks so no PR is pushed on a cancelled task.
+    """
+
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_cancelled_task_skips_post_hooks(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, sse_adapter=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        # Simulate cancel-task.ts having already flipped the status.
+        mock_get_task = MagicMock(return_value={"status": "CANCELLED"})
+
+        mock_ensure_pr = MagicMock()
+        mock_ensure_committed = MagicMock()
+
+        with (
+            patch("pipeline.ensure_committed", mock_ensure_committed),
+            patch("pipeline.verify_build"),
+            patch("pipeline.verify_lint"),
+            patch("pipeline.ensure_pr", mock_ensure_pr),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            # Route get_task through the mock; keep TaskFetchError importable.
+            mock_task_state_mod.get_task = mock_get_task
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-cancelled",
+            )
+
+        # CRITICAL: no PR push, no commit safety-net on cancelled task.
+        mock_ensure_pr.assert_not_called()
+        mock_ensure_committed.assert_not_called()
+        assert result["status"] == "cancelled"
+        assert result["task_id"] == "t-cancelled"
+
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_running_task_runs_post_hooks_normally(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """Regression guard: a task that is NOT cancelled still runs post-hooks."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, sse_adapter=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_ensure_pr = MagicMock(return_value="https://github.com/o/r/pull/1")
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", mock_ensure_pr),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            # Task is RUNNING (not cancelled) — normal path must execute.
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-running",
+            )
+
+        mock_ensure_pr.assert_called_once()

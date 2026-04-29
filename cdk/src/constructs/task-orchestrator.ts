@@ -205,7 +205,19 @@ export class TaskOrchestrator extends Construct {
         }),
       },
       bundling: {
-        externalModules: ['@aws-sdk/*'],
+        // Bundle `@aws-sdk/client-bedrock-agentcore` — newer commands (e.g.
+        // StopRuntimeSessionCommand) are not in the Lambda runtime's pinned
+        // SDK and throw `<Command> is not a constructor` if externalized.
+        // See cancel-task silent-failure mode (task-api.ts commonBundling).
+        externalModules: [
+          '@aws-sdk/client-dynamodb',
+          '@aws-sdk/client-ecs',
+          '@aws-sdk/client-lambda',
+          '@aws-sdk/client-bedrock-runtime',
+          '@aws-sdk/client-secrets-manager',
+          '@aws-sdk/lib-dynamodb',
+          '@aws-sdk/util-dynamodb',
+        ],
       },
     });
 

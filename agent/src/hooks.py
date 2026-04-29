@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
+import task_state
 from output_scanner import scan_tool_output
 from shell import log
 
@@ -279,9 +280,47 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     return [formatted] if formatted else []
 
 
-# Global list of between-turns hooks.  First entry is the nudge reader.
+def _cancel_between_turns_hook(ctx: dict) -> list[str]:
+    """Detect user-initiated cancellation and signal the Stop hook to halt.
+
+    Reads the task record from DynamoDB each turn.  If ``status == "CANCELLED"``
+    sets ``ctx["_cancel_requested"] = True`` so :func:`stop_hook` returns
+    ``continue_=False`` and the SDK tears the agent down cleanly.
+
+    Fail-open: a ``TaskFetchError`` (transient DDB failure) is treated as
+    "no cancel detected" to avoid stranding running tasks on blips.  This is
+    symmetric with ``_nudge_between_turns_hook`` (also fail-open for DDB).
+    Worst case a cancel is missed for one turn; the next turn will catch it.
+
+    Returns ``[]`` always — the cancel signal flows via the ctx sentinel, not
+    via injected text.  Injecting text would cause the SDK to continue the
+    conversation, which is the opposite of what cancel needs.
+    """
+    task_id = ctx.get("task_id") or ""
+    if not task_id:
+        return []
+    try:
+        record = task_state.get_task(task_id)
+    except task_state.TaskFetchError as exc:
+        log("WARN", f"cancel hook get_task raised: {type(exc).__name__}: {exc}")
+        return []
+    if record and record.get("status") == "CANCELLED":
+        ctx["_cancel_requested"] = True
+        _emit_nudge_milestone(
+            ctx,
+            "cancel_detected",
+            "Task cancelled by user; stopping agent after this turn.",
+        )
+    return []
+
+
+# Global list of between-turns hooks.  Cancel runs first so it can short-circuit
+# nudges on cancelled tasks (no point injecting nudges into a dying agent).
 # Phase 3 (approval gates) will ``append`` additional hooks here.
-between_turns_hooks: list[BetweenTurnsHook] = [_nudge_between_turns_hook]
+between_turns_hooks: list[BetweenTurnsHook] = [
+    _cancel_between_turns_hook,
+    _nudge_between_turns_hook,
+]
 
 
 async def stop_hook(
@@ -327,6 +366,15 @@ async def stop_hook(
             continue
         if produced:
             chunks.extend(produced)
+
+    # Cancel takes precedence over nudge injection.  ``continue_: False`` tells
+    # the SDK to end the turn loop and return control to the caller, which
+    # lets the pipeline see the CANCELLED status and skip post-hooks.
+    if ctx.get("_cancel_requested"):
+        return {
+            "continue_": False,
+            "stopReason": "Task cancelled by user",
+        }
 
     if not chunks:
         return {}

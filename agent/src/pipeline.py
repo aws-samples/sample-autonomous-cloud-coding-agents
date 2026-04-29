@@ -369,6 +369,37 @@ def run_task(
                     f"status={agent_result.status} turns={agent_result.turns}",
                 )
 
+            # Cancel short-circuit: the Stop hook signalled cancel by stopping
+            # the SDK early, but that only stops the agent loop — post-hooks
+            # (ensure_committed, ensure_pr) would still run and push/open a PR
+            # on a cancelled task.  Re-check the task status here and exit the
+            # pipeline before any side-effect-producing post-hook runs.  The
+            # terminal state is already CANCELLED (written by cancel-task.ts),
+            # so we do NOT call write_terminal — its ConditionExpression only
+            # allows RUNNING/HYDRATING/FINALIZING, which would fail silently,
+            # but leaving the cancel record intact makes the intent explicit.
+            try:
+                _current_record = task_state.get_task(config.task_id)
+            except task_state.TaskFetchError:
+                _current_record = None  # fail-open: let normal path proceed
+            if _current_record and _current_record.get("status") == "CANCELLED":
+                log("TASK", f"Task {config.task_id} cancelled; skipping post-hooks")
+                progress.write_agent_milestone(
+                    "task_cancelled_acknowledged",
+                    "Post-hooks skipped; terminal state already CANCELLED.",
+                )
+                if sse_adapter is not None:
+                    sse_adapter.write_agent_milestone(
+                        "task_cancelled_acknowledged",
+                        "Post-hooks skipped; terminal state already CANCELLED.",
+                    )
+                return {
+                    "status": "cancelled",
+                    "task_id": config.task_id,
+                    "turns": agent_result.turns,
+                    "turns_attempted": agent_result.num_turns or agent_result.turns,
+                }
+
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
                 # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)

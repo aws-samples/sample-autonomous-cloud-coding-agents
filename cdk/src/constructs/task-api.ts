@@ -305,8 +305,24 @@ export class TaskApi extends Construct {
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
     };
+    // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
+    // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
+    // shipped new commands (e.g. StopRuntimeSessionCommand) that are not in
+    // the runtime's bundled SDK, so externalizing it causes Lambdas to throw
+    // `<Command> is not a constructor` at runtime — a silent failure mode
+    // because catch blocks swallow the error and log a best-effort warning.
+    // Bundle bedrock-agentcore explicitly; keep stable clients external to
+    // keep Lambda sizes small.
     const commonBundling: lambda.BundlingOptions = {
-      externalModules: ['@aws-sdk/*'],
+      externalModules: [
+        '@aws-sdk/client-dynamodb',
+        '@aws-sdk/client-ecs',
+        '@aws-sdk/client-lambda',
+        '@aws-sdk/client-bedrock-runtime',
+        '@aws-sdk/client-secrets-manager',
+        '@aws-sdk/lib-dynamodb',
+        '@aws-sdk/util-dynamodb',
+      ],
     };
 
     // --- Lambda handlers ---
@@ -374,6 +390,12 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: cancelTaskEnv,
       bundling: commonBundling,
+      // Cancel performs: DDB GetItem + DDB UpdateItem + ECS StopTask or
+      // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
+      // is not enough once cold-start TLS handshakes for bedrock-agentcore
+      // are added.  15s gives comfortable headroom.
+      timeout: Duration.seconds(15),
+      memorySize: 256,
     });
 
     const getTaskEventsFn = new lambda.NodejsFunction(this, 'GetTaskEventsFn', {
