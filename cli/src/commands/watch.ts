@@ -20,29 +20,96 @@
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { debug, isVerbose } from '../debug';
+import { ApiError } from '../errors';
 import { formatJson } from '../format';
 import { TERMINAL_STATUSES, TaskEvent } from '../types';
 
 /**
- * Polling cadence for the REST-based `watch` loop.
+ * Adaptive polling cadence (design INTERACTIVE_AGENTS.md §5.3).
  *
- * Design §9.13.1 calls for 500 ms polling. We adopt that for the first
- * POLL_FAST_WINDOW_MS window (users are watching fresh, active tasks)
- * and decay to POLL_SLOW_INTERVAL_MS for long-running observations so
- * we don't hammer REST for hours at 500 ms.
- *
- * Chunk H will make this adaptive; the simple decaying cadence is kept
- * in the meantime.
+ * While events are arriving we stay at ``POLL_FAST_INTERVAL_MS``. When a
+ * poll returns zero events we back off through the ``BACKOFF_INTERVALS_MS``
+ * ladder, resetting to fast on the next poll that delivers events. The
+ * ladder caps at 5 s to keep status freshness bounded during idle
+ * stretches without hammering DDB.
  */
 const POLL_FAST_INTERVAL_MS = 500;
-const POLL_SLOW_INTERVAL_MS = 2_000;
-const POLL_FAST_WINDOW_MS = 3 * 60 * 1_000; // 3 min of fast polling
+const BACKOFF_INTERVALS_MS: readonly number[] = [1_000, 2_000, 5_000];
 
-function currentPollInterval(startedAt: number): number {
-  return Date.now() - startedAt < POLL_FAST_WINDOW_MS
-    ? POLL_FAST_INTERVAL_MS
-    : POLL_SLOW_INTERVAL_MS;
+/** Adaptive polling state, threaded through the poll loop. */
+interface PollCadenceState {
+  intervalMs: number;
+  consecutiveEmptyPolls: number;
 }
+
+/** Compute the next cadence from whether the last poll delivered events.
+ *  Pure so the state machine is test-coverable without timers. */
+export function nextCadence(state: PollCadenceState, sawEvents: boolean): PollCadenceState {
+  if (sawEvents) {
+    return { intervalMs: POLL_FAST_INTERVAL_MS, consecutiveEmptyPolls: 0 };
+  }
+  const nextEmpty = state.consecutiveEmptyPolls + 1;
+  // Ladder index is ``nextEmpty - 1`` (first empty poll picks slot 0 =
+  // 1 s). After the ladder is exhausted we pin at the cap.
+  const idx = Math.min(nextEmpty - 1, BACKOFF_INTERVALS_MS.length - 1);
+  return { intervalMs: BACKOFF_INTERVALS_MS[idx], consecutiveEmptyPolls: nextEmpty };
+}
+
+/** Retry budget for transient 5xx / network failures. Exhausting it exits
+ *  the watch loop with a clear "rerun to resume" message. 4xx errors are
+ *  deterministic and never retried. */
+const MAX_TRANSIENT_RETRIES = 5;
+
+/** Exponential backoff with **equal-jitter** (AWS Architecture Blog
+ *  variant): half of the base delay is fixed, the other half is
+ *  randomized. This prevents the degenerate case where ``Math.random()``
+ *  rolls near-zero on every retry and the CLI retry-spams a degraded
+ *  service with no wait between attempts. Bounded at the ladder cap so
+ *  a retry storm never walks longer than the adaptive poll ceiling. */
+export function transientRetryDelayMs(attempt: number): number {
+  const base = Math.min(5_000, POLL_FAST_INTERVAL_MS * 2 ** attempt);
+  const half = Math.floor(base / 2);
+  return half + Math.floor(Math.random() * (base - half));
+}
+
+/** Classify an error into retryable vs. terminal. We use a **whitelist**
+ *  rather than a blacklist: only conditions we specifically recognize as
+ *  transient retry. Everything else (programmer errors, JSON parse
+ *  failures, auth-token-expired, CliError) propagates immediately so
+ *  users see an actionable message instead of "re-run to resume" that
+ *  would never succeed.
+ *
+ *  Transient:
+ *    - ``ApiError`` with status 5xx (server-side hiccup)
+ *    - Network failures surfaced by ``fetch`` as a ``TypeError`` —
+ *      Node's undici implementation reports connect refused / reset /
+ *      DNS failure this way on Node 22+.
+ *
+ *  Non-transient (propagates with its original message):
+ *    - ``ApiError`` with status 4xx (including 401 auth-expired — the
+ *      ``bgagent login`` hint is already in the message)
+ *    - ``CliError`` (our own deterministic contract-violation signal)
+ *    - Anything else (``TypeError`` that is *not* a fetch failure,
+ *      ``SyntaxError`` from a bad code path, etc.) — a real bug.
+ */
+function isTransientError(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    return err.statusCode >= 500 && err.statusCode < 600;
+  }
+  // Node 22+ fetch surfaces network failures as a ``TypeError`` with a
+  // "fetch failed" message (undici wraps the underlying cause). Match
+  // loosely so we tolerate both direct ``TypeError`` and DOMException
+  // lookalikes without retrying genuine programmer ``TypeError``s.
+  if (err instanceof TypeError && /fetch failed|network/i.test(err.message)) {
+    return true;
+  }
+  return false;
+}
+
+/** Exit code 130 is the conventional POSIX code for "terminated by
+ *  SIGINT". Using it lets shell scripts distinguish Ctrl+C from a failed
+ *  task run. */
+const EXIT_CODE_SIGINT = 130;
 /** Size of the initial snapshot fetch used to detect already-terminal tasks
  *  and seed the catch-up cursor. */
 const SNAPSHOT_PAGE_SIZE = 100;
@@ -172,11 +239,19 @@ interface PollOptions {
 }
 
 /**
- * Poll ``GET /tasks/{id}/events`` and ``GET /tasks/{id}`` on a
- * decaying interval (500 ms for the first 3 min, then 2 s), invoking
- * ``onEvent`` for each new event and ``onTerminal`` once the task
- * reaches a terminal status. Resolves when the task terminates or the
- * signal fires.
+ * Poll ``GET /tasks/{id}/events`` and ``GET /tasks/{id}`` on an adaptive
+ * cadence: 500 ms while events are arriving, backing off through
+ * 1 s / 2 s / 5 s on consecutive empty polls and resetting to fast on
+ * the next event. Invokes ``onEvent`` for each new event and
+ * ``onTerminal`` once the task reaches a terminal status. Resolves when
+ * the task terminates or the abort signal fires.
+ *
+ * Transient 5xx / network errors are retried with jittered exponential
+ * backoff up to ``MAX_TRANSIENT_RETRIES`` times; 4xx errors propagate
+ * immediately (the next call would return the same failure). On retry
+ * exhaustion we throw a ``CliError``-like message that tells the user
+ * to re-run ``bgagent watch`` — the event cursor is durable, so
+ * resuming is safe.
  */
 async function pollTaskEvents(
   apiClient: ApiClient,
@@ -184,28 +259,23 @@ async function pollTaskEvents(
   options: PollOptions,
 ): Promise<void> {
   let lastSeenEventId: string | null = options.afterEventId ?? null;
-  const pollStartedAt = Date.now();
+  let cadence: PollCadenceState = { intervalMs: POLL_FAST_INTERVAL_MS, consecutiveEmptyPolls: 0 };
   debug(`[watch/poll] starting polling loop afterEventId=${lastSeenEventId ?? '<none>'}`);
 
   while (!options.signal.aborted) {
     // Fetch every event past our cursor. ``catchUpEvents`` seeds with
     // ``after=lastSeenEventId`` and drains the server's ``next_token``
     // pagination so we see all events — not just the first 100.
-    let newEvents: TaskEvent[];
-    try {
-      if (lastSeenEventId) {
-        newEvents = await apiClient.catchUpEvents(taskId, lastSeenEventId);
-      } else {
-        // First iteration without a seed cursor: snapshot already emitted
-        // history; grab any events the server picked up since.
-        const result = await apiClient.getTaskEvents(taskId, { limit: 100 });
-        newEvents = result.data;
-      }
-    } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      debug(`[watch/poll] getTaskEvents failed: ${e.message}`);
-      throw e;
-    }
+    const newEvents = await withTransientRetry(
+      () => (lastSeenEventId
+        ? apiClient.catchUpEvents(taskId, lastSeenEventId, 100, { signal: options.signal })
+        : apiClient.getTaskEvents(taskId, { limit: 100, signal: options.signal })
+          .then(r => r.data)),
+      options.signal,
+      'getTaskEvents',
+    );
+
+    if (options.signal.aborted) return;
 
     if (newEvents.length > 0) {
       lastSeenEventId = newEvents[newEvents.length - 1].event_id;
@@ -215,14 +285,13 @@ async function pollTaskEvents(
       }
     }
 
-    let task;
-    try {
-      task = await apiClient.getTask(taskId);
-    } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      debug(`[watch/poll] getTask failed: ${e.message}`);
-      throw e;
-    }
+    const task = await withTransientRetry(
+      () => apiClient.getTask(taskId, { signal: options.signal }),
+      options.signal,
+      'getTask',
+    );
+
+    if (options.signal.aborted) return;
 
     if ((TERMINAL_STATUSES as readonly string[]).includes(task.status)) {
       debug(`[watch/poll] task reached terminal status=${task.status}`);
@@ -230,11 +299,52 @@ async function pollTaskEvents(
       return;
     }
 
-    if (options.signal.aborted) {
-      debug('[watch/poll] aborted after poll iteration, exiting');
-      return;
+    cadence = nextCadence(cadence, newEvents.length > 0);
+    debug(`[watch/poll] cadence=${cadence.intervalMs}ms emptyPolls=${cadence.consecutiveEmptyPolls}`);
+    await abortableSleep(cadence.intervalMs, options.signal);
+  }
+}
+
+/**
+ * Execute an API call with retry-on-transient semantics:
+ *   - 5xx / network errors → retry after jittered backoff, up to
+ *     ``MAX_TRANSIENT_RETRIES`` total attempts.
+ *   - 4xx errors → rethrow immediately (deterministic; retrying is futile).
+ *   - Exhausted retries → throw with a "re-run to resume" hint.
+ *   - Abort during retry sleep → throw the original error up (caller will
+ *     check ``signal.aborted`` and exit cleanly).
+ *
+ * ``label`` is used only for debug logging so operators can see *which*
+ * call is retrying during a degraded poll window.
+ */
+async function withTransientRetry<T>(
+  op: () => Promise<T>,
+  signal: AbortSignal,
+  label: string,
+): Promise<T> {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await op();
+    } catch (err) {
+      if (signal.aborted) throw err;
+      if (!isTransientError(err)) {
+        debug(`[watch/retry] ${label}: non-transient error, propagating: ${String(err)}`);
+        throw err;
+      }
+      attempt += 1;
+      if (attempt > MAX_TRANSIENT_RETRIES) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        throw new Error(
+          `Exceeded retry budget after ${MAX_TRANSIENT_RETRIES} transient failures `
+          + `(${label}): ${e.message}. Re-run \`bgagent watch <id>\` to resume.`,
+        );
+      }
+      const delayMs = transientRetryDelayMs(attempt);
+      debug(`[watch/retry] ${label}: attempt ${attempt}/${MAX_TRANSIENT_RETRIES} after ${delayMs}ms`);
+      await abortableSleep(delayMs, signal);
     }
-    await abortableSleep(currentPollInterval(pollStartedAt), options.signal);
   }
 }
 
@@ -275,11 +385,16 @@ interface SnapshotResult {
  *
  *  Emitted event ordering: events are returned in ascending event_id
  *  order (REST contract). */
-export async function fetchInitialSnapshot(apiClient: ApiClient, taskId: string): Promise<SnapshotResult> {
+export async function fetchInitialSnapshot(
+  apiClient: ApiClient,
+  taskId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<SnapshotResult> {
   debug(`[watch/snapshot] fetching initial snapshot task=${taskId}`);
+  const signal = opts?.signal;
   const [eventsPage, task] = await Promise.all([
-    apiClient.getTaskEvents(taskId, { limit: SNAPSHOT_PAGE_SIZE }),
-    apiClient.getTask(taskId),
+    apiClient.getTaskEvents(taskId, { limit: SNAPSHOT_PAGE_SIZE, signal }),
+    apiClient.getTask(taskId, { signal }),
   ]);
   const events = eventsPage.data;
   const latestEventId = events.length > 0 ? events[events.length - 1].event_id : null;
@@ -318,8 +433,19 @@ export function makeWatchCommand(): Command {
         // -------- Snapshot: detect already-terminal tasks, seed cursor. --
         let snapshot: SnapshotResult;
         try {
-          snapshot = await fetchInitialSnapshot(apiClient, taskId);
+          snapshot = await fetchInitialSnapshot(apiClient, taskId, { signal: abortController.signal });
         } catch (err) {
+          // Only exit 130 if the error IS the abort — i.e., an AbortError
+          // from our signal. Checking only ``signal.aborted`` would race:
+          // a real 401 from an expired token that happens to throw at the
+          // same moment the user Ctrl+Cs would get silently swallowed as
+          // a clean interrupt, and the user would miss the ``bgagent
+          // login`` hint.
+          const isAbortError = err instanceof Error && err.name === 'AbortError';
+          if (isAbortError && abortController.signal.aborted) {
+            process.exitCode = EXIT_CODE_SIGINT;
+            return;
+          }
           const e = err instanceof Error ? err : new Error(String(err));
           logError(`Initial snapshot failed: ${e.message}`);
           throw e;
@@ -381,8 +507,14 @@ async function runPolling(
     onTerminal: (status) => { finalStatus = status; },
   });
 
-  if (signal.aborted && finalStatus === null) {
+  // SIGINT always wins. Check ``signal.aborted`` BEFORE ``finalStatus``
+  // so a user who Ctrl+C's between ``onTerminal`` firing and this block
+  // evaluating still gets exit 130 — their intent to interrupt is the
+  // load-bearing signal, not the coincidental terminal status. POSIX:
+  // 128 + SIGINT (2) = 130.
+  if (signal.aborted) {
     logInfo(isJson, 'Aborted.');
+    process.exitCode = EXIT_CODE_SIGINT;
     return;
   }
 

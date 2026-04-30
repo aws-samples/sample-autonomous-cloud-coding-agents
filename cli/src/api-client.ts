@@ -50,7 +50,13 @@ export class ApiClient {
     return this.baseUrl;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    headers?: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const token = await getAuthToken();
     const url = `${this.getBaseUrl()}${path}`;
 
@@ -67,29 +73,54 @@ export class ApiClient {
         ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal,
     });
 
     debug(`Response: ${res.status} ${res.statusText}`);
 
     let json: unknown;
+    let jsonParseOk = true;
     try {
       json = await res.json();
     } catch {
-      throw new CliError(`HTTP ${res.status}: ${res.statusText} (non-JSON response)`);
+      jsonParseOk = false;
     }
 
-    debug(`Response body: ${JSON.stringify(json)}`);
+    if (jsonParseOk) {
+      debug(`Response body: ${JSON.stringify(json)}`);
+    }
 
     if (!res.ok) {
-      const err = json as ErrorResponse;
-      if (err.error) {
+      // Keep HTTP-status-carrying errors as ``ApiError`` regardless of
+      // body shape so callers (e.g. the watch retry loop) can classify
+      // 4xx-vs-5xx reliably. A WAF / CloudFront / API-GW edge page is
+      // still a deterministic 4xx from the caller's perspective —
+      // retrying it would be futile.
+      if (jsonParseOk && (json as ErrorResponse).error) {
+        const err = json as ErrorResponse;
         let message = `${err.error.message} (${err.error.code})`;
         if (res.status === 401) {
           message += '\nHint: Run `bgagent login` to re-authenticate.';
         }
         throw new ApiError(res.status, err.error.code, message, err.error.request_id);
       }
-      throw new CliError(`HTTP ${res.status}: ${res.statusText}`);
+      // Non-JSON or envelope-less error body — still an HTTP error, still
+      // must carry the status so classification works. Code/request_id
+      // are unavailable at this layer; surface ``HTTP_ERROR`` / empty.
+      throw new ApiError(
+        res.status,
+        'HTTP_ERROR',
+        `HTTP ${res.status}: ${res.statusText}${jsonParseOk ? '' : ' (non-JSON response)'}`,
+        '',
+      );
+    }
+
+    if (!jsonParseOk) {
+      // 2xx with an unparseable body is a server contract violation —
+      // neither transient (5xx) nor user-recoverable (4xx). Fail hard
+      // with ``CliError`` so the retry loop does NOT treat it as
+      // transient.
+      throw new CliError(`HTTP ${res.status}: ${res.statusText} (non-JSON response)`);
     }
 
     return json as T;
@@ -124,8 +155,14 @@ export class ApiClient {
   }
 
   /** GET /tasks/{task_id} — get task detail. */
-  async getTask(taskId: string): Promise<TaskDetail> {
-    const res = await this.request<SuccessResponse<TaskDetail>>('GET', `/tasks/${encodeURIComponent(taskId)}`);
+  async getTask(taskId: string, opts?: { signal?: AbortSignal }): Promise<TaskDetail> {
+    const res = await this.request<SuccessResponse<TaskDetail>>(
+      'GET',
+      `/tasks/${encodeURIComponent(taskId)}`,
+      undefined,
+      undefined,
+      opts?.signal,
+    );
     return res.data;
   }
 
@@ -171,6 +208,8 @@ export class ApiClient {
     after?: string;
     /** Request newest-first ordering — mutually exclusive with ``after`` on the server. */
     desc?: boolean;
+    /** Abort an in-flight request (SIGINT during ``bgagent watch``, etc.). */
+    signal?: AbortSignal;
   }): Promise<PaginatedResponse<TaskEvent>> {
     const params = new URLSearchParams();
     if (opts?.limit) params.set('limit', String(opts.limit));
@@ -180,7 +219,7 @@ export class ApiClient {
 
     const qs = params.toString();
     const path = `/tasks/${encodeURIComponent(taskId)}/events${qs ? `?${qs}` : ''}`;
-    return this.request<PaginatedResponse<TaskEvent>>('GET', path);
+    return this.request<PaginatedResponse<TaskEvent>>('GET', path, undefined, undefined, opts?.signal);
   }
 
   /**
@@ -221,15 +260,22 @@ export class ApiClient {
    * @param pageSize - page size passed to the server (default 100, max 100).
    * @returns all events after the cursor, in chronological order.
    */
-  async catchUpEvents(taskId: string, afterEventId: string, pageSize = 100): Promise<TaskEvent[]> {
+  async catchUpEvents(
+    taskId: string,
+    afterEventId: string,
+    pageSize = 100,
+    opts?: { signal?: AbortSignal },
+  ): Promise<TaskEvent[]> {
     const collected: TaskEvent[] = [];
+    const signal = opts?.signal;
     // First page uses ``after``; subsequent pages use the opaque ``next_token``.
-    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: pageSize });
+    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: pageSize, signal });
     collected.push(...page.data);
     while (page.pagination.has_more && page.pagination.next_token) {
       page = await this.getTaskEvents(taskId, {
         nextToken: page.pagination.next_token,
         limit: pageSize,
+        signal,
       });
       collected.push(...page.data);
     }

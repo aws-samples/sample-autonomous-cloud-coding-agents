@@ -304,6 +304,68 @@ describe('ApiClient', () => {
     });
   });
 
+  describe('AbortSignal propagation', () => {
+    test('threads signal through request() into fetch()', async () => {
+      // Regression guard: if a refactor ever drops ``signal`` from the
+      // fetch options, ``bgagent watch`` Ctrl+C becomes unresponsive
+      // because in-flight requests would have to time out before the
+      // loop could exit. This test proves the plumbing end-to-end at
+      // the HTTP boundary.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: { task_id: 'abc' } }),
+      });
+
+      const controller = new AbortController();
+      await client.getTask('abc', { signal: controller.signal });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ signal: controller.signal }),
+      );
+    });
+
+    test('threads signal through getTaskEvents() and catchUpEvents() into fetch()', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+      });
+
+      const controller = new AbortController();
+      await client.getTaskEvents('abc', { signal: controller.signal });
+      await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 100, { signal: controller.signal });
+
+      // Every fetch the client issued must carry the same signal.
+      const calls = mockFetch.mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      for (const [, init] of calls) {
+        expect((init as RequestInit).signal).toBe(controller.signal);
+      }
+    });
+
+    test('throws ApiError (not CliError) for non-JSON 4xx body so callers can classify', async () => {
+      // Regression guard for Chunk H: WAF / CloudFront HTML error pages
+      // used to come back as CliError without a status, defeating the
+      // watch retry loop's 4xx-vs-5xx classification. Non-JSON HTTP
+      // errors must still be ApiError so ``isTransientError`` can see
+      // the 4xx status and NOT retry.
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        json: async () => { throw new SyntaxError('Unexpected token <'); },
+      });
+
+      try {
+        await client.getTask('abc');
+        fail('expected an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).statusCode).toBe(403);
+      }
+    });
+  });
+
   describe('getStatusSnapshot', () => {
     test('runs getTask and getTaskEvents(desc=1) in parallel and returns both', async () => {
       const taskDetail = { task_id: 'abc', status: 'RUNNING' };
@@ -465,7 +527,10 @@ describe('ApiClient', () => {
       await expect(client.getTask('abc')).rejects.toThrow('bgagent login');
     });
 
-    test('throws CliError on non-JSON response', async () => {
+    test('throws ApiError with HTTP status for non-JSON error response', async () => {
+      // A non-JSON body on an HTTP error (WAF HTML page, edge proxy,
+      // 5xx with a plaintext reason) must still carry the status as an
+      // ``ApiError`` so the watch retry loop can classify 4xx vs 5xx.
       mockFetch.mockResolvedValue({
         ok: false,
         status: 502,
@@ -474,6 +539,14 @@ describe('ApiClient', () => {
       });
 
       await expect(client.getTask('abc')).rejects.toThrow('non-JSON response');
+      // ApiError (not CliError) so isTransientError can see the 502.
+      try {
+        await client.getTask('abc');
+        fail('expected throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).statusCode).toBe(502);
+      }
     });
   });
 });
