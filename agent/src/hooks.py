@@ -190,15 +190,36 @@ def _emit_nudge_milestone(ctx: dict, milestone: str, details: str) -> None:
 
     Best-effort — swallow errors so stream visibility failures never block
     nudge injection itself.  ``ctx`` may carry a ``progress`` ref stamped by
-    :func:`stop_hook`; absent writer is silently skipped (tests, early-boot,
-    etc.).
+    :func:`stop_hook`.  Skips (with a log line in each case) when:
+
+    - no ``progress`` ref is stamped on ``ctx`` (tests, early-boot, or a
+      hook invoked outside :func:`stop_hook`'s dispatch)
+    - the progress writer's circuit breaker has tripped after repeated
+      DDB write failures (``ProgressWriter._disabled``)
+    - the underlying ``write_agent_milestone`` raises despite the writer's
+      own fail-open contract
+
+    Surfacing these as log lines (instead of silent drops) lets
+    ``--trace`` mode and CloudWatch Logs show when an ack could not be
+    delivered to the durable event stream.
     """
     progress = ctx.get("progress")
+    if progress is None:
+        log("DEBUG", f"nudge milestone {milestone!r} skipped: no progress writer in ctx")
+        return
+    # Only skip when ``_disabled`` is explicitly True on a real ProgressWriter.
+    # ``getattr(..., False)`` is not safe — ``MagicMock`` returns an auto-mock
+    # attribute for any access, which evaluates truthy.
+    if getattr(progress, "_disabled", False) is True:
+        log(
+            "WARN",
+            f"nudge milestone {milestone!r} skipped: progress writer circuit breaker open",
+        )
+        return
     try:
-        if progress is not None:
-            progress.write_agent_milestone(milestone=milestone, details=details)
+        progress.write_agent_milestone(milestone=milestone, details=details)
     except Exception as exc:  # pragma: no cover — defensive, writers never raise
-        log("DEBUG", f"nudge milestone progress write failed: {exc}")
+        log("WARN", f"nudge milestone {milestone!r} progress write failed: {exc}")
 
 
 def _nudge_between_turns_hook(ctx: dict) -> list[str]:
@@ -213,9 +234,15 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     prevents infinite re-injection of the same nudge across turns if
     ``mark_consumed`` repeatedly fails.
 
-    Emits ``agent_milestone`` events (``nudge_applied`` when injection
-    happens) so the CLI stream shows a visible marker that the operator's
-    steering message reached the agent.
+    Emits a ``nudge_acknowledged`` ``agent_milestone`` event **before**
+    returning the injected user-message list (combined-turn ack, see
+    ``INTERACTIVE_AGENTS.md`` §AD-5) so the durable event stream records
+    the ack in the same turn the nudge is consumed.  Emission is
+    best-effort: if the progress writer's circuit breaker has tripped
+    (repeated DDB write failures) or no ``progress`` ref is stamped on
+    ``ctx``, the ack is logged but skipped and the injection still
+    proceeds — better to steer the agent than block on a flaky event
+    table.
     """
     task_id = ctx.get("task_id") or ""
     if not task_id:
@@ -264,10 +291,11 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     # it fits on a single terminal line.
     first_msg = (pending[0].get("message") or "")[:60]
     ids = ",".join(str(n.get("nudge_id", ""))[-8:] for n in pending)
-    details = f"{count} nudge(s) applied (ids=…{ids}): {first_msg}" + (
+    details = f"{count} nudge(s) acknowledged (ids=…{ids}): {first_msg}" + (
         "…" if count > 1 or len(first_msg) == 60 else ""
     )
-    _emit_nudge_milestone(ctx, "nudge_applied", details)
+    # AD-5: emit the ack BEFORE returning the injection list.
+    _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
 
     return [formatted] if formatted else []
 
@@ -387,7 +415,7 @@ def build_hook_matchers(
     has ``matcher: str | None`` and ``hooks: list[HookCallback]``.
 
     ``progress`` is forwarded to the Stop hook so that between-turns hooks
-    can emit milestones (e.g. ``nudge_applied``) that show up in the
+    can emit milestones (e.g. ``nudge_acknowledged``) that show up in the
     durable progress stream as a visible marker of Phase 2 nudge activity.
     """
     from claude_agent_sdk.types import (

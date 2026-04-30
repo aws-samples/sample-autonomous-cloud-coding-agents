@@ -184,7 +184,9 @@ Responsibilities:
 - **Poll loop** — waits for the agent to land a terminal status in `TaskTable`; enforces heartbeat watchdog; transitions to `FAILED` if the container dies.
 - **Finalize** — TTL + concurrency decrement + synthesized terminal event.
 
-Hydration (blueprint merge, repo config, PAT retrieval, prompt assembly) happens **inside the agent container at startup**, not in the orchestrator. This keeps the orchestrator thin, lets heavy I/O fail inside a durable 8 h runtime rather than a 15 min Lambda, and gives the runtime container the IAM it needs for those reads anyway.
+Hydration (blueprint merge, repo config, PAT retrieval, prompt assembly) is targeted to live **inside the agent container at startup**, not in the orchestrator. This keeps the orchestrator thin, lets heavy I/O fail inside a durable 8 h runtime rather than a 15 min Lambda, and gives the runtime container the IAM it needs for those reads anyway.
+
+> **Status (2026-04-30):** the rev-6 PR ships with hydration still in the orchestrator Lambda for scope reasons — moving it is pure architectural relocation with no user-visible delta and a ~2,700 lines porting surface (TypeScript → Python with new boto3 clients and a GraphQL GitHub path). Tracked as AD-11 carry-forward in upstream [issue #53](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/53) — current plan is a hybrid split: keep lightweight preflight in the orchestrator, move heavy I/O hydration to the container. Contract drift during the deferral window is bounded by the `SUPPORTED_HYDRATED_CONTEXT_VERSION` version gate in `agent/src/models.py`.
 
 ### 3.3 SubmitTaskFn
 
@@ -676,11 +678,15 @@ One timeout value covers all stranded cases (orchestrator crash, container crash
 
 *Why:* The interactive-specific timeout disappeared along with the interactive path. One reconciler, one threshold, easier to reason about.
 
-### AD-11. Agent-side hydration
+### AD-11. Agent-side hydration (hybrid split; partially deferred)
 
-Blueprint merging, repo config, PAT retrieval, and prompt assembly happen inside the agent container at startup, not in the orchestrator Lambda.
+Blueprint merging, repo config, PAT retrieval, and prompt assembly are targeted for the agent container at startup, not the orchestrator Lambda.
 
-*Why:* Hydration artifacts (cloned repos, merged blueprints, rendered prompts) are large and only needed inside the runtime. Failures belong inside the durable 8 h runtime rather than a 15 min Lambda. The runtime already has the IAM it needs for those reads.
+*Why:* Hydration artifacts (cloned repos, merged blueprints, rendered prompts) are large and only needed inside the runtime. Failures belong inside the durable 8 h runtime rather than a 15 min Lambda. The runtime already has the IAM it needs for those reads. Industry precedent (Cursor background agents, GitHub Copilot coding agent, Devin, Temporal's activity-worker pattern, LangGraph's queue-worker split) converges on worker-side hydration for long-running async agents.
+
+*Target shape — hybrid split:* keep the **cheap preflight** in the orchestrator (PAT validity check, repo-existence check, guardrail screen on the raw `task_description`) so we still fail fast before burning an AgentCore compute slot. Move the **heavy I/O hydration** (GitHub issue / PR fetch including review threads, prompt assembly, Memory retrieval, S3 blueprint reads) into the agent container.
+
+*Status (2026-04-30):* **deferred to a follow-up PR**, tracked at [upstream issue #53](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/53). Rev-6 ships with full hydration still in the orchestrator Lambda. Reasons: (a) pure architectural relocation with no user-visible change, (b) ~2,700 lines porting surface (1,190 LOC of `context-hydration.ts` + 1,514 LOC of tests) requiring new boto3 surfaces in the container and a GraphQL GitHub client, (c) PR #52 already ships 10,000+ lines of changes across the SSE removal — folding in hydration would blur the review narrative. The Pydantic `SUPPORTED_HYDRATED_CONTEXT_VERSION` gate in `agent/src/models.py` bounds drift risk during the deferral window.
 
 ### AD-12. `--trace` as the debug escape hatch
 

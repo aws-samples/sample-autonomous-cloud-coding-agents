@@ -73,7 +73,7 @@ class TestNudgeBetweenTurnsHook:
         assert hooks_mod._nudge_between_turns_hook({"task_id": "t-1"}) == []
 
     def test_nudge_injection_emits_milestone_on_progress(self):
-        """When nudges are injected, ``nudge_applied`` milestone fires on the
+        """When nudges are injected, ``nudge_acknowledged`` milestone fires on the
         progress writer so the durable event stream shows a visible marker."""
         table = MagicMock()
         table.query.return_value = {
@@ -100,9 +100,117 @@ class TestNudgeBetweenTurnsHook:
 
         progress.write_agent_milestone.assert_called_once()
         _, kwargs = progress.write_agent_milestone.call_args
-        assert kwargs["milestone"] == "nudge_applied"
-        assert "1 nudge(s) applied" in kwargs["details"]
+        assert kwargs["milestone"] == "nudge_acknowledged"
+        assert "1 nudge(s) acknowledged" in kwargs["details"]
         assert "focus on error handling" in kwargs["details"]
+
+    def test_nudge_ack_milestone_fires_before_injection_list_returns(self):
+        """Regression for AD-5 combined-turn ack: the ``nudge_acknowledged``
+        milestone MUST be written before the hook returns the injection list.
+
+        The durable event stream is how the CLI / fan-out dispatchers learn
+        the nudge reached the agent.  If the SDK crashes between the hook's
+        return and the next turn firing, the ack still has to be on the
+        event table so operators don't think the nudge was lost.
+        """
+        table = MagicMock()
+        table.query.return_value = {
+            "Items": [
+                {
+                    "task_id": "t-1",
+                    "nudge_id": "01ABCDEFGHJKMNPQR9ST8V0WXZ",
+                    "message": "pivot to logging",
+                    "created_at": "2026-04-22T12:00:00Z",
+                    "consumed": False,
+                }
+            ]
+        }
+        table.update_item.return_value = {}
+        nudge_reader._TABLE_CACHE = table
+
+        call_order: list[str] = []
+        progress = MagicMock()
+        # ``write_agent_milestone`` is a sync boto3 call in production; if a
+        # future refactor makes it fire-and-forget, this test needs to grow
+        # a flush barrier to keep the invariant guarded.
+        progress.write_agent_milestone.side_effect = lambda **kw: call_order.append("milestone")
+
+        result = hooks_mod._nudge_between_turns_hook(
+            {
+                "task_id": "t-1",
+                "progress": progress,
+            }
+        )
+        # Append after the hook returns so return-time is recorded relative
+        # to the synchronous side_effect.
+        call_order.append("return")
+
+        # The milestone call must have landed BEFORE the return.
+        assert call_order == ["milestone", "return"]
+        assert len(result) == 1
+
+    def test_nudge_ack_skipped_when_no_progress_in_ctx(self):
+        """When ``ctx`` has no progress writer (e.g. hook invoked outside
+        ``stop_hook``), the ack is skipped but injection still proceeds.
+
+        Before this chunk the skip was silent; now it emits a DEBUG log so
+        operators running with ``--trace`` can see ack delivery gaps.
+        """
+        table = MagicMock()
+        table.query.return_value = {
+            "Items": [
+                {
+                    "task_id": "t-1",
+                    "nudge_id": "01ABC",
+                    "message": "hi",
+                    "created_at": "2026-04-22T12:00:00Z",
+                    "consumed": False,
+                }
+            ]
+        }
+        table.update_item.return_value = {}
+        nudge_reader._TABLE_CACHE = table
+
+        # ctx without "progress" key
+        result = hooks_mod._nudge_between_turns_hook({"task_id": "t-1"})
+        # Injection still happens — AD-5 prefers steering the agent over
+        # blocking on an ack delivery gap.
+        assert len(result) == 1
+
+    def test_nudge_ack_skipped_when_progress_writer_circuit_breaker_open(self):
+        """When the progress writer's circuit breaker is tripped, the ack is
+        skipped (with a WARN) but injection still proceeds."""
+        table = MagicMock()
+        table.query.return_value = {
+            "Items": [
+                {
+                    "task_id": "t-1",
+                    "nudge_id": "01ABC",
+                    "message": "keep going",
+                    "created_at": "2026-04-22T12:00:00Z",
+                    "consumed": False,
+                }
+            ]
+        }
+        table.update_item.return_value = {}
+        nudge_reader._TABLE_CACHE = table
+
+        progress = MagicMock()
+        progress._disabled = True  # circuit breaker open
+
+        result = hooks_mod._nudge_between_turns_hook(
+            {
+                "task_id": "t-1",
+                "progress": progress,
+            }
+        )
+
+        # write_agent_milestone MUST NOT be called when the breaker is open
+        # — emitting would violate the circuit-breaker contract and risk
+        # tipping the writer further into a bad state.
+        progress.write_agent_milestone.assert_not_called()
+        # Injection still happens.
+        assert len(result) == 1
 
     def test_nudge_milestone_emit_is_best_effort_on_progress_failure(self):
         """Milestone emission errors must not break injection."""
