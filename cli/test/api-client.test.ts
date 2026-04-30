@@ -74,22 +74,6 @@ describe('ApiClient', () => {
       expect(call[1].headers['Idempotency-Key']).toBe('my-key');
     });
 
-    test('forwards execution_mode in request body', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: async () => ({ data: { task_id: 'abc' } }),
-      });
-
-      await client.createTask({
-        repo: 'owner/repo',
-        task_description: 'interactive task',
-        execution_mode: 'interactive',
-      });
-
-      const call = mockFetch.mock.calls[0];
-      const body = JSON.parse(call[1].body);
-      expect(body.execution_mode).toBe('interactive');
-    });
   });
 
   describe('listTasks', () => {

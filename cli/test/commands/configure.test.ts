@@ -58,27 +58,7 @@ describe('configure command', () => {
     expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
   });
 
-  test('saves runtime_jwt_arn when --runtime-jwt-arn is supplied', async () => {
-    const cmd = makeConfigureCommand();
-    await cmd.parseAsync([
-      'node', 'test',
-      '--api-url', 'https://api.example.com',
-      '--region', 'us-east-1',
-      '--user-pool-id', 'us-east-1_xyz',
-      '--client-id', 'client-123',
-      '--runtime-jwt-arn', 'arn:aws:bedrock-agentcore:us-east-1:111:runtime/abca_agent_jwt-ABC',
-    ]);
-
-    const config = JSON.parse(
-      fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
-    );
-    expect(config.runtime_jwt_arn).toBe(
-      'arn:aws:bedrock-agentcore:us-east-1:111:runtime/abca_agent_jwt-ABC',
-    );
-  });
-
-  test('partial update: --runtime-jwt-arn alone merges onto existing config', async () => {
-    // First: full configure without runtime_jwt_arn.
+  test('partial update: new field value merges onto existing config', async () => {
     const cmd1 = makeConfigureCommand();
     await cmd1.parseAsync([
       'node', 'test',
@@ -88,26 +68,17 @@ describe('configure command', () => {
       '--client-id', 'client-123',
     ]);
 
-    // Second: only --runtime-jwt-arn, no other fields.
+    // Update only --region; other fields should persist.
     const cmd2 = makeConfigureCommand();
-    await cmd2.parseAsync([
-      'node', 'test',
-      '--runtime-jwt-arn',
-      'arn:aws:bedrock-agentcore:us-east-1:222:runtime/abca_agent_jwt-DEF',
-    ]);
+    await cmd2.parseAsync(['node', 'test', '--region', 'us-west-1']);
 
     const config = JSON.parse(
       fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
     );
-    // Existing fields preserved.
     expect(config.api_url).toBe('https://api.example.com');
-    expect(config.region).toBe('us-east-1');
+    expect(config.region).toBe('us-west-1');
     expect(config.user_pool_id).toBe('us-east-1_xyz');
     expect(config.client_id).toBe('client-123');
-    // New field added.
-    expect(config.runtime_jwt_arn).toBe(
-      'arn:aws:bedrock-agentcore:us-east-1:222:runtime/abca_agent_jwt-DEF',
-    );
   });
 
   test('first-time configure without all required fields → CliError', async () => {
@@ -121,32 +92,26 @@ describe('configure command', () => {
     ).rejects.toThrow(/Missing required configuration/);
   });
 
-  test('backward compatibility: existing config.json without runtime_jwt_arn loads cleanly', async () => {
-    // Write a pre-existing config without runtime_jwt_arn (simulating an old install).
-    fs.writeFileSync(
-      path.join(tmpDir, 'config.json'),
-      JSON.stringify({
-        api_url: 'https://api.example.com',
-        region: 'us-east-1',
-        user_pool_id: 'us-east-1_legacy',
-        client_id: 'client-legacy',
-      }, null, 2),
-    );
-
-    const cmd = makeConfigureCommand();
-    // Add runtime_jwt_arn only; should succeed and preserve everything else.
-    await cmd.parseAsync([
+  test('no flags with complete existing config → reports "No configuration changes" without re-saving', async () => {
+    // Seed a complete config.
+    const cmd1 = makeConfigureCommand();
+    await cmd1.parseAsync([
       'node', 'test',
-      '--runtime-jwt-arn',
-      'arn:aws:bedrock-agentcore:us-east-1:333:runtime/abca_agent_jwt-GHI',
+      '--api-url', 'https://api.example.com',
+      '--region', 'us-east-1',
+      '--user-pool-id', 'us-east-1_abc',
+      '--client-id', 'client-123',
     ]);
+    const initialMtime = fs.statSync(path.join(tmpDir, 'config.json')).mtimeMs;
 
-    const config = JSON.parse(
-      fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
-    );
-    expect(config.user_pool_id).toBe('us-east-1_legacy');
-    expect(config.runtime_jwt_arn).toBe(
-      'arn:aws:bedrock-agentcore:us-east-1:333:runtime/abca_agent_jwt-GHI',
-    );
+    // Run configure again with no flags.
+    const cmd2 = makeConfigureCommand();
+    await cmd2.parseAsync(['node', 'test']);
+
+    // File was not rewritten.
+    expect(fs.statSync(path.join(tmpDir, 'config.json')).mtimeMs).toBe(initialMtime);
+    // User-facing message is honest about the no-op.
+    expect(consoleSpy).toHaveBeenCalledWith('No configuration changes — all flags were omitted.');
+    expect(consoleSpy).not.toHaveBeenLastCalledWith('Configuration saved.');
   });
 });

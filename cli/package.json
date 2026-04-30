@@ -30,10 +30,8 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@ag-ui/core": "^0.0.52",
     "@aws-sdk/client-cognito-identity-provider": "^3.1021.0",
-    "commander": "^14.0.3",
-    "eventsource-parser": "^3.0.8"
+    "commander": "^14.0.3"
   },
   "resolutions": {
     "eslint-plugin-import/minimatch": "^3.1.2"

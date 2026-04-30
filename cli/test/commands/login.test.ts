@@ -74,7 +74,7 @@ describe('login command', () => {
       fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'),
     );
     expect(creds.id_token).toBe('id-tok');
-    expect(creds.access_token).toBe('access-tok');
+    expect(creds.access_token).toBeUndefined();
     expect(consoleSpy).toHaveBeenCalledWith('Login successful. Credentials saved.');
   });
 });

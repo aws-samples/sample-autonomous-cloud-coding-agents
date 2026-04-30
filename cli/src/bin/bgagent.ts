@@ -26,7 +26,6 @@ import { makeEventsCommand } from '../commands/events';
 import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
 import { makeNudgeCommand } from '../commands/nudge';
-import { makeRunCommand } from '../commands/run';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
 import { makeWatchCommand } from '../commands/watch';
@@ -52,7 +51,6 @@ program
 program.addCommand(makeConfigureCommand());
 program.addCommand(makeLoginCommand());
 program.addCommand(makeSubmitCommand());
-program.addCommand(makeRunCommand());
 program.addCommand(makeListCommand());
 program.addCommand(makeStatusCommand());
 program.addCommand(makeCancelCommand());

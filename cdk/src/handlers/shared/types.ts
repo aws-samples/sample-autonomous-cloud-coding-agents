@@ -109,15 +109,6 @@ export interface TaskDetail {
    *  when the cap tripped. */
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
-  /**
-   * SHIM (Chunk A, removed in Chunk D). Older CLIs declare
-   * `execution_mode: ExecutionMode | null` as non-optional and parse the
-   * response eagerly. We keep emitting a constant `'orchestrator'` so those
-   * CLIs don't throw at parse time during the rollout window. The field
-   * and this shim both go away when Chunk D lands and the CLI drops the
-   * matching declaration.
-   */
-  readonly execution_mode?: 'orchestrator';
 }
 
 /**
@@ -153,10 +144,10 @@ export interface EventRecord {
  * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
  *
  * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
- * used by the SSE client to catch up after a disconnect) over ``next_token``
- * (an opaque DynamoDB pagination token). If both are provided, the handler
- * uses ``after`` and logs a WARN. Neither is required — callers may start
- * from the beginning of the task's event stream.
+ * used by CLI polling and webhook replay to resume from a known event id)
+ * over ``next_token`` (an opaque DynamoDB pagination token). If both are
+ * provided, the handler uses ``after`` and logs a WARN. Neither is required
+ * — callers may start from the beginning of the task's event stream.
  *
  * When a page is truncated at ``limit``, the response includes a
  * ``next_token`` so the caller can continue paginating forward regardless
@@ -227,9 +218,6 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     turns_attempted: record.turns_attempted ?? null,
     turns_completed: record.turns_completed ?? null,
     prompt_version: record.prompt_version ?? null,
-    // SHIM (Chunk A, removed in Chunk D): constant value for old-CLI parse
-    // compatibility. See the field comment on TaskDetail.
-    execution_mode: 'orchestrator',
   };
 }
 

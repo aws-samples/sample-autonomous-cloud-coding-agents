@@ -153,17 +153,17 @@ export class ApiClient {
   }
 
   /**
-   * GET /tasks/{task_id}/events — get task events.
+   * GET /tasks/{task_id}/events — fetch one page of task events.
    *
    * Supports two alternative pagination cursors:
    *   - ``after`` — a ULID event_id. Server returns events with
-   *     ``event_id > after``. Used by the SSE client to catch up after
-   *     a disconnect.
+   *     ``event_id > after``.
    *   - ``nextToken`` — an opaque DynamoDB pagination token for normal
    *     forward pagination.
    *
    * If both are passed, the server prefers ``after`` and logs a warning.
-   * Prefer {@link catchUpEvents} when you want all events after a known id.
+   * Prefer {@link catchUpEvents} when you want all events after a known
+   * id drained across pagination (the watch loop uses this).
    */
   async getTaskEvents(taskId: string, opts?: {
     limit?: number;
@@ -184,10 +184,9 @@ export class ApiClient {
    * Fetch every event with ``event_id > afterEventId``, paginating through
    * the server's ``next_token`` internally.
    *
-   * Intended for the SSE reconnect path: the CLI tracks the last event_id
-   * it saw on the live stream, and on reconnect calls this helper to fill
-   * the gap before resuming the SSE stream. Returns events in ascending
-   * order (oldest first), matching the server's ``ScanIndexForward: true``.
+   * Paginates forward from a known event_id cursor. Returns events in
+   * ascending order (oldest first), matching the server's
+   * ``ScanIndexForward: true``.
    *
    * @param taskId - the task whose events to fetch.
    * @param afterEventId - the ULID cursor; events strictly greater than

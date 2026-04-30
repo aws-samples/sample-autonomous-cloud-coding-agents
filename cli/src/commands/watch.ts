@@ -18,29 +18,21 @@
  */
 
 import { Command } from 'commander';
-import {
-  SemanticEvent,
-  TaskEventRecord,
-  agUiToSemantic,
-  translateDbRowToAgUi,
-} from '../ag-ui-translator';
 import { ApiClient } from '../api-client';
-import { getAccessToken } from '../auth';
-import { loadConfig } from '../config';
 import { debug, isVerbose } from '../debug';
-import { CliError } from '../errors';
 import { formatJson } from '../format';
-import { AgUiEvent, runSseClient } from '../sse-client';
-import { ExecutionMode, TERMINAL_STATUSES, TaskEvent } from '../types';
-import { DEFAULT_STREAM_TIMEOUT_SECONDS, validateStreamTimeout } from './_stream';
+import { TERMINAL_STATUSES, TaskEvent } from '../types';
 
 /**
- * Polling cadence for the REST-based `watch` fallback (rev-5 POLL-1).
+ * Polling cadence for the REST-based `watch` loop.
  *
  * Design §9.13.1 calls for 500 ms polling. We adopt that for the first
  * POLL_FAST_WINDOW_MS window (users are watching fresh, active tasks)
  * and decay to POLL_SLOW_INTERVAL_MS for long-running observations so
  * we don't hammer REST for hours at 500 ms.
+ *
+ * Chunk H will make this adaptive; the simple decaying cadence is kept
+ * in the meantime.
  */
 const POLL_FAST_INTERVAL_MS = 500;
 const POLL_SLOW_INTERVAL_MS = 2_000;
@@ -54,8 +46,6 @@ function currentPollInterval(startedAt: number): number {
 /** Size of the initial snapshot fetch used to detect already-terminal tasks
  *  and seed the catch-up cursor. */
 const SNAPSHOT_PAGE_SIZE = 100;
-
-type Transport = 'sse' | 'polling' | 'auto';
 
 /** Progress event types emitted by the agent ProgressWriter. */
 const PROGRESS_EVENT_TYPES = new Set([
@@ -78,7 +68,7 @@ function formatTime(isoTimestamp: string): string {
 }
 
 /** Render a single progress event as a human-readable line. */
-export function renderEvent(event: SemanticEvent | TaskEvent): string {
+export function renderEvent(event: TaskEvent): string {
   const time = formatTime(event.timestamp);
   const meta = event.metadata;
 
@@ -99,18 +89,18 @@ export function renderEvent(event: SemanticEvent | TaskEvent): string {
     case 'agent_tool_call': {
       const tool = meta.tool_name ?? 'unknown';
       const preview = meta.tool_input_preview ?? '';
-      return `[${time}]   \u25B6 ${tool}: ${preview}`;
+      return `[${time}]   ▶ ${tool}: ${preview}`;
     }
     case 'agent_tool_result': {
       const tool = meta.tool_name ?? '';
       const isError = meta.is_error ? ' [ERROR]' : '';
       const preview = meta.content_preview ?? '';
-      return `[${time}]   \u25C0 ${tool}${isError}: ${preview}`;
+      return `[${time}]   ◀ ${tool}${isError}: ${preview}`;
     }
     case 'agent_milestone': {
       const milestone = meta.milestone ?? '';
       const details = meta.details ?? '';
-      return `[${time}] \u2605 ${milestone}${details ? ': ' + details : ''}`;
+      return `[${time}] ★ ${milestone}${details ? ': ' + details : ''}`;
     }
     case 'agent_cost_update': {
       const cost = meta.cost_usd != null ? `$${Number(meta.cost_usd).toFixed(4)}` : '$?';
@@ -121,7 +111,7 @@ export function renderEvent(event: SemanticEvent | TaskEvent): string {
     case 'agent_error': {
       const errType = meta.error_type ?? 'Error';
       const msg = meta.message_preview ?? '';
-      return `[${time}] \u2716 ${errType}: ${msg}`;
+      return `[${time}] ✖ ${errType}: ${msg}`;
     }
     default:
       return `[${time}] ${event.event_type}: ${JSON.stringify(meta)}`;
@@ -139,49 +129,26 @@ function logInfo(_isJson: boolean, message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
-/** Log a WARN-level message to stderr regardless of output mode. */
-function logWarn(message: string): void {
-  process.stderr.write(`WARN: ${message}\n`);
-}
-
 /** Log an ERROR-level message to stderr regardless of output mode. */
 function logError(message: string): void {
   process.stderr.write(`ERROR: ${message}\n`);
 }
 
 /* ------------------------------------------------------------------------ */
-/*  Formatter boundary (Option A)                                            */
+/*  Formatter boundary                                                        */
 /* ------------------------------------------------------------------------ */
 
 /**
- * A formatter that accepts either AG-UI events (from SSE + catch-up) or
- * semantic events (from REST polling) and produces identical byte-for-byte
- * output regardless of transport. The SSE path calls {@link emitAgUi}; the
- * polling path calls {@link emitSemantic}.
+ * A formatter that accepts `TaskEvent` rows (from REST polling) and
+ * produces human-readable output (text mode) or NDJSON (json mode).
  */
 interface Formatter {
-  emitAgUi(ev: AgUiEvent): void;
-  emitSemantic(ev: SemanticEvent | TaskEvent): void;
+  emit(ev: TaskEvent): void;
 }
 
 export function makeFormatter(isJson: boolean): Formatter {
   return {
-    emitAgUi(ev: AgUiEvent): void {
-      if (isJson) {
-        // In JSON mode, emit the semantic form (matches Phase 1a output
-        // schema) — pure NDJSON on stdout.
-        const semantic = agUiToSemantic(ev);
-        if (semantic) {
-          console.log(formatJson(semantic));
-        }
-        return;
-      }
-      const semantic = agUiToSemantic(ev);
-      if (semantic && PROGRESS_EVENT_TYPES.has(semantic.event_type)) {
-        console.log(renderEvent(semantic));
-      }
-    },
-    emitSemantic(ev: SemanticEvent | TaskEvent): void {
+    emit(ev: TaskEvent): void {
       if (isJson) {
         console.log(formatJson(ev));
         return;
@@ -194,7 +161,7 @@ export function makeFormatter(isJson: boolean): Formatter {
 }
 
 /* ------------------------------------------------------------------------ */
-/*  Polling loop (Phase 1a behavior, extracted for reuse)                    */
+/*  Polling loop                                                             */
 /* ------------------------------------------------------------------------ */
 
 interface PollOptions {
@@ -221,20 +188,24 @@ async function pollTaskEvents(
   debug(`[watch/poll] starting polling loop afterEventId=${lastSeenEventId ?? '<none>'}`);
 
   while (!options.signal.aborted) {
-    let events: TaskEvent[];
+    // Fetch every event past our cursor. ``catchUpEvents`` seeds with
+    // ``after=lastSeenEventId`` and drains the server's ``next_token``
+    // pagination so we see all events — not just the first 100.
+    let newEvents: TaskEvent[];
     try {
-      const result = await apiClient.getTaskEvents(taskId, { limit: 100 });
-      events = result.data;
+      if (lastSeenEventId) {
+        newEvents = await apiClient.catchUpEvents(taskId, lastSeenEventId);
+      } else {
+        // First iteration without a seed cursor: snapshot already emitted
+        // history; grab any events the server picked up since.
+        const result = await apiClient.getTaskEvents(taskId, { limit: 100 });
+        newEvents = result.data;
+      }
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       debug(`[watch/poll] getTaskEvents failed: ${e.message}`);
       throw e;
     }
-
-    const lastSeen = lastSeenEventId;
-    const newEvents: TaskEvent[] = lastSeen
-      ? events.filter(e => e.event_id > lastSeen)
-      : events;
 
     if (newEvents.length > 0) {
       lastSeenEventId = newEvents[newEvents.length - 1].event_id;
@@ -295,20 +266,15 @@ interface SnapshotResult {
   readonly latestEventId: string | null;
   readonly events: TaskEvent[];
   readonly taskStatus: string;
-  /** execution_mode from TaskDetail. `null` for legacy tasks created before
-   *  rev 5 (effectively `'orchestrator'`). Typed as the `ExecutionMode`
-   *  union so `!== 'interactive'` is exhaustiveness-checked at compile
-   *  time. */
-  readonly executionMode: ExecutionMode | null;
 }
 
 /** Fetch the latest events + current task status. Used both to detect a
  *  task that already terminated before ``bgagent watch`` connected, and to
- *  seed the SSE catch-up cursor to ``latestEventId`` so we don't re-emit the
- *  snapshot's contents during the first SSE catch-up call.
+ *  seed the polling cursor so we don't re-emit the snapshot's contents on
+ *  the first poll iteration.
  *
- *  Emitted event ordering: events are returned in ascending order (matching
- *  the REST contract from Phase 1b Step 4). */
+ *  Emitted event ordering: events are returned in ascending event_id
+ *  order (REST contract). */
 export async function fetchInitialSnapshot(apiClient: ApiClient, taskId: string): Promise<SnapshotResult> {
   debug(`[watch/snapshot] fetching initial snapshot task=${taskId}`);
   const [eventsPage, task] = await Promise.all([
@@ -317,12 +283,11 @@ export async function fetchInitialSnapshot(apiClient: ApiClient, taskId: string)
   ]);
   const events = eventsPage.data;
   const latestEventId = events.length > 0 ? events[events.length - 1].event_id : null;
-  const executionMode = task.execution_mode ?? null;
   debug(
     `[watch/snapshot] events=${events.length} latestEventId=${latestEventId ?? '<none>'} `
-    + `status=${task.status} execution_mode=${executionMode ?? '<legacy>'}`,
+    + `status=${task.status}`,
   );
-  return { latestEventId, events, taskStatus: task.status, executionMode };
+  return { latestEventId, events, taskStatus: task.status };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -334,27 +299,11 @@ export function makeWatchCommand(): Command {
     .description('Watch task progress in real-time')
     .argument('<task-id>', 'Task ID')
     .option('--output <format>', 'Output format (text or json)', 'text')
-    .option(
-      '--transport <sse|polling|auto>',
-      'Transport to use (auto tries SSE first, falls back to polling)',
-      'auto',
-    )
-    .option(
-      '--stream-timeout-seconds <n>',
-      'SSE stream proactive-restart timeout in seconds (max 3500 = 58 min)',
-      String(DEFAULT_STREAM_TIMEOUT_SECONDS),
-    )
     .action(async (taskId: string, opts) => {
       const isJson = opts.output === 'json';
-      const transport = validateTransport(opts.transport);
-      const streamTimeoutSeconds = validateStreamTimeout(opts.streamTimeoutSeconds);
-      const config = loadConfig();
       const apiClient = new ApiClient();
 
-      debug(
-        `[watch] task=${taskId} transport=${transport} isJson=${isJson} `
-        + `streamTimeoutSeconds=${streamTimeoutSeconds} verbose=${isVerbose()}`,
-      );
+      debug(`[watch] task=${taskId} isJson=${isJson} verbose=${isVerbose()}`);
 
       // Abort controller for SIGINT / SIGTERM.
       const abortController = new AbortController();
@@ -382,7 +331,7 @@ export function makeWatchCommand(): Command {
         if ((TERMINAL_STATUSES as readonly string[]).includes(snapshot.taskStatus)) {
           debug(`[watch] task already terminal status=${snapshot.taskStatus} — printing tail`);
           for (const ev of snapshot.events) {
-            formatter.emitSemantic(ev);
+            formatter.emit(ev);
           }
           if (!isJson) {
             logInfo(isJson, `Task ${snapshot.taskStatus.toLowerCase()}.`);
@@ -394,7 +343,7 @@ export function makeWatchCommand(): Command {
         // Emit the snapshot events first so the user sees history before
         // live events start flowing.
         for (const ev of snapshot.events) {
-          formatter.emitSemantic(ev);
+          formatter.emit(ev);
         }
         const seedCursor = snapshot.latestEventId ?? '';
 
@@ -402,250 +351,12 @@ export function makeWatchCommand(): Command {
           logInfo(isJson, `Watching task ${taskId}... (Ctrl+C to stop)`);
         }
 
-        // -------- Transport decision and execution. ---------------------
-        // Rev 5, §9.13.4: tasks submitted via the orchestrator path cannot
-        // be attached to over SSE on Runtime-JWT (different microVM pool);
-        // server.py returns 409 RUN_ELSEWHERE which AgentCore wraps as 424
-        // Failed Dependency to the client. Use the snapshot's execution_mode
-        // to skip SSE directly and avoid a reconnect storm.
-        if (transport === 'auto' && snapshot.executionMode !== 'interactive') {
-          logInfo(
-            isJson,
-            `Task execution_mode=${snapshot.executionMode ?? 'orchestrator'} — using polling (SSE only supported for interactive tasks).`,
-          );
-          debug(`[watch] transport=polling (auto: execution_mode=${snapshot.executionMode})`);
-          await runPolling(apiClient, taskId, seedCursor, formatter, abortController.signal, isJson);
-          return;
-        }
-
-        const resolved = resolveTransport(transport, config.runtime_jwt_arn, isJson);
-        if (resolved === 'polling') {
-          await runPolling(apiClient, taskId, seedCursor, formatter, abortController.signal, isJson);
-          return;
-        }
-
-        // SSE or AUTO with runtime_jwt_arn configured.
-        try {
-          await runSse({
-            apiClient,
-            taskId,
-            seedCursor,
-            runtimeJwtArn: config.runtime_jwt_arn as string,
-            region: config.region,
-            streamTimeoutSeconds,
-            formatter,
-            abortController,
-            isJson,
-          });
-        } catch (err) {
-          // Unrecoverable SSE failure. Behaviour depends on mode.
-          const e = err instanceof Error ? err : new Error(String(err));
-          if (transport === 'sse') {
-            logError(`SSE transport failed: ${e.message}`);
-            throw e;
-          }
-          // --transport auto: warn and fall back to polling.
-          logWarn(
-            `SSE transport failed (${e.message}) — falling back to polling.`,
-          );
-          debug('[watch] auto fallback to polling triggered');
-          await runPolling(
-            apiClient,
-            taskId,
-            seedCursor,
-            formatter,
-            abortController.signal,
-            isJson,
-          );
-        }
+        await runPolling(apiClient, taskId, seedCursor, formatter, abortController.signal, isJson);
       } finally {
         process.removeListener('SIGINT', onSignal);
         process.removeListener('SIGTERM', onSignal);
       }
     });
-}
-
-/* ------------------------------------------------------------------------ */
-/*  Transport resolution                                                     */
-/* ------------------------------------------------------------------------ */
-
-function validateTransport(raw: unknown): Transport {
-  if (raw === 'sse' || raw === 'polling' || raw === 'auto') return raw;
-  throw new CliError(
-    `Invalid --transport value: ${String(raw)}. Expected one of: sse, polling, auto.`,
-  );
-}
-
-/** Choose the actual transport given the requested mode and the availability
- *  of a Runtime-JWT ARN. Logs at INFO / WARN level as appropriate. */
-function resolveTransport(
-  requested: Transport,
-  runtimeJwtArn: string | undefined,
-  isJson: boolean,
-): Transport {
-  if (requested === 'polling') {
-    logInfo(isJson, 'Using polling transport.');
-    debug('[watch] transport=polling (explicit)');
-    return 'polling';
-  }
-  if (requested === 'sse') {
-    if (!runtimeJwtArn) {
-      logError(
-        'SSE transport requires `runtime_jwt_arn` in config. '
-        + 'Run `bgagent configure --runtime-jwt-arn <arn>` and retry.',
-      );
-      throw new CliError('SSE transport unavailable: `runtime_jwt_arn` not configured.');
-    }
-    logInfo(isJson, 'Using SSE transport.');
-    debug('[watch] transport=sse (explicit)');
-    return 'sse';
-  }
-  // auto
-  if (!runtimeJwtArn) {
-    logWarn(
-      '`runtime_jwt_arn` not configured — falling back to polling transport. '
-      + 'Run `bgagent configure --runtime-jwt-arn <arn>` for real-time SSE streaming.',
-    );
-    debug('[watch] transport=polling (auto fallback: missing runtime_jwt_arn)');
-    return 'polling';
-  }
-  logInfo(isJson, 'Using SSE transport (auto).');
-  debug('[watch] transport=sse (auto)');
-  return 'sse';
-}
-
-/* ------------------------------------------------------------------------ */
-/*  SSE runner                                                               */
-/* ------------------------------------------------------------------------ */
-
-export interface RunSseArgs {
-  readonly apiClient: ApiClient;
-  readonly taskId: string;
-  readonly seedCursor: string;
-  readonly runtimeJwtArn: string;
-  readonly region: string;
-  readonly streamTimeoutSeconds: number;
-  readonly formatter: Formatter;
-  readonly abortController: AbortController;
-  readonly isJson: boolean;
-}
-
-export async function runSse(args: RunSseArgs): Promise<void> {
-  const {
-    apiClient, taskId, seedCursor, runtimeJwtArn, region,
-    streamTimeoutSeconds, formatter, abortController, isJson,
-  } = args;
-
-  let consecutiveReconnects = 0;
-
-  const result = await runSseClient({
-    runtimeJwtArn,
-    region,
-    taskId,
-    // SSE-specific: AgentCore Runtime-JWT validates `client_id` which only
-    // exists on Cognito access tokens. REST API Gateway still uses the ID
-    // token via api-client.ts's default getAuthToken() path.
-    getAuthToken: async () => getAccessToken(),
-    catchUp: async (afterEventId: string): Promise<AgUiEvent[]> => {
-      // The SSE cursor may carry a synthetic AG-UI suffix (e.g.
-      // "01KPPVWM...:step-started") because the translator mints multiple
-      // AG-UI frames per DDB row and needs unique dedup ids. REST only
-      // accepts a bare 26-char ULID — strip everything from ':' onward
-      // to get back to the DDB event_id.
-      const bareEventId = afterEventId.split(':', 1)[0] ?? afterEventId;
-      debug(
-        `[watch/sse] catchUp afterEventId=${afterEventId || '<empty>'} ` +
-          `bareEventId=${bareEventId}`,
-      );
-      const rows = await apiClient.catchUpEvents(taskId, bareEventId);
-      debug(`[watch/sse] catchUp fetched ${rows.length} rows`);
-      const agUi: AgUiEvent[] = [];
-      for (const row of rows) {
-        agUi.push(...translateDbRowToAgUi(row as TaskEventRecord));
-      }
-      return agUi;
-    },
-    initialCatchUpCursor: seedCursor,
-    onEvent: (ev: AgUiEvent) => {
-      debug(`[watch/sse] event type=${ev.type} id=${typeof ev.id === 'string' ? ev.id : '<none>'}`);
-      // Reset consecutive-reconnect counter on successful event flow.
-      consecutiveReconnects = 0;
-      formatter.emitAgUi(ev);
-    },
-    onReconnecting: (attempt, reason, delayMs) => {
-      consecutiveReconnects += 1;
-      const msg = `Reconnecting (attempt ${attempt}, reason=${reason}, delayMs=${delayMs})`;
-      if (!isJson) {
-        logInfo(isJson, msg);
-      } else {
-        process.stderr.write(`${msg}\n`);
-      }
-      if (consecutiveReconnects > 3) {
-        logWarn(
-          `Stream reconnected ${consecutiveReconnects} times in a row — `
-          + 'network may be flaky.',
-        );
-      }
-      debug(`[watch/sse] reconnecting attempt=${attempt} reason=${reason} delayMs=${delayMs}`);
-    },
-    onCatchUp: (count, fromEventId) => {
-      debug(`[watch/sse] catchUp summary count=${count} fromEventId=${fromEventId || '<empty>'}`);
-      if (count > 0) {
-        logInfo(isJson, `Replayed ${count} events.`);
-      }
-    },
-    onError: (err, willRetry) => {
-      if (willRetry) {
-        debug(`[watch/sse] recoverable error (will retry): ${err.message}`);
-      } else {
-        debug(`[watch/sse] fatal error: ${err.message}`);
-      }
-    },
-    signal: abortController.signal,
-    maxStreamSeconds: streamTimeoutSeconds,
-  });
-
-  debug(
-    `[watch/sse] run complete terminalEvent=${result.terminalEvent?.type ?? '<none>'} `
-    + `reconnectCount=${result.reconnectCount} eventsReceived=${result.eventsReceived} `
-    + `eventsDeduplicated=${result.eventsDeduplicated} durationMs=${result.totalDurationMs}`,
-  );
-
-  if (abortController.signal.aborted) {
-    logInfo(isJson, 'Aborted.');
-    return;
-  }
-
-  // After the stream terminates (RUN_FINISHED / RUN_ERROR), consult REST for
-  // the authoritative final task status so the exit code reflects the truth
-  // rather than just the AG-UI frame type.
-  let finalStatus: string;
-  let statusInferred = false;
-  try {
-    const task = await apiClient.getTask(taskId);
-    finalStatus = task.status;
-  } catch (err) {
-    const e = err instanceof Error ? err : new Error(String(err));
-    debug(`[watch/sse] getTask after RUN_FINISHED failed: ${e.message}`);
-    // If we can't read the authoritative status, INFER from the terminal
-    // AG-UI event. Surface the fact that we're inferring — the AG-UI
-    // event type and the server-side status can disagree (e.g., server
-    // cancels a task after RUN_FINISHED was emitted; or the stream saw
-    // a RUN_ERROR but the server finalized as COMPLETED via a retry).
-    finalStatus = result.terminalEvent?.type === 'RUN_FINISHED' ? 'COMPLETED' : 'FAILED';
-    statusInferred = true;
-    logWarn(
-      `Final task status could not be fetched from REST (${e.message}); `
-      + `inferred as ${finalStatus} from the terminal SSE event. `
-      + `Run 'bgagent status ${taskId}' to confirm.`,
-    );
-  }
-
-  if (!isJson) {
-    const suffix = statusInferred ? ' (inferred)' : '';
-    logInfo(isJson, `Task ${finalStatus.toLowerCase()}${suffix}.`);
-  }
-  process.exitCode = finalStatus === 'COMPLETED' ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -666,7 +377,7 @@ async function runPolling(
   await pollTaskEvents(apiClient, taskId, {
     signal,
     afterEventId: seedCursor || undefined,
-    onEvent: (ev) => formatter.emitSemantic(ev),
+    onEvent: (ev) => formatter.emit(ev),
     onTerminal: (status) => { finalStatus = status; },
   });
 

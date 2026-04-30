@@ -47,9 +47,9 @@ type QueryMode = 'from_beginning' | 'next_token' | 'after';
  * Supports two alternative pagination modes (plus the default "from the beginning"):
  *
  *   - ``?after=<event_id>`` — ULID cursor. Query returns events with
- *     ``event_id > after``. Used by the SSE client to catch up on events
- *     missed during disconnect/reconnect. ULIDs are lexicographically
- *     sortable by timestamp, so string ``>`` compare is correct.
+ *     ``event_id > after``. Used by CLI polling and webhook replay to
+ *     resume from a known event id. ULIDs are lexicographically sortable
+ *     by timestamp, so string ``>`` compare is correct.
  *   - ``?next_token=<base64>`` — opaque DynamoDB ``LastEvaluatedKey``,
  *     used for normal forward pagination.
  *
@@ -102,8 +102,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const afterValid = typeof afterRaw === 'string' && afterRaw.length === 26 ? afterRaw : undefined;
 
     // 3b. ``after`` and ``next_token`` together is always a client bug —
-    // one is a cursor from SSE, the other is an opaque pagination token.
-    // Prefer ``after`` because it is the more specific, user-driven intent.
+    // one is a user-driven event_id cursor, the other is an opaque
+    // pagination token. Prefer ``after`` because it is the more specific,
+    // user-driven intent.
     if (afterValid && nextTokenRaw) {
       logger.warn('Both after and next_token provided; preferring after', {
         request_id: requestId,

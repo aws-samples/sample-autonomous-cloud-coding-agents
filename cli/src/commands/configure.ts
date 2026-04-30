@@ -23,13 +23,8 @@ import { CliError } from '../errors';
 import { CliConfig } from '../types';
 
 /**
- * Phase 1b Step 6: ``--runtime-jwt-arn`` is optional. When supplied, it's
- * persisted so ``bgagent watch --transport sse|auto`` can stream AG-UI events
- * from the Cognito-JWT-auth AgentCore Runtime (CFN output ``RuntimeJwtArn``).
- *
  * All four core fields (api-url, region, user-pool-id, client-id) are required
- * the first time — subsequent invocations may update a subset (so callers can
- * run ``bgagent configure --runtime-jwt-arn ...`` after an initial configure).
+ * the first time — subsequent invocations may update a subset.
  */
 export function makeConfigureCommand(): Command {
   return new Command('configure')
@@ -38,20 +33,17 @@ export function makeConfigureCommand(): Command {
     .option('--region <region>', 'AWS region')
     .option('--user-pool-id <id>', 'Cognito User Pool ID')
     .option('--client-id <id>', 'Cognito App Client ID')
-    .option(
-      '--runtime-jwt-arn <arn>',
-      'ARN of the Cognito-JWT-auth AgentCore Runtime (CFN output: RuntimeJwtArn). '
-      + 'Required for `bgagent watch --transport sse|auto`.',
-    )
     .action((opts) => {
       const existing = tryLoadConfig();
-      const merged: Partial<CliConfig> = {
-        ...(existing ?? {}),
+      const providedFlags = {
         ...(opts.apiUrl !== undefined ? { api_url: opts.apiUrl } : {}),
         ...(opts.region !== undefined ? { region: opts.region } : {}),
         ...(opts.userPoolId !== undefined ? { user_pool_id: opts.userPoolId } : {}),
         ...(opts.clientId !== undefined ? { client_id: opts.clientId } : {}),
-        ...(opts.runtimeJwtArn !== undefined ? { runtime_jwt_arn: opts.runtimeJwtArn } : {}),
+      };
+      const merged: Partial<CliConfig> = {
+        ...(existing ?? {}),
+        ...providedFlags,
       };
 
       // All four core fields must be present after merge — enforces first-time
@@ -66,6 +58,14 @@ export function makeConfigureCommand(): Command {
           `Missing required configuration: ${missing.join(', ')}. `
           + 'Provide all four core fields on the first `bgagent configure` call.',
         );
+      }
+
+      // If the user ran `bgagent configure` with no flags while a complete
+      // config already existed, there is nothing to save — don't print the
+      // misleading "Configuration saved." message.
+      if (existing !== null && Object.keys(providedFlags).length === 0) {
+        console.log('No configuration changes — all flags were omitted.');
+        return;
       }
 
       saveConfig(merged as CliConfig);
