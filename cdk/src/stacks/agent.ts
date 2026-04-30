@@ -55,22 +55,7 @@ export class AgentStack extends Stack {
 
     const runnerPath = path.join(__dirname, '..', '..', '..', 'agent');
 
-    // Two separate AssetImage instances — one per runtime. The L2 construct
-    // grants ECR pull inside ``AssetImage.bind``, but guards the grant with a
-    // ``this.bound`` flag (see the copy of the construct under
-    // ``node_modules/@aws-cdk/aws-bedrock-agentcore-alpha/lib/runtime/
-    // runtime-artifact.js`` — ``AssetImage.bind`` sets ``this.bound = true``
-    // after the first ``grantPull``, so subsequent ``bind()`` calls are
-    // skipped entirely). When the SAME instance is passed to two Runtimes,
-    // the second runtime's execution role never receives ECR permissions →
-    // image pull fails with 424 "no basic auth credentials" on /invocations.
-    //
-    // The DockerImageAsset dedupes on asset hash so we still publish one
-    // image to ECR. Keep this split until the L2 fixes the multi-runtime
-    // bind guard — tracked upstream at
-    // https://github.com/aws/aws-cdk/issues/37663.
-    const artifactIam = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
-    const artifactJwt = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
 
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
@@ -161,12 +146,10 @@ export class AgentStack extends Stack {
 
     inputGuardrail.createVersion('Initial version');
 
-    // --- Runtime-JWT needs the Cognito User Pool + App Client owned by TaskApi.
-    // TaskApi in turn needs the orchestrator ARN (not yet available). We break
-    // the cycle with Lazy strings: TaskApi is constructed first with lazy refs
-    // to the orchestrator alias ARN, which is set once the orchestrator exists.
-    // At synth time the Lazy resolves to a CloudFormation token — no runtime
-    // ordering issue because the stack deploys both resources together.
+    // --- TaskApi is constructed before the orchestrator (which it needs the
+    // ARN of) and before the Runtime (which it needs the ARN of, for the
+    // cancel-task Lambda's stop-session permission). We break both cycles
+    // with Lazy strings that resolve to CloudFormation tokens at synth time.
     let orchestratorArnHolder: string | undefined;
     const lazyOrchestratorArn = Lazy.string({
       produce: () => {
@@ -177,29 +160,19 @@ export class AgentStack extends Stack {
       },
     });
 
-    // Two Runtime ARN placeholders — the runtimes are created AFTER TaskApi
-    // because Runtime-JWT needs the Cognito pool owned by TaskApi.
-    let runtimeIamArnHolder: string | undefined;
-    const lazyRuntimeIamArn = Lazy.string({
+    // Runtime ARN placeholder — the runtime is created AFTER TaskApi so the
+    // Lambda handlers can get their env var via a Lazy.string reference.
+    let runtimeArnHolder: string | undefined;
+    const lazyRuntimeArn = Lazy.string({
       produce: () => {
-        if (!runtimeIamArnHolder) {
-          throw new Error('Runtime-IAM ARN was accessed before RuntimeIam was created');
+        if (!runtimeArnHolder) {
+          throw new Error('Runtime ARN was accessed before Runtime was created');
         }
-        return runtimeIamArnHolder;
-      },
-    });
-    let runtimeJwtArnHolder: string | undefined;
-    const lazyRuntimeJwtArn = Lazy.string({
-      produce: () => {
-        if (!runtimeJwtArnHolder) {
-          throw new Error('Runtime-JWT ARN was accessed before RuntimeJwt was created');
-        }
-        return runtimeJwtArnHolder;
+        return runtimeArnHolder;
       },
     });
 
     // --- Task API (REST API + Cognito + Lambda handlers) ---
-    // Created early so the Cognito User Pool is available for Runtime-JWT below.
     const taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
@@ -209,20 +182,13 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: lazyOrchestratorArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
-      agentCoreStopSessionRuntimeArns: [lazyRuntimeIamArn, lazyRuntimeJwtArn],
+      agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
     });
 
-    // --- Two AgentCore Runtimes (same artifact, different authorizer) ---
+    // --- AgentCore Runtime (IAM-authed orchestrator path) ---
     //
-    // Runtime-IAM: invoked by the OrchestratorFn Lambda via SigV4.
-    // Runtime-JWT: invoked directly by CLI/SPA clients with a Cognito ID token.
-    //
-    // Sessions are scoped to a single runtime ARN (cannot be transferred across
-    // runtimes) but ProgressWriter writes to TaskEventsTable from inside the
-    // container regardless of invocation path, so cross-path observation works.
-    //
-    // Both runtimes share the same execution role requirements, VPC, secrets,
-    // memory, models, and env vars — factor them into shared constants first.
+    // One runtime, invoked by OrchestratorFn via SigV4. See
+    // `docs/design/INTERACTIVE_AGENTS.md` §3.1 and AD-1.
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
@@ -258,92 +224,48 @@ export class AgentStack extends Stack {
       securityGroups: [agentVpc.runtimeSecurityGroup],
     });
 
-    // LifecycleConfiguration — see design doc §9.12.
-    // Defaults (idle=900s, max=28800s) are too aggressive: a 15-minute idle
-    // window will recycle the microVM while a user is reconnecting, losing the
-    // session. Raise idle to match maxLifetime (both capped at 8h by the
-    // AgentCore service quota). maxLifetime remains 8h (service maximum).
-    const sharedLifecycleConfiguration: agentcore.LifecycleConfiguration = {
+    // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
+    // long-running tasks (approval waits, heavy builds) are not evicted.
+    const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
       idleRuntimeSessionTimeout: Duration.hours(8),
       maxLifetime: Duration.hours(8),
     };
 
-    // --- Runtime-IAM (orchestrator path) ---
-    // Uses default IAM authorizer. Consumed by OrchestratorFn.
-    //
-    // Construct id kept as 'Runtime' (not renamed to 'RuntimeIam') so CFN
-    // updates the existing deployed resource in place. Renaming would force
-    // CFN to CREATE a new AgentCore Runtime before DELETING the old one —
-    // both carrying runtimeName 'jean_cloude', which violates AgentCore's
-    // account-level name uniqueness and triggers an UPDATE_ROLLBACK. The TS
-    // variable name `runtimeIam` documents its Phase 1b role.
-    const runtimeIam = new agentcore.Runtime(this, 'Runtime', {
+    // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
+    // CREATE the new resource before DELETING the old one, violating
+    // AgentCore's account-level runtimeName uniqueness and triggering an
+    // UPDATE_ROLLBACK.
+    const runtime = new agentcore.Runtime(this, 'Runtime', {
       runtimeName,
-      agentRuntimeArtifact: artifactIam,
+      agentRuntimeArtifact: artifact,
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
-      lifecycleConfiguration: sharedLifecycleConfiguration,
+      lifecycleConfiguration: lifecycleConfiguration,
     });
 
-    // --- Runtime-JWT (interactive CLI/SPA path) ---
-    // Uses Cognito User Pool JWT authorizer. Consumed directly by clients over
-    // streaming InvokeAgentRuntime (SSE). Phase 1b direct-to-AgentCore path.
-    //
-    // Runtime name must match the AgentCore pattern ^[a-zA-Z][a-zA-Z0-9_]{0,47}$
-    // and must be globally unique per-runtime within the account/region.
-    const runtimeJwtName = `${runtimeName}_jwt`;
-    const runtimeJwt = new agentcore.Runtime(this, 'RuntimeJwt', {
-      runtimeName: runtimeJwtName,
-      agentRuntimeArtifact: artifactJwt,
-      networkConfiguration: runtimeNetworkConfig,
-      environmentVariables: runtimeEnvironmentVariables,
-      lifecycleConfiguration: sharedLifecycleConfiguration,
-      authorizerConfiguration: agentcore.RuntimeAuthorizerConfiguration.usingCognito(
-        taskApi.userPool,
-        [taskApi.appClient],
-      ),
-    });
+    runtimeArnHolder = runtime.agentRuntimeArn;
 
-    runtimeIamArnHolder = runtimeIam.agentRuntimeArn;
-    runtimeJwtArnHolder = runtimeJwt.agentRuntimeArn;
-
-    // --- Session storage (preview) on BOTH runtimes ---
+    // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
-    // CFN escape hatch. Same /mnt/workspace mount on both runtimes so an
-    // interactive task can share the persistent cache with orchestrator-path
-    // tasks in the same repo.
-    for (const rt of [runtimeIam, runtimeJwt]) {
-      const cfnRuntime = rt.node.defaultChild as CfnResource;
-      cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
-        {
-          SessionStorage: {
-            MountPath: '/mnt/workspace',
-          },
+    // CFN escape hatch. /mnt/workspace mount backs the persistent cache
+    // shared across tasks in the same repo.
+    const cfnRuntime = runtime.node.defaultChild as CfnResource;
+    cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
+      {
+        SessionStorage: {
+          MountPath: '/mnt/workspace',
         },
-      ]);
-    }
+      },
+    ]);
 
-    // --- Rev-5 OBS-4 note: no runtime-self-ARN env var ---
-    // An earlier attempt injected each runtime's own ARN as an env var
-    // so `server.py` could write it to TaskTable. That creates a CFN
-    // cycle (Runtime property references the same Runtime's
-    // `AgentRuntimeArn` GetAtt). The interactive path instead records
-    // only `session_id` on TaskTable from server.py; the cancel-task
-    // Lambda resolves the correct runtime ARN by consulting
-    // `execution_mode` on the task record (RUNTIME_IAM_ARN for
-    // orchestrator, RUNTIME_JWT_ARN for interactive) — both ARNs are
-    // known to the cancel-task Lambda at CDK synth time with no cycle.
-
-    // --- Shared IAM grants on BOTH runtimes ---
-    for (const rt of [runtimeIam, runtimeJwt]) {
-      taskTable.table.grantReadWriteData(rt);
-      taskEventsTable.table.grantReadWriteData(rt);
-      taskNudgesTable.table.grantReadWriteData(rt);
-      userConcurrencyTable.table.grantReadWriteData(rt);
-      githubTokenSecret.grantRead(rt);
-      applicationLogGroup.grantWrite(rt);
-      agentMemory.grantReadWrite(rt);
-    }
+    // --- IAM grants ---
+    taskTable.table.grantReadWriteData(runtime);
+    taskEventsTable.table.grantReadWriteData(runtime);
+    taskNudgesTable.table.grantReadWriteData(runtime);
+    userConcurrencyTable.table.grantReadWriteData(runtime);
+    githubTokenSecret.grantRead(runtime);
+    applicationLogGroup.grantWrite(runtime);
+    agentMemory.grantReadWrite(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -377,42 +299,27 @@ export class AgentStack extends Stack {
       model: model2,
     });
 
-    for (const rt of [runtimeIam, runtimeJwt]) {
-      model.grantInvoke(rt);
-      inferenceProfile.grantInvoke(rt);
-      model3.grantInvoke(rt);
-      inferenceProfile3.grantInvoke(rt);
-      model2.grantInvoke(rt);
-      inferenceProfile2.grantInvoke(rt);
+    model.grantInvoke(runtime);
+    inferenceProfile.grantInvoke(runtime);
+    model3.grantInvoke(runtime);
+    inferenceProfile3.grantInvoke(runtime);
+    model2.grantInvoke(runtime);
+    inferenceProfile2.grantInvoke(runtime);
 
-      // Runtime logs and traces (same config for both)
-      rt.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
-      rt.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
-      rt.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
+    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
+    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
 
-      NagSuppressions.addResourceSuppressions(rt, [
-        {
-          id: 'AwsSolutions-IAM5',
-          reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
-        },
-      ], true);
-    }
+    NagSuppressions.addResourceSuppressions(runtime, [
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
+      },
+    ], true);
 
-    new CfnOutput(this, 'RuntimeIamArn', {
-      value: runtimeIam.agentRuntimeArn,
-      description: 'ARN of the AgentCore runtime with IAM authorizer (orchestrator path)',
-    });
-
-    new CfnOutput(this, 'RuntimeJwtArn', {
-      value: runtimeJwt.agentRuntimeArn,
-      description: 'ARN of the AgentCore runtime with Cognito JWT authorizer (interactive CLI/SPA path)',
-    });
-
-    // Backward-compatible alias — existing consumers (dashboards, scripts) that
-    // previously read `RuntimeArn` continue to work; defaults to Runtime-IAM.
     new CfnOutput(this, 'RuntimeArn', {
-      value: runtimeIam.agentRuntimeArn,
-      description: 'Deprecated alias for RuntimeIamArn — the IAM-auth runtime ARN',
+      value: runtime.agentRuntimeArn,
+      description: 'ARN of the AgentCore runtime',
     });
 
     new CfnOutput(this, 'TaskTableName', {
@@ -471,14 +378,12 @@ export class AgentStack extends Stack {
     // });
 
     // --- Task Orchestrator (durable Lambda function) ---
-    // runtimeArn points to Runtime-IAM only — the orchestrator must NOT invoke
-    // Runtime-JWT (which requires a Cognito ID token from a real user).
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
       repoTable: repoTable.table,
-      runtimeArn: runtimeIam.agentRuntimeArn,
+      runtimeArn: runtime.agentRuntimeArn,
       githubTokenSecretArn: githubTokenSecret.secretArn,
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
@@ -508,33 +413,29 @@ export class AgentStack extends Stack {
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
-    // --- Stranded-task reconciler (rev-5 P0-c) ---
-    // Fails SUBMITTED / HYDRATING tasks whose pipeline never started.
-    // Complements the `bgagent run` client-side cancel on SSE fatal by
-    // catching the CLI-dead edge case (kill -9, network partition, or
-    // orchestrator Lambda crash).
+    // --- Stranded-task reconciler ---
+    // Catches SUBMITTED / HYDRATING tasks whose pipeline never started
+    // (orchestrator Lambda crash between TaskTable write and InvokeAgentRuntime,
+    // container crash during startup, etc.). Transitions to FAILED with a
+    // `task_stranded` event.
     new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
-    // --- Fan-out plane consumer (Phase 1b §8.9) ---
-    // Consumes TaskEventsTable DynamoDB Streams and dispatches
-    // milestones / terminal events / pr_created signals to
-    // non-interactive channels (Slack, GitHub PR comments, email).
-    // Ships as a skeleton: dispatchers log-only until per-channel
-    // integrations land incrementally. No change to agent or CLI.
+    // --- Fan-out plane consumer ---
+    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
+    // Slack / GitHub / email per per-channel default filters. Ships as a
+    // router with log-only dispatchers; real integrations land incrementally.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
     });
 
     // --- Operator dashboard ---
-    // Dashboards the orchestrator-path runtime (Runtime-IAM). Runtime-JWT
-    // metrics can be added in a later phase when interactive telemetry matures.
     new TaskDashboard(this, 'TaskDashboard', {
       applicationLogGroup,
-      runtimeArn: runtimeIam.agentRuntimeArn,
+      runtimeArn: runtime.agentRuntimeArn,
     });
 
     // --- Bedrock model invocation logging (account-level) ---

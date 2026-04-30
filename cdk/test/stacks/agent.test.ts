@@ -58,10 +58,10 @@ describe('AgentStack', () => {
     expect(props.StreamSpecification).toBeUndefined();
   });
 
-  test('both runtimes receive NUDGES_TABLE_NAME env var', () => {
+  test('runtime receives NUDGES_TABLE_NAME env var', () => {
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     const runtimeList = Object.values(runtimes);
-    expect(runtimeList).toHaveLength(2);
+    expect(runtimeList).toHaveLength(1);
     for (const rt of runtimeList) {
       const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
         .Properties?.EnvironmentVariables ?? {};
@@ -99,53 +99,15 @@ describe('AgentStack', () => {
     });
   });
 
-  test('outputs RuntimeArn (backward-compatible alias for RuntimeIamArn)', () => {
-    template.hasOutput('RuntimeArn', {
-      Description: 'Deprecated alias for RuntimeIamArn — the IAM-auth runtime ARN',
-    });
+  test('outputs RuntimeArn', () => {
+    template.hasOutput('RuntimeArn', {});
   });
 
-  test('outputs RuntimeIamArn for the IAM-auth runtime (orchestrator path)', () => {
-    template.hasOutput('RuntimeIamArn', {
-      Description: 'ARN of the AgentCore runtime with IAM authorizer (orchestrator path)',
-    });
+  test('creates exactly one AgentCore Runtime', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
   });
 
-  test('outputs RuntimeJwtArn for the Cognito-JWT-auth runtime (interactive path)', () => {
-    template.hasOutput('RuntimeJwtArn', {
-      Description: 'ARN of the AgentCore runtime with Cognito JWT authorizer (interactive CLI/SPA path)',
-    });
-  });
-
-  test('creates exactly two AgentCore Runtimes (Runtime-IAM and Runtime-JWT)', () => {
-    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 2);
-  });
-
-  test('Runtime-JWT has a Cognito JWT authorizer pointing at the TaskApi User Pool', () => {
-    // Find the JWT-auth runtime — it has an AuthorizerConfiguration with CustomJWTAuthorizer.
-    // The other runtime uses default IAM auth (no AuthorizerConfiguration present).
-    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
-    const jwtRuntimes = Object.values(runtimes).filter(r => r.Properties?.AuthorizerConfiguration);
-    expect(jwtRuntimes).toHaveLength(1);
-    const jwtAuth = jwtRuntimes[0]!.Properties.AuthorizerConfiguration.CustomJWTAuthorizer;
-    expect(jwtAuth).toBeDefined();
-    // Cognito issuer URL embeds the UserPool id — validated by checking for
-    // cognito-idp in the DiscoveryUrl and presence of AllowedClients.
-    const discoveryUrl = JSON.stringify(jwtAuth.DiscoveryUrl);
-    expect(discoveryUrl).toContain('cognito-idp');
-    expect(discoveryUrl).toContain('.well-known/openid-configuration');
-    expect(jwtAuth.AllowedClients).toBeDefined();
-  });
-
-  test('both runtime execution roles carry ECR pull permissions (rev-5 CDK-2)', () => {
-    // Regression: the L2 AgentRuntimeArtifact.fromAsset has a double-attach
-    // guard (AssetImage.bind's `this.bound = true`) that silently skips
-    // granting ECR pull perms to the second runtime when a single asset
-    // instance is shared. We work around it in agent.ts by calling
-    // fromAsset twice (one per runtime); if a future refactor collapses
-    // them back to one, this test will fail. The JWT runtime's missing
-    // ECR perms produced a 424 Failed Dependency outage during rev-5
-    // bring-up.
+  test('runtime execution role carries ECR pull permissions', () => {
     const policies = template.findResources('AWS::IAM::Policy');
 
     const rolesWithEcrPull = Object.values(policies).filter(policy => {
@@ -159,17 +121,13 @@ describe('AgentStack', () => {
       });
     });
 
-    // Both the IAM runtime execution role AND the JWT runtime execution role
-    // must be among the policies with ECR pull. (Their sibling policies
-    // also carry `ecr:GetAuthorizationToken`, so we look for the
-    // repo-scoped triplet that the AgentRuntimeArtifact grant emits.)
-    expect(rolesWithEcrPull.length).toBeGreaterThanOrEqual(2);
+    expect(rolesWithEcrPull.length).toBeGreaterThanOrEqual(1);
   });
 
-  test('both runtimes have 8-hour lifecycle limits (idle + max)', () => {
+  test('runtime has 8-hour lifecycle limits (idle + max)', () => {
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     const runtimeList = Object.values(runtimes);
-    expect(runtimeList).toHaveLength(2);
+    expect(runtimeList).toHaveLength(1);
     for (const rt of runtimeList) {
       expect(rt.Properties?.LifecycleConfiguration).toEqual({
         IdleRuntimeSessionTimeout: 28800,
@@ -190,7 +148,7 @@ describe('AgentStack', () => {
     });
   });
 
-  test('orchestrator IAM policy grants InvokeAgentRuntime on Runtime-IAM only (NOT Runtime-JWT)', () => {
+  test('orchestrator IAM policy grants InvokeAgentRuntime on the runtime', () => {
     // Find the orchestrator's IAM policy that contains InvokeAgentRuntime.
     const policies = template.findResources('AWS::IAM::Policy');
     const invokePolicies = Object.values(policies).filter(p => {
@@ -202,12 +160,10 @@ describe('AgentStack', () => {
     });
     expect(invokePolicies.length).toBeGreaterThanOrEqual(1);
 
-    // The policy must reference Runtime-IAM's ARN (via Fn::GetAtt on the
-    // Runtime* logical id — kept as 'Runtime' to avoid resource replacement)
-    // and must NOT reference Runtime-JWT's ARN.
+    // The policy must reference the runtime's ARN (via Fn::GetAtt on the
+    // Runtime* logical id).
     const serialized = JSON.stringify(invokePolicies);
     expect(serialized).toMatch(/"Fn::GetAtt":\["Runtime[0-9A-F]+","AgentRuntimeArn"\]/);
-    expect(serialized).not.toContain('RuntimeJwt');
   });
 
   test('outputs ApiUrl', () => {

@@ -73,13 +73,6 @@ export interface TaskRecord {
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
   readonly compute_metadata?: Record<string, string>;
-  /**
-   * Execution mode recorded at task creation time (rev 5, §9.13.4). Used by
-   * `server.py` on Runtime-JWT to reject SSE spawn attempts on tasks that
-   * were submitted via the orchestrator path (RUN_ELSEWHERE guard). If
-   * unset, the task predates rev 5 and is treated as `'orchestrator'`.
-   */
-  readonly execution_mode?: ExecutionMode;
   readonly ttl?: number;
 }
 
@@ -117,12 +110,14 @@ export interface TaskDetail {
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
   /**
-   * Execution mode the task was submitted with (rev 5, §9.13.4). Lets the
-   * CLI pick the correct transport for `watch`: tasks with
-   * `'orchestrator'` (or missing, for legacy tasks) must use polling; only
-   * `'interactive'` tasks are observable via SSE on Runtime-JWT.
+   * SHIM (Chunk A, removed in Chunk D). Older CLIs declare
+   * `execution_mode: ExecutionMode | null` as non-optional and parse the
+   * response eagerly. We keep emitting a constant `'orchestrator'` so those
+   * CLIs don't throw at parse time during the rollout window. The field
+   * and this shim both go away when Chunk D lands and the CLI drops the
+   * matching declaration.
    */
-  readonly execution_mode: ExecutionMode | null;
+  readonly execution_mode?: 'orchestrator';
 }
 
 /**
@@ -177,48 +172,6 @@ export interface GetTaskEventsQuery {
 }
 
 /**
- * How a task's pipeline should be executed (rev 5, §9.13).
- *
- * - `'orchestrator'` (default, Phase 1a behaviour): the CreateTask Lambda
- *   async-invokes the orchestrator, which calls Runtime-IAM. The pipeline
- *   runs on Runtime-IAM independent of any live watcher. This is the only
- *   correct choice for non-interactive channels (webhook, Slack, cron).
- * - `'interactive'` (rev 5 Branch A Path 1): the CreateTask Lambda SKIPS
- *   the orchestrator invoke. The caller is expected to immediately open an
- *   SSE connection to Runtime-JWT's /invocations with the returned task_id,
- *   so the pipeline runs same-process with the stream (real-time). If no
- *   SSE connection is established, the task stays in PENDING and is
- *   eventually cleaned up by the concurrency reconciler.
- *
- * Only the Cognito-authed API path accepts `'interactive'`. The webhook
- * path (no live watcher by definition) rejects it with 400.
- */
-export type ExecutionMode = 'orchestrator' | 'interactive';
-
-/**
- * Closed union of well-known API error codes (rev-5 TDA-3).
- *
- * Used by the SSE data-plane on Runtime-JWT (server.py) where non-2xx
- * responses carry an ad-hoc JSON body rather than going through the
- * REST API Gateway's structured ErrorResponse envelope. KEEP IN SYNC
- * with `cli/src/types.ts` and the `agent/src/server.py` constants.
- */
-export type ApiErrorCode =
-  | 'RUN_ELSEWHERE'
-  | 'TASK_STATE_UNAVAILABLE'
-  | 'SSE_ATTACH_RACE'
-  | 'TASK_RECORD_INCOMPLETE';
-
-/** Typed envelope for SSE data-plane error bodies. */
-export interface ApiErrorBody<C extends ApiErrorCode = ApiErrorCode> {
-  readonly code: C;
-  readonly message: string;
-  readonly details?: Record<string, unknown>;
-  readonly execution_mode?: ExecutionMode;
-  readonly missing?: readonly string[];
-}
-
-/**
  * Create task request body.
  */
 export interface CreateTaskRequest {
@@ -230,7 +183,6 @@ export interface CreateTaskRequest {
   readonly task_type?: TaskType;
   readonly pr_number?: number;
   readonly attachments?: Attachment[];
-  readonly execution_mode?: ExecutionMode;
 }
 
 /**
@@ -275,7 +227,9 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     turns_attempted: record.turns_attempted ?? null,
     turns_completed: record.turns_completed ?? null,
     prompt_version: record.prompt_version ?? null,
-    execution_mode: record.execution_mode ?? null,
+    // SHIM (Chunk A, removed in Chunk D): constant value for old-CLI parse
+    // compatibility. See the field comment on TaskDetail.
+    execution_mode: 'orchestrator',
   };
 }
 

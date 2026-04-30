@@ -29,8 +29,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'Concurrency';
-process.env.STRANDED_INTERACTIVE_TIMEOUT_SECONDS = '300';
-process.env.STRANDED_ORCHESTRATOR_TIMEOUT_SECONDS = '1200';
+process.env.STRANDED_TIMEOUT_SECONDS = '1200';
 process.env.TASK_RETENTION_DAYS = '90';
 
 import { handler } from '../../src/handlers/reconcile-stranded-tasks';
@@ -42,13 +41,11 @@ function mockTaskRow(opts: {
   task_id: string;
   user_id: string;
   created_at: string;
-  execution_mode?: string;
 }): Record<string, { S: string }> {
   return {
     task_id: { S: opts.task_id },
     user_id: { S: opts.user_id },
     created_at: { S: opts.created_at },
-    ...(opts.execution_mode && { execution_mode: { S: opts.execution_mode } }),
   };
 }
 
@@ -86,16 +83,15 @@ describe('reconcile-stranded-tasks', () => {
     expect(mockDdbSend).toHaveBeenCalledTimes(2);
   });
 
-  test('interactive task older than 300s → fails + emits events + decrements concurrency', async () => {
-    const ancient = new Date(Date.now() - 10 * 60 * 1000).toISOString(); // 10 min ago
+  test('task older than 1200s → fails + emits events + decrements concurrency', async () => {
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString(); // 25 min ago
     primeResponses([
-      // Query SUBMITTED returns one stranded interactive candidate.
+      // Query SUBMITTED returns one stranded candidate.
       {
         Items: [mockTaskRow({
-          task_id: 't-stranded-interactive',
+          task_id: 't-stranded',
           user_id: 'u-1',
           created_at: ancient,
-          execution_mode: 'interactive',
         })],
       },
       {}, // conditional UpdateItem → FAILED
@@ -115,7 +111,7 @@ describe('reconcile-stranded-tasks', () => {
       Key: { task_id: { S: string } };
       ExpressionAttributeValues: Record<string, { S?: string }>;
     };
-    expect(input.Key.task_id.S).toBe('t-stranded-interactive');
+    expect(input.Key.task_id.S).toBe('t-stranded');
     expect(input.ExpressionAttributeValues[':failed'].S).toBe('FAILED');
     expect(input.ExpressionAttributeValues[':expected'].S).toBe('SUBMITTED');
 
@@ -135,84 +131,8 @@ describe('reconcile-stranded-tasks', () => {
     expect(decrementCall).toBeDefined();
   });
 
-  test('orchestrator task younger than 1200s is NOT failed (threshold respected)', async () => {
-    // Query's sort-key condition uses the INTERACTIVE (stricter/shorter)
-    // cutoff, so this orchestrator row may come back from the query, but
-    // the in-code per-mode filter must skip it. Age: 10 min (600s) —
-    // older than interactive (300s) but younger than orchestrator (1200s).
-    const mid = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-    primeResponses([
-      {
-        Items: [mockTaskRow({
-          task_id: 't-orch-young',
-          user_id: 'u-1',
-          created_at: mid,
-          execution_mode: 'orchestrator',
-        })],
-      },
-      { Items: [] }, // Query HYDRATING
-    ]);
-
-    await handler();
-
-    const writes = (mockDdbSend.mock.calls as [{ _type: string }][])
-      .filter(([c]) => c._type === 'UpdateItem' || c._type === 'PutItem');
-    expect(writes).toHaveLength(0);
-  });
-
-  test('orchestrator task older than 1200s → failed', async () => {
-    const veryOld = new Date(Date.now() - 25 * 60 * 1000).toISOString(); // 25 min
-    primeResponses([
-      {
-        Items: [mockTaskRow({
-          task_id: 't-orch-stranded',
-          user_id: 'u-2',
-          created_at: veryOld,
-          execution_mode: 'orchestrator',
-        })],
-      },
-      {}, // UpdateItem transition
-      {}, // task_stranded event
-      {}, // task_failed event
-      {}, // concurrency decrement
-      { Items: [] }, // HYDRATING query
-    ]);
-
-    await handler();
-
-    const transitionCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
-      .find(([c]) => c._type === 'UpdateItem' && String(c.input.ConditionExpression).includes('= :expected'));
-    expect(transitionCall).toBeDefined();
-    const input = transitionCall![0].input as {
-      Key: { task_id: { S: string } };
-    };
-    expect(input.Key.task_id.S).toBe('t-orch-stranded');
-  });
-
-  test('legacy task (no execution_mode) → treated as orchestrator threshold', async () => {
-    const veryOld = new Date(Date.now() - 25 * 60 * 1000).toISOString();
-    primeResponses([
-      {
-        Items: [mockTaskRow({
-          task_id: 't-legacy',
-          user_id: 'u-3',
-          created_at: veryOld,
-          // execution_mode omitted
-        })],
-      },
-      {}, {}, {}, {}, // transition + 2 events + decrement
-      { Items: [] }, // HYDRATING query
-    ]);
-
-    await handler();
-
-    const transitionCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
-      .find(([c]) => c._type === 'UpdateItem' && String(c.input.ConditionExpression).includes('= :expected'));
-    expect(transitionCall).toBeDefined();
-  });
-
   test('task advances during reconcile (ConditionalCheckFailedException) → skipped cleanly', async () => {
-    const ancient = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     const conditionalErr = Object.assign(new Error('ConditionalCheckFailed'), {
       name: 'ConditionalCheckFailedException',
     });
@@ -222,7 +142,6 @@ describe('reconcile-stranded-tasks', () => {
           task_id: 't-raced',
           user_id: 'u-4',
           created_at: ancient,
-          execution_mode: 'interactive',
         })],
       },
       conditionalErr, // UpdateItem transition rejected (task already advanced)
@@ -257,7 +176,7 @@ describe('reconcile-stranded-tasks', () => {
   });
 
   test('query paginates with ExclusiveStartKey when LastEvaluatedKey present', async () => {
-    const ancient = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     // findStrandedCandidates paginates internally and returns ALL rows
     // before the handler starts writing. So the call order is:
     //   Query SUBMITTED page1 (with LEK) → Query SUBMITTED page2 (no LEK)
@@ -270,7 +189,6 @@ describe('reconcile-stranded-tasks', () => {
           task_id: 't-page1',
           user_id: 'u-a',
           created_at: ancient,
-          execution_mode: 'interactive',
         })],
         LastEvaluatedKey: { task_id: { S: 't-page1' } },
       },
@@ -280,7 +198,6 @@ describe('reconcile-stranded-tasks', () => {
           task_id: 't-page2',
           user_id: 'u-b',
           created_at: ancient,
-          execution_mode: 'interactive',
         })],
       },
       // Writes for both candidates (4 each = 8 total).

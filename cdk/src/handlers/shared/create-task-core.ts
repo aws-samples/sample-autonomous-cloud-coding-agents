@@ -69,21 +69,7 @@ export async function createTaskCore(
   body: CreateTaskRequest,
   context: TaskCreationContext,
   requestId: string,
-  allowedExecutionModes: readonly ('orchestrator' | 'interactive')[] = ['orchestrator'],
 ): Promise<APIGatewayProxyResult> {
-  // 0. Validate execution_mode (rev 5 Branch A, §9.13).
-  // Cognito-authed callers get ['orchestrator', 'interactive'];
-  // webhook callers get ['orchestrator'] only (no live watcher ever).
-  const executionMode = body.execution_mode ?? 'orchestrator';
-  if (!allowedExecutionModes.includes(executionMode)) {
-    return errorResponse(
-      400,
-      ErrorCode.VALIDATION_ERROR,
-      `execution_mode='${executionMode}' is not allowed for this channel. Allowed: ${allowedExecutionModes.join(', ')}.`,
-      requestId,
-    );
-  }
-
   // 1. Validate request body
   if (!body.repo || !isValidRepo(body.repo)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
@@ -213,7 +199,6 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
-    execution_mode: executionMode,
     status_created_at: `${TaskStatus.SUBMITTED}#${now}`,
     created_at: now,
     updated_at: now,
@@ -260,22 +245,8 @@ export async function createTaskCore(
     request_id: requestId,
   });
 
-  // 8. Async-invoke the orchestrator (fire-and-forget) — UNLESS the caller
-  //    requested execution_mode='interactive'. In that mode the CLI is
-  //    about to open SSE to Runtime-JWT and the pipeline runs same-process
-  //    with the stream (rev 5 §9.13.4). The orchestrator invoke would be a
-  //    duplicate pipeline.
-  if (executionMode === 'interactive') {
-    // Rev-5 OBS-3: stable event name so Logs Insights can filter on
-    // `event = 'task.admitted.orchestrator_skipped'` without free-text
-    // substring matching on log messages.
-    logger.info('Admission: interactive mode, orchestrator invoke skipped', {
-      event: 'task.admitted.orchestrator_skipped',
-      task_id: taskId,
-      execution_mode: executionMode,
-      request_id: requestId,
-    });
-  } else if (lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
+  // 8. Async-invoke the orchestrator (fire-and-forget)
+  if (lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
     try {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: process.env.ORCHESTRATOR_FUNCTION_ARN,
@@ -285,7 +256,6 @@ export async function createTaskCore(
       logger.info('Orchestrator invoked', {
         event: 'task.admitted.orchestrator_invoked',
         task_id: taskId,
-        execution_mode: executionMode,
         request_id: requestId,
       });
     } catch (orchErr) {

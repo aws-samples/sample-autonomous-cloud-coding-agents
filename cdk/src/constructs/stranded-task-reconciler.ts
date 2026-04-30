@@ -50,34 +50,26 @@ export interface StrandedTaskReconcilerProps {
   readonly schedule?: Duration;
 
   /**
-   * Stranded-timeout for `execution_mode='interactive'` tasks. Set via
-   * the Lambda env `STRANDED_INTERACTIVE_TIMEOUT_SECONDS`.
-   *
-   * @default 300 (5 minutes)
-   */
-  readonly interactiveTimeoutSeconds?: number;
-
-  /**
-   * Stranded-timeout for `execution_mode='orchestrator'` / legacy tasks.
-   * Set via `STRANDED_ORCHESTRATOR_TIMEOUT_SECONDS`.
+   * Stranded-timeout (seconds). Tasks in SUBMITTED or HYDRATING older
+   * than this are transitioned to FAILED. Set via
+   * `STRANDED_TIMEOUT_SECONDS`.
    *
    * @default 1200 (20 minutes)
    */
-  readonly orchestratorTimeoutSeconds?: number;
+  readonly strandedTimeoutSeconds?: number;
 
   /** Forwarded to the handler for event TTL. @default 90 */
   readonly taskRetentionDays?: number;
 }
 
 /**
- * Scheduled Lambda that fails stranded tasks (rev-5 P0-c).
+ * Scheduled Lambda that fails stranded tasks.
  *
  * A stranded task is one admitted into TaskTable (SUBMITTED or HYDRATING)
- * whose pipeline never started — either the CLI died between admission
- * and SSE connect, or the orchestrator Lambda crashed between write and
- * sync invoke. Left alone these permanently consume a user's concurrency
- * slot. The `bgagent run` CLI auto-cancels the common case; this handler
- * catches the rest.
+ * whose pipeline never started — typically because the orchestrator
+ * Lambda crashed between admission and InvokeAgentRuntime, or because the
+ * agent container crashed during startup. Left alone these permanently
+ * consume a user's concurrency slot.
  *
  * RUNNING / FINALIZING tasks are handled separately by `pollTaskStatus`
  * in `orchestrator.ts` via the `agent_heartbeat_at` timeout.
@@ -90,8 +82,7 @@ export class StrandedTaskReconciler extends Construct {
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
 
-    const interactiveTimeout = props.interactiveTimeoutSeconds ?? 300;
-    const orchestratorTimeout = props.orchestratorTimeoutSeconds ?? 1200;
+    const strandedTimeout = props.strandedTimeoutSeconds ?? 1200;
     const retentionDays = props.taskRetentionDays ?? 90;
 
     this.fn = new lambda.NodejsFunction(this, 'ReconcilerFn', {
@@ -105,8 +96,7 @@ export class StrandedTaskReconciler extends Construct {
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
-        STRANDED_INTERACTIVE_TIMEOUT_SECONDS: String(interactiveTimeout),
-        STRANDED_ORCHESTRATOR_TIMEOUT_SECONDS: String(orchestratorTimeout),
+        STRANDED_TIMEOUT_SECONDS: String(strandedTimeout),
         TASK_RETENTION_DAYS: String(retentionDays),
       },
       bundling: {

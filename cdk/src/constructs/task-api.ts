@@ -108,10 +108,11 @@ export interface TaskApiProps {
   readonly webhookRetentionDays?: number;
 
   /**
-   * AgentCore runtime ARNs for which cancel-task may call `StopRuntimeSession`.
-   * First ARN is also passed as `RUNTIME_ARN` when the task record has no `agent_runtime_arn`.
+   * AgentCore runtime ARN for which cancel-task may call `StopRuntimeSession`.
+   * Also passed as `RUNTIME_ARN` to cancel-task so it can resolve the target
+   * runtime when a task record lacks `agent_runtime_arn`.
    */
-  readonly agentCoreStopSessionRuntimeArns?: string[];
+  readonly agentCoreStopSessionRuntimeArn?: string;
 
   /**
    * ECS cluster ARN for cancel-task to stop ECS-backed tasks.
@@ -148,8 +149,6 @@ export class TaskApi extends Construct {
 
   /**
    * The Cognito User Pool App Client.
-   * Exposed so other stacks/resources (e.g. AgentCore Runtime-JWT) can reference
-   * the same pool + client for Cognito-backed authorization.
    */
   public readonly appClient: cognito.UserPoolClient;
 
@@ -366,18 +365,9 @@ export class TaskApi extends Construct {
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
-    const stopSessionArns = props.agentCoreStopSessionRuntimeArns ?? [];
-    if (stopSessionArns.length > 0) {
-      // Legacy env (pre-rev-5) pointed at the orchestrator runtime only.
-      cancelTaskEnv.RUNTIME_ARN = stopSessionArns[0]!;
-      // Rev-5 OBS-4: disambiguate by execution_mode. By convention the
-      // stopSessionArns array is [iam, jwt]. Pass both so cancel-task can
-      // resolve the correct runtime for interactive tasks (which record
-      // `execution_mode='interactive'` but not their runtime ARN).
-      cancelTaskEnv.RUNTIME_IAM_ARN = stopSessionArns[0]!;
-      if (stopSessionArns[1]) {
-        cancelTaskEnv.RUNTIME_JWT_ARN = stopSessionArns[1];
-      }
+    const stopSessionArn = props.agentCoreStopSessionRuntimeArn;
+    if (stopSessionArn) {
+      cancelTaskEnv.RUNTIME_ARN = stopSessionArn;
     }
     if (props.ecsClusterArn) {
       cancelTaskEnv.ECS_CLUSTER_ARN = props.ecsClusterArn;
@@ -414,11 +404,10 @@ export class TaskApi extends Construct {
     props.taskTable.grantReadWriteData(cancelTaskFn);
     props.taskEventsTable.grantReadWriteData(cancelTaskFn);
 
-    if (stopSessionArns.length > 0) {
-      const runtimeResources = stopSessionArns.flatMap(arn => [arn, `${arn}/*`]);
+    if (stopSessionArn) {
       cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['bedrock-agentcore:StopRuntimeSession'],
-        resources: runtimeResources,
+        resources: [stopSessionArn, `${stopSessionArn}/*`],
       }));
     }
 

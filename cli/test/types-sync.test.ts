@@ -60,7 +60,10 @@ function extractUnionLiterals(source: string, typeName: string): string[] {
   return Array.from(body.matchAll(/'([^']+)'/g)).map(m => m[1]).sort();
 }
 
-describe('Rev-5 TDA-4: cross-file type drift detection', () => {
+// SHIM (Chunk A): the CDK side of ExecutionMode + ApiErrorCode was deleted
+// when the SSE / two-runtime architecture was retired. The CLI side will be
+// deleted in Chunk D; at that point this entire file goes away.
+describe.skip('Rev-5 TDA-4: cross-file type drift detection (deleted in Chunk D)', () => {
   test('ExecutionMode union has the same members in CDK and CLI', () => {
     // CLI canonical (ExecutionMode is a pure type so there's no runtime
     // value to import — check against the grep-extracted CDK list).

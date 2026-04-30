@@ -18,22 +18,13 @@
  */
 
 /**
- * Scheduled handler: find and fail stranded tasks (rev-5, addresses P0-c
- * from the pre-push validation pass).
+ * Scheduled handler: find and fail stranded tasks.
  *
  * A stranded task is one whose admission write landed in TaskTable but
- * whose pipeline never started — either because:
- *
- * - (interactive) the CLI died between `POST /v1/tasks` (201) and the
- *   subsequent SSE connect to Runtime-JWT, so server.py never saw the
- *   `/invocations` request and never spawned a pipeline; OR
- * - (orchestrator) the orchestrator Lambda crashed between the TaskTable
- *   write and the Runtime-IAM sync invocation.
- *
- * The `bgagent run` CLI (rev-5 `run.ts`) auto-cancels on SSE fatal
- * errors, which handles the common case. This reconciler exists for the
- * edge cases that the CLI can't catch (`kill -9`, hard network partition,
- * orchestrator crash).
+ * whose pipeline never started — typically because the orchestrator
+ * Lambda crashed between the TaskTable write and the InvokeAgentRuntime
+ * call, or because the agent container crashed during startup before
+ * writing its first heartbeat.
  *
  * RUNNING / FINALIZING tasks are handled separately by `pollTaskStatus`
  * in `orchestrator.ts` via the `agent_heartbeat_at` timeout path — this
@@ -54,19 +45,11 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
 const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;
 
-/** Timeout for interactive tasks. A CLI that opens SSE promptly hits
- *  Runtime-JWT within seconds of admission; 300 s is generous. */
-const INTERACTIVE_TIMEOUT_SECONDS = Number(
-  process.env.STRANDED_INTERACTIVE_TIMEOUT_SECONDS ?? '300',
-);
-
-/** Timeout for orchestrator tasks. The orchestrator Lambda is async-
- *  invoked and Runtime-IAM has a cold-start path; 1200 s covers Lambda
- *  retries + AgentCore container warm-up without false positives. Also
- *  applies to legacy tasks (no `execution_mode` field, treated as
- *  orchestrator by the server). */
-const ORCHESTRATOR_TIMEOUT_SECONDS = Number(
-  process.env.STRANDED_ORCHESTRATOR_TIMEOUT_SECONDS ?? '1200',
+/** Stranded-task timeout. The orchestrator Lambda is async-invoked and
+ *  the agent runtime has a cold-start path; 1200 s covers Lambda retries
+ *  + AgentCore container warm-up without false positives. */
+const STRANDED_TIMEOUT_SECONDS = Number(
+  process.env.STRANDED_TIMEOUT_SECONDS ?? '1200',
 );
 
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -75,28 +58,22 @@ interface StrandedCandidate {
   readonly task_id: string;
   readonly user_id: string;
   readonly status: string;
-  readonly execution_mode: string;
   readonly created_at: string;
   readonly age_seconds: number;
 }
 
 /**
  * Query TaskTable by (status, created_at) via the StatusIndex GSI and
- * return rows older than their applicable timeout.
+ * return rows older than the stranded timeout.
  *
  * One query per status (SUBMITTED, HYDRATING) using a sort-key condition
- * `created_at < :cutoff`. Cutoff is the LOOSER of the two timeouts
- * (orchestrator's 1200s) so the query pulls every potential stranded
- * candidate; per-row filtering below classifies each by its
- * `execution_mode` using the stricter interactive threshold where
- * applicable.
+ * `created_at < :cutoff`.
  */
 async function findStrandedCandidates(
   status: 'SUBMITTED' | 'HYDRATING',
   now: Date,
 ): Promise<StrandedCandidate[]> {
-  const looserCutoff = new Date(now.getTime() - ORCHESTRATOR_TIMEOUT_SECONDS * 1000);
-  const stricterCutoff = new Date(now.getTime() - INTERACTIVE_TIMEOUT_SECONDS * 1000);
+  const cutoff = new Date(now.getTime() - STRANDED_TIMEOUT_SECONDS * 1000);
 
   const matches: StrandedCandidate[] = [];
   let lastKey: Record<string, unknown> | undefined;
@@ -109,7 +86,7 @@ async function findStrandedCandidates(
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':status': { S: status },
-        ':cutoff': { S: stricterCutoff.toISOString() },
+        ':cutoff': { S: cutoff.toISOString() },
       },
       ExclusiveStartKey: lastKey as Record<string, never> | undefined,
     }));
@@ -118,34 +95,15 @@ async function findStrandedCandidates(
       const taskId = item.task_id?.S;
       const userId = item.user_id?.S;
       const createdAt = item.created_at?.S;
-      const executionMode = item.execution_mode?.S ?? 'orchestrator';
       if (!taskId || !userId || !createdAt) continue;
 
       const createdMs = Date.parse(createdAt);
       const ageSec = Math.floor((now.getTime() - createdMs) / 1000);
 
-      // Apply the per-mode threshold.
-      const threshold = executionMode === 'interactive'
-        ? INTERACTIVE_TIMEOUT_SECONDS
-        : ORCHESTRATOR_TIMEOUT_SECONDS;
-
-      if (ageSec < threshold) {
-        // Caught by the loose cutoff but not actually stranded for its mode.
-        continue;
-      }
-
-      // Defensive: confirm the row is still older than the orchestrator
-      // loose cutoff (should always be true given the sort-key condition,
-      // but guard against clock skew).
-      if (createdMs >= looserCutoff.getTime() && executionMode !== 'interactive') {
-        continue;
-      }
-
       matches.push({
         task_id: taskId,
         user_id: userId,
         status,
-        execution_mode: executionMode,
         created_at: createdAt,
         age_seconds: ageSec,
       });
@@ -164,10 +122,10 @@ async function findStrandedCandidates(
  */
 async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
   const now = new Date().toISOString();
-  const errorMessage = `Stranded: ${task.status} for ${task.age_seconds}s (execution_mode=${task.execution_mode}) — `
+  const errorMessage = `Stranded: ${task.status} for ${task.age_seconds}s — `
     + 'no pipeline attached before the stranded-task timeout. '
-    + 'This usually means the CLI crashed between admission and SSE connect, '
-    + 'or the orchestrator Lambda crashed before invoking the runtime.';
+    + 'This usually means the orchestrator Lambda crashed before invoking '
+    + 'the runtime, or the agent container crashed during startup.';
 
   // 1. Conditional status transition — only if still in the stranded state.
   try {
@@ -216,7 +174,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
           M: {
             code: { S: 'STRANDED_NO_HEARTBEAT' },
             prior_status: { S: task.status },
-            execution_mode: { S: task.execution_mode },
             age_seconds: { N: String(task.age_seconds) },
           },
         },
@@ -280,8 +237,7 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
 
 export async function handler(): Promise<void> {
   logger.info('Stranded-task reconciler started', {
-    interactive_timeout_s: INTERACTIVE_TIMEOUT_SECONDS,
-    orchestrator_timeout_s: ORCHESTRATOR_TIMEOUT_SECONDS,
+    stranded_timeout_s: STRANDED_TIMEOUT_SECONDS,
   });
 
   const now = new Date();
@@ -309,7 +265,6 @@ export async function handler(): Promise<void> {
       logger.info('Detected stranded task', {
         task_id: task.task_id,
         status: task.status,
-        execution_mode: task.execution_mode,
         age_seconds: task.age_seconds,
       });
       try {
