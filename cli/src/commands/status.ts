@@ -19,12 +19,12 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { formatJson, formatTaskDetail } from '../format';
+import { formatJson, formatStatusSnapshot, formatTaskDetail } from '../format';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
 export function makeStatusCommand(): Command {
   return new Command('status')
-    .description('Get task status')
+    .description('Get a deterministic status snapshot of a task')
     .argument('<task-id>', 'Task ID')
     .option('--wait', 'Wait for task to reach terminal status')
     .option('--output <format>', 'Output format (text or json)', 'text')
@@ -32,13 +32,24 @@ export function makeStatusCommand(): Command {
       const client = new ApiClient();
 
       if (opts.wait) {
+        // ``--wait`` blocks until terminal and prints the full task-detail
+        // view. The snapshot template is recency-biased and less useful
+        // once the task has landed; reuse ``formatTaskDetail`` for that case.
         const task = await waitForTask(client, taskId);
         process.stderr.write('\n');
         console.log(opts.output === 'json' ? formatJson(task) : formatTaskDetail(task));
         process.exitCode = exitCodeForStatus(task.status);
-      } else {
-        const task = await client.getTask(taskId);
-        console.log(opts.output === 'json' ? formatJson(task) : formatTaskDetail(task));
+        return;
       }
+
+      if (opts.output === 'json') {
+        // JSON consumers keep the existing ``TaskDetail`` contract.
+        const task = await client.getTask(taskId);
+        console.log(formatJson(task));
+        return;
+      }
+
+      const { task, recentEvents } = await client.getStatusSnapshot(taskId);
+      console.log(formatStatusSnapshot(task, recentEvents));
     });
 }

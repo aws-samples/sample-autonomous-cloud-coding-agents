@@ -169,15 +169,42 @@ export class ApiClient {
     limit?: number;
     nextToken?: string;
     after?: string;
+    /** Request newest-first ordering — mutually exclusive with ``after`` on the server. */
+    desc?: boolean;
   }): Promise<PaginatedResponse<TaskEvent>> {
     const params = new URLSearchParams();
     if (opts?.limit) params.set('limit', String(opts.limit));
     if (opts?.nextToken) params.set('next_token', opts.nextToken);
     if (opts?.after) params.set('after', opts.after);
+    if (opts?.desc) params.set('desc', '1');
 
     const qs = params.toString();
     const path = `/tasks/${encodeURIComponent(taskId)}/events${qs ? `?${qs}` : ''}`;
     return this.request<PaginatedResponse<TaskEvent>>('GET', path);
+  }
+
+  /**
+   * Fetch the combined task + most-recent-events payload that backs the
+   * deterministic ``bgagent status`` snapshot (design §5.2).
+   *
+   * Runs the ``GET /tasks/{id}`` and ``GET /tasks/{id}/events?desc=1&limit=N``
+   * calls in parallel so the snapshot is a single round-trip in wall-clock
+   * terms. The event page is intentionally small (default 20) — the
+   * formatter only needs the latest tool call, turn, milestone, and cost
+   * update, which are always recent in a well-behaved event stream.
+   *
+   * @param taskId - the task to summarize.
+   * @param recentEventLimit - how many recent events to pull (default 20).
+   */
+  async getStatusSnapshot(
+    taskId: string,
+    recentEventLimit = 20,
+  ): Promise<{ task: TaskDetail; recentEvents: TaskEvent[] }> {
+    const [task, eventsPage] = await Promise.all([
+      this.getTask(taskId),
+      this.getTaskEvents(taskId, { limit: recentEventLimit, desc: true }),
+    ]);
+    return { task, recentEvents: eventsPage.data };
   }
 
   /**

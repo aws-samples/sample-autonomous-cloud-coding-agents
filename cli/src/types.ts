@@ -99,6 +99,11 @@ export interface GetTaskEventsQuery {
   readonly limit?: number;
   readonly next_token?: string;
   readonly after?: string;
+  /**
+   * When ``"1"``, requests events in descending ``event_id`` order
+   * (newest first). Mutually exclusive with ``after`` on the server.
+   */
+  readonly desc?: string;
 }
 
 /** Create task request body for POST /v1/tasks. */

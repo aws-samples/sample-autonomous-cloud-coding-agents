@@ -358,6 +358,80 @@ describe('get-task-events handler', () => {
     expect(body.pagination.next_token).toBeTruthy();
   });
 
+  // -------- ?desc= support (status snapshot) --------
+
+  test('?desc=1 flips ScanIndexForward to false and logs query_mode=desc', async () => {
+    const stdoutWrite = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const event = makeEvent({ queryStringParameters: { desc: '1' } });
+      const result = await handler(event);
+
+      expect(result.statusCode).toBe(200);
+
+      const queryInput = MockQueryCommand.mock.calls[0][0];
+      expect(queryInput.ScanIndexForward).toBe(false);
+      // ``desc`` alone does not touch KeyConditionExpression or ExclusiveStartKey.
+      expect(queryInput.KeyConditionExpression).toBe('task_id = :tid');
+      expect(queryInput.ExclusiveStartKey).toBeUndefined();
+
+      const infoLines = stdoutWrite.mock.calls
+        .map(c => String(c[0]))
+        .filter(line => line.includes('"level":"INFO"'));
+      const invoked = infoLines.find(line => line.includes('get-task-events invoked'));
+      expect(invoked).toContain('"query_mode":"desc"');
+    } finally {
+      stdoutWrite.mockRestore();
+    }
+  });
+
+  test('?desc=true is accepted as truthy', async () => {
+    await handler(makeEvent({ queryStringParameters: { desc: 'true' } }));
+    const queryInput = MockQueryCommand.mock.calls[0][0];
+    expect(queryInput.ScanIndexForward).toBe(false);
+  });
+
+  test('unknown ?desc= value falls through to ascending (no 400)', async () => {
+    // Lenient parsing — anything other than "1"/"true" is treated as absent.
+    await handler(makeEvent({ queryStringParameters: { desc: 'yes' } }));
+    const queryInput = MockQueryCommand.mock.calls[0][0];
+    expect(queryInput.ScanIndexForward).toBe(true);
+  });
+
+  test('?desc=1 suppresses next_token even when DDB returns a LastEvaluatedKey', async () => {
+    // DDB populates ``LastEvaluatedKey`` on truncated descending scans, but
+    // the token carries no direction. A follow-up caller that drops
+    // ``desc`` would silently interleave ascending results. The handler
+    // intentionally null-trims the token on descending pages; ``bgagent
+    // status`` only reads one page and does not need continuation.
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD })
+      .mockResolvedValueOnce({
+        Items: [EVENT_ITEMS[0]],
+        LastEvaluatedKey: { task_id: 'task-1', event_id: ANOTHER_ULID },
+      });
+
+    const result = await handler(makeEvent({
+      queryStringParameters: { desc: '1', limit: '1' },
+    }));
+    const body = JSON.parse(result.body);
+
+    expect(body.pagination.has_more).toBe(false);
+    expect(body.pagination.next_token).toBeNull();
+  });
+
+  test('?desc=1 combined with ?after= returns 400 VALIDATION_ERROR before any DDB call', async () => {
+    mockSend.mockReset();
+    const event = makeEvent({ queryStringParameters: { desc: '1', after: VALID_AFTER } });
+    const result = await handler(event);
+
+    expect(result.statusCode).toBe(400);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('mutually exclusive');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   test('handler logs INFO on entry and exit with query_mode', async () => {
     const stdoutWrite = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {

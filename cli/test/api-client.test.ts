@@ -73,7 +73,6 @@ describe('ApiClient', () => {
       const call = mockFetch.mock.calls[0];
       expect(call[1].headers['Idempotency-Key']).toBe('my-key');
     });
-
   });
 
   describe('listTasks', () => {
@@ -179,6 +178,35 @@ describe('ApiClient', () => {
       expect(url).not.toContain('after=');
     });
 
+    test('passes ?desc=1 when desc=true is provided', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', { limit: 20, desc: true });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('desc=1');
+      expect(url).toContain('limit=20');
+      // ``desc: false`` MUST NOT leak as ``desc=0`` or ``desc=false`` —
+      // the server treats anything truthy-looking as opt-in.
+    });
+
+    test('omits desc when desc is falsy or absent', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', { limit: 5, desc: false });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).not.toContain('desc=');
+    });
+
     test('both after and nextToken are sent verbatim to the server', async () => {
       // The client does not arbitrate — the server prefers ``after`` and logs
       // a warning. This test just locks in the transport behaviour.
@@ -273,6 +301,64 @@ describe('ApiClient', () => {
       const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
       expect(result).toEqual([]);
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('getStatusSnapshot', () => {
+    test('runs getTask and getTaskEvents(desc=1) in parallel and returns both', async () => {
+      const taskDetail = { task_id: 'abc', status: 'RUNNING' };
+      const events = [
+        { event_id: 'E2', event_type: 'agent_tool_call', timestamp: 't2', metadata: { tool_name: 'Bash' } },
+        { event_id: 'E1', event_type: 'agent_turn', timestamp: 't1', metadata: { turn: 3 } },
+      ];
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: taskDetail }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: events, pagination: { next_token: null, has_more: false } }),
+        });
+
+      const result = await client.getStatusSnapshot('abc');
+
+      expect(result.task).toEqual(taskDetail);
+      expect(result.recentEvents).toEqual(events);
+
+      // Two HTTP calls; the events call must carry ``desc=1`` and a bounded limit.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const urls = mockFetch.mock.calls.map(c => c[0] as string);
+      expect(urls.some(u => u === 'https://api.example.com/tasks/abc')).toBe(true);
+      const eventsUrl = urls.find(u => u.includes('/events'));
+      expect(eventsUrl).toBeDefined();
+      expect(eventsUrl).toContain('desc=1');
+      expect(eventsUrl).toContain('limit=20');
+    });
+
+    test('surfaces a getTask failure from the parallel pair', async () => {
+      // Regression guard against a future refactor to ``Promise.allSettled``
+      // that would silently render a broken snapshot. The current contract
+      // is fail-fast: if either leg errors, the CLI surfaces the error.
+      mockFetch
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+        });
+
+      await expect(client.getStatusSnapshot('abc')).rejects.toThrow('network down');
+    });
+
+    test('honors a custom recentEventLimit', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { task_id: 'abc' } }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+        });
+
+      await client.getStatusSnapshot('abc', 5);
+
+      const eventsUrl = mockFetch.mock.calls.map(c => c[0] as string).find(u => u.includes('/events'));
+      expect(eventsUrl).toContain('limit=5');
     });
   });
 

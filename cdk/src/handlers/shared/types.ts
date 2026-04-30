@@ -160,6 +160,14 @@ export interface GetTaskEventsQuery {
   readonly next_token?: string;
   /** ULID event_id cursor. Returns events with ``event_id > after``. */
   readonly after?: string;
+  /**
+   * When truthy (``"1"`` or ``"true"``), return events in descending
+   * ``event_id`` order (newest first). Used by ``bgagent status`` to
+   * render a recency-biased snapshot without walking the full event
+   * stream. Mutually exclusive with ``after`` — the handler rejects
+   * the combination with 400.
+   */
+  readonly desc?: string;
 }
 
 /**

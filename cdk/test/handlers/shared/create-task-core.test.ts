@@ -364,5 +364,4 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(400);
     expect(result.body).toContain('pr_number is only allowed');
   });
-
 });

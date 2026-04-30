@@ -39,12 +39,12 @@ const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'INFO').toUpperCase();
 const DEBUG_ENABLED = LOG_LEVEL === 'DEBUG';
 
 /** Query mode resolved from query parameters for structured logging. */
-type QueryMode = 'from_beginning' | 'next_token' | 'after';
+type QueryMode = 'from_beginning' | 'next_token' | 'after' | 'desc';
 
 /**
  * GET /v1/tasks/{task_id}/events — Get task event audit trail.
  *
- * Supports two alternative pagination modes (plus the default "from the beginning"):
+ * Supports three alternative query modes (plus the default "from the beginning"):
  *
  *   - ``?after=<event_id>`` — ULID cursor. Query returns events with
  *     ``event_id > after``. Used by CLI polling and webhook replay to
@@ -52,11 +52,17 @@ type QueryMode = 'from_beginning' | 'next_token' | 'after';
  *     by timestamp, so string ``>`` compare is correct.
  *   - ``?next_token=<base64>`` — opaque DynamoDB ``LastEvaluatedKey``,
  *     used for normal forward pagination.
+ *   - ``?desc=1`` — return the newest events first. Used by ``bgagent
+ *     status`` to render a recency-biased snapshot in O(limit) rather
+ *     than walking the full event stream. Mutually exclusive with
+ *     ``after`` (a forward cursor has no meaning against a descending
+ *     scan); the combination is rejected as 400.
  *
- * If both are provided, ``after`` wins (a WARN is logged — likely a client bug).
- * If neither is provided, the query starts from the oldest event.
- * In all modes, when the result is truncated at ``limit`` a ``next_token``
- * is emitted so the caller can continue paginating.
+ * If both ``after`` and ``next_token`` are provided, ``after`` wins (a WARN
+ * is logged — likely a client bug). If none are provided, the query starts
+ * from the oldest event. In all modes, when the result is truncated at
+ * ``limit`` a ``next_token`` is emitted so the caller can continue
+ * paginating.
  *
  * @param event - API Gateway proxy event.
  * @returns API Gateway proxy result.
@@ -82,6 +88,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const limit = parseLimit(params.limit, 50, 100);
     const afterRaw = params.after;
     const nextTokenRaw = params.next_token;
+    const descRaw = params.desc;
+    // ``desc`` accepts "1" or "true" (case-insensitive). Anything else falls
+    // through to ascending order — we do not treat a malformed value as an
+    // error to keep the surface lenient for clients that send defaults.
+    const desc = typeof descRaw === 'string'
+      && (descRaw === '1' || descRaw.toLowerCase() === 'true');
 
     // 3a. Validate ``after`` if provided. An invalid ULID shape is a client
     // error — fail fast rather than silently ignoring the cursor.
@@ -101,7 +113,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const afterValid = typeof afterRaw === 'string' && afterRaw.length === 26 ? afterRaw : undefined;
 
-    // 3b. ``after`` and ``next_token`` together is always a client bug —
+    // 3b. ``desc`` combined with ``after`` makes no semantic sense: ``after``
+    // is a forward-walking ULID cursor. Reject the combination rather than
+    // silently honoring one — the caller has a bug and a 400 surfaces it.
+    if (desc && afterValid) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Parameters `desc` and `after` are mutually exclusive.',
+        requestId,
+      );
+    }
+
+    // 3c. ``after`` and ``next_token`` together is always a client bug —
     // one is a user-driven event_id cursor, the other is an opaque
     // pagination token. Prefer ``after`` because it is the more specific,
     // user-driven intent.
@@ -116,9 +140,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const queryMode: QueryMode = afterValid
       ? 'after'
-      : startKey
-        ? 'next_token'
-        : 'from_beginning';
+      : desc
+        ? 'desc'
+        : startKey
+          ? 'next_token'
+          : 'from_beginning';
 
     logger.info('get-task-events invoked', {
       request_id: requestId,
@@ -144,6 +170,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 5. Build DDB query. When ``after`` is provided we add a sort-key
     // filter ``event_id > :after`` — safe because ULIDs are lexicographic.
+    // ``desc`` flips ``ScanIndexForward`` so the newest events return first,
+    // which is what ``bgagent status`` needs to render a recency-biased
+    // snapshot cheaply.
     const queryInput: Record<string, unknown> = {
       TableName: EVENTS_TABLE_NAME,
       KeyConditionExpression: afterValid
@@ -152,7 +181,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ExpressionAttributeValues: afterValid
         ? { ':tid': taskId, ':after': afterValid }
         : { ':tid': taskId },
-      ScanIndexForward: true,
+      ScanIndexForward: !desc,
       Limit: limit,
     };
 
@@ -191,7 +220,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       metadata: e.metadata ?? {},
     }));
 
-    const nextToken = encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
+    // For descending scans we intentionally suppress ``next_token``. DDB's
+    // ``LastEvaluatedKey`` carries no direction — a follow-up request that
+    // passes ``?next_token=...`` without also passing ``desc=1`` would
+    // silently scan ascending from mid-stream and interleave results.
+    // ``bgagent status`` only ever requests one page anyway; surfacing a
+    // token here would invite future callers into that footgun.
+    const nextToken = desc
+      ? null
+      : encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
 
     // 7. Warn on unexpectedly empty catch-up — helps debug CLI reconnect logic.
     // We only warn for ``after`` mode because "no events yet" is normal on cold start.
