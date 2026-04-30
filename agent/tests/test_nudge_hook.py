@@ -72,9 +72,9 @@ class TestNudgeBetweenTurnsHook:
         nudge_reader._TABLE_CACHE = table
         assert hooks_mod._nudge_between_turns_hook({"task_id": "t-1"}) == []
 
-    def test_nudge_injection_emits_milestone_on_progress_and_sse(self):
-        """When nudges are injected, ``nudge_applied`` milestone fires on
-        both writers so the CLI stream shows a visible marker."""
+    def test_nudge_injection_emits_milestone_on_progress(self):
+        """When nudges are injected, ``nudge_applied`` milestone fires on the
+        progress writer so the durable event stream shows a visible marker."""
         table = MagicMock()
         table.query.return_value = {
             "Items": [
@@ -91,11 +91,9 @@ class TestNudgeBetweenTurnsHook:
         nudge_reader._TABLE_CACHE = table
 
         progress = MagicMock()
-        sse_adapter = MagicMock()
         ctx = {
             "task_id": "t-1",
             "progress": progress,
-            "sse_adapter": sse_adapter,
         }
         result = hooks_mod._nudge_between_turns_hook(ctx)
         assert len(result) == 1
@@ -105,10 +103,6 @@ class TestNudgeBetweenTurnsHook:
         assert kwargs["milestone"] == "nudge_applied"
         assert "1 nudge(s) applied" in kwargs["details"]
         assert "focus on error handling" in kwargs["details"]
-
-        sse_adapter.write_agent_milestone.assert_called_once()
-        _, sse_kwargs = sse_adapter.write_agent_milestone.call_args
-        assert sse_kwargs["milestone"] == "nudge_applied"
 
     def test_nudge_milestone_emit_is_best_effort_on_progress_failure(self):
         """Milestone emission errors must not break injection."""
@@ -129,17 +123,13 @@ class TestNudgeBetweenTurnsHook:
 
         progress = MagicMock()
         progress.write_agent_milestone.side_effect = RuntimeError("boom")
-        sse_adapter = MagicMock()
         ctx = {
             "task_id": "t-1",
             "progress": progress,
-            "sse_adapter": sse_adapter,
         }
         # Injection must still succeed even if milestone write raises.
         result = hooks_mod._nudge_between_turns_hook(ctx)
         assert len(result) == 1
-        # SSE adapter still called (independent of the failed progress write).
-        sse_adapter.write_agent_milestone.assert_called_once()
 
     def test_no_pending_no_milestone_emitted(self):
         """Don't spam milestones when there's nothing to inject."""
@@ -148,15 +138,12 @@ class TestNudgeBetweenTurnsHook:
         nudge_reader._TABLE_CACHE = table
 
         progress = MagicMock()
-        sse_adapter = MagicMock()
         ctx = {
             "task_id": "t-1",
             "progress": progress,
-            "sse_adapter": sse_adapter,
         }
         assert hooks_mod._nudge_between_turns_hook(ctx) == []
         progress.write_agent_milestone.assert_not_called()
-        sse_adapter.write_agent_milestone.assert_not_called()
 
     def test_already_consumed_nudge_not_reinjected(self):
         """A second read_pending call (post-consume) returns [] and hook returns []."""

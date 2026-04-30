@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import os
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -32,9 +30,6 @@ from runner import run_agent
 from shell import log
 from system_prompt import SYSTEM_PROMPT
 from telemetry import format_bytes, get_disk_usage, print_metrics
-
-if TYPE_CHECKING:
-    from sse_adapter import _SSEAdapter
 
 _SDK_NO_RESULT_MESSAGE = (
     "Agent SDK stream ended without a ResultMessage (agent_status=unknown). "
@@ -178,7 +173,6 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
-    sse_adapter: _SSEAdapter | None = None,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -310,11 +304,6 @@ def run_task(
                 "repo_setup_complete",
                 f"branch={setup.branch} build_before={setup.build_before}",
             )
-            if sse_adapter is not None:
-                sse_adapter.write_agent_milestone(
-                    "repo_setup_complete",
-                    f"branch={setup.branch} build_before={setup.build_before}",
-                )
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
@@ -351,7 +340,6 @@ def run_task(
                             system_prompt,
                             config,
                             cwd=setup.repo_dir,
-                            sse_adapter=sse_adapter,
                         )
                     )
                 except Exception as e:
@@ -363,11 +351,6 @@ def run_task(
                 "agent_execution_complete",
                 f"status={agent_result.status} turns={agent_result.turns}",
             )
-            if sse_adapter is not None:
-                sse_adapter.write_agent_milestone(
-                    "agent_execution_complete",
-                    f"status={agent_result.status} turns={agent_result.turns}",
-                )
 
             # Cancel short-circuit: the Stop hook signalled cancel by stopping
             # the SDK early, but that only stops the agent loop — post-hooks
@@ -388,11 +371,6 @@ def run_task(
                     "task_cancelled_acknowledged",
                     "Post-hooks skipped; terminal state already CANCELLED.",
                 )
-                if sse_adapter is not None:
-                    sse_adapter.write_agent_milestone(
-                        "task_cancelled_acknowledged",
-                        "Post-hooks skipped; terminal state already CANCELLED.",
-                    )
                 return {
                     "status": "cancelled",
                     "task_id": config.task_id,
@@ -419,8 +397,6 @@ def run_task(
                 post_span.set_attribute("pr.url", pr_url or "")
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
-                if sse_adapter is not None:
-                    sse_adapter.write_agent_milestone("pr_created", pr_url)
 
             # Memory write — capture task episode and repo learnings
             memory_written = False
@@ -547,13 +523,6 @@ def run_task(
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             raise
-        finally:
-            # Phase 1b: close the SSE adapter (idempotent) so any attached
-            # consumer receives the terminal sentinel and the stream ends
-            # cleanly. Never raises — .close() wraps its loop interaction.
-            if sse_adapter is not None:
-                with contextlib.suppress(Exception):
-                    sse_adapter.close()
 
 
 def main():

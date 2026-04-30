@@ -93,7 +93,6 @@ class TestStopHookHonoursCancel:
                 hook_context=None,
                 task_id="t-cancel",
                 progress=MagicMock(),
-                sse_adapter=MagicMock(),
             )
         )
         assert result == {
@@ -125,7 +124,6 @@ class TestStopHookHonoursCancel:
                 hook_context=None,
                 task_id="t-cancel-with-nudge",
                 progress=MagicMock(),
-                sse_adapter=MagicMock(),
             )
         )
         assert result == {
@@ -155,7 +153,6 @@ class TestStopHookHonoursCancel:
                 hook_context=None,
                 task_id="t-running",
                 progress=MagicMock(),
-                sse_adapter=MagicMock(),
             )
         )
         assert result == {
@@ -169,7 +166,6 @@ class TestStopHookHonoursCancel:
         hooks_mod.between_turns_hooks[:] = [hooks_mod._cancel_between_turns_hook]
 
         progress = MagicMock()
-        sse_adapter = MagicMock()
 
         _run(
             hooks_mod.stop_hook(
@@ -178,11 +174,9 @@ class TestStopHookHonoursCancel:
                 hook_context=None,
                 task_id="t-cancel-milestone",
                 progress=progress,
-                sse_adapter=sse_adapter,
             )
         )
 
         progress.write_agent_milestone.assert_called_once()
         call_kwargs = progress.write_agent_milestone.call_args.kwargs
         assert call_kwargs["milestone"] == "cancel_detected"
-        sse_adapter.write_agent_milestone.assert_called_once()

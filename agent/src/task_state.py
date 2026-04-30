@@ -99,12 +99,11 @@ def write_heartbeat(task_id: str) -> None:
 def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) -> None:
     """Record session_id + agent_runtime_arn on a pre-RUNNING task.
 
-    Rev-5 OBS-4: the orchestrator path gets these fields written by the
-    orchestrator Lambda at the HYDRATING → RUNNING transition. The
-    interactive path (`bgagent run` → Runtime-JWT) has no Lambda in the
-    loop, so server.py calls this helper just before spawning the
-    pipeline. Used by `cancel-task` to `StopRuntimeSession` on the right
-    runtime, and by operators debugging stuck tasks.
+    The orchestrator Lambda writes these fields on the HYDRATING → RUNNING
+    transition so ``cancel-task`` can ``StopRuntimeSession`` on the right
+    runtime and operators can correlate a stuck task to a specific AgentCore
+    session. Currently only the orchestrator calls this; the agent-side
+    invocation path inherits the fields from the orchestrator's payload.
 
     Idempotent + best-effort. Skips silently if the task is already
     past SUBMITTED/HYDRATING (concurrent transition winning is fine).
@@ -292,11 +291,15 @@ def get_task(task_id: str) -> dict | None:
         ``TASK_TABLE_NAME`` unset).
 
     Raises:
-        TaskFetchError: DDB/boto/network failure. Callers that depend on
-            correctness (e.g. the rev-5 RUN_ELSEWHERE guard) should treat
-            this as fail-closed — a transient DDB blip must NOT be confused
-            with "record doesn't exist" or they will spawn duplicate
-            pipelines on Runtime-JWT.
+        TaskFetchError: DDB/boto/network failure, distinguished from
+            ``None`` (== "record not found") so callers can choose their
+            failure posture. Current callers
+            (``hooks._cancel_between_turns_hook``, ``pipeline.run_task``'s
+            cancel short-circuit) all fail open on this — they prefer to
+            keep a running task alive through a transient DDB blip rather
+            than stranding it. New callers should make the choice
+            explicitly; silently collapsing the two cases to ``None``
+            erases the signal.
     """
     table = _get_table()
     if table is None:

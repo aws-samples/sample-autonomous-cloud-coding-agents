@@ -55,12 +55,11 @@ class TestBuildLogsUrl:
 
 
 class TestGetTask:
-    """Verify the NotFound vs FetchFailed distinction added in rev-5 (P0-b).
+    """Verify the NotFound vs FetchFailed distinction.
 
-    The rev-5 RUN_ELSEWHERE guard on Runtime-JWT depends on being able to
-    tell "record doesn't exist" (fail-open, spawn) from "couldn't read"
-    (fail-closed, 503). Before this split both collapsed to ``None`` and a
-    DDB blip would cause duplicate pipelines.
+    Callers must be able to tell "record doesn't exist" (``None``) from
+    "couldn't read it" (``TaskFetchError``). Collapsing the two to ``None``
+    would let a transient DDB blip look like a legitimate absence.
     """
 
     def test_returns_none_when_no_table(self, monkeypatch):

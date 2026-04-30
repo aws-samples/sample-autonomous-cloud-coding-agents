@@ -186,25 +186,19 @@ def _reset_injected_nudges_for_tests() -> None:
 
 
 def _emit_nudge_milestone(ctx: dict, milestone: str, details: str) -> None:
-    """Emit ``agent_milestone`` to both progress writer and SSE adapter.
+    """Emit ``agent_milestone`` to the progress writer.
 
     Best-effort — swallow errors so stream visibility failures never block
-    nudge injection itself.  ``ctx`` may carry ``progress`` and
-    ``sse_adapter`` refs stamped by :func:`stop_hook`; absent writers are
-    silently skipped (tests, early-boot, etc.).
+    nudge injection itself.  ``ctx`` may carry a ``progress`` ref stamped by
+    :func:`stop_hook`; absent writer is silently skipped (tests, early-boot,
+    etc.).
     """
     progress = ctx.get("progress")
-    sse_adapter = ctx.get("sse_adapter")
     try:
         if progress is not None:
             progress.write_agent_milestone(milestone=milestone, details=details)
     except Exception as exc:  # pragma: no cover — defensive, writers never raise
         log("DEBUG", f"nudge milestone progress write failed: {exc}")
-    try:
-        if sse_adapter is not None:
-            sse_adapter.write_agent_milestone(milestone=milestone, details=details)
-    except Exception as exc:  # pragma: no cover
-        log("DEBUG", f"nudge milestone SSE write failed: {exc}")
 
 
 def _nudge_between_turns_hook(ctx: dict) -> list[str]:
@@ -328,7 +322,6 @@ async def stop_hook(
     *,
     task_id: str,
     progress: Any = None,
-    sse_adapter: Any = None,
 ) -> dict:
     """Stop hook: run registered between-turns hooks; block if they produce text.
 
@@ -341,14 +334,13 @@ async def stop_hook(
     sync boto3 calls inside the hook (DDB query + update) do not stall the
     asyncio loop driving ``client.receive_response()``.
 
-    ``progress`` and ``sse_adapter`` are optional writer refs threaded into
-    each hook's ``ctx`` so hooks can emit their own milestone / progress
-    events without holding a module-global reference to them.
+    ``progress`` is an optional writer ref threaded into each hook's ``ctx``
+    so hooks can emit their own milestone / progress events without holding
+    a module-global reference to it.
     """
     ctx = {
         "task_id": task_id,
         "progress": progress,
-        "sse_adapter": sse_adapter,
     }
 
     chunks: list[str] = []
@@ -385,7 +377,6 @@ def build_hook_matchers(
     trajectory: _TrajectoryWriter | None = None,
     task_id: str = "",
     progress: Any = None,
-    sse_adapter: Any = None,
 ) -> dict:
     """Build hook matchers dict for ClaudeAgentOptions.
 
@@ -395,9 +386,9 @@ def build_hook_matchers(
     The SDK expects ``dict[HookEvent, list[HookMatcher]]`` where HookMatcher
     has ``matcher: str | None`` and ``hooks: list[HookCallback]``.
 
-    ``progress`` and ``sse_adapter`` are forwarded to the Stop hook so that
-    between-turns hooks can emit milestones (e.g. ``nudge_applied``) that
-    show up in the CLI stream as a visible marker of Phase 2 nudge activity.
+    ``progress`` is forwarded to the Stop hook so that between-turns hooks
+    can emit milestones (e.g. ``nudge_applied``) that show up in the
+    durable progress stream as a visible marker of Phase 2 nudge activity.
     """
     from claude_agent_sdk.types import (
         HookContext,
@@ -445,7 +436,6 @@ def build_hook_matchers(
                 ctx,
                 task_id=stop_task_id,
                 progress=progress,
-                sse_adapter=sse_adapter,
             )
         except Exception as exc:
             log(
