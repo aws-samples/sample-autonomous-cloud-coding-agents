@@ -9,12 +9,15 @@
     "test": "jest --passWithNoTests --updateSnapshot",
     "test:watch": "jest --watch",
     "build": "npm run compile && npm run test && npm run eslint",
+    "tui:compile": "tsc --build src/tui/tsconfig.json",
+    "tui": "npm run tui:compile && node --enable-source-maps lib/tui/index.js",
     "security:retire": "retire --path . --severity high"
   },
   "devDependencies": {
     "@stylistic/eslint-plugin": "^2",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "eslint": "^9",
@@ -31,7 +34,12 @@
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1021.0",
-    "commander": "^14.0.3"
+    "commander": "^14.0.3",
+    "figures": "^6.1.0",
+    "ink": "^7.0.1",
+    "ink-spinner": "^5.0.0",
+    "react": "^19.2.5",
+    "strip-ansi": "^7.2.0"
   },
   "resolutions": {
     "eslint-plugin-import/minimatch": "^3.1.2"

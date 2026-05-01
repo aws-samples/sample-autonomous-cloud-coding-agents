@@ -32,5 +32,8 @@
   "include": [
     "src/**/*.ts"
   ],
-  "exclude": []
+  "exclude": [
+    "src/tui/**/*",
+    "src/mock/**/*"
+  ]
 }
