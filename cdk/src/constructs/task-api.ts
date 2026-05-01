@@ -26,6 +26,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -113,6 +114,13 @@ export interface TaskApiProps {
    * runtime when a task record lacks `agent_runtime_arn`.
    */
   readonly agentCoreStopSessionRuntimeArn?: string;
+
+  /**
+   * S3 bucket storing ``--trace`` trajectory artifacts. When provided,
+   * a ``GET /v1/tasks/{task_id}/trace`` route is created that issues
+   * short-lived presigned download URLs (design §10.1).
+   */
+  readonly traceArtifactsBucket?: s3.IBucket;
 
   /**
    * ECS cluster ARN for cancel-task to stop ECS-backed tasks.
@@ -470,6 +478,45 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
+    if (props.traceArtifactsBucket) {
+      const traceBucket = props.traceArtifactsBucket;
+      const getTraceUrlFn = new lambda.NodejsFunction(this, 'GetTraceUrlFn', {
+        entry: path.join(handlersDir, 'get-trace-url.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: {
+          ...commonEnv,
+          TRACE_ARTIFACTS_BUCKET_NAME: traceBucket.bucketName,
+        },
+        bundling: {
+          ...commonBundling,
+          // Defensive future-proofing: if ``@aws-sdk/client-s3`` or
+          // ``@aws-sdk/s3-request-presigner`` are ever added to
+          // ``commonBundling.externalModules`` (e.g. because a future
+          // Node runtime ships them), this filter ensures they stay
+          // bundled for *this* function — the Node 24 Lambda runtime
+          // does not ship either, and ``getSignedUrl`` will throw
+          // ``Cannot find module`` at cold start if it's externalized.
+          // Today this is a no-op (neither module is in the common
+          // external list); the filter exists to guard against drift.
+          externalModules: commonBundling.externalModules?.filter(
+            m => m !== '@aws-sdk/client-s3' && m !== '@aws-sdk/s3-request-presigner',
+          ),
+        },
+      });
+
+      props.taskTable.grantReadData(getTraceUrlFn);
+      // Read-only grant — the handler only issues GetObject presigns.
+      traceBucket.grantRead(getTraceUrlFn);
+
+      const trace = taskById.addResource('trace');
+      trace.addMethod('GET', new apigw.LambdaIntegration(getTraceUrlFn), cognitoAuthOptions);
+
+      allFunctions.push(getTraceUrlFn);
+    }
 
     // --- Nudge endpoint (Phase 2): POST /tasks/{task_id}/nudge ---
     if (props.taskNudgesTable) {

@@ -247,3 +247,122 @@ class TestWriteTerminalMaintainsStatusCreatedAt:
         sca_ts = values[":sca"].split("#", 1)[1]
         completed_at = values[":t"]
         assert sca_ts == completed_at
+
+
+class TestWriteTerminalTraceS3Uri:
+    """K2 Stage 4 — ``write_terminal`` persists ``trace_s3_uri`` from
+    the result dict so the ``get-trace-url`` handler (which reads the
+    field off the TaskRecord) sees a consistent view the moment the
+    task reaches terminal."""
+
+    def test_trace_s3_uri_written_when_present_in_result(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-trace",
+            "COMPLETED",
+            {"trace_s3_uri": "s3://bucket/traces/u-1/t-trace.jsonl.gz"},
+        )
+        assert len(calls) == 1
+        update_expr = calls[0]["UpdateExpression"]
+        assert "trace_s3_uri = :ts3" in update_expr
+        values = calls[0]["ExpressionAttributeValues"]
+        assert values[":ts3"] == "s3://bucket/traces/u-1/t-trace.jsonl.gz"
+
+    def test_trace_s3_uri_omitted_when_result_has_no_uri(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-plain",
+            "COMPLETED",
+            {"pr_url": "https://github.com/o/r/pull/1"},
+        )
+        assert len(calls) == 1
+        update_expr = calls[0]["UpdateExpression"]
+        assert "trace_s3_uri" not in update_expr
+        values = calls[0]["ExpressionAttributeValues"]
+        assert ":ts3" not in values
+
+    def test_trace_s3_uri_none_omitted(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-null",
+            "COMPLETED",
+            {"trace_s3_uri": None},
+        )
+        update_expr = calls[0]["UpdateExpression"]
+        assert "trace_s3_uri" not in update_expr
+
+    def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        """K2 final review SIG-1: when ``write_terminal``'s precondition
+        fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
+        already uploaded, the orphaned S3 object needs a dedicated log
+        line — otherwise the generic ``skipped: precondition not met``
+        message hides silently-lost trace URIs."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-orphan",
+            "COMPLETED",
+            {"trace_s3_uri": "s3://bucket/traces/u-1/t-orphan.jsonl.gz"},
+        )
+        out = capsys.readouterr().out
+        # Generic skip message still prints (benign-case compatibility).
+        assert "write_terminal skipped" in out
+        # And the specific orphan log calls out the URI + actionable
+        # detail (7-day lifecycle) so operators can reason about cost.
+        assert "orphaned by ConditionalCheckFailed" in out
+        assert "s3://bucket/traces/u-1/t-orphan.jsonl.gz" in out
+        assert "7-day lifecycle" in out
+
+    def test_conditional_check_failed_without_trace_uri_skips_orphan_log(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        """The orphan diagnostic must NOT fire on the common
+        benign-cancel case (where no S3 write happened) — otherwise
+        operators get log noise that blunts the signal of a real
+        orphan."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-benign", "COMPLETED", {"pr_url": "https://pr"})
+        out = capsys.readouterr().out
+        assert "write_terminal skipped" in out
+        assert "orphaned" not in out

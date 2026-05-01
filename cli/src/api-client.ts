@@ -34,6 +34,7 @@ import {
   TaskDetail,
   TaskEvent,
   TaskSummary,
+  TraceUrlResponse,
   WebhookDetail,
 } from './types';
 
@@ -280,6 +281,23 @@ export class ApiClient {
       collected.push(...page.data);
     }
     return collected;
+  }
+
+  /**
+   * GET /tasks/{task_id}/trace — get a presigned S3 URL for the
+   * ``--trace`` trajectory dump (design §10.1).
+   *
+   * Returns a short-lived (15-minute) presigned URL the CLI can
+   * stream directly from S3. The endpoint 404s with code
+   * ``TRACE_NOT_AVAILABLE`` when the task did not run with
+   * ``--trace`` or the upload has not yet completed.
+   */
+  async getTraceUrl(taskId: string): Promise<TraceUrlResponse> {
+    const res = await this.request<SuccessResponse<TraceUrlResponse>>(
+      'GET',
+      `/tasks/${encodeURIComponent(taskId)}/trace`,
+    );
+    return res.data;
   }
 
   /** POST /webhooks — create a new webhook. */

@@ -108,6 +108,14 @@ class TaskConfig(BaseModel):
     branch_name: str = ""
     pr_number: str = ""
     task_id: str = ""
+    # Platform user_id (Cognito ``sub``) threaded from the orchestrator
+    # payload. Required ONLY when ``trace`` is true — the agent writes
+    # the trajectory dump to ``traces/<user_id>/<task_id>.jsonl.gz``
+    # (design §10.1), and the ``get-trace-url`` handler's per-caller-
+    # prefix guard refuses to presign keys outside the caller's own
+    # ``traces/<user_id>/`` prefix. Empty-string default for local
+    # batch runs (no orchestrator in the loop; no trace upload).
+    user_id: str = ""
     # Opt-in debug preview cap (design §10.1). Threaded to BOTH the
     # pipeline.py milestone writer AND the runner.py turn/tool writer —
     # the runner's writer is where thinking/tool_input/tool_result
@@ -185,3 +193,9 @@ class TaskResult(BaseModel):
     output_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
+    # S3 URI of the uploaded --trace trajectory dump, or ``None`` when
+    # the task did not run with ``--trace`` / the upload was skipped or
+    # failed. Threaded into ``task_state.write_terminal`` so the
+    # TaskRecord's ``trace_s3_uri`` field is set atomically with the
+    # terminal-status transition (design §10.1).
+    trace_s3_uri: str | None = None

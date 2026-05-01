@@ -251,6 +251,13 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("memory_written") is not None:
                 update_parts.append("memory_written = :mw")
                 expr_values[":mw"] = result["memory_written"]
+            # --trace artifact URI (design §10.1). Written atomically
+            # with the terminal-status transition so a consumer that
+            # reads TaskRecord.trace_s3_uri immediately after
+            # status becomes terminal sees a consistent view.
+            if result.get("trace_s3_uri"):
+                update_parts.append("trace_s3_uri = :ts3")
+                expr_values[":ts3"] = result["trace_s3_uri"]
 
         table.update_item(
             Key={"task_id": task_id},
@@ -270,6 +277,28 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 "[task_state] write_terminal skipped: "
                 "status precondition not met (task may have been cancelled)"
             )
+            # K2 final review SIG-1: ConditionalCheckFailed on the
+            # happy path after a successful S3 trace upload orphans
+            # the S3 object — the URI never lands on the TaskRecord,
+            # so ``get-trace-url`` will 404 ``TRACE_NOT_AVAILABLE``
+            # indefinitely. Without this dedicated log the orphan
+            # is invisible; the generic skip message above doesn't
+            # distinguish benign-racing-cancel from
+            # silently-lost-trace-URI. The object is reaped by the
+            # 7-day bucket lifecycle; a future Chunk L follow-up can
+            # add a second conditional UpdateItem scoped to
+            # ``attribute_not_exists(trace_s3_uri)`` to self-heal.
+            if result and result.get("trace_s3_uri"):
+                print(
+                    f"[task_state] trace_s3_uri orphaned by "
+                    f"ConditionalCheckFailed: task_id={task_id!r} "
+                    f"trace_s3_uri={result['trace_s3_uri']!r}. "
+                    f"S3 object exists but TaskRecord will not be "
+                    f"updated; presigned-URL endpoint will 404 for "
+                    f"this task. Object will be reaped by the 7-day "
+                    f"lifecycle.",
+                    flush=True,
+                )
             return
         print(f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
 

@@ -192,6 +192,41 @@ describe('hydrateAndTransition', () => {
     expect(payload).not.toHaveProperty('trace');
   });
 
+  test('threads user_id into the agent payload (design §10.1 — required for trace S3 key)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    // user_id is threaded unconditionally (not just when trace=true)
+    // so that a future feature needing it does not have to re-plumb.
+    // The agent only USES it when trace=true.
+    expect(payload.user_id).toBe('user-123');
+  });
+
+  test('threads user_id even when trace flag is absent', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskNoTrace = { ...baseTask, trace: undefined };
+    const payload = await hydrateAndTransition(taskNoTrace as any);
+    expect(payload.user_id).toBe('user-123');
+    expect(payload).not.toHaveProperty('trace');
+  });
+
+  test('payload.user_id is undefined when the task record lacks user_id (defensive)', async () => {
+    // Defends the Stage 3 ↔ Stage 4 contract: a legacy / corrupted
+    // record without ``user_id`` should surface as ``undefined`` in
+    // the payload (which JSON.stringify drops entirely), not get
+    // silently coerced to an empty string that would then combine
+    // with ``trace=true`` to produce an unreachable ``traces//...``
+    // S3 key. Admission-control should catch this upstream; test
+    // pins the downstream behavior regardless.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskNoUser = { ...baseTask };
+    delete (taskNoUser as { user_id?: string }).user_id;
+    const payload = await hydrateAndTransition(taskNoUser as any);
+    expect(payload.user_id).toBeUndefined();
+  });
+
   test('throws when guardrail_blocked is set on hydrated context', async () => {
     mockDdbSend.mockResolvedValue({});
     mockHydrateContext.mockResolvedValueOnce({

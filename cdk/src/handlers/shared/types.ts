@@ -71,6 +71,15 @@ export interface TaskRecord {
    * clipped. Opt-in per task — not routine observability.
    */
   readonly trace?: boolean;
+  /**
+   * S3 URI of the gzipped JSONL trajectory dump written by the agent on
+   * terminal state when ``trace`` is true (design §10.1). Shape:
+   * ``s3://<trace-bucket>/traces/<user_id>/<task_id>.jsonl.gz``. Absent
+   * until the agent finishes the upload; also absent for tasks that ran
+   * without ``--trace`` or whose upload failed. The
+   * ``get-trace-url`` handler reads this to issue presigned download URLs.
+   */
+  readonly trace_s3_uri?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
   readonly turns_attempted?: number;
@@ -168,6 +177,12 @@ export interface TaskDetail {
    *  opt-in state to scripts / CLI consumers without making them
    *  guess from secondary signals. */
   readonly trace: boolean;
+  /** S3 URI of the uploaded ``--trace`` trajectory dump, or ``null``
+   *  until the agent finishes the terminal upload (or for tasks that
+   *  ran without ``--trace``). Non-optional so scripts can rely on
+   *  the field being present; CLI download resolves this via the
+   *  ``get-trace-url`` handler rather than hitting S3 directly. */
+  readonly trace_s3_uri: string | null;
 }
 
 /**
@@ -290,6 +305,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     turns_completed: record.turns_completed ?? null,
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
+    trace_s3_uri: record.trace_s3_uri ?? null,
   };
 }
 

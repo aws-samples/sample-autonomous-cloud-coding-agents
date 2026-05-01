@@ -46,6 +46,7 @@ import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
 import { TaskOrchestrator } from '../constructs/task-orchestrator';
 import { TaskTable } from '../constructs/task-table';
+import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
 
@@ -64,6 +65,33 @@ export class AgentStack extends Stack {
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
+
+    // --trace trajectory storage (design §10.1). Opt-in per task; only
+    // written when the submit payload sets ``trace: true``.
+    const traceArtifactsBucket = new TraceArtifactsBucket(this, 'TraceArtifactsBucket');
+
+    // Server access logging intentionally disabled. Rationale:
+    //  - writes: only the agent runtime IAM role (``grantPut`` below).
+    //  - reads: only via short-lived presigned URL issued by
+    //    ``get-trace-url`` after a Cognito auth check + ownership
+    //    check against the TaskRecord.
+    //  - 7-day object TTL bounds blast radius.
+    //  - adding a log bucket would double S3 footprint for a debug-only
+    //    feature users explicitly opt into with ``--trace``.
+    // Note: default CloudTrail does NOT capture S3 object-level
+    // events (PutObject / GetObject via presigned URL), so there is
+    // intentionally no object-level audit trail for this bucket. That
+    // is an accepted trade-off for a sample-project debug feature —
+    // the cost/complexity of CloudTrail data events or a log bucket
+    // is not justified for opt-in ``--trace`` usage. If a future
+    // requirement needs audit, the right fix is a CloudTrail data
+    // event selector on this bucket, not server access logs.
+    NagSuppressions.addResourceSuppressions(traceArtifactsBucket.bucket, [
+      {
+        id: 'AwsSolutions-S1',
+        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; writes confined to runtime IAM role by grantPut; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
+      },
+    ]);
 
     // --- Repository onboarding ---
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
@@ -183,6 +211,7 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
+      traceArtifactsBucket: traceArtifactsBucket.bucket,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -199,6 +228,10 @@ export class AgentStack extends Stack {
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
+      // --trace artifact store (§10.1). The agent writes the JSONL
+      // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
+      // terminal state when the submit payload enabled ``trace``.
+      TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
       MAX_TURNS: '100',
@@ -266,6 +299,21 @@ export class AgentStack extends Stack {
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
+    // Runtime only ever writes trace artifacts (read happens via presigned
+    // URL from the ``get-trace-url`` handler, not the runtime).
+    //
+    // TODO(K2 Stage 2+): tighten to a per-prefix condition so the runtime
+    // cannot write outside its own task's ``traces/<user_id>/`` prefix.
+    // The current grant expands to ``Resource: <bucket>/*`` with no
+    // ``s3:prefix`` / ``aws:PrincipalTag`` condition — per-user isolation
+    // is enforced in *agent code* (object-key construction), which is a
+    // trust boundary, not an enforcement boundary. Options: propagate
+    // ``user_id`` as an IAM session tag on the runtime invocation and
+    // condition the policy on ``aws:PrincipalTag/UserId``; or run the
+    // upload from a short-lived Lambda with a scoped policy instead of
+    // the runtime itself. Deferred because the session-tag plumbing is
+    // orthogonal to landing the feature behavior.
+    traceArtifactsBucket.bucket.grantPut(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -355,6 +403,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'GitHubTokenSecretArn', {
       value: githubTokenSecret.secretArn,
       description: 'ARN of the Secrets Manager secret for the GitHub token',
+    });
+
+    new CfnOutput(this, 'TraceArtifactsBucketName', {
+      value: traceArtifactsBucket.bucket.bucketName,
+      description: 'Name of the S3 bucket storing --trace trajectory artifacts (design §10.1)',
     });
 
     // --- ECS Fargate compute backend (optional) ---

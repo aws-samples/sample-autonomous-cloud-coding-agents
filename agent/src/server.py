@@ -255,6 +255,7 @@ def _run_task_background(
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
     trace: bool = False,
+    user_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -301,6 +302,7 @@ def _run_task_background(
             pr_number=pr_number,
             cedar_policies=cedar_policies,
             trace=trace,
+            user_id=user_id,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -350,6 +352,25 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
     trace = inp.get("trace") is True
+    # Platform user_id (Cognito ``sub``). Only consumed when ``trace``
+    # is true (see ``TaskConfig.user_id``). String check defends against
+    # a non-string payload — the agent writes this into an S3 key, so a
+    # surprise ``None`` or int would blow up later at upload time.
+    # When coercion fires, WARN loudly: a silent empty string combined
+    # with ``trace=True`` would make Stage 4's upload path skip the S3
+    # write with zero observability, and a user-reported "my trace
+    # vanished" investigation would find nothing.
+    raw_user_id = inp.get("user_id", "")
+    if isinstance(raw_user_id, str):
+        user_id = raw_user_id
+    else:
+        print(
+            "[server/warn] user_id payload field is not a string "
+            f"(type={type(raw_user_id).__name__}); coerced to empty. "
+            f"task_id={inp.get('task_id', '')!r}",
+            flush=True,
+        )
+        user_id = ""
 
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
 
@@ -373,6 +394,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
         "trace": trace,
+        "user_id": user_id,
     }
 
 

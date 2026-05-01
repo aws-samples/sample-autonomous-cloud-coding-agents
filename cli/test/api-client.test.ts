@@ -113,6 +113,36 @@ describe('ApiClient', () => {
     });
   });
 
+  describe('getTraceUrl', () => {
+    test('sends GET to /tasks/{id}/trace and returns the presigned URL envelope', async () => {
+      const payload = {
+        url: 'https://s3.example/trace?sig=abc',
+        expires_at: '2026-04-30T20:15:00Z',
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: payload }),
+      });
+
+      const result = await client.getTraceUrl('abc');
+      expect(result).toEqual(payload);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks/abc/trace',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    test('URL-encodes task_id', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: { url: 'x', expires_at: 'y' } }),
+      });
+      await client.getTraceUrl('weird/id with space');
+      const calledUrl = (mockFetch.mock.calls[0] as [string, unknown])[0];
+      expect(calledUrl).toContain(encodeURIComponent('weird/id with space'));
+    });
+  });
+
   describe('cancelTask', () => {
     test('sends DELETE', async () => {
       const cancelResponse = { task_id: 'abc', status: 'CANCELLED', cancelled_at: '2026-01-01T00:00:00Z' };

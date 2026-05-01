@@ -28,6 +28,7 @@ import { makeLoginCommand } from '../commands/login';
 import { makeNudgeCommand } from '../commands/nudge';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
+import { makeTraceCommand } from '../commands/trace';
 import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
@@ -57,6 +58,7 @@ program.addCommand(makeCancelCommand());
 program.addCommand(makeNudgeCommand());
 program.addCommand(makeEventsCommand());
 program.addCommand(makeWatchCommand());
+program.addCommand(makeTraceCommand());
 program.addCommand(makeWebhookCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {

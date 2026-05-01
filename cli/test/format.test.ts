@@ -44,6 +44,7 @@ describe('format', () => {
     max_turns: 100,
     max_budget_usd: null,
     trace: false,
+    trace_s3_uri: null,
   };
 
   describe('formatTaskDetail', () => {

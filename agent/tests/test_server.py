@@ -435,3 +435,69 @@ class TestExtractTrace:
             self._fake_req(),
         )
         assert params["trace"] is False
+
+
+class TestExtractUserId:
+    """K2 Stage 3: ``user_id`` is the platform Cognito ``sub`` threaded
+    from the orchestrator. The agent uses it to construct the trace S3
+    key ``traces/<user_id>/<task_id>.jsonl.gz``. A non-string value
+    must be coerced to empty so a surprise ``None`` / int doesn't flow
+    into an S3 PutObject call later."""
+
+    def _base_payload(self, **extra):
+        return {
+            "repo_url": "org/repo",
+            "task_description": "Fix it",
+            "task_id": "t-1",
+            **extra,
+        }
+
+    def _fake_req(self) -> Any:
+        return _FakeRequest()
+
+    def test_user_id_string_extracts_verbatim(self):
+        params = server._extract_invocation_params(
+            self._base_payload(user_id="sub-abc-123"),
+            self._fake_req(),
+        )
+        assert params["user_id"] == "sub-abc-123"
+
+    def test_user_id_absent_defaults_to_empty_string(self):
+        params = server._extract_invocation_params(
+            self._base_payload(),
+            self._fake_req(),
+        )
+        assert params["user_id"] == ""
+
+    def test_user_id_none_coerced_to_empty(self):
+        params = server._extract_invocation_params(
+            self._base_payload(user_id=None),
+            self._fake_req(),
+        )
+        assert params["user_id"] == ""
+
+    def test_user_id_non_string_coerced_to_empty(self):
+        # Defend against a misbehaving caller sending an int or dict —
+        # the agent writes ``user_id`` into an S3 object key, so a
+        # non-string would blow up at upload time (or worse, silently
+        # stringify to something like ``"None"`` or ``"123"``).
+        params = server._extract_invocation_params(
+            self._base_payload(user_id=12345),
+            self._fake_req(),
+        )
+        assert params["user_id"] == ""
+
+    def test_user_id_non_string_logs_warn(self, capsys):
+        # Silent coercion is a documented anti-pattern in project
+        # guidelines — if Stage 4 later skips the S3 upload because
+        # ``user_id`` is empty, a user investigating "my trace never
+        # appeared" needs a signal in CloudWatch to correlate.
+        server._extract_invocation_params(
+            self._base_payload(user_id=12345, task_id="t-warn"),
+            self._fake_req(),
+        )
+        captured = capsys.readouterr()
+        assert "[server/warn]" in captured.out
+        assert "user_id payload field is not a string" in captured.out
+        assert "type=int" in captured.out
+        assert "'t-warn'" in captured.out

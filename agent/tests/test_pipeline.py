@@ -35,7 +35,7 @@ class TestCedarPoliciesInjection:
 
         captured_config: TaskConfig | None = None
 
-        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
             nonlocal captured_config
             captured_config = config
             return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
@@ -103,7 +103,7 @@ class TestCedarPoliciesInjection:
 
         captured_config: TaskConfig | None = None
 
-        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
             nonlocal captured_config
             captured_config = config
             return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
@@ -261,7 +261,7 @@ class TestCancelSkipsPostHooks:
             build_before=True,
         )
 
-        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None):
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
             return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
 
         mock_run_agent.side_effect = fake_run_agent
@@ -330,7 +330,7 @@ class TestCancelSkipsPostHooks:
             build_before=True,
         )
 
-        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None):
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
             return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
 
         mock_run_agent.side_effect = fake_run_agent
@@ -407,7 +407,7 @@ class TestTraceThreading:
 
         captured_config: TaskConfig | None = None
 
-        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
             nonlocal captured_config
             captured_config = config
             return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
@@ -473,7 +473,7 @@ class TestTraceThreading:
 
         captured_config: TaskConfig | None = None
 
-        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
             nonlocal captured_config
             captured_config = config
             return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
@@ -508,3 +508,430 @@ class TestTraceThreading:
 
         assert captured_config is not None
         assert captured_config.trace is False
+
+
+class TestTraceS3Upload:
+    """K2 Stage 4 — pipeline triggers the S3 trace upload only when
+    ``trace=True`` AND ``user_id`` is non-empty; threads the resulting
+    ``trace_s3_uri`` into ``task_state.write_terminal`` so the
+    TaskRecord update is atomic with terminal-status."""
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_upload_happens_when_trace_and_user_id(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            # Simulate the runner accumulating one event so dump returns bytes.
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_upload.return_value = "s3://b/traces/u-1/t-up.jsonl.gz"
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="debug it",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-up",
+                trace=True,
+                user_id="u-1",
+            )
+
+        # Upload was called with the expected identifiers.
+        assert mock_upload.called
+        call_kwargs = mock_upload.call_args.kwargs
+        assert call_kwargs["task_id"] == "t-up"
+        assert call_kwargs["user_id"] == "u-1"
+        assert isinstance(call_kwargs["body"], bytes)
+
+        # trace_s3_uri was threaded into the terminal write.
+        assert result["trace_s3_uri"] == "s3://b/traces/u-1/t-up.jsonl.gz"
+        mock_task_state.write_terminal.assert_called()
+        terminal_result = mock_task_state.write_terminal.call_args.args[2]
+        assert terminal_result["trace_s3_uri"] == "s3://b/traces/u-1/t-up.jsonl.gz"
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_upload_skipped_when_trace_false(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="normal",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-nt",
+                trace=False,
+                user_id="u-1",
+            )
+
+        assert not mock_upload.called
+        assert result["trace_s3_uri"] is None
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_upload_skipped_when_user_id_empty_and_trace_true(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        """K2 Stage 3 review Finding #1 — empty user_id with trace=True
+        must skip the upload to avoid writing an unreachable
+        ``traces//<task_id>.jsonl.gz`` artifact."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="trace without user",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-no-uid",
+                trace=True,
+                user_id="",  # empty — must gate upload
+            )
+
+        assert not mock_upload.called
+        assert result["trace_s3_uri"] is None
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_upload_fail_open_does_not_fail_task(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        """A failed S3 upload (fail-open returns None) must NOT flip
+        the task to FAILED — the trajectory is a debug artifact."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_upload.return_value = None  # simulate S3 failure
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="trace fail",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-fail",
+                trace=True,
+                user_id="u-1",
+            )
+
+        assert mock_upload.called
+        # Fail-open: task is still success, trace_s3_uri just absent.
+        assert result["status"] == "success"
+        assert result["trace_s3_uri"] is None
+
+
+class TestTraceCrashPath:
+    """K2 review Finding #1 — a pipeline crash (exception after the
+    agent loop) must still attempt the trace upload so the user can
+    debug the failure. The upload is fully fail-open under the crash
+    path too: an S3 error must not mask or replace the underlying
+    pipeline exception."""
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_crash_path_uploads_trace_and_threads_uri(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            # Accumulate something so dump has bytes, then later cause
+            # the pipeline to crash post-hooks.
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_upload.return_value = "s3://b/traces/u-1/t-crash.jsonl.gz"
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        # Force a crash after agent completes but before terminal write:
+        # ``verify_build`` raises, which escapes to the outer except.
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", side_effect=RuntimeError("build verify boom")),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            import contextlib
+
+            from pipeline import run_task
+
+            with contextlib.suppress(RuntimeError):
+                run_task(
+                    repo_url="owner/repo",
+                    task_description="crash case",
+                    github_token="ghp_test",
+                    aws_region="us-east-1",
+                    task_id="t-crash",
+                    trace=True,
+                    user_id="u-1",
+                )  # pipeline re-raises after writing FAILED
+
+        # Upload was invoked on the crash path.
+        assert mock_upload.called
+        call_kwargs = mock_upload.call_args.kwargs
+        assert call_kwargs["task_id"] == "t-crash"
+        assert call_kwargs["user_id"] == "u-1"
+
+        # Terminal was written as FAILED WITH trace_s3_uri threaded in.
+        mock_task_state.write_terminal.assert_called()
+        args, _ = mock_task_state.write_terminal.call_args
+        assert args[1] == "FAILED"
+        crash_result = args[2]
+        assert crash_result["trace_s3_uri"] == "s3://b/traces/u-1/t-crash.jsonl.gz"
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_crash_path_upload_exception_does_not_mask_original_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        """If the crash-path upload itself raises, the original
+        pipeline exception must still be the one that propagates."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_upload.side_effect = RuntimeError("upload explode")
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", side_effect=ValueError("original pipeline error")),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            import pytest
+
+            from pipeline import run_task
+
+            with pytest.raises(ValueError, match="original pipeline error"):
+                run_task(
+                    repo_url="owner/repo",
+                    task_description="mask test",
+                    github_token="ghp_test",
+                    aws_region="us-east-1",
+                    task_id="t-mask",
+                    trace=True,
+                    user_id="u-1",
+                )
+
+        # Terminal still written despite the upload failure.
+        mock_task_state.write_terminal.assert_called()

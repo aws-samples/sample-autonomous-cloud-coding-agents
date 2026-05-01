@@ -68,6 +68,21 @@ export interface TaskDetail {
    *  emits the field (defaulted to ``false`` in ``toTaskDetail`` on
    *  the CDK side) — mirrors the CDK guarantee. */
   readonly trace: boolean;
+  /** S3 URI of the ``--trace`` trajectory dump, or ``null`` when the
+   *  task did not run with ``--trace`` or the agent has not yet
+   *  uploaded. ``bgagent trace download`` reads the presigned URL from
+   *  ``GET /v1/tasks/{id}/trace`` rather than this field, but surfacing
+   *  the URI in ``status --output json`` lets users / scripts detect
+   *  completion without an extra round trip. */
+  readonly trace_s3_uri: string | null;
+}
+
+/** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
+export interface TraceUrlResponse {
+  /** Short-lived presigned S3 URL for the gzipped JSONL trajectory. */
+  readonly url: string;
+  /** ISO-8601 timestamp when ``url`` expires (15 min from issuance). */
+  readonly expires_at: string;
 }
 
 /** Task summary returned by GET /v1/tasks list responses. */

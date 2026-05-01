@@ -180,6 +180,7 @@ async def run_agent(
     system_prompt: str,
     config: TaskConfig,
     cwd: str = AGENT_WORKSPACE,
+    trajectory: _TrajectoryWriter | None = None,
 ) -> AgentResult:
     """Invoke the Claude Agent SDK and stream output."""
     from claude_agent_sdk import (
@@ -228,7 +229,14 @@ async def run_agent(
     # meant to raise to 4 KB. The pipeline.py milestone writer is a
     # separate instance; dropping trace here silently no-ops the feature
     # for every preview field that matters.
-    trajectory = _TrajectoryWriter(config.task_id or "unknown")
+    #
+    # When the caller (pipeline.py) injects a pre-built ``trajectory`` we
+    # use it as-is so the pipeline can retain access to the accumulator
+    # after ``run_agent`` returns (the --trace S3 upload runs in
+    # pipeline.py on terminal state — see design §10.1). For standalone
+    # invocations we fall back to a fresh writer with no accumulator.
+    if trajectory is None:
+        trajectory = _TrajectoryWriter(config.task_id or "unknown")
     progress = _ProgressWriter(config.task_id or "unknown", trace=config.trace)
 
     # Map tool_use_id → tool_name so we can label ToolResultBlocks that arrive

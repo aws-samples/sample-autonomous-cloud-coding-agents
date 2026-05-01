@@ -29,7 +29,13 @@ from prompt_builder import build_system_prompt, discover_project_config
 from runner import run_agent
 from shell import log
 from system_prompt import SYSTEM_PROMPT
-from telemetry import format_bytes, get_disk_usage, print_metrics
+from telemetry import (
+    _TrajectoryWriter,
+    format_bytes,
+    get_disk_usage,
+    print_metrics,
+    upload_trace_to_s3,
+)
 
 _SDK_NO_RESULT_MESSAGE = (
     "Agent SDK stream ended without a ResultMessage (agent_status=unknown). "
@@ -47,6 +53,69 @@ def _chain_prior_agent_error(agent_result: AgentResult | None, exc: BaseExceptio
     if agent_result.status == "error":
         return f"Agent reported status=error; subsequent failure: {tail}"
     return tail
+
+
+def _maybe_upload_trace(
+    config: TaskConfig,
+    trajectory,
+    progress,
+) -> str | None:
+    """Run the --trace S3 upload if the task opted in and user_id is set.
+
+    Returns the resulting ``s3://`` URI (or ``None`` on any skip/fail).
+    Fully fail-open: an exception here does NOT propagate. Called from
+    both the happy path (post-hooks complete) and the crash path
+    (top-level ``except``) so a crashing task still produces a
+    debuggable artifact — which is exactly when ``--trace`` is most
+    useful (K2 review Finding #1).
+
+    Gates (K2 Stage 3 review Finding #1):
+      - ``config.trace`` must be true.
+      - ``config.user_id`` must be non-empty, else we would write to
+        ``traces//<task_id>.jsonl.gz`` — an unreachable key that no
+        Cognito caller can download through ``bgagent trace download``.
+    """
+    if not config.trace:
+        return None
+    if not config.user_id:
+        log(
+            "WARN",
+            "Trace was enabled but user_id is empty — skipping S3 "
+            "upload to avoid writing an unreachable artifact key. "
+            f"task_id={config.task_id}",
+        )
+        return None
+    try:
+        artifact = trajectory.dump_gzipped_jsonl()
+    except Exception as e:
+        log("WARN", f"Trace dump_gzipped_jsonl failed: {type(e).__name__}: {e}")
+        return None
+    if not artifact:
+        log(
+            "INFO",
+            "Trace accumulator is empty (no trajectory events captured). Skipping S3 upload.",
+        )
+        return None
+    trace_s3_uri = upload_trace_to_s3(
+        task_id=config.task_id,
+        user_id=config.user_id,
+        body=artifact,
+    )
+    if trace_s3_uri:
+        try:
+            progress.write_agent_milestone("trajectory_uploaded", trace_s3_uri)
+        except Exception as e:
+            # Milestone write is best-effort; don't mask the upload.
+            log("WARN", f"trajectory_uploaded milestone emit failed: {type(e).__name__}: {e}")
+        log("TASK", f"Trace artifact uploaded: {trace_s3_uri}")
+    else:
+        log(
+            "WARN",
+            "Trace upload returned no URI — see [trace/upload] logs "
+            "above for the reason (skipped or failed). Task proceeds "
+            "to terminal without trace_s3_uri.",
+        )
+    return trace_s3_uri
 
 
 def _resolve_overall_task_status(
@@ -174,6 +243,7 @@ def run_task(
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
     trace: bool = False,
+    user_id: str = "",
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -205,6 +275,7 @@ def run_task(
         branch_name=branch_name,
         pr_number=pr_number,
         trace=trace,
+        user_id=user_id,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
@@ -230,6 +301,29 @@ def run_task(
 
         agent_result: AgentResult | None = None
         progress = _ProgressWriter(config.task_id, trace=trace)
+        # --trace accumulator (design §10.1): when the task opted into
+        # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
+        # event so the pipeline can gzip+upload the full trajectory to
+        # S3 on terminal. Owned by the pipeline rather than the runner
+        # so the accumulator outlives ``run_agent``'s scope.
+        trajectory = _TrajectoryWriter(config.task_id, accumulate=trace)
+        # K2 review Finding #3 — surface accumulator truncation to the
+        # user via a ``trace_truncated`` milestone on TaskEventsTable
+        # (visible in ``bgagent watch``). Fire-once by design: the
+        # downloaded artifact's header reports the final drop count.
+        if trace:
+
+            def _on_trace_truncated(max_bytes: int, first_dropped: int) -> None:
+                progress.write_agent_milestone(
+                    "trace_truncated",
+                    f"Trace accumulator hit its {max_bytes}-byte cap after "
+                    f"{first_dropped} event drop(s); the downloaded "
+                    f"artifact will be truncated. See the "
+                    f"TRAJECTORY_ARTIFACT_HEADER row for the final "
+                    f"drop count.",
+                )
+
+            trajectory.set_truncation_callback(_on_trace_truncated)
         try:
             # Context hydration
             with task_span("task.context_hydration"):
@@ -342,6 +436,7 @@ def run_task(
                             system_prompt,
                             config,
                             cwd=setup.repo_dir,
+                            trajectory=trajectory,
                         )
                     )
                 except Exception as e:
@@ -373,6 +468,24 @@ def run_task(
                     "task_cancelled_acknowledged",
                     "Post-hooks skipped; terminal state already CANCELLED.",
                 )
+                # K2 review Finding #2: we intentionally do NOT upload the
+                # trace on the cancel path right now — the record is
+                # already in terminal state CANCELLED and we have no
+                # atomic hook to persist ``trace_s3_uri`` alongside it
+                # (``write_terminal``'s ConditionExpression rejects
+                # CANCELLED). A follow-up can add a conditional update
+                # scoped to CANCELLED + trace_s3_uri. Until then, surface
+                # the skip loudly so users running ``--trace`` against a
+                # cancelled task know the trajectory was captured in
+                # CloudWatch Logs but is not in S3.
+                if config.trace:
+                    log(
+                        "WARN",
+                        "Task was cancelled mid-run; --trace S3 upload is "
+                        "skipped (terminal state already CANCELLED; see "
+                        "CloudWatch Logs stream `trajectory/"
+                        f"{config.task_id}` for captured events).",
+                    )
                 return {
                     "status": "cancelled",
                     "task_id": config.task_id,
@@ -443,6 +556,16 @@ def run_task(
                 pr_url=pr_url,
             )
 
+            # --trace trajectory S3 upload (design §10.1). Runs AFTER
+            # post-hooks but BEFORE ``write_terminal`` so the resulting
+            # ``trace_s3_uri`` can be persisted atomically with the
+            # terminal-status transition. Fail-open: an S3 error does
+            # NOT flip the task to FAILED — the trajectory is a debug
+            # artifact, not a correctness gate. The same helper is also
+            # invoked from the crash path below so a pipeline exception
+            # still produces a usable debug artifact.
+            trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+
             # Build TaskResult
             usage = agent_result.usage
             turns_attempted = agent_result.num_turns or agent_result.turns
@@ -475,6 +598,7 @@ def run_task(
                 output_tokens=usage.output_tokens if usage else None,
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
+                trace_s3_uri=trace_s3_uri,
             )
 
             result_dict = result.model_dump()
@@ -515,6 +639,23 @@ def run_task(
         except Exception as e:
             # Ensure the task is marked FAILED in DynamoDB even if the pipeline
             # crashes before reaching the normal terminal-state write.
+            #
+            # K2 review Finding #1 — crash-path trace upload. The
+            # trajectory accumulator is exactly the artifact the user
+            # enabled ``--trace`` to capture the failure with; dropping
+            # it on the crash path is a silent regression against the
+            # design intent. Fully wrapped in its own try/except so a
+            # trace upload failure cannot mask or replace the real
+            # exception (we re-raise ``e`` at the end).
+            crash_trace_s3_uri: str | None = None
+            try:
+                crash_trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+            except Exception as upload_exc:
+                log(
+                    "WARN",
+                    f"Crash-path trace upload failed: {type(upload_exc).__name__}: {upload_exc}",
+                )
+
             agent_for_chain = agent_result
             combined = _chain_prior_agent_error(agent_for_chain, e)
             crash_result = TaskResult(
@@ -522,6 +663,7 @@ def run_task(
                 error=combined,
                 task_id=config.task_id,
                 agent_status=agent_for_chain.status if agent_for_chain else "unknown",
+                trace_s3_uri=crash_trace_s3_uri,
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             raise
@@ -587,6 +729,8 @@ def main():
         max_budget_usd=config.max_budget_usd,
         aws_region=config.aws_region,
         system_prompt_overrides=config.system_prompt_overrides,
+        trace=config.trace,
+        user_id=config.user_id,
     )
 
     # Exit with error if agent failed

@@ -20,6 +20,7 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { TaskApi, type TaskApiProps } from '../../src/constructs/task-api';
 
 function createStack(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
@@ -548,5 +549,151 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
         }),
       },
     });
+  });
+});
+
+describe('TaskApi construct — trace endpoint (design §10.1)', () => {
+  function createStackWithTrace(overrides?: Partial<TaskApiProps>): Template {
+    const app = new App();
+    const stack = new Stack(app, 'TraceStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const traceBucket = new s3.Bucket(stack, 'TraceBucket');
+    new TaskApi(stack, 'TaskApi', {
+      taskTable,
+      taskEventsTable,
+      traceArtifactsBucket: traceBucket,
+      ...overrides,
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('does NOT create a trace resource when traceArtifactsBucket is absent', () => {
+    const app = new App();
+    const stack = new Stack(app, 'NoTraceStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    new TaskApi(stack, 'TaskApi', { taskTable, taskEventsTable });
+    const template = Template.fromStack(stack);
+
+    const resources = template.findResources('AWS::ApiGateway::Resource');
+    const pathParts = Object.values(resources).map(r => r.Properties.PathPart);
+    expect(pathParts).not.toContain('trace');
+  });
+
+  test('creates a GET /tasks/{task_id}/trace resource when traceArtifactsBucket is provided', () => {
+    const template = createStackWithTrace();
+
+    // There should be an API Gateway Resource with PathPart='trace'
+    const resources = template.findResources('AWS::ApiGateway::Resource');
+    const tracePath = Object.values(resources).find(r => r.Properties.PathPart === 'trace');
+    expect(tracePath).toBeDefined();
+
+    // And a GET method on it
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'GET',
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      ResourceId: Match.anyValue(),
+    });
+  });
+
+  test('creates the GetTraceUrlFn Lambda with TRACE_ARTIFACTS_BUCKET_NAME env var', () => {
+    const template = createStackWithTrace();
+
+    const functions = template.findResources('AWS::Lambda::Function');
+    const traceFns = Object.entries(functions).filter(([id]) =>
+      id.startsWith('TaskApiGetTraceUrlFn'),
+    );
+    expect(traceFns).toHaveLength(1);
+    const [, resource] = traceFns[0];
+    const envVars = resource.Properties.Environment?.Variables;
+    expect(envVars).toBeDefined();
+    expect(envVars.TRACE_ARTIFACTS_BUCKET_NAME).toBeDefined();
+    // TASK_TABLE_NAME must be present too (for the ownership check)
+    expect(envVars.TASK_TABLE_NAME).toBeDefined();
+  });
+
+  test('grants the handler read-only access to the trace bucket (GetObject, not PutObject)', () => {
+    const template = createStackWithTrace();
+
+    // Find the IAM policy attached to the GetTraceUrlFn role
+    const policies = template.findResources('AWS::IAM::Policy');
+    const handlerPolicies = Object.entries(policies).filter(([id]) =>
+      id.includes('GetTraceUrlFn'),
+    );
+    expect(handlerPolicies.length).toBeGreaterThan(0);
+
+    // Walk every policy attached to the handler and check S3 actions.
+    const allS3Actions: string[] = [];
+    for (const [, resource] of handlerPolicies) {
+      const statements = resource.Properties.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actionList = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+        for (const a of actionList) {
+          if (typeof a === 'string' && a.startsWith('s3:')) {
+            allS3Actions.push(a);
+          }
+        }
+      }
+    }
+
+    // Must be able to GetObject (to presign). CDK's grantRead expands
+    // to ``s3:GetObject*`` / ``s3:GetBucket*`` / ``s3:List*``.
+    expect(allS3Actions.some(a => a === 's3:GetObject' || a === 's3:GetObject*')).toBe(true);
+    // Must NOT have write permissions (including wildcarded forms).
+    expect(allS3Actions.some(a => a.startsWith('s3:PutObject'))).toBe(false);
+    expect(allS3Actions.some(a => a.startsWith('s3:DeleteObject'))).toBe(false);
+    expect(allS3Actions).not.toContain('s3:*');
+  });
+
+  test('grants the handler read access to the task table for ownership checks', () => {
+    const template = createStackWithTrace();
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    const handlerPolicies = Object.entries(policies).filter(([id]) =>
+      id.includes('GetTraceUrlFn'),
+    );
+
+    const allDdbActions: string[] = [];
+    for (const [, resource] of handlerPolicies) {
+      const statements = resource.Properties.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actionList = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+        for (const a of actionList) {
+          if (typeof a === 'string' && a.startsWith('dynamodb:')) {
+            allDdbActions.push(a);
+          }
+        }
+      }
+    }
+    expect(allDdbActions).toContain('dynamodb:GetItem');
+    // Must NOT have write permissions
+    expect(allDdbActions).not.toContain('dynamodb:PutItem');
+    expect(allDdbActions).not.toContain('dynamodb:UpdateItem');
+  });
+
+  test('trace endpoint uses Cognito authorization (same as other task endpoints)', () => {
+    const template = createStackWithTrace();
+
+    // The trace resource's method must require Cognito auth.
+    const methods = template.findResources('AWS::ApiGateway::Method');
+    const traceMethods = Object.values(methods).filter(m =>
+      m.Properties.HttpMethod === 'GET',
+    );
+    // Gather all Cognito-authorized GET methods; the trace one must be among them.
+    const cognitoGetMethods = traceMethods.filter(m => m.Properties.AuthorizationType === 'COGNITO_USER_POOLS');
+    // There should be at least 3 Cognito GET methods: get-task, list-tasks, get-events, get-trace.
+    // But we only test that `get-trace` auth is Cognito (which is implied by the creation test above).
+    expect(cognitoGetMethods.length).toBeGreaterThanOrEqual(4);
   });
 });

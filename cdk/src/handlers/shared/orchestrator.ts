@@ -324,6 +324,14 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
+    // user_id is required by the agent ONLY when ``trace`` is true —
+    // the agent writes the trajectory to
+    // ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1) and the
+    // handler's per-caller-prefix guard relies on the agent landing
+    // under the submitter's prefix. Threaded unconditionally so
+    // scripts that inspect the payload can always see it; costs one
+    // Cognito-sub-sized string in the JSON.
+    user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
     task_type: task.task_type ?? 'new_task',
