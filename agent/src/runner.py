@@ -222,9 +222,14 @@ async def run_agent(
     # per-task-type restrictions via PreToolUse hooks.
     allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
 
-    # Create trajectory writer and Cedar policy engine with hook matchers
+    # Create trajectory writer and Cedar policy engine with hook matchers.
+    # ``trace=config.trace`` is load-bearing: this writer emits the turn /
+    # tool_call / tool_result / error previews that the --trace flag is
+    # meant to raise to 4 KB. The pipeline.py milestone writer is a
+    # separate instance; dropping trace here silently no-ops the feature
+    # for every preview field that matters.
     trajectory = _TrajectoryWriter(config.task_id or "unknown")
-    progress = _ProgressWriter(config.task_id or "unknown")
+    progress = _ProgressWriter(config.task_id or "unknown", trace=config.trace)
 
     # Map tool_use_id → tool_name so we can label ToolResultBlocks that arrive
     # in UserMessages (ToolResultBlock carries only the id, not the name).

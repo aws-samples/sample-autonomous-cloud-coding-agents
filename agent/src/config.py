@@ -52,6 +52,7 @@ def build_config(
     task_type: str = "new_task",
     branch_name: str = "",
     pr_number: str = "",
+    trace: bool = False,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -102,6 +103,7 @@ def build_config(
         branch_name=branch_name,
         pr_number=pr_number,
         task_id=task_id or uuid.uuid4().hex[:12],
+        trace=trace,
     )
 
 

@@ -62,6 +62,12 @@ export interface TaskDetail {
   /** Rev-5 DATA-1: turns that actually completed (clamped to
    *  `max_turns` when the cap tripped). */
   readonly turns_completed?: number | null;
+  /** Whether the task was submitted with ``--trace``. Surfaces in
+   *  ``bgagent status --output json`` so scripts can confirm trace
+   *  capture is active. Non-optional because the server always
+   *  emits the field (defaulted to ``false`` in ``toTaskDetail`` on
+   *  the CDK side) — mirrors the CDK guarantee. */
+  readonly trace: boolean;
 }
 
 /** Task summary returned by GET /v1/tasks list responses. */
@@ -115,6 +121,14 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
+  /**
+   * Enable the ``--trace`` debug path (design §10.1). When true, the
+   * agent's ProgressWriter raises its preview-truncation cap from 200
+   * chars to 4 KB so debug captures aren't silently clipped mid-field.
+   * Trace is opt-in per task — routine observability goes through
+   * ``bgagent watch`` / notifications.
+   */
+  readonly trace?: boolean;
 }
 
 /**

@@ -123,6 +123,14 @@ export async function createTaskCore(
   }
   const userMaxBudgetUsd = maxBudgetResult;
 
+  // --trace is a strict boolean — reject strings / numbers so a
+  // misbehaving client can't accidentally enable it with ``"trace":
+  // "false"`` (which would be truthy).
+  if (body.trace !== undefined && typeof body.trace !== 'boolean') {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid trace. Must be a boolean.', requestId);
+  }
+  const userTrace = body.trace === true;
+
   // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
@@ -196,6 +204,7 @@ export async function createTaskCore(
     branch_name: branchName,
     ...(userMaxTurns !== undefined && { max_turns: userMaxTurns }),
     ...(userMaxBudgetUsd !== undefined && { max_budget_usd: userMaxBudgetUsd }),
+    ...(userTrace && { trace: true }),
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,

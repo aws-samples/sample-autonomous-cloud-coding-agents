@@ -173,6 +173,7 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    trace: bool = False,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -203,6 +204,7 @@ def run_task(
         task_type=task_type,
         branch_name=branch_name,
         pr_number=pr_number,
+        trace=trace,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
@@ -227,7 +229,7 @@ def run_task(
         task_state.write_heartbeat(config.task_id)
 
         agent_result: AgentResult | None = None
-        progress = _ProgressWriter(config.task_id)
+        progress = _ProgressWriter(config.task_id, trace=trace)
         try:
             # Context hydration
             with task_span("task.context_hydration"):

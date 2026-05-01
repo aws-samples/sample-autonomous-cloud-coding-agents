@@ -177,6 +177,21 @@ describe('hydrateAndTransition', () => {
     expect(payload.max_turns).toBe(100);
   });
 
+  test('threads trace: true into the agent payload when set on the task record', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithTrace = { ...baseTask, trace: true };
+    const payload = await hydrateAndTransition(taskWithTrace as any);
+    expect(payload.trace).toBe(true);
+  });
+
+  test('omits trace from payload when task record has no trace flag (slim wire)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload).not.toHaveProperty('trace');
+  });
+
   test('throws when guardrail_blocked is set on hydrated context', async () => {
     mockDdbSend.mockResolvedValue({});
     mockHydrateContext.mockResolvedValueOnce({

@@ -27,8 +27,13 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
-# 200-char limit for preview fields, per design doc
+# Preview field cap defaults (design §10.1):
+#   - 200 chars for normal tasks — small DDB rows, cheap watch-stream bytes.
+#   - 4096 chars (4 KB) for ``--trace`` opt-in tasks — full enough to
+#     capture the critical lines of a tool invocation / model response
+#     without blowing through DDB's per-item byte budget.
 _PREVIEW_MAX_LEN = 200
+_PREVIEW_MAX_LEN_TRACE = 4096
 
 # 90 days in seconds — matches task retention TTL
 _TTL_SECONDS = 90 * 24 * 60 * 60
@@ -83,12 +88,19 @@ class _ProgressWriter:
 
     _MAX_FAILURES = 3
 
-    def __init__(self, task_id: str) -> None:
+    def __init__(self, task_id: str, trace: bool = False) -> None:
         self._task_id = task_id
         self._table_name = os.environ.get("TASK_EVENTS_TABLE_NAME")
         self._table = None
         self._disabled = False
         self._failure_count = 0
+        # Per-instance preview cap — design §10.1. ``trace=True`` raises
+        # the cap from 200 chars to 4 KB for debug captures.
+        self._preview_max_len = _PREVIEW_MAX_LEN_TRACE if trace else _PREVIEW_MAX_LEN
+
+    def _preview(self, value: str | None) -> str:
+        """Truncate *value* to the instance's preview cap."""
+        return _truncate_preview(value, self._preview_max_len)
 
     # -- lazy init -------------------------------------------------------------
 
@@ -171,8 +183,8 @@ class _ProgressWriter:
             {
                 "turn": turn,
                 "model": model,
-                "thinking_preview": _truncate_preview(thinking),
-                "text_preview": _truncate_preview(text),
+                "thinking_preview": self._preview(thinking),
+                "text_preview": self._preview(text),
                 "tool_calls_count": tool_calls_count,
             },
         )
@@ -188,7 +200,7 @@ class _ProgressWriter:
             "agent_tool_call",
             {
                 "tool_name": tool_name,
-                "tool_input_preview": _truncate_preview(tool_input),
+                "tool_input_preview": self._preview(tool_input),
                 "turn": turn,
             },
         )
@@ -206,7 +218,7 @@ class _ProgressWriter:
             {
                 "tool_name": tool_name,
                 "is_error": is_error,
-                "content_preview": _truncate_preview(content),
+                "content_preview": self._preview(content),
                 "turn": turn,
             },
         )
@@ -217,7 +229,7 @@ class _ProgressWriter:
             "agent_milestone",
             {
                 "milestone": milestone,
-                "details": _truncate_preview(details),
+                "details": self._preview(details),
             },
         )
 
@@ -245,6 +257,6 @@ class _ProgressWriter:
             "agent_error",
             {
                 "error_type": error_type,
-                "message_preview": _truncate_preview(message),
+                "message_preview": self._preview(message),
             },
         )

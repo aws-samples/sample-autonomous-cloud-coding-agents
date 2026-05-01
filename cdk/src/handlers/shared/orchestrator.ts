@@ -332,6 +332,10 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
+    // Only include when true so the agent's ``inp.get("trace", False)``
+    // default semantics remain the no-op path. Keeps the wire payload
+    // slim for the common non-trace case.
+    ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),

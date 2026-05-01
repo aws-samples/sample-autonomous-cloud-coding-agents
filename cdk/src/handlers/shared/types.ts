@@ -63,6 +63,14 @@ export interface TaskRecord {
   readonly build_passed?: boolean;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  /**
+   * Whether the task was submitted with ``--trace`` (design §10.1).
+   * When true the orchestrator threads a ``trace: true`` flag into the
+   * agent payload; the agent's ``_ProgressWriter`` raises its preview
+   * cap from 200 chars to 4 KB so debug captures aren't silently
+   * clipped. Opt-in per task — not routine observability.
+   */
+  readonly trace?: boolean;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
   readonly turns_attempted?: number;
@@ -156,6 +164,10 @@ export interface TaskDetail {
    *  when the cap tripped. */
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
+  /** True when the task was submitted with ``--trace`` — surfaces the
+   *  opt-in state to scripts / CLI consumers without making them
+   *  guess from secondary signals. */
+  readonly trace: boolean;
 }
 
 /**
@@ -219,6 +231,8 @@ export interface GetTaskEventsQuery {
 
 /**
  * Create task request body.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -229,6 +243,8 @@ export interface CreateTaskRequest {
   readonly task_type?: TaskType;
   readonly pr_number?: number;
   readonly attachments?: Attachment[];
+  /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
+  readonly trace?: boolean;
 }
 
 /**
@@ -273,6 +289,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     turns_attempted: record.turns_attempted ?? null,
     turns_completed: record.turns_completed ?? null,
     prompt_version: record.prompt_version ?? null,
+    trace: record.trace === true,
   };
 }
 

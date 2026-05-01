@@ -1,7 +1,10 @@
 """Tests for AgentCore FastAPI server behavior."""
 
+from __future__ import annotations
+
 import threading
 import time
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -369,3 +372,66 @@ def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch
 
     with server._debug_cw_failures_lock:
         assert server._debug_cw_failures == 1
+
+
+# ---------------------------------------------------------------------------
+# Chunk K: trace flag extraction (design §10.1)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRequest:
+    """Minimal stand-in for starlette.Request — only ``.headers.get`` is used."""
+
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+
+
+class TestExtractTrace:
+    """_extract_invocation_params is the boundary where the orchestrator's
+    ``trace`` payload becomes the agent's ``trace`` kwarg. The flag is
+    strictly opt-in — only a real boolean ``True`` counts."""
+
+    def _base_payload(self, **extra):
+        return {
+            "repo_url": "org/repo",
+            "task_description": "Fix it",
+            "task_id": "t-1",
+            **extra,
+        }
+
+    def _fake_req(self) -> Any:
+        # ``_extract_invocation_params`` only calls ``request.headers.get``,
+        # so a duck-typed stub suffices. Return ``Any`` to silence the
+        # ty type checker without importing starlette at runtime.
+        return _FakeRequest()
+
+    def test_trace_true_in_payload_extracts_to_True(self):
+        params = server._extract_invocation_params(
+            self._base_payload(trace=True),
+            self._fake_req(),
+        )
+        assert params["trace"] is True
+
+    def test_trace_absent_defaults_to_False(self):
+        params = server._extract_invocation_params(
+            self._base_payload(),
+            self._fake_req(),
+        )
+        assert params["trace"] is False
+
+    def test_trace_string_true_does_NOT_enable_trace(self):
+        # Guard against a misbehaving client sending "true" (truthy
+        # string) — the extractor uses ``is True`` so only real
+        # booleans flip the flag.
+        params = server._extract_invocation_params(
+            self._base_payload(trace="true"),
+            self._fake_req(),
+        )
+        assert params["trace"] is False
+
+    def test_trace_1_does_NOT_enable_trace(self):
+        params = server._extract_invocation_params(
+            self._base_payload(trace=1),
+            self._fake_req(),
+        )
+        assert params["trace"] is False

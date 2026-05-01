@@ -108,6 +108,12 @@ class TaskConfig(BaseModel):
     branch_name: str = ""
     pr_number: str = ""
     task_id: str = ""
+    # Opt-in debug preview cap (design §10.1). Threaded to BOTH the
+    # pipeline.py milestone writer AND the runner.py turn/tool writer —
+    # the runner's writer is where thinking/tool_input/tool_result
+    # previews live, so dropping ``trace`` here silently no-ops the
+    # feature for the fields that matter.
+    trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
     issue: GitHubIssue | None = None

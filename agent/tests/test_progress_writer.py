@@ -200,6 +200,147 @@ class TestProgressWriterPutEvent:
 
 
 # ---------------------------------------------------------------------------
+# _ProgressWriter — --trace preview cap (design §10.1)
+# ---------------------------------------------------------------------------
+
+
+class TestProgressWriterTrace:
+    """Trace-enabled writers use a 4 KB preview cap instead of 200 chars.
+
+    The cap is per-instance, not a mutable global: two writers in the
+    same process (unit tests, local batch mode) can coexist with
+    different caps without cross-contamination.
+    """
+
+    @pytest.fixture()
+    def trace_writer(self, monkeypatch):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        return _ProgressWriter("task-trace", trace=True)
+
+    @pytest.fixture()
+    def normal_writer(self, monkeypatch):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        return _ProgressWriter("task-normal")
+
+    def test_trace_raises_preview_cap_to_4kb(self, trace_writer):
+        table = MagicMock()
+        trace_writer._table = table
+        long_text = "x" * 3000
+        trace_writer.write_agent_turn(
+            turn=1, model="c4", thinking=long_text, text="", tool_calls_count=0
+        )
+        item = table.put_item.call_args[1]["Item"]
+        # 3000 chars fits inside the 4 KB trace cap → returned verbatim,
+        # no "..." suffix appended.
+        assert item["metadata"]["thinking_preview"] == long_text
+
+    def test_trace_still_caps_at_4096_plus_ellipsis(self, trace_writer):
+        table = MagicMock()
+        trace_writer._table = table
+        long_text = "y" * 5000
+        trace_writer.write_agent_turn(
+            turn=1, model="c4", thinking=long_text, text="", tool_calls_count=0
+        )
+        item = table.put_item.call_args[1]["Item"]
+        preview = item["metadata"]["thinking_preview"]
+        # 4096 content chars + "..." = 4099. Assert the prefix content so
+        # a regression that kept the last 4096 (instead of the first)
+        # surfaces here instead of passing silently.
+        assert len(preview) == 4099
+        assert preview[:4096] == "y" * 4096
+        assert preview.endswith("...")
+
+    @pytest.mark.parametrize(
+        "length,expected_len,has_ellipsis",
+        [
+            (4095, 4095, False),  # below cap: passes through verbatim
+            (4096, 4096, False),  # exactly at cap (``<= max_len`` branch)
+            (4097, 4099, True),  # one over: truncated with ellipsis
+        ],
+    )
+    def test_trace_cap_boundary_conditions(self, trace_writer, length, expected_len, has_ellipsis):
+        # Lock the ``<=`` vs ``<`` off-by-one at the exact cap boundary.
+        table = MagicMock()
+        trace_writer._table = table
+        trace_writer.write_agent_milestone("m", "x" * length)
+        preview = table.put_item.call_args[1]["Item"]["metadata"]["details"]
+        assert len(preview) == expected_len
+        assert preview.endswith("...") is has_ellipsis
+
+    @pytest.mark.parametrize(
+        "length,expected_len,has_ellipsis",
+        [
+            (199, 199, False),
+            (200, 200, False),
+            (201, 203, True),
+        ],
+    )
+    def test_normal_cap_boundary_conditions(
+        self,
+        normal_writer,
+        length,
+        expected_len,
+        has_ellipsis,
+    ):
+        # Same off-by-one guard on the default 200-char path.
+        table = MagicMock()
+        normal_writer._table = table
+        normal_writer.write_agent_milestone("m", "x" * length)
+        preview = table.put_item.call_args[1]["Item"]["metadata"]["details"]
+        assert len(preview) == expected_len
+        assert preview.endswith("...") is has_ellipsis
+
+    def test_normal_writer_default_200_char_cap_preserved(self, normal_writer):
+        # Regression guard: trace=False must keep the 200-char cap.
+        table = MagicMock()
+        normal_writer._table = table
+        long_text = "z" * 500
+        normal_writer.write_agent_turn(
+            turn=1, model="c4", thinking=long_text, text="", tool_calls_count=0
+        )
+        item = table.put_item.call_args[1]["Item"]
+        preview = item["metadata"]["thinking_preview"]
+        assert len(preview) == 203  # 200 + "..."
+
+    def test_trace_flag_applies_to_all_preview_fields(self, trace_writer):
+        # Cover every preview site so a future ``write_agent_X`` that
+        # forgets ``self._preview(...)`` gets caught.
+        table = MagicMock()
+        trace_writer._table = table
+        long = "L" * 1000
+
+        trace_writer.write_agent_tool_call(tool_name="Bash", tool_input=long, turn=1)
+        assert table.put_item.call_args[1]["Item"]["metadata"]["tool_input_preview"] == long
+
+        trace_writer.write_agent_tool_result(tool_name="Bash", is_error=False, content=long, turn=1)
+        assert table.put_item.call_args[1]["Item"]["metadata"]["content_preview"] == long
+
+        trace_writer.write_agent_milestone("ms", long)
+        assert table.put_item.call_args[1]["Item"]["metadata"]["details"] == long
+
+        trace_writer.write_agent_error("E", long)
+        assert table.put_item.call_args[1]["Item"]["metadata"]["message_preview"] == long
+
+    def test_two_writers_in_same_process_have_independent_caps(self, normal_writer, trace_writer):
+        # Per-instance cap — not a mutable module global.
+        normal_table = MagicMock()
+        trace_table = MagicMock()
+        normal_writer._table = normal_table
+        trace_writer._table = trace_table
+
+        long = "x" * 1000
+        normal_writer.write_agent_milestone("n", long)
+        trace_writer.write_agent_milestone("t", long)
+
+        n_details = normal_table.put_item.call_args[1]["Item"]["metadata"]["details"]
+        t_details = trace_table.put_item.call_args[1]["Item"]["metadata"]["details"]
+        assert len(n_details) == 203  # 200 + "..."
+        assert t_details == long  # under 4096, full pass-through
+
+
+# ---------------------------------------------------------------------------
 # _ProgressWriter — fail-open behavior
 # ---------------------------------------------------------------------------
 

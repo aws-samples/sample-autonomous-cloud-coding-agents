@@ -366,3 +366,145 @@ class TestCancelSkipsPostHooks:
             )
 
         mock_ensure_pr.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Chunk K1 — trace threading into TaskConfig (design §10.1)
+# ---------------------------------------------------------------------------
+
+
+class TestTraceThreading:
+    """run_task(trace=...) must land on ``TaskConfig.trace`` so the
+    runner.py _ProgressWriter picks it up. This is the exact junction a
+    reviewer caught as silently dropping the flag in review; lock it
+    with a dedicated test.
+    """
+
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_run_task_trace_true_sets_config_trace_true(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        captured_config: TaskConfig | None = None
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
+            nonlocal captured_config
+            captured_config = config
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch(
+                "pipeline.ensure_pr",
+                return_value="https://github.com/org/repo/pull/1",
+            ),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            run_task(
+                repo_url="owner/repo",
+                task_description="deep debug",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-trace",
+                trace=True,
+            )
+
+        assert captured_config is not None
+        # The config reaching run_agent carries trace=True so runner.py's
+        # _ProgressWriter(config.task_id, trace=config.trace) picks it up.
+        assert captured_config.trace is True
+
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_run_task_trace_default_is_false(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        captured_config: TaskConfig | None = None
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None):
+            nonlocal captured_config
+            captured_config = config
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch(
+                "pipeline.ensure_pr",
+                return_value="https://github.com/org/repo/pull/1",
+            ),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            run_task(
+                repo_url="owner/repo",
+                task_description="normal task",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-notrace",
+            )
+
+        assert captured_config is not None
+        assert captured_config.trace is False

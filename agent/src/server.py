@@ -254,6 +254,7 @@ def _run_task_background(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    trace: bool = False,
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -299,6 +300,7 @@ def _run_task_background(
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
+            trace=trace,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -344,6 +346,10 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    # ``trace`` is strictly opt-in (design §10.1). Accept only real
+    # booleans from the orchestrator — a string "false" would otherwise
+    # flip the flag on.
+    trace = inp.get("trace") is True
 
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
 
@@ -366,6 +372,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
+        "trace": trace,
     }
 
 

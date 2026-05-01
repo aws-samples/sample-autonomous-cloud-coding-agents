@@ -51,6 +51,7 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     max_budget_usd: 2.0,
     turns_attempted: null,
     turns_completed: null,
+    trace: false,
     ...overrides,
   };
 }
