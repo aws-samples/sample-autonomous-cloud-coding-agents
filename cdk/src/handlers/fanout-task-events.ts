@@ -44,9 +44,14 @@
  * props. Chunk J ships the first real dispatcher (GitHub edit-in-place).
  */
 
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBStreamEvent, DynamoDBStreamHandler, DynamoDBRecord } from 'aws-lambda';
+import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
+import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { logger } from './shared/logger';
-import type { ChannelConfig, TaskNotificationsConfig } from './shared/types';
+import { loadRepoConfig } from './shared/repo-config';
+import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 
 // Re-export the shared types so existing test imports (and any future
 // caller that only imports from the handler module) continue to work.
@@ -252,14 +257,249 @@ async function dispatchToSlack(event: FanOutEvent): Promise<void> {
   });
 }
 
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+/**
+ * Load the TaskRecord fields the GitHub dispatcher needs. Returns
+ * ``null`` if the task vanished (race with TTL cleanup) or if the
+ * TaskTable env var is missing in a broken deployment — the dispatcher
+ * logs and skips instead of failing the batch.
+ */
+async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) {
+    logger.warn('[fanout/github] TASK_TABLE_NAME not set — cannot dispatch', {
+      event: 'fanout.github.missing_env',
+    });
+    return null;
+  }
+  const result = await ddb.send(new GetCommand({
+    TableName: tableName,
+    Key: { task_id: taskId },
+  }));
+  return (result.Item as TaskRecord | undefined) ?? null;
+}
+
+/**
+ * Persist the ``github_comment_id`` / ``github_comment_etag`` fields on
+ * the TaskRecord after a successful upsert. Conditional on the task
+ * still existing — a concurrent TTL eviction would otherwise create a
+ * zombie record with only these two fields.
+ *
+ * The caller (``dispatchToGitHubComment``) decides how to react to
+ * each failure mode: ConditionalCheckFailedException (task evicted)
+ * is benign because subsequent events will also GetItem-miss and
+ * skip; any other error is a real persistence bug that risks a
+ * duplicate comment on the next event.
+ */
+async function saveCommentState(
+  taskId: string,
+  commentId: number,
+  etag: string,
+): Promise<void> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return;
+  await ddb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { task_id: taskId },
+    UpdateExpression: 'SET github_comment_id = :cid, github_comment_etag = :etag',
+    ExpressionAttributeValues: {
+      ':cid': commentId,
+      ':etag': etag,
+    },
+    ConditionExpression: 'attribute_exists(task_id)',
+  }));
+}
+
+/** Name of the AWS SDK v3 conditional-failure error. Checking ``name``
+ *  rather than ``instanceof`` keeps the check decoupled from the
+ *  specific SDK client class the DocumentClient wraps. */
+const CONDITIONAL_CHECK_FAILED = 'ConditionalCheckFailedException';
+
+/**
+ * Resolve the GitHub comment target for this task. Prefers ``pr_number``
+ * (the design-intent surface for pr_iteration / pr_review tasks) and
+ * falls back to ``issue_number``. Returns ``null`` if the task has
+ * neither — new_task tasks submitted via the API (no webhook) have no
+ * upstream surface to comment on.
+ */
+function resolveCommentTarget(task: TaskRecord): number | null {
+  return task.pr_number ?? task.issue_number ?? null;
+}
+
+/**
+ * Resolve the GitHub token ARN for a task. Per-repo config wins; fall
+ * back to the Lambda's platform default env var so freshly-onboarded
+ * repos without an override still work.
+ *
+ * Error classification:
+ *   - ``ResourceNotFoundException`` (RepoTable absent in dev) → fall
+ *     back to the platform default silently.
+ *   - ``AccessDeniedException`` → hard fail. An IAM misconfig means
+ *     the dispatcher would use the wrong token for every repo, and
+ *     silently falling back would mask the deployment bug.
+ *   - Anything else (throttling, transient DDB errors, schema
+ *     violations) → log at error and fall back so one flaky DDB
+ *     invocation doesn't black-hole GitHub comments platform-wide.
+ */
+async function resolveTokenSecretArn(repo: string): Promise<string | null> {
+  let repoConfig: Awaited<ReturnType<typeof loadRepoConfig>> = null;
+  try {
+    repoConfig = await loadRepoConfig(repo);
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    if (name === 'AccessDeniedException') {
+      // Hard fail — IAM deny means every task in this deploy would
+      // silently fall back to the platform default, hiding the bug.
+      throw err;
+    }
+    if (name === 'ResourceNotFoundException') {
+      logger.info('[fanout/github] RepoTable not present — using platform default token', {
+        event: 'fanout.github.repo_table_absent',
+        repo,
+      });
+    } else {
+      logger.error('[fanout/github] loadRepoConfig transient error — falling back to platform token', {
+        event: 'fanout.github.repo_config_failed',
+        error_id: 'FANOUT_REPO_CONFIG_FAILED',
+        repo,
+        error_name: name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return repoConfig?.github_token_secret_arn
+    ?? process.env.GITHUB_TOKEN_SECRET_ARN
+    ?? null;
+}
+
 async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
-  // Real integration (Chunk J): inspect `event.metadata.channel_source === 'webhook'`
-  // and the task's `repo` + `issue_number` / `pr_number`; edit a single
-  // issue comment in place via the GitHub App REST API with If-Match
-  // ETag concurrency.
-  logger.info('[fanout/github] would comment', {
-    event: 'fanout.github.dispatch_stub',
-    task_id: event.task_id,
+  const task = await loadTaskForComment(event.task_id);
+  if (!task) {
+    logger.warn('[fanout/github] task not found — skipping comment', {
+      event: 'fanout.github.task_missing',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
+  const targetNumber = resolveCommentTarget(task);
+  if (targetNumber === null) {
+    // No issue / PR to comment on (API-submitted new_task with only a
+    // task_description). Skip silently at debug level.
+    logger.info('[fanout/github] no issue/pr target for task — skipping', {
+      event: 'fanout.github.no_target',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
+  const tokenArn = await resolveTokenSecretArn(task.repo);
+  if (!tokenArn) {
+    logger.warn('[fanout/github] no GitHub token ARN configured — skipping', {
+      event: 'fanout.github.no_token_arn',
+      task_id: event.task_id,
+      repo: task.repo,
+    });
+    return;
+  }
+
+  let token: string;
+  try {
+    token = await resolveGitHubToken(tokenArn);
+  } catch (err) {
+    logger.warn('[fanout/github] token resolution failed — skipping', {
+      event: 'fanout.github.token_resolve_failed',
+      task_id: event.task_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  const body = renderCommentBody({
+    taskId: task.task_id,
+    status: task.status,
+    repo: task.repo,
+    latestEventType: event.event_type,
+    latestEventAt: event.timestamp,
+    prUrl: task.pr_url ?? null,
+    durationS: task.duration_s ?? null,
+    costUsd: task.cost_usd ?? null,
+  });
+
+  const upsertParams = {
+    repo: task.repo,
+    issueOrPrNumber: targetNumber,
+    body,
+    token,
+    existingCommentId: task.github_comment_id,
+    existingEtag: task.github_comment_etag,
+  };
+
+  let result;
+  try {
+    result = await upsertTaskComment(upsertParams);
+  } catch (err) {
+    // On 401 we treat the cached token as stale (rotation / expiry),
+    // evict the cache, and retry exactly once. A cold token fetch is
+    // cheap (one Secrets Manager call) and this self-heals the common
+    // rotation case without operator intervention. Identify by duck-
+    // typing on ``name`` + ``httpStatus`` rather than ``instanceof`` so
+    // downstream callers (and tests that mock the module) can throw
+    // a compatible shape without being the exact same class instance.
+    const isGhErr = err instanceof Error && err.name === 'GitHubCommentError';
+    const httpStatus = (err as { httpStatus?: unknown }).httpStatus;
+    if (isGhErr && httpStatus === 401) {
+      logger.warn('[fanout/github] 401 from GitHub — evicting token cache and retrying once', {
+        event: 'fanout.github.token_stale_retry',
+        task_id: event.task_id,
+        token_arn: tokenArn,
+      });
+      clearTokenCache();
+      const freshToken = await resolveGitHubToken(tokenArn);
+      result = await upsertTaskComment({ ...upsertParams, token: freshToken });
+    } else {
+      throw err;
+    }
+  }
+
+  try {
+    await saveCommentState(task.task_id, result.commentId, result.etag);
+  } catch (err) {
+    const errName = err instanceof Error ? err.name : '';
+    if (errName === CONDITIONAL_CHECK_FAILED) {
+      // Benign: the task was TTL-evicted between our GetItem and this
+      // UpdateItem. Subsequent events for this task will also find no
+      // TaskRecord (loadTaskForComment → null) and skip dispatching,
+      // so there's no duplicate-comment risk to chase.
+      logger.info('[fanout/github] task evicted before saveCommentState — benign', {
+        event: 'fanout.github.persist_benign_evicted',
+        task_id: task.task_id,
+      });
+    } else {
+      // Non-conditional failure (DDB throttling, IAM deny, etc.) is a
+      // real persistence bug: the comment WAS posted but its id/etag
+      // are not on the TaskRecord. The next event will POST a second
+      // comment instead of PATCHing. Log at ERROR with an error_id so
+      // operators can alarm on persistent GitHub dispatch failures
+      // distinctly from the generic dispatcher-rejected stream.
+      logger.error('[fanout/github] saveCommentState failed — next event may duplicate comment', {
+        event: 'fanout.github.persist_failed',
+        error_id: 'FANOUT_GITHUB_PERSIST_FAILED',
+        task_id: task.task_id,
+        comment_id: result.commentId,
+        created: result.created,
+        error_name: errName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  logger.info('[fanout/github] comment dispatched', {
+    event: 'fanout.github.dispatched',
+    task_id: task.task_id,
+    comment_id: result.commentId,
+    created: result.created,
     event_type: event.event_type,
   });
 }

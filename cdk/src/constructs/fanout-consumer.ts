@@ -23,6 +23,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as sm from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -37,6 +38,29 @@ export interface FanOutConsumerProps {
   /** The TaskEventsTable whose stream this consumer reads from. Must
    *  have `stream: NEW_IMAGE` enabled (see `TaskEventsTable`). */
   readonly taskEventsTable: dynamodb.ITable;
+
+  /**
+   * TaskTable — the GitHub dispatcher needs read access to resolve
+   * repo + pr_number + existing github_comment_id for a task, and
+   * write access to persist the comment_id + etag after an upsert.
+   * Optional: if omitted, the GitHub dispatcher skips (log-only) and
+   * Slack / Email continue to run as stubs.
+   */
+  readonly taskTable?: dynamodb.ITable;
+
+  /**
+   * RepoTable — GitHub dispatcher reads per-repo
+   * `github_token_secret_arn` overrides. Optional: if omitted, falls
+   * back to the platform default secret.
+   */
+  readonly repoTable?: dynamodb.ITable;
+
+  /**
+   * Platform default GitHub token secret. Used by the GitHub
+   * dispatcher when the per-repo config has no override. Optional: if
+   * omitted and the repo has no override, the dispatcher skips.
+   */
+  readonly githubTokenSecret?: sm.ISecret;
 
   /**
    * Maximum batch size delivered to the Lambda per invocation.
@@ -92,6 +116,23 @@ export class FanOutConsumer extends Construct {
         externalModules: ['@aws-sdk/*'],
       },
     });
+
+    // GitHub dispatcher plumbing. Each grant/env var is guarded so the
+    // fan-out plane still deploys cleanly in a dev environment that
+    // hasn't onboarded the RepoTable or a platform GitHub token yet —
+    // the dispatcher will log-and-skip rather than crash.
+    if (props.taskTable) {
+      props.taskTable.grantReadWriteData(this.fn);
+      this.fn.addEnvironment('TASK_TABLE_NAME', props.taskTable.tableName);
+    }
+    if (props.repoTable) {
+      props.repoTable.grantReadData(this.fn);
+      this.fn.addEnvironment('REPO_TABLE_NAME', props.repoTable.tableName);
+    }
+    if (props.githubTokenSecret) {
+      props.githubTokenSecret.grantRead(this.fn);
+      this.fn.addEnvironment('GITHUB_TOKEN_SECRET_ARN', props.githubTokenSecret.secretArn);
+    }
 
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,

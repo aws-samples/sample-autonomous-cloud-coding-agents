@@ -83,6 +83,21 @@ export interface TaskRecord {
    * ``undefined`` at runtime and every task inherits the defaults.
    */
   readonly notifications?: TaskNotificationsConfig;
+  /**
+   * ID of the single GitHub issue comment the fan-out plane maintains
+   * for this task (design §6.4 — edit-in-place). Written by the
+   * GitHub dispatcher on the first delivery; read on subsequent
+   * deliveries to PATCH instead of POST. Absent until the first
+   * dispatch fires successfully.
+   */
+  readonly github_comment_id?: number;
+  /**
+   * ETag of the last successful PATCH / POST against the issue comment.
+   * Sent back as ``If-Match`` on the next PATCH for optimistic
+   * concurrency (§6.4). Refreshed after each successful write; on 412
+   * the dispatcher re-GETs the comment and retries once.
+   */
+  readonly github_comment_etag?: string;
 }
 
 /** Per-channel override for one notification channel. See

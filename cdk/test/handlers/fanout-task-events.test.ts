@@ -18,6 +18,61 @@
  */
 
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+
+// -- DDB + downstream-module mocks (hoisted before handler import) --
+// Default resolves to an empty-item Get so routing tests that don't
+// care about DDB see the dispatcher short-circuit on "task not found"
+// rather than throwing a TypeError. Per-test code can override with
+// ``mockDdbSend.mockReset()`` + ``.mockResolvedValueOnce(...)`` as
+// needed.
+const mockDdbSend = jest.fn().mockResolvedValue({ Item: undefined });
+// Stub the DDB client + command constructors. Using ``jest.fn`` for
+// each command class gives us ``new GetCommand(input)`` producing a
+// plain object we can inspect; the DocumentClient's ``send`` is routed
+// to the mock above. ``requireActual`` on ``lib-dynamodb`` would pull
+// in the real command implementations which internally instantiate
+// ``client-dynamodb`` classes we've stubbed — that's the import cycle
+// that surfaces as ``GetItemCommand is not a constructor``.
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockDdbSend })) },
+  GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+}));
+
+const mockUpsertTaskComment: jest.Mock = jest.fn();
+const mockRenderCommentBody: jest.Mock = jest.fn().mockReturnValue('rendered body');
+jest.mock('../../src/handlers/shared/github-comment', () => ({
+  upsertTaskComment: (args: unknown) => mockUpsertTaskComment(args),
+  renderCommentBody: (args: unknown) => mockRenderCommentBody(args),
+  // Stub class mirrors the production shape so the handler's
+  // ``instanceof GitHubCommentError && err.httpStatus === 401`` check
+  // fires correctly in the token-rotation test.
+  GitHubCommentError: class GitHubCommentError extends Error {
+    readonly httpStatus: number | undefined;
+    constructor(message: string, httpStatus?: number) {
+      super(message);
+      this.name = 'GitHubCommentError';
+      this.httpStatus = httpStatus;
+    }
+  },
+}));
+
+const mockLoadRepoConfig: jest.Mock = jest.fn();
+jest.mock('../../src/handlers/shared/repo-config', () => ({
+  loadRepoConfig: (repo: string) => mockLoadRepoConfig(repo),
+}));
+
+const mockResolveGitHubToken: jest.Mock = jest.fn();
+const mockClearTokenCache: jest.Mock = jest.fn();
+jest.mock('../../src/handlers/shared/context-hydration', () => ({
+  resolveGitHubToken: (arn: string) => mockResolveGitHubToken(arn),
+  clearTokenCache: () => mockClearTokenCache(),
+}));
+
+process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:0:secret:platform';
+
 import {
   CHANNEL_DEFAULTS,
   parseStreamRecord,
@@ -315,9 +370,11 @@ describe('fanout-task-events: channel isolation', () => {
         timestamp: '2026-04-22T04:00:00Z',
       });
 
-      // (1) Email + GitHub actually ran their dispatch paths.
+      // (1) Email actually ran its dispatch path (GitHub short-circuits
+      // on "task not found" because the shared DDB mock returns no
+      // Item — that's fine; the key invariant is that one channel's
+      // failure doesn't block the others).
       expect(observedEvents).toContain('fanout.email.dispatch_stub');
-      expect(observedEvents).toContain('fanout.github.dispatch_stub');
       // Slack also ran (it threw), so its log line was emitted before the throw.
       expect(observedEvents).toContain('fanout.slack.dispatch_stub');
 
@@ -380,5 +437,277 @@ describe('fanout-task-events: handler', () => {
       Records: [mkRecord('REMOVE', undefined)],
     };
     await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chunk J — GitHub dispatcher integration
+// ---------------------------------------------------------------------------
+
+describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
+  const TASK_RECORD_BASE = {
+    task_id: 't-gh',
+    user_id: 'u-1',
+    status: 'COMPLETED',
+    repo: 'owner/repo',
+    pr_number: 42,
+    branch_name: 'bgagent/t-gh/fix',
+    channel_source: 'api',
+    status_created_at: 'COMPLETED#2026-04-30T12:00:00Z',
+    created_at: '2026-04-30T11:50:00Z',
+    updated_at: '2026-04-30T12:00:00Z',
+  };
+
+  beforeEach(() => {
+    // Per-test-suite reset. After ``mockReset`` we re-establish a
+    // permissive default so a test that forgets to script GetCommand
+    // doesn't crash with a TypeError.
+    mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
+    mockUpsertTaskComment.mockReset();
+    mockRenderCommentBody.mockReset().mockReturnValue('rendered body');
+    mockLoadRepoConfig.mockReset().mockResolvedValue(null);
+    mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
+    mockClearTokenCache.mockReset();
+  });
+
+  test('first terminal event POSTs a new comment and persists {id, etag} to TaskTable', async () => {
+    // Get task record → upsert creates → UpdateItem persists.
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE }) // GetCommand
+      .mockResolvedValueOnce({}); // UpdateCommand
+    mockUpsertTaskComment.mockResolvedValueOnce({
+      commentId: 555,
+      etag: '"new-etag"',
+      created: true,
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
+    const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
+    expect(upsertArg).toMatchObject({
+      repo: 'owner/repo',
+      issueOrPrNumber: 42,
+      token: 'ghp_fake',
+      existingCommentId: undefined,
+    });
+    // UpdateCommand fired with the new ids.
+    const update = mockDdbSend.mock.calls[1][0] as { input: { ExpressionAttributeValues: Record<string, unknown> } };
+    expect(update.input.ExpressionAttributeValues[':cid']).toBe(555);
+    expect(update.input.ExpressionAttributeValues[':etag']).toBe('"new-etag"');
+  });
+
+  test('subsequent event passes the persisted comment_id so the helper PATCHes', async () => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...TASK_RECORD_BASE, github_comment_id: 555, github_comment_etag: '"prev"' } })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({
+      commentId: 555,
+      etag: '"after-patch"',
+      created: false,
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
+    expect(upsertArg.existingCommentId).toBe(555);
+  });
+
+  test('task with no issue_number and no pr_number skips the GitHub dispatcher', async () => {
+    mockDdbSend.mockResolvedValueOnce({
+      Item: { ...TASK_RECORD_BASE, pr_number: undefined, issue_number: undefined },
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    expect(mockUpsertTaskComment).not.toHaveBeenCalled();
+    // No UpdateItem either — nothing to persist.
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('missing task record (TTL race) → skip without throwing', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-missing')] };
+    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+
+    expect(mockUpsertTaskComment).not.toHaveBeenCalled();
+  });
+
+  test('upsertTaskComment rejection does NOT break the batch (routeEvent catches)', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE });
+    mockUpsertTaskComment.mockRejectedValueOnce(new Error('github 500'));
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    // No UpdateCommand fires (no id/etag to persist from a failed upsert).
+    const updateCalls = mockDdbSend.mock.calls.filter(
+      c => (c[0] as { _type?: string })._type === 'Update',
+    );
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test('passes persisted github_comment_etag through to upsertTaskComment (enables steady-state one-call PATCH)', async () => {
+    // Locks the fix for the BLOCKER where the etag was written but
+    // never read — without the pass-through, every subsequent event
+    // would do GET + PATCH instead of just PATCH.
+    mockDdbSend
+      .mockResolvedValueOnce({
+        Item: { ...TASK_RECORD_BASE, github_comment_id: 555, github_comment_etag: '"cached"' },
+      })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({
+      commentId: 555,
+      etag: '"after"',
+      created: false,
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
+    expect(upsertArg.existingEtag).toBe('"cached"');
+    expect(upsertArg.existingCommentId).toBe(555);
+  });
+
+  test('falls back to issue_number when pr_number is absent', async () => {
+    // Webhook-submitted issue tasks are the common real-world surface.
+    mockDdbSend
+      .mockResolvedValueOnce({
+        Item: { ...TASK_RECORD_BASE, pr_number: undefined, issue_number: 7 },
+      })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    expect(mockUpsertTaskComment.mock.calls[0][0].issueOrPrNumber).toBe(7);
+  });
+
+  test('loadRepoConfig throwing a transient error falls back to the platform default token', async () => {
+    // SFH-S2: DDB throttling must not black-hole GitHub comments;
+    // the dispatcher falls back to the platform default ARN so
+    // one flaky invocation doesn't silence the whole fleet.
+    mockLoadRepoConfig.mockRejectedValueOnce(
+      Object.assign(new Error('rate exceeded'), { name: 'ProvisionedThroughputExceededException' }),
+    );
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    // Fallback to the platform env-var ARN (set at the top of this file).
+    expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:aws:secretsmanager:us-east-1:0:secret:platform');
+  });
+
+  test('resolveGitHubToken throwing causes the dispatcher to skip without calling upsertTaskComment', async () => {
+    // SFH-S1 adjacent: when Secrets Manager fails, we must NOT
+    // attempt to write a comment with an undefined token.
+    mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE });
+    mockResolveGitHubToken.mockRejectedValueOnce(new Error('secrets manager down'));
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+
+    expect(mockUpsertTaskComment).not.toHaveBeenCalled();
+  });
+
+  test('saveCommentState ConditionalCheckFailed (task evicted) logs at INFO not ERROR', async () => {
+    // Benign: the task was TTL-evicted between the Get and the
+    // Update. Subsequent events for this task will also skip, so
+    // no duplicate-comment risk. Must NOT alarm operators.
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }),
+      );
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+
+    // Upsert fired (comment posted); handler didn't throw.
+    expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
+  });
+
+  test('saveCommentState non-conditional failure (DDB throttling) logs at ERROR with error_id', async () => {
+    // SFH-B2: non-ConditionalCheckFailed failures leave the task
+    // without a comment_id, so the next event will duplicate. This
+    // is a real persistence bug that must alarm distinctly.
+    const errorSpy = jest.fn();
+    jest.spyOn(
+      (await import('../../src/handlers/shared/logger')).logger,
+      'error',
+    ).mockImplementation(errorSpy);
+
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }),
+      );
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    // The dedicated error_id tag must fire so operators can alarm on it.
+    const errorCall = errorSpy.mock.calls.find(
+      c => (c[1] as Record<string, unknown> | undefined)?.error_id === 'FANOUT_GITHUB_PERSIST_FAILED',
+    );
+    expect(errorCall).toBeDefined();
+  });
+
+  test('401 from GitHub clears the token cache and retries once with a fresh token', async () => {
+    // SFH-S1: token rotation recovery. The first upsert rejects with
+    // 401, the dispatcher evicts the cache, re-fetches, and retries.
+    // We import the (mocked) class fresh so ``instanceof`` in the
+    // handler matches the instance the test throws.
+    const { GitHubCommentError } = jest.requireMock<typeof import('../../src/handlers/shared/github-comment')>(
+      '../../src/handlers/shared/github-comment',
+    );
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment
+      .mockRejectedValueOnce(new GitHubCommentError('unauthorized', 401))
+      .mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    // Two token fetches — stale then fresh.
+    mockResolveGitHubToken
+      .mockResolvedValueOnce('ghp_stale')
+      .mockResolvedValueOnce('ghp_fresh');
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    expect(mockClearTokenCache).toHaveBeenCalledTimes(1);
+    expect(mockUpsertTaskComment).toHaveBeenCalledTimes(2);
+    // Retry carried the fresh token.
+    expect(mockUpsertTaskComment.mock.calls[1][0].token).toBe('ghp_fresh');
+  });
+
+  test('per-repo github_token_secret_arn override takes precedence over platform default', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'owner/repo',
+      status: 'active',
+      onboarded_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      github_token_secret_arn: 'arn:repo-specific',
+    });
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:repo-specific');
   });
 });

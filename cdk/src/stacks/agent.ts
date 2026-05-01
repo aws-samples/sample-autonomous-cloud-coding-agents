@@ -426,10 +426,14 @@ export class AgentStack extends Stack {
 
     // --- Fan-out plane consumer ---
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / email per per-channel default filters. Ships as a
-    // router with log-only dispatchers; real integrations land incrementally.
+    // Slack / GitHub / email per per-channel default filters. GitHub
+    // dispatcher (Chunk J) edits a single issue comment in place with
+    // If-Match ETag; Slack / Email remain log-only until Phase 2.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
+      taskTable: taskTable.table,
+      repoTable: repoTable.table,
+      githubTokenSecret,
     });
 
     // --- Operator dashboard ---
