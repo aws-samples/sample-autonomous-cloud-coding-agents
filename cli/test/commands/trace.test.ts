@@ -51,11 +51,11 @@ function mockApiClientWith(getTraceUrl: jest.Mock): void {
 function makeFetchResponse(ok: boolean, status: number, statusText: string, bytes?: Uint8Array): Response {
   const body = bytes !== undefined
     ? new ReadableStream({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        },
-      })
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    })
     : null;
   return { ok, status, statusText, body } as unknown as Response;
 }
@@ -100,7 +100,11 @@ describe('trace download command', () => {
     }
 
     expect(getTraceUrl).toHaveBeenCalledWith('task-1');
-    expect(global.fetch).toHaveBeenCalledWith('https://s3.example/trace?sig=abc');
+    // L3 item 1: fetch is invoked with an AbortSignal for timeout / SIGINT.
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://s3.example/trace?sig=abc',
+      expect.objectContaining({ signal: expect.anything() }),
+    );
   });
 
   test('streams gunzipped JSONL to stdout by default', async () => {
@@ -173,6 +177,128 @@ describe('trace download command', () => {
     await expect(cmd.parseAsync(['node', 'test', 'download', 'task-1'])).rejects.toThrow(
       /S3 download failed: HTTP 403[^\n]*15-minute TTL/,
     );
+  });
+
+  test('rejects with CliError "corrupt or not gzipped" when stdout pipeline hits bad bytes (L3 item 1)', async () => {
+    // Bytes are NOT a valid gzip stream (magic number 0x1f 0x8b is missing).
+    // The default (no ``-o``) path pipes through ``createGunzip()``; L3
+    // wraps the raw zlib ``Z_DATA_ERROR`` in a ``CliError`` that names
+    // the real cause (corrupt / not gzipped) rather than surfacing an
+    // internal stack that looks like a CLI bug.
+    const junk = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+    const getTraceUrl = jest.fn().mockResolvedValue({
+      url: 'https://s3.example/trace?sig=abc',
+      expires_at: '2026-04-30T20:00:00Z',
+    });
+    mockApiClientWith(getTraceUrl);
+
+    global.fetch = jest.fn().mockResolvedValue(
+      makeFetchResponse(true, 200, 'OK', junk),
+    ) as typeof global.fetch;
+
+    // Silence the stdout writes the pipeline attempts before rejecting.
+    const writeSpy = jest
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((() => true) as typeof process.stdout.write);
+
+    try {
+      const cmd = makeTraceCommand();
+      await expect(cmd.parseAsync(['node', 'test', 'download', 'task-1'])).rejects.toThrow(
+        /corrupt or not gzipped/,
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  test('AbortController aborts the fetch when the 2-minute timeout expires (L3 item 1)', async () => {
+    // Use fake timers so we can advance past the 2-minute wall clock
+    // without the Jest suite sleeping for 2 real minutes. The fetch
+    // mock returns a promise that only rejects when the AbortSignal
+    // fires — mirroring undici's behavior on a stalled S3 stream.
+    const getTraceUrl = jest.fn().mockResolvedValue({
+      url: 'https://s3.example/trace?sig=abc',
+      expires_at: '2026-04-30T20:00:00Z',
+    });
+    mockApiClientWith(getTraceUrl);
+
+    // Fake timers must be installed BEFORE the action runs so the
+    // setTimeout in the handler uses the fake clock.
+    jest.useFakeTimers();
+    try {
+      global.fetch = jest.fn((_url: string, init?: { signal?: AbortSignal }) => {
+        return new Promise((_resolve, reject) => {
+          // Reject on abort so the action's AbortError handler runs.
+          init?.signal?.addEventListener('abort', () => {
+            const abortErr = new Error('The user aborted a request.');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          });
+        }) as unknown as Promise<Response>;
+      }) as typeof global.fetch;
+
+      const cmd = makeTraceCommand();
+      // Attach a catch handler BEFORE advancing timers so the rejection
+      // is never observed as unhandled (which Jest would treat as a
+      // test failure even if the final assertion also matches).
+      const done = cmd.parseAsync(['node', 'test', 'download', 'task-1']);
+      const assertion = expect(done).rejects.toThrow(/timed out after 2 minutes/);
+
+      // Fast-forward past the 2-minute timeout. The in-action timer
+      // will fire and abort the AbortController.
+      await jest.advanceTimersByTimeAsync(121_000);
+
+      await assertion;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('SIGINT during fetch aborts the download and cleans up the listener (L3 item 1)', async () => {
+    // Verify both the listener attach/detach contract AND that a SIGINT
+    // actually cancels the pending fetch. Fake timers prevent the
+    // 2-minute watchdog from racing the SIGINT signal.
+    const getTraceUrl = jest.fn().mockResolvedValue({
+      url: 'https://s3.example/trace?sig=abc',
+      expires_at: '2026-04-30T20:00:00Z',
+    });
+    mockApiClientWith(getTraceUrl);
+
+    // Track SIGINT listener count to confirm the action both adds (1)
+    // and removes (0) its handler on completion.
+    const listenersBefore = process.listenerCount('SIGINT');
+
+    jest.useFakeTimers();
+    try {
+      let sigintListenerAttached = false;
+      global.fetch = jest.fn((_url: string, init?: { signal?: AbortSignal }) => {
+        sigintListenerAttached = process.listenerCount('SIGINT') > listenersBefore;
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const abortErr = new Error('The user aborted a request.');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          });
+          // Simulate the user hitting Ctrl+C shortly after fetch starts.
+          // ``process.emit('SIGINT')`` triggers the action's handler
+          // which calls ac.abort().
+          setImmediate(() => process.emit('SIGINT' as never));
+        }) as unknown as Promise<Response>;
+      }) as typeof global.fetch;
+
+      const cmd = makeTraceCommand();
+      const done = cmd.parseAsync(['node', 'test', 'download', 'task-1']);
+      // Drain any pending setImmediate / microtasks.
+      await Promise.resolve();
+      jest.runOnlyPendingTimers();
+
+      await expect(done).rejects.toThrow(/Cancelled by user|aborted/);
+      expect(sigintListenerAttached).toBe(true);
+      // Listener must be detached on both success and error paths.
+      expect(process.listenerCount('SIGINT')).toBe(listenersBefore);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('rejects when S3 response has no body', async () => {

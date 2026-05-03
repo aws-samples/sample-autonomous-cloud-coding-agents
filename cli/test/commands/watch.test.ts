@@ -18,7 +18,14 @@
  */
 
 import { ApiClient } from '../../src/api-client';
-import { makeWatchCommand, nextCadence, renderEvent, transientRetryDelayMs } from '../../src/commands/watch';
+import {
+  _getSessionRetries,
+  _resetSessionRetries,
+  makeWatchCommand,
+  nextCadence,
+  renderEvent,
+  transientRetryDelayMs,
+} from '../../src/commands/watch';
 import { loadConfig as loadConfigMocked } from '../../src/config';
 import { ApiError, CliError } from '../../src/errors';
 import { TaskEvent } from '../../src/types';
@@ -175,6 +182,9 @@ describe('watch command — polling', () => {
     loadConfig.mockReset();
     loadConfig.mockReturnValue(CONFIG_POLLING);
     process.exitCode = undefined;
+    // L3 item 5: module-level retry counter is process-lived; reset between
+    // tests so the flap warn fires deterministically in the dedicated test.
+    _resetSessionRetries();
 
     (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
       createTask: jest.fn(),
@@ -489,6 +499,66 @@ describe('watch command — polling', () => {
     await cmd.parseAsync(['node', 'test', 'task-sigint']);
 
     expect(process.exitCode).toBe(130);
+  });
+
+  test('session-level retry counter surfaces a "flapping" stderr warn exactly once (L3 item 5)', async () => {
+    // Regression guard: before L3, ``withTransientRetry`` reset the
+    // per-op attempt counter on every successful poll. A 50% flapping
+    // upstream would retry-and-recover forever without ever surfacing
+    // a signal to the user. The session counter accumulates across all
+    // retries; crossing 10 emits the stderr warn once.
+    _resetSessionRetries();
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = ((fn: () => void) => {
+      queueMicrotask(fn);
+      return 0 as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout;
+
+    try {
+      // Snapshot (1 call to each), then a flapping pattern: fail-then-succeed
+      // alternating for getTaskEvents so each poll incurs exactly 1 retry.
+      // We need >= 10 retries to cross the threshold, so run 12 flap cycles
+      // followed by a terminal poll.
+      mockGetTaskEvents.mockResolvedValueOnce({
+        data: [],
+        pagination: { next_token: null, has_more: false },
+      }); // snapshot
+
+      for (let i = 0; i < 12; i += 1) {
+        mockGetTaskEvents.mockRejectedValueOnce(
+          new ApiError(503, 'SERVICE_UNAVAILABLE', 'flap', `req-${i}`),
+        );
+        mockGetTaskEvents.mockResolvedValueOnce({
+          data: [],
+          pagination: { next_token: null, has_more: false },
+        });
+      }
+
+      // Snapshot task poll + per-loop polls. Return COMPLETED after enough
+      // flaps to cross the threshold (12 retries → well past the 10 threshold).
+      let taskCallCount = 0;
+      mockGetTask.mockImplementation(async () => {
+        taskCallCount += 1;
+        // 1 snapshot + 12 poll iterations = terminal on the 13th task call
+        return { status: taskCallCount >= 13 ? 'COMPLETED' : 'RUNNING' };
+      });
+
+      const cmd = makeWatchCommand();
+      await cmd.parseAsync(['node', 'test', 'task-flapping']);
+
+      // Session counter must have accumulated past the threshold.
+      expect(_getSessionRetries()).toBeGreaterThanOrEqual(10);
+
+      // Warn must have fired EXACTLY once despite crossing threshold
+      // multiple times (threshold 10, saw 12 retries).
+      const stderrOutput = stderrSpy.mock.calls.map(c => String(c[0])).join('');
+      const warnMatches = stderrOutput.match(/upstream is flapping/g) ?? [];
+      expect(warnMatches).toHaveLength(1);
+      expect(stderrOutput).toMatch(/retries so far; results may be delayed/);
+    } finally {
+      global.setTimeout = realSetTimeout;
+      _resetSessionRetries();
+    }
   });
 
   test('exhausted retry budget throws a "re-run to resume" message', async () => {

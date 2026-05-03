@@ -60,6 +60,41 @@ export function nextCadence(state: PollCadenceState, sawEvents: boolean): PollCa
  *  deterministic and never retried. */
 const MAX_TRANSIENT_RETRIES = 5;
 
+/**
+ * Session-level retry counter (L3 item 5). ``withTransientRetry`` resets
+ * its per-op ``attempt`` counter on every successful poll, which means a
+ * flapping upstream at ~50% success rate never trips the 5-retry budget
+ * even though the user is watching a degraded stream for minutes on end.
+ * The session counter accumulates across all retries for the life of the
+ * watch process so a ``SESSION_FLAP_THRESHOLD`` crossing can surface the
+ * "upstream is flapping" stderr signal exactly once.
+ *
+ * Not exposed on any public surface — underscore-prefixed getter is for
+ * tests only (module-level state makes this awkward to inject, and the
+ * tradeoff isn't worth a full dependency-injection refactor).
+ */
+let sessionRetries = 0;
+let flapWarnEmitted = false;
+
+/** Emit-once threshold for the "upstream is flapping" warning. Picked so
+ *  a sustained ~30% failure rate over a few-minute poll window lands
+ *  above it without a transient 2-failure blip crossing. */
+const SESSION_FLAP_THRESHOLD = 10;
+
+/** Test-only accessor for the module-level retry counter. Prefixed with
+ *  ``_`` to signal "not part of the stable API". */
+export function _getSessionRetries(): number {
+  return sessionRetries;
+}
+
+/** Test-only reset of the module-level state. Tests that exercise the
+ *  flap warning need a clean slate because the counter is process-lived
+ *  and Jest's module reset does not apply to values captured at import. */
+export function _resetSessionRetries(): void {
+  sessionRetries = 0;
+  flapWarnEmitted = false;
+}
+
 /** Exponential backoff with **equal-jitter** (AWS Architecture Blog
  *  variant): half of the base delay is fixed, the other half is
  *  randomized. This prevents the degenerate case where ``Math.random()``
@@ -334,6 +369,16 @@ async function withTransientRetry<T>(
         throw err;
       }
       attempt += 1;
+      // Session-level counter (L3 item 5). ``attempt`` resets on every
+      // successful op; ``sessionRetries`` does not, so a flapping upstream
+      // that never exhausts the per-op budget still accumulates here.
+      sessionRetries += 1;
+      if (sessionRetries >= SESSION_FLAP_THRESHOLD && !flapWarnEmitted) {
+        flapWarnEmitted = true;
+        process.stderr.write(
+          `[watch] upstream is flapping — ${sessionRetries} retries so far; results may be delayed\n`,
+        );
+      }
       if (attempt > MAX_TRANSIENT_RETRIES) {
         const e = err instanceof Error ? err : new Error(String(err));
         throw new Error(

@@ -44,6 +44,35 @@ const GITHUB_TIMEOUT_MS = 5_000;
 /** User-Agent required by the GitHub API on all writes. */
 const USER_AGENT = 'abca-fanout/1.0';
 
+/** Rate-limit WARN threshold. GitHub's authenticated limit is 5000 req/h.
+ *  Below 500 remaining we're within 10% of the 403 window — ops should
+ *  see a signal well before the next-poll-storm exhausts the budget. */
+const RATE_LIMIT_WARN_THRESHOLD = 500;
+
+/**
+ * Inspect ``X-RateLimit-Remaining`` on every GitHub response and emit a
+ * WARN when the budget falls below ``RATE_LIMIT_WARN_THRESHOLD`` (L3
+ * item 4). Does NOT block the request — the goal is an ops-visible
+ * trail leading up to the 403 that would otherwise arrive unannounced.
+ *
+ * Called from both the POST and PATCH paths so partial-burst scenarios
+ * (e.g. a reconciliation wave patching every comment) surface early.
+ */
+function logRateLimitIfLow(response: Response, repo: string): void {
+  const remainingHeader = response.headers.get('x-ratelimit-remaining');
+  if (remainingHeader === null) return;
+  const remaining = Number(remainingHeader);
+  if (!Number.isFinite(remaining) || remaining >= RATE_LIMIT_WARN_THRESHOLD) {
+    return;
+  }
+  logger.warn('GitHub rate limit low', {
+    event: 'github.rate_limit_low',
+    remaining,
+    reset_at: response.headers.get('x-ratelimit-reset') ?? undefined,
+    repo,
+  });
+}
+
 /** Result of a comment upsert. ``created`` distinguishes the initial
  *  POST from subsequent PATCHes so the caller can gate the TaskRecord
  *  UpdateItem (first call persists the comment_id; later calls refresh
@@ -218,6 +247,7 @@ async function getComment(params: {
     );
   }
 
+  logRateLimitIfLow(res, repo);
   if (!res.ok) {
     throw new GitHubCommentError(
       `GET /repos/${repo}/issues/comments/${commentId} failed: HTTP ${res.status}`,
@@ -271,6 +301,7 @@ async function tryPatch(params: {
     );
   }
 
+  logRateLimitIfLow(res, repo);
   if (!res.ok) {
     return { ok: false, status: res.status, etag: '' };
   }
@@ -312,6 +343,7 @@ async function createComment(params: {
     );
   }
 
+  logRateLimitIfLow(res, repo);
   if (!res.ok) {
     throw new GitHubCommentError(
       `POST /repos/${repo}/issues/${issueOrPrNumber}/comments failed: HTTP ${res.status}`,

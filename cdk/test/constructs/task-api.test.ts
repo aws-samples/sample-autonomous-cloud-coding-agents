@@ -647,9 +647,21 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
       }
     }
 
-    // Must be able to GetObject (to presign). CDK's grantRead expands
-    // to ``s3:GetObject*`` / ``s3:GetBucket*`` / ``s3:List*``.
-    expect(allS3Actions.some(a => a === 's3:GetObject' || a === 's3:GetObject*')).toBe(true);
+    // Must be able to GetObject (to presign + HeadObject). L3 item 2
+    // tightens this from CDK's ``grantRead`` (which expands to
+    // ``s3:GetObject*`` / ``s3:GetBucket*`` / ``s3:List*``) down to an
+    // explicit ``s3:GetObject`` — AWS grants HeadObject implicitly on
+    // the same permission, so the handler's HEAD-before-presign check
+    // is still authorized.
+    expect(allS3Actions).toContain('s3:GetObject');
+    // The wildcarded ``s3:GetObject*`` form must be absent — L3 pinned
+    // the handler to the exact action, not the wildcard.
+    expect(allS3Actions).not.toContain('s3:GetObject*');
+    // ``ListBucket`` is unnecessary scope (the handler never lists). A
+    // regression here would reintroduce the ``grantRead`` expansion.
+    expect(allS3Actions).not.toContain('s3:ListBucket');
+    expect(allS3Actions.some(a => a.startsWith('s3:List'))).toBe(false);
+    expect(allS3Actions.some(a => a.startsWith('s3:GetBucket'))).toBe(false);
     // Must NOT have write permissions (including wildcarded forms).
     expect(allS3Actions.some(a => a.startsWith('s3:PutObject'))).toBe(false);
     expect(allS3Actions.some(a => a.startsWith('s3:DeleteObject'))).toBe(false);

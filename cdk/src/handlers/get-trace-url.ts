@@ -18,8 +18,8 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -151,6 +151,52 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         request_id: requestId,
       });
       return errorResponse(403, ErrorCode.FORBIDDEN, 'Trace artifact is not owned by the caller.', requestId);
+    }
+
+    // HEAD-check the object before presigning. The agent may have
+    // written ``trace_s3_uri`` to DDB before the S3 PUT propagated, or
+    // a lifecycle policy / operator action may have deleted the
+    // artifact after the record was stamped. Issuing a URL that 404s
+    // XML from S3 would leave the user debugging a broken download with
+    // no obvious remedy; returning the same ``TRACE_NOT_AVAILABLE`` 404
+    // the CLI already knows how to message (re-submit with --trace) is
+    // strictly more user-friendly. ``s3:GetObject`` implicitly grants
+    // HeadObject per AWS IAM docs, so no extra permission is required.
+    try {
+      await s3.send(new HeadObjectCommand({ Bucket: parsed.bucket, Key: parsed.key }));
+    } catch (err) {
+      // S3 SDK v3 returns either ``NotFound`` (object-level 404) or
+      // ``NoSuchKey`` (key-level 404) depending on operation; both map
+      // to the same user-facing outcome. HTTP 403 can also mean the
+      // object is missing in a bucket the principal can't probe, but
+      // since this handler signs for its own bucket and the CLI already
+      // received ``trace_s3_uri``, 404 is the only case we hide behind
+      // TRACE_NOT_AVAILABLE.
+      const name = (err as { name?: string })?.name;
+      const httpStatus = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+      if (name === 'NotFound' || name === 'NoSuchKey' || httpStatus === 404) {
+        logger.warn('Trace artifact S3 object not found at HEAD time', {
+          task_id: taskId,
+          bucket: parsed.bucket,
+          key: parsed.key,
+          request_id: requestId,
+        });
+        return errorResponse(
+          404,
+          ErrorCode.TRACE_NOT_AVAILABLE,
+          'Task did not run with --trace, or the trace has not been uploaded yet.',
+          requestId,
+        );
+      }
+      logger.error('HeadObject failed for trace artifact', {
+        task_id: taskId,
+        bucket: parsed.bucket,
+        key: parsed.key,
+        error: err instanceof Error ? err.message : String(err),
+        error_name: name,
+        request_id: requestId,
+      });
+      return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
     }
 
     const url = await getSignedUrl(

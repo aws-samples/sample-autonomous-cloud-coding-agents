@@ -509,8 +509,16 @@ export class TaskApi extends Construct {
       });
 
       props.taskTable.grantReadData(getTraceUrlFn);
-      // Read-only grant — the handler only issues GetObject presigns.
-      traceBucket.grantRead(getTraceUrlFn);
+      // Minimal grant — the handler only needs ``s3:GetObject`` (which
+      // implicitly covers ``s3:HeadObject``) on trace objects to sign
+      // presigned URLs and HEAD-check for existence before presigning.
+      // ``grantRead`` would expand to ``s3:GetObject*`` + ``s3:GetBucket*``
+      // + ``s3:List*``; ``ListBucket`` / ``GetBucketLocation`` / etc. are
+      // unnecessary scope. Tightening to an explicit statement (L3 item 2).
+      getTraceUrlFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [`${traceBucket.bucketArn}/*`],
+      }));
 
       const trace = taskById.addResource('trace');
       trace.addMethod('GET', new apigw.LambdaIntegration(getTraceUrlFn), cognitoAuthOptions);

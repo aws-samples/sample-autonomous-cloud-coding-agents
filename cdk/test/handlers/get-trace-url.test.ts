@@ -28,9 +28,11 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 }));
 
 const mockGetSignedUrl = jest.fn();
+const mockS3Send = jest.fn();
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({})),
+  S3Client: jest.fn(() => ({ send: (...args: unknown[]) => mockS3Send(...args) })),
   GetObjectCommand: jest.fn((input: unknown) => ({ _type: 'S3Get', input })),
+  HeadObjectCommand: jest.fn((input: unknown) => ({ _type: 'S3Head', input })),
 }));
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: (...args: unknown[]) => mockGetSignedUrl(...args),
@@ -108,6 +110,8 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 beforeEach(() => {
   jest.clearAllMocks();
   mockSend.mockResolvedValue({ Item: TASK_RECORD });
+  // L3 item 3: HEAD the S3 object before presigning. Default: object exists.
+  mockS3Send.mockResolvedValue({ ContentLength: 1234 });
   mockGetSignedUrl.mockResolvedValue('https://example.com/presigned?sig=abc');
 });
 
@@ -242,6 +246,69 @@ describe('get-trace-url handler', () => {
 
     expect(result.statusCode).toBe(500);
     expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+  });
+
+  // -------- L3 item 3: HEAD-before-presign --------
+
+  test('HEADs the S3 object before signing (race-between-DDB-write-and-S3-propagation guard)', async () => {
+    await handler(makeEvent());
+    // HeadObject must be called with the same bucket/key as the presign.
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    const sentCommand = mockS3Send.mock.calls[0][0];
+    expect(sentCommand._type).toBe('S3Head');
+    expect(sentCommand.input).toEqual({
+      Bucket: 'trace-bucket',
+      Key: 'traces/user-123/task-1.jsonl.gz',
+    });
+  });
+
+  test('returns 404 TRACE_NOT_AVAILABLE when HEAD throws NotFound (SDK v3 error name)', async () => {
+    // SDK v3 surfaces a missing S3 object as an error with name='NotFound'.
+    const notFoundErr = new Error('Not Found');
+    notFoundErr.name = 'NotFound';
+    mockS3Send.mockRejectedValueOnce(notFoundErr);
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(404);
+    expect(JSON.parse(result.body).error.code).toBe('TRACE_NOT_AVAILABLE');
+    // Must NOT have attempted to sign a URL for a missing object.
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 TRACE_NOT_AVAILABLE when HEAD throws NoSuchKey', async () => {
+    // Some code paths (GET-style) surface missing as NoSuchKey; treat identically.
+    const err = new Error('The specified key does not exist');
+    err.name = 'NoSuchKey';
+    mockS3Send.mockRejectedValueOnce(err);
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(404);
+    expect(JSON.parse(result.body).error.code).toBe('TRACE_NOT_AVAILABLE');
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 TRACE_NOT_AVAILABLE when HEAD returns HTTP 404 via $metadata', async () => {
+    // Belt-and-suspenders: catch a 404 that didn't tag error.name (older
+    // SDK versions or custom wrappers).
+    const err = Object.assign(new Error('NotFound'), { $metadata: { httpStatusCode: 404 } });
+    mockS3Send.mockRejectedValueOnce(err);
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(404);
+    expect(JSON.parse(result.body).error.code).toBe('TRACE_NOT_AVAILABLE');
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
+  });
+
+  test('returns 500 when HEAD throws a generic error (not a 404)', async () => {
+    // A non-404 HEAD error is a real AWS problem (throttle, 500, 503,
+    // etc.). Surface as INTERNAL_ERROR — retrying is fine, but hiding
+    // behind TRACE_NOT_AVAILABLE would mislead the user into re-submitting.
+    mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(500);
+    expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
   });
 
   test('includes standard headers and X-Request-Id', async () => {

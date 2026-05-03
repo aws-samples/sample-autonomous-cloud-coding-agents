@@ -23,6 +23,7 @@ import {
   renderCommentBody,
   upsertTaskComment,
 } from '../../../src/handlers/shared/github-comment';
+import { logger } from '../../../src/handlers/shared/logger';
 
 // ``fetch`` is the global transport; each test installs its own mock.
 const originalFetch = global.fetch;
@@ -32,10 +33,18 @@ function mockResponse(opts: {
   ok?: boolean;
   etag?: string | null;
   body?: unknown;
+  rateLimitRemaining?: string;
+  rateLimitReset?: string;
 }): Response {
   const headers = new Headers();
   if (opts.etag !== null && opts.etag !== undefined) {
     headers.set('etag', opts.etag);
+  }
+  if (opts.rateLimitRemaining !== undefined) {
+    headers.set('x-ratelimit-remaining', opts.rateLimitRemaining);
+  }
+  if (opts.rateLimitReset !== undefined) {
+    headers.set('x-ratelimit-reset', opts.rateLimitReset);
   }
   return {
     ok: opts.ok ?? (opts.status >= 200 && opts.status < 300),
@@ -351,6 +360,122 @@ describe('github-comment: upsertTaskComment — cached-etag fast path', () => {
         existingEtag: '"cached"',
       }),
     ).rejects.toThrow(/missing ETag/);
+  });
+});
+
+describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () => {
+  test('emits a WARN when x-ratelimit-remaining < 500 on POST response', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse({
+        status: 201,
+        etag: '"abc"',
+        body: { id: 1, body: 'b' },
+        rateLimitRemaining: '450',
+        rateLimitReset: '1714500000',
+      }),
+    ) as unknown as typeof fetch;
+
+    await upsertTaskComment({
+      repo: 'owner/repo',
+      issueOrPrNumber: 1,
+      body: 'b',
+      token: 't',
+      existingCommentId: undefined,
+      existingEtag: undefined,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      'GitHub rate limit low',
+      expect.objectContaining({
+        event: 'github.rate_limit_low',
+        remaining: 450,
+        reset_at: '1714500000',
+        repo: 'owner/repo',
+      }),
+    );
+  });
+
+  test('emits a WARN when x-ratelimit-remaining < 500 on PATCH response', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    // Cached-etag fast-path: a single PATCH call.
+    global.fetch = jest.fn().mockResolvedValueOnce(
+      mockResponse({
+        status: 200,
+        etag: '"after"',
+        body: { id: 7 },
+        rateLimitRemaining: '100',
+      }),
+    ) as unknown as typeof fetch;
+
+    await upsertTaskComment({
+      repo: 'owner/repo',
+      issueOrPrNumber: 42,
+      body: 'new',
+      token: 't',
+      existingCommentId: 7,
+      existingEtag: '"cached"',
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      'GitHub rate limit low',
+      expect.objectContaining({ remaining: 100, repo: 'owner/repo' }),
+    );
+  });
+
+  test('does NOT warn when x-ratelimit-remaining is well above the 500 threshold', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse({
+        status: 201,
+        etag: '"abc"',
+        body: { id: 1, body: 'b' },
+        rateLimitRemaining: '4999',
+      }),
+    ) as unknown as typeof fetch;
+
+    await upsertTaskComment({
+      repo: 'owner/repo',
+      issueOrPrNumber: 1,
+      body: 'b',
+      token: 't',
+      existingCommentId: undefined,
+      existingEtag: undefined,
+    });
+
+    // Rate-limit WARN is the only warn site touched by this path; a
+    // future unrelated warn in the dispatcher would break this. Pin
+    // specifically on the rate-limit event name.
+    const rateLimitWarns = warnSpy.mock.calls.filter(
+      c => (c[1] as Record<string, unknown> | undefined)?.event === 'github.rate_limit_low',
+    );
+    expect(rateLimitWarns).toHaveLength(0);
+  });
+
+  test('does NOT warn when x-ratelimit-remaining is absent (e.g. GHES variants)', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse({
+        status: 201,
+        etag: '"abc"',
+        body: { id: 1, body: 'b' },
+        // No rateLimitRemaining set — header absent on the response.
+      }),
+    ) as unknown as typeof fetch;
+
+    await upsertTaskComment({
+      repo: 'owner/repo',
+      issueOrPrNumber: 1,
+      body: 'b',
+      token: 't',
+      existingCommentId: undefined,
+      existingEtag: undefined,
+    });
+
+    const rateLimitWarns = warnSpy.mock.calls.filter(
+      c => (c[1] as Record<string, unknown> | undefined)?.event === 'github.rate_limit_low',
+    );
+    expect(rateLimitWarns).toHaveLength(0);
   });
 });
 
