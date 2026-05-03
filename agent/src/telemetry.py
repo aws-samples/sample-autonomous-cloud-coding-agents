@@ -383,6 +383,10 @@ class _TrajectoryWriter:
         if not self._accumulate or not self._events:
             return None
 
+        # Peak memory ~= accumulator size + gzip output buffer. With the default
+        # 50 MB cap and typical ~8x JSONL compression, the transient peak is
+        # ~55-60 MB during dump. Raising the cap needs matching container
+        # memory headroom.
         import gzip
         import io
 

@@ -51,6 +51,9 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.pr_url) {
     lines.push(`PR:          ${task.pr_url}`);
   }
+  if (task.trace_s3_uri) {
+    lines.push(`Trace S3:    ${task.trace_s3_uri}`);
+  }
   if (task.error_message) {
     lines.push(...formatErrorLines(task));
   }

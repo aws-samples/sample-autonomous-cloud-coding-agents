@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { isPrTaskType, type CreateTaskRequest, type TaskType } from './types';
+import { type CreateTaskRequest, type TaskType } from './types';
 import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */

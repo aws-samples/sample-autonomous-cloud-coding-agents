@@ -105,6 +105,23 @@ describe('format', () => {
       expect(output).not.toContain('PR #:');
     });
 
+    test('renders Trace S3 line when trace_s3_uri is non-null', () => {
+      const traced: TaskDetail = {
+        ...task,
+        trace: true,
+        trace_s3_uri: 's3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
+      };
+      const output = formatTaskDetail(traced);
+      expect(output).toContain(
+        'Trace S3:    s3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
+      );
+    });
+
+    test('omits Trace S3 line when trace_s3_uri is null', () => {
+      const output = formatTaskDetail(task);
+      expect(output).not.toContain('Trace S3:');
+    });
+
     test('shows classified error with raw detail when error_classification is present', () => {
       const failedTask: TaskDetail = {
         ...task,
