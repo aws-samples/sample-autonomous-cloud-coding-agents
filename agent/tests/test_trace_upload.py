@@ -98,6 +98,44 @@ class TestTrajectoryAccumulator:
         # No events appended
         assert w.dump_gzipped_jsonl() is None
 
+    def test_accumulator_cap_uses_inclusive_upper_bound(self):
+        """Pin ``<=`` boundary on ``_put_event``.
+
+        An event whose serialized size is EXACTLY the cap must be
+        accepted (``<=``). A subsequent 1-byte-added event must be
+        rejected. This test guards against a future ``<`` off-by-one
+        refactor that would silently drop events sitting right at the
+        cap.
+
+        The exact serialized JSON length is measured below so the test
+        is deterministic under default ``json.dumps`` spacing; the
+        padding length (75) is chosen to land the event on 100 bytes
+        on the nose.
+        """
+        import json as _json
+
+        w = _TrajectoryWriter("t", accumulate=True)
+        w._ACCUMULATOR_MAX_BYTES = 100
+
+        # Craft an event whose JSON byte length is exactly 100.
+        exact_event = {"event": "X", "pad": "A" * 75}
+        assert len(_json.dumps(exact_event).encode("utf-8")) == 100, (
+            "Padding recipe drifted; recompute the 'pad' length so the "
+            "serialized event is 100 bytes."
+        )
+
+        w._put_event(exact_event)
+        # Accepted at the boundary (<=).
+        assert len(w._events) == 1
+        assert w._accumulated_bytes == 100
+        assert w._accumulator_dropped == 0
+
+        # Any further event (even 1 byte over the remaining budget) is
+        # dropped — remaining budget is 0.
+        w._put_event({"event": "X"})
+        assert len(w._events) == 1  # unchanged
+        assert w._accumulator_dropped == 1
+
     def test_accumulator_handles_non_serializable_gracefully(self, capsys):
         w = _TrajectoryWriter("t-1", accumulate=True)
 
@@ -201,6 +239,77 @@ class TestUploadTraceToS3:
 
         _, kwargs = mock_client.put_object.call_args
         assert kwargs["Key"] == "traces/sub-123/TASK-XYZ.jsonl.gz"
+
+    def test_region_env_unset_passes_none_to_boto_client(self, monkeypatch):
+        """Both ``AWS_REGION`` and ``AWS_DEFAULT_REGION`` unset — the
+        uploader must still proceed and delegate region resolution to
+        boto3's default credential/region provider chain by passing
+        ``region_name=None``."""
+        monkeypatch.setenv("TRACE_ARTIFACTS_BUCKET_NAME", "bucket")
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+        mock_client = MagicMock()
+        with patch("boto3.client", return_value=mock_client) as mock_factory:
+            result = upload_trace_to_s3(task_id="t-1", user_id="u-1", body=b"x")
+
+        # Upload proceeded (did not short-circuit on missing region).
+        assert result == "s3://bucket/traces/u-1/t-1.jsonl.gz"
+        # boto3.client was invoked with region_name=None so boto's default
+        # chain (IMDS, config file, env var precedence) resolves it.
+        args, kwargs = mock_factory.call_args
+        assert args[0] == "s3"
+        assert kwargs.get("region_name") is None
+
+    def test_empty_body_still_calls_put_object(self, monkeypatch):
+        """Empty ``body=b""`` must be passed to ``put_object`` without
+        short-circuiting. Boto3 accepts empty Body; we pin that behavior
+        so a future refactor can't silently skip zero-byte uploads."""
+        monkeypatch.setenv("TRACE_ARTIFACTS_BUCKET_NAME", "my-bucket")
+        mock_client = MagicMock()
+        with patch("boto3.client", return_value=mock_client):
+            result = upload_trace_to_s3(task_id="t-empty", user_id="u-1", body=b"")
+
+        assert result == "s3://my-bucket/traces/u-1/t-empty.jsonl.gz"
+        mock_client.put_object.assert_called_once()
+        _, kwargs = mock_client.put_object.call_args
+        assert kwargs["Body"] == b""
+        assert kwargs["Key"] == "traces/u-1/t-empty.jsonl.gz"
+
+    def test_none_body_raises_when_put_object_rejects(self, monkeypatch):
+        """``body=None`` is a contract violation from the caller's side.
+
+        The current implementation passes ``None`` straight through to
+        ``put_object`` and relies on boto3's ``ParamValidationError``
+        (or TypeError in the mocked case) to fail visibly. Pin whatever
+        the current behavior is — if L3 wants to harden this with an
+        early ``if body is None: skip``, it can.
+
+        We use ``side_effect=TypeError`` to simulate boto3's rejection
+        of ``Body=None`` in a way that's deterministic without requiring
+        the real SDK.
+        """
+        monkeypatch.setenv("TRACE_ARTIFACTS_BUCKET_NAME", "my-bucket")
+        mock_client = MagicMock()
+        mock_client.put_object.side_effect = TypeError(
+            "put_object() Body expected bytes-like, got NoneType"
+        )
+        from typing import cast
+
+        # ``cast`` launders ``None`` through the ``bytes``-typed parameter
+        # so the static type checker accepts the contract violation this
+        # test is deliberately exercising.
+        bad_body: bytes = cast("bytes", None)
+        with patch("boto3.client", return_value=mock_client):
+            # Fail-open on the generic except path — returns None, does
+            # not raise. This pins the CURRENT behavior: None body is
+            # swallowed as an upload failure rather than rejected up
+            # front. Flagged for L3 in the report.
+            result = upload_trace_to_s3(task_id="t-none", user_id="u-1", body=bad_body)
+        assert result is None
+        mock_client.put_object.assert_called_once()
+        _, kwargs = mock_client.put_object.call_args
+        assert kwargs["Body"] is None
 
 
 class TestEndToEndAccumulatorRoundTrip:
@@ -352,6 +461,29 @@ class TestTruncationCallback:
             w._put_event({"event": "X", "i": i})
         assert w._accumulator_dropped > 0
         assert "truncation callback raised" in capsys.readouterr().out
+
+    def test_accumulator_dropped_continues_past_announcement(self):
+        """Debounce semantics: the callback fires once, but
+        ``_accumulator_dropped`` must keep incrementing for every
+        subsequent rejected event so the header reports the true final
+        drop count (not just the count at the moment of announcement)."""
+        w = _TrajectoryWriter("t", accumulate=True)
+        w._ACCUMULATOR_MAX_BYTES = 50
+        calls: list[tuple[int, int]] = []
+        w.set_truncation_callback(lambda maxb, dropped: calls.append((maxb, dropped)))
+
+        # Many events past the cap — force multiple drops.
+        for i in range(50):
+            w._put_event({"event": "X", "i": i})
+
+        # Fire-once: the callback was called exactly one time.
+        assert len(calls) == 1
+        announced_drops = calls[0][1]
+        # Counter kept climbing after the one-shot announcement.
+        assert w._accumulator_dropped > announced_drops, (
+            f"dropped counter stuck at announcement value "
+            f"{announced_drops}; final={w._accumulator_dropped}"
+        )
 
     def test_callback_not_fired_when_accumulator_disabled(self):
         w = _TrajectoryWriter("t", accumulate=False)
