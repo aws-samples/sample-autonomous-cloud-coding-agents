@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, existsSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
@@ -77,9 +77,23 @@ export function makeTraceCommand(): Command {
     .argument('<task-id>', 'Task ID')
     .option(
       '-o, --output <file>',
-      'Write raw gzipped bytes to <file> (overwrites if exists) instead of gunzipped to stdout',
+      'Write raw gzipped bytes to <file> instead of gunzipped to stdout. Use --force to overwrite an existing file.',
     )
-    .action(async (taskId: string, opts: { output?: string }) => {
+    .option('-f, --force', 'Overwrite the output file if it already exists')
+    .action(async (taskId: string, opts: { output?: string; force?: boolean }) => {
+      // L4 item 2: refuse to overwrite an existing ``-o <file>``
+      // without an explicit ``--force``. Previously the CLI silently
+      // clobbered existing files, which is a footgun when a user
+      // re-runs ``bgagent trace download`` and accidentally blows
+      // away an earlier artifact they wanted to keep. Check is done
+      // BEFORE the presigned-URL fetch so we also skip the S3 round
+      // trip on the refusal path.
+      if (opts.output && !opts.force && existsSync(opts.output)) {
+        throw new CliError(
+          `Refusing to overwrite existing file ${opts.output}. Pass --force to overwrite.`,
+        );
+      }
+
       const client = new ApiClient();
 
       let urlInfo;
@@ -97,17 +111,17 @@ export function makeTraceCommand(): Command {
         throw err;
       }
 
-      // L3 item 1: plumb an AbortSignal through fetch so (a) a 2-minute
-      // wall-clock timeout can force-fail a stalled download, and (b)
-      // SIGINT from the user aborts cleanly with a translated error
-      // rather than leaving the CLI wedged.
+      // L3 item 1: fetch timeout + SIGINT abort. A stalled S3 download
+      // (TCP dead-peer, NAT reaping, etc.) otherwise wedges the CLI
+      // with no recovery signal other than the user killing the shell.
+      // 2 minutes is generous for multi-MB artifacts on slow links and
+      // well under the 15-minute presigned-URL TTL.
       const ac = new AbortController();
-      const timer = setTimeout(() => {
-        ac.abort(new Error('Trace download timed out after 2 minutes'));
-      }, TRACE_DOWNLOAD_TIMEOUT_MS);
-      const onSigint = () => {
-        ac.abort(new Error('Cancelled by user (SIGINT)'));
-      };
+      const timer = setTimeout(
+        () => ac.abort(new Error('Trace download timed out after 2 minutes')),
+        TRACE_DOWNLOAD_TIMEOUT_MS,
+      );
+      const onSigint = (): void => ac.abort(new Error('Cancelled by user'));
       process.on('SIGINT', onSigint);
 
       try {
@@ -115,11 +129,12 @@ export function makeTraceCommand(): Command {
         try {
           s3Response = await fetch(urlInfo.url, { signal: ac.signal });
         } catch (err) {
-          if (isAbortError(err) || ac.signal.aborted) {
-            const reason = ac.signal.reason instanceof Error
-              ? ac.signal.reason.message
-              : 'aborted';
-            throw new CliError(`Trace download aborted: ${reason}.`);
+          // AbortError surfaces as a DOMException with name='AbortError'
+          // on Node's fetch (undici). Reason carries our thrown Error.
+          if (isAbortError(err)) {
+            const reason = ac.signal.reason;
+            const reasonMsg = reason instanceof Error ? reason.message : String(reason ?? 'aborted');
+            throw new CliError(`Trace download aborted: ${reasonMsg}`);
           }
           throw err;
         }
@@ -127,7 +142,7 @@ export function makeTraceCommand(): Command {
         if (!s3Response.ok) {
           throw new CliError(
             `S3 download failed: HTTP ${s3Response.status} ${s3Response.statusText}. ` +
-              `The presigned URL may have expired (15-minute TTL). Try 'bgagent trace download' again.`,
+              'The presigned URL may have expired (15-minute TTL). Try \'bgagent trace download\' again.',
           );
         }
         if (!s3Response.body) {
@@ -142,7 +157,7 @@ export function makeTraceCommand(): Command {
         if (opts.output) {
           // -o <file>: write raw gzipped bytes as-is. Preserves the
           // artifact for archival / re-inspection with standard tools
-          // (``zcat file | jq -s .``).
+          // (``zcat file | jq -s .``). No gunzip → no zlib errors to wrap.
           await pipeline(nodeReadable, createWriteStream(opts.output));
           // Status line on stderr so it does not pollute stdout (which
           // users may be piping through other tools).
@@ -151,17 +166,17 @@ export function makeTraceCommand(): Command {
         }
 
         // Default: gunzip to stdout so the pipe contract is ``jq -s .``-
-        // friendly. L3 item 1: wrap raw zlib ``Z_DATA_ERROR`` etc. in a
-        // ``CliError`` so a corrupt artifact produces a message naming
-        // the real cause rather than a raw stack trace that looks like
-        // a CLI bug.
+        // friendly. A raw ``Z_DATA_ERROR`` stack is actively misleading —
+        // it looks like a CLI bug rather than a corrupt artifact. Wrap
+        // zlib failures in a ``CliError`` pointing at the real cause
+        // (L3 item 1).
         try {
           await pipeline(nodeReadable, createGunzip(), process.stdout);
         } catch (err) {
           if (isZlibError(err)) {
             throw new CliError(
               `Trace artifact is corrupt or not gzipped (${(err as Error).message}). ` +
-                `Re-download with 'bgagent trace download -o <file>' to inspect the raw bytes.`,
+                `Re-download with 'bgagent trace download ${taskId}' or inspect the raw bytes with '-o <file>'.`,
             );
           }
           throw err;

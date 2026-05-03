@@ -284,10 +284,14 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             # indefinitely. Without this dedicated log the orphan
             # is invisible; the generic skip message above doesn't
             # distinguish benign-racing-cancel from
-            # silently-lost-trace-URI. The object is reaped by the
-            # 7-day bucket lifecycle; a future Chunk L follow-up can
-            # add a second conditional UpdateItem scoped to
-            # ``attribute_not_exists(trace_s3_uri)`` to self-heal.
+            # silently-lost-trace-URI.
+            #
+            # L4 self-heal: attempt a second conditional UpdateItem
+            # scoped to ``attribute_not_exists(trace_s3_uri)`` AND a
+            # terminal status. If the task genuinely raced into a
+            # terminal state (cancel / reconciler), this puts the URI
+            # back on the record and the orphan log below documents
+            # the original race for operators.
             if result and result.get("trace_s3_uri"):
                 print(
                     f"[task_state] trace_s3_uri orphaned by "
@@ -299,8 +303,73 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                     f"lifecycle.",
                     flush=True,
                 )
+                healed = write_trace_uri_conditional(task_id, result["trace_s3_uri"])
+                if healed:
+                    print(
+                        f"[task_state] trace_s3_uri self-healed for "
+                        f"task_id={task_id!r} after ConditionalCheckFailed "
+                        f"(terminal-state race).",
+                        flush=True,
+                    )
             return
         print(f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
+
+
+def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
+    """Persist ``trace_s3_uri`` on an already-terminal record.
+
+    Used as a self-heal after ``write_terminal`` loses a race with
+    cancel / reconciler. Only writes when:
+      1. The status is terminal (CANCELLED / COMPLETED / FAILED / TIMED_OUT).
+      2. ``trace_s3_uri`` is not already set (avoid clobbering).
+
+    Returns True on successful write, False on any conditional-check
+    failure or other fail-open path. Never raises.
+    """
+    if not task_id or not uri:
+        return False
+    try:
+        table = _get_table()
+        if table is None:
+            return False
+        table.update_item(
+            Key={"task_id": task_id},
+            UpdateExpression="SET trace_s3_uri = :ts3",
+            ConditionExpression=(
+                "attribute_not_exists(trace_s3_uri) AND "
+                "#s IN (:cancelled, :completed, :failed, :timed_out)"
+            ),
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":ts3": uri,
+                ":cancelled": "CANCELLED",
+                ":completed": "COMPLETED",
+                ":failed": "FAILED",
+                ":timed_out": "TIMED_OUT",
+            },
+        )
+        return True
+    except Exception as e:
+        from botocore.exceptions import ClientError
+
+        if (
+            isinstance(e, ClientError)
+            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+        ):
+            # Benign: URI was already persisted, or status isn't terminal yet.
+            print(
+                f"[task_state] write_trace_uri_conditional skipped for "
+                f"task_id={task_id!r}: precondition not met "
+                f"(trace_s3_uri already set or status not terminal).",
+                flush=True,
+            )
+            return False
+        print(
+            f"[task_state] write_trace_uri_conditional failed for "
+            f"task_id={task_id!r}: {type(e).__name__}: {e}",
+            flush=True,
+        )
+        return False
 
 
 class TaskFetchError(Exception):

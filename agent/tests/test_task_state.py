@@ -318,17 +318,30 @@ class TestWriteTerminalTraceS3Uri:
         fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
         already uploaded, the orphaned S3 object needs a dedicated log
         line — otherwise the generic ``skipped: precondition not met``
-        message hides silently-lost trace URIs."""
+        message hides silently-lost trace URIs.
+
+        L4 extension: after the orphan log prints, the self-heal
+        ``write_trace_uri_conditional`` fires; when the second
+        UpdateItem succeeds, the self-heal log also prints."""
         from botocore.exceptions import ClientError
 
         class _FakeTable:
-            def update_item(self, **_kwargs):
-                raise ClientError(
-                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
-                    "UpdateItem",
-                )
+            def __init__(self):
+                self.calls = 0
 
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+            def update_item(self, **_kwargs):
+                self.calls += 1
+                # First call (write_terminal) raises CCF.
+                # Second call (self-heal) succeeds.
+                if self.calls == 1:
+                    raise ClientError(
+                        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                        "UpdateItem",
+                    )
+                return {}
+
+        fake = _FakeTable()
+        monkeypatch.setattr(task_state, "_get_table", lambda: fake)
         task_state.write_terminal(
             "t-orphan",
             "COMPLETED",
@@ -342,6 +355,9 @@ class TestWriteTerminalTraceS3Uri:
         assert "orphaned by ConditionalCheckFailed" in out
         assert "s3://bucket/traces/u-1/t-orphan.jsonl.gz" in out
         assert "7-day lifecycle" in out
+        # L4: self-heal fired (second update_item call) and logged success.
+        assert fake.calls == 2
+        assert "self-healed" in out
 
     def test_conditional_check_failed_without_trace_uri_skips_orphan_log(
         self,
@@ -366,3 +382,141 @@ class TestWriteTerminalTraceS3Uri:
         out = capsys.readouterr().out
         assert "write_terminal skipped" in out
         assert "orphaned" not in out
+
+
+class TestWriteTraceUriConditional:
+    """L4 item 1a — ``write_trace_uri_conditional`` persists
+    ``trace_s3_uri`` on an already-terminal record as a self-heal
+    after ``write_terminal`` loses a race with cancel / reconciler.
+
+    The helper is scoped to ``attribute_not_exists(trace_s3_uri) AND
+    status IN (CANCELLED, COMPLETED, FAILED, TIMED_OUT)`` so it cannot
+    clobber an existing URI or write on a non-terminal record."""
+
+    def test_happy_path_writes_uri_and_returns_true(self, monkeypatch):
+        """Status=COMPLETED, no existing trace_s3_uri → write succeeds."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+                return {}
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-heal", "s3://bucket/traces/u-1/t-heal.jsonl.gz"
+        )
+        assert healed is True
+        assert len(calls) == 1
+        kwargs = calls[0]
+        assert kwargs["Key"] == {"task_id": "t-heal"}
+        assert kwargs["UpdateExpression"] == "SET trace_s3_uri = :ts3"
+        # ConditionExpression must be scoped to both "URI not set" and
+        # "status terminal" — either one alone would be unsafe.
+        cond = kwargs["ConditionExpression"]
+        assert "attribute_not_exists(trace_s3_uri)" in cond
+        assert "#s IN" in cond
+        assert kwargs["ExpressionAttributeNames"] == {"#s": "status"}
+        values = kwargs["ExpressionAttributeValues"]
+        assert values[":ts3"] == "s3://bucket/traces/u-1/t-heal.jsonl.gz"
+        # All four terminal-status literals must appear in the IN-list
+        # (the helper's contract is terminal-agnostic).
+        assert values[":cancelled"] == "CANCELLED"
+        assert values[":completed"] == "COMPLETED"
+        assert values[":failed"] == "FAILED"
+        assert values[":timed_out"] == "TIMED_OUT"
+
+    def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capsys):
+        """``ConditionalCheckFailedException`` → returns False, INFO log (benign)."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-already", "s3://bucket/traces/u/t-already.jsonl.gz"
+        )
+        assert healed is False
+        out = capsys.readouterr().out
+        assert "write_trace_uri_conditional skipped" in out
+        assert "t-already" in out
+
+    def test_non_terminal_status_returns_false(self, monkeypatch):
+        """Non-terminal status raises CCF (status IN clause rejects) → False."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-running", "s3://b/traces/u/t-running.jsonl.gz"
+        )
+        assert healed is False
+
+    def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capsys):
+        """A non-CCF ClientError (e.g., throttling) → returns False, WARN log."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ProvisionedThroughputExceededException",
+                            "Message": "!",
+                        }
+                    },
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-throttle", "s3://b/traces/u/t-throttle.jsonl.gz"
+        )
+        assert healed is False
+        out = capsys.readouterr().out
+        assert "write_trace_uri_conditional failed" in out
+        # Log surfaces the exception type name to aid triage.
+        assert "ClientError" in out
+
+    def test_empty_uri_is_a_noop(self, monkeypatch):
+        """Guard: empty URI → no DDB call, returns False."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional("t-x", "")
+        assert healed is False
+        assert calls == []
+
+    def test_empty_task_id_is_a_noop(self, monkeypatch):
+        """Guard: empty task_id → no DDB call, returns False."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional("", "s3://b/x.gz")
+        assert healed is False
+        assert calls == []
+
+    def test_no_table_returns_false(self, monkeypatch):
+        """When ``_get_table`` returns None (TASK_TABLE_NAME unset) → False."""
+        monkeypatch.setattr(task_state, "_get_table", lambda: None)
+        healed = task_state.write_trace_uri_conditional("t-x", "s3://b/x.gz")
+        assert healed is False

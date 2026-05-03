@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -298,6 +298,64 @@ describe('trace download command', () => {
       expect(process.listenerCount('SIGINT')).toBe(listenersBefore);
     } finally {
       jest.useRealTimers();
+    }
+  });
+
+  test('refuses to overwrite existing -o <file> without --force (L4 item 2)', async () => {
+    // Seed an existing file. The CLI must refuse BEFORE touching S3 —
+    // a user who typed the wrong path should not even see network
+    // activity, and a stale presigned URL shouldn't be minted for a
+    // doomed operation.
+    const outFile = join(tmpDir, 'existing.jsonl.gz');
+    writeFileSync(outFile, Buffer.from('keep-me'));
+
+    const getTraceUrl = jest.fn().mockResolvedValue({
+      url: 'https://s3.example/trace?sig=abc',
+      expires_at: '2026-04-30T20:00:00Z',
+    });
+    mockApiClientWith(getTraceUrl);
+    global.fetch = jest.fn() as typeof global.fetch;
+
+    const cmd = makeTraceCommand();
+    await expect(
+      cmd.parseAsync(['node', 'test', 'download', 'task-1', '-o', outFile]),
+    ).rejects.toThrow(/Refusing to overwrite/);
+
+    // Existing file untouched.
+    expect(readFileSync(outFile).toString()).toBe('keep-me');
+    // No S3 fetch should have happened — the refusal is pre-fetch so
+    // we also skip minting a presigned URL for a doomed operation…
+    // actually ``getTraceUrl`` runs after the existsSync check; assert
+    // neither the S3 fetch nor the API call ran.
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(getTraceUrl).not.toHaveBeenCalled();
+  });
+
+  test('overwrites existing -o <file> with --force (L4 item 2)', async () => {
+    const outFile = join(tmpDir, 'existing.jsonl.gz');
+    writeFileSync(outFile, Buffer.from('old-content'));
+
+    const payload = gzipSync(Buffer.from('{"event":"TURN","turn":7}\n', 'utf-8'));
+    const getTraceUrl = jest.fn().mockResolvedValue({
+      url: 'https://s3.example/trace?sig=abc',
+      expires_at: '2026-04-30T20:00:00Z',
+    });
+    mockApiClientWith(getTraceUrl);
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(makeFetchResponse(true, 200, 'OK', payload)) as typeof global.fetch;
+
+    const consoleErr = jest.spyOn(console, 'error').mockImplementation();
+    try {
+      const cmd = makeTraceCommand();
+      await cmd.parseAsync(['node', 'test', 'download', 'task-1', '-o', outFile, '--force']);
+
+      // File was overwritten with the new gzipped bytes.
+      const written = readFileSync(outFile);
+      expect(Buffer.compare(written, payload)).toBe(0);
+      expect(consoleErr).toHaveBeenCalledWith(`Wrote ${outFile}`);
+    } finally {
+      consoleErr.mockRestore();
     }
   });
 

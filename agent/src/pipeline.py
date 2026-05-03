@@ -468,24 +468,33 @@ def run_task(
                     "task_cancelled_acknowledged",
                     "Post-hooks skipped; terminal state already CANCELLED.",
                 )
-                # K2 review Finding #2: we intentionally do NOT upload the
-                # trace on the cancel path right now — the record is
-                # already in terminal state CANCELLED and we have no
-                # atomic hook to persist ``trace_s3_uri`` alongside it
-                # (``write_terminal``'s ConditionExpression rejects
-                # CANCELLED). A follow-up can add a conditional update
-                # scoped to CANCELLED + trace_s3_uri. Until then, surface
-                # the skip loudly so users running ``--trace`` against a
-                # cancelled task know the trajectory was captured in
-                # CloudWatch Logs but is not in S3.
+                # L4 item 1c: best-effort trace upload + conditional
+                # self-heal on the cancel path. ``write_terminal``'s
+                # ConditionExpression rejects CANCELLED, so we cannot
+                # persist ``trace_s3_uri`` atomically with the terminal
+                # write — use ``write_trace_uri_conditional`` instead,
+                # which is scoped to ``attribute_not_exists(trace_s3_uri)``
+                # AND a terminal status. Fully fail-open: any exception
+                # (upload, DDB, serialization) must not prevent the
+                # cancel fast-path from returning.
                 if config.trace:
                     log(
-                        "WARN",
-                        "Task was cancelled mid-run; --trace S3 upload is "
-                        "skipped (terminal state already CANCELLED; see "
-                        "CloudWatch Logs stream `trajectory/"
-                        f"{config.task_id}` for captured events).",
+                        "TASK",
+                        "Task cancelled mid-run; attempting best-effort "
+                        "--trace upload + conditional persist so the "
+                        "trajectory captured before cancel is still "
+                        "recoverable.",
                     )
+                    try:
+                        trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+                        if trace_s3_uri:
+                            task_state.write_trace_uri_conditional(config.task_id, trace_s3_uri)
+                    except Exception as e:
+                        log(
+                            "WARN",
+                            f"Cancel-path trace upload/persist failed "
+                            f"(fail-open): {type(e).__name__}: {e}",
+                        )
                 return {
                     "status": "cancelled",
                     "task_id": config.task_id,

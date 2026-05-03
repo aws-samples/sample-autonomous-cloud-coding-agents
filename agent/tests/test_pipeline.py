@@ -780,6 +780,255 @@ class TestTraceS3Upload:
         assert result["status"] == "success"
         assert result["trace_s3_uri"] is None
 
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_cancel_path_does_not_upload_trace_when_trace_false(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        """Cancel path must NOT attempt an S3 upload when ``trace=False``.
+
+        L4 flipped the previous blanket "no upload on cancel" rule: the
+        cancel path now best-effort uploads and self-heals when
+        ``config.trace=True`` (so users can debug cancelled-mid-run
+        tasks). This test pins the negative side — without ``--trace``,
+        there is still no upload on the cancel path. Post-hooks must
+        still be skipped in both cases."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_get_task = MagicMock(return_value={"status": "CANCELLED"})
+
+        with (
+            patch("pipeline.ensure_committed") as mock_ensure_committed,
+            patch("pipeline.verify_build"),
+            patch("pipeline.verify_lint"),
+            patch("pipeline.ensure_pr") as mock_ensure_pr,
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = mock_get_task
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="mid-run cancel no trace",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-cancelled-no-trace",
+                trace=False,  # no --trace → no upload even on cancel
+                user_id="u-1",
+            )
+
+        mock_upload.assert_not_called()
+        mock_ensure_committed.assert_not_called()
+        mock_ensure_pr.assert_not_called()
+        assert result["status"] == "cancelled"
+        assert result["task_id"] == "t-cancelled-no-trace"
+        assert "trace_s3_uri" not in result
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_cancel_path_uploads_and_self_heals_when_trace(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        """L4 item 1c — cancel path with ``trace=True`` best-effort
+        uploads to S3 and calls ``write_trace_uri_conditional`` so the
+        trajectory captured before cancel stays recoverable.
+
+        ``write_terminal`` cannot persist ``trace_s3_uri`` atomically on
+        this path because its ConditionExpression rejects CANCELLED —
+        the conditional-self-heal helper (scoped to
+        ``attribute_not_exists(trace_s3_uri) AND status IN (...)``)
+        handles the persistence instead."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            # Seed the accumulator so dump_gzipped_jsonl returns bytes.
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_upload.return_value = "s3://bucket/traces/u-1/t-cancelled-trace.jsonl.gz"
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_get_task = MagicMock(return_value={"status": "CANCELLED"})
+
+        with (
+            patch("pipeline.ensure_committed") as mock_ensure_committed,
+            patch("pipeline.verify_build"),
+            patch("pipeline.verify_lint"),
+            patch("pipeline.ensure_pr") as mock_ensure_pr,
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = mock_get_task
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.write_trace_uri_conditional = MagicMock(return_value=True)
+
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="mid-run cancel with trace",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-cancelled-trace",
+                trace=True,
+                user_id="u-1",
+            )
+
+            # Upload was attempted.
+            mock_upload.assert_called_once()
+            # Self-heal was invoked with the resulting URI.
+            mock_task_state_mod.write_trace_uri_conditional.assert_called_once_with(
+                "t-cancelled-trace",
+                "s3://bucket/traces/u-1/t-cancelled-trace.jsonl.gz",
+            )
+            # write_terminal is NOT called on the cancel path (its
+            # ConditionExpression would reject CANCELLED).
+            mock_task_state_mod.write_terminal.assert_not_called()
+
+        # Post-hooks still skipped (cancel short-circuit).
+        mock_ensure_committed.assert_not_called()
+        mock_ensure_pr.assert_not_called()
+        # Cancel-shaped return payload.
+        assert result["status"] == "cancelled"
+        assert result["task_id"] == "t-cancelled-trace"
+
+    @patch("pipeline.upload_trace_to_s3")
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_cancel_path_heal_failure_is_fail_open(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        mock_upload,
+        monkeypatch,
+    ):
+        """L4 item 1c — when the self-heal helper raises on the cancel
+        path, the cancel fast-path must still return cleanly; an
+        upload/persist error must not propagate and turn a valid cancel
+        into a pipeline crash."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            if trajectory is not None:
+                trajectory._put_event({"event": "TURN", "turn": 1})
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_upload.return_value = "s3://bucket/traces/u-1/t-cancelled-crash.jsonl.gz"
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_get_task = MagicMock(return_value={"status": "CANCELLED"})
+
+        with (
+            patch("pipeline.ensure_committed"),
+            patch("pipeline.verify_build"),
+            patch("pipeline.verify_lint"),
+            patch("pipeline.ensure_pr"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = mock_get_task
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            # Self-heal raises — cancel path must swallow it.
+            mock_task_state_mod.write_trace_uri_conditional = MagicMock(
+                side_effect=RuntimeError("ddb boom")
+            )
+
+            from pipeline import run_task
+
+            # No exception should escape — fail-open contract.
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="cancel with heal failure",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-cancelled-crash",
+                trace=True,
+                user_id="u-1",
+            )
+
+        # Upload was attempted; heal raised but was swallowed.
+        mock_upload.assert_called_once()
+        assert result["status"] == "cancelled"
+        assert result["task_id"] == "t-cancelled-crash"
+
 
 class TestTraceCrashPath:
     """K2 review Finding #1 — a pipeline crash (exception after the
