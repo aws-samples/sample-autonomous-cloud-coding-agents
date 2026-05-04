@@ -95,7 +95,7 @@ export class AgentStack extends Stack {
 
     // --- Repository onboarding ---
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
-      repo: 'krokoko/agent-plugins',
+      repo: 'scoropeza/agent-plugins',
       repoTable: repoTable.table,
     });
 
@@ -166,7 +166,19 @@ export class AgentStack extends Stack {
       contentFilters: [
         {
           type: bedrock.ContentFilterType.PROMPT_ATTACK,
-          inputStrength: bedrock.ContentFilterStrength.HIGH,
+          // MEDIUM blocks on MEDIUM+HIGH confidence; LOW-confidence
+          // detections are ignored. Observed during PR #52 Scenario
+          // 7-extended deploy validation: at HIGH (blocks LOW too) the
+          // PROMPT_ATTACK classifier is stochastic at the LOW tier and
+          // flags ordinary imperative-mood task descriptions and
+          // ordinary PR bodies (pr_iteration hydration). MEDIUM matches
+          // the Bedrock documentation's default for non-adversarial
+          // user input. The previous threshold blocked legitimate
+          // natural-language submissions (e.g. "Make no changes, just
+          // inspect README.md and finish.", "enumerate every plugin in
+          // extreme detail") and legitimate pr_iteration hydrations
+          // against PRs containing normal imperative documentation.
+          inputStrength: bedrock.ContentFilterStrength.MEDIUM,
           outputStrength: bedrock.ContentFilterStrength.NONE,
         },
       ],
