@@ -506,6 +506,10 @@ export class TaskApi extends Construct {
             m => m !== '@aws-sdk/client-s3' && m !== '@aws-sdk/s3-request-presigner',
           ),
         },
+        // Cold-start SDK load (s3-client + s3-request-presigner + lib-dynamodb)
+        // exceeds Lambda's 3s default, causing INIT timeout → 502 Bad Gateway.
+        timeout: Duration.seconds(15),
+        memorySize: 512,
       });
 
       props.taskTable.grantReadData(getTraceUrlFn);

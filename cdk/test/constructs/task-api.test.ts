@@ -708,4 +708,18 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
     // But we only test that `get-trace` auth is Cognito (which is implied by the creation test above).
     expect(cognitoGetMethods.length).toBeGreaterThanOrEqual(4);
   });
+
+  test('GetTraceUrlFn has adequate timeout and memory for SDK cold-start', () => {
+    const template = createStackWithTrace();
+    // Find the GetTraceUrlFn by looking for the function whose env has TRACE_ARTIFACTS_BUCKET_NAME.
+    const functions = template.findResources('AWS::Lambda::Function');
+    const traceFn = Object.values(functions).find(
+      f => f.Properties.Environment?.Variables?.TRACE_ARTIFACTS_BUCKET_NAME !== undefined,
+    );
+    expect(traceFn).toBeDefined();
+    // 15s matches CancelTaskFn precedent for cold-start SDK loads;
+    // 512 MB is headroom above the observed 126 MB cold-start peak.
+    expect(traceFn!.Properties.Timeout).toBe(15);
+    expect(traceFn!.Properties.MemorySize).toBe(512);
+  });
 });
