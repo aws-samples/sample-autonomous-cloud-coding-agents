@@ -19,31 +19,40 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { formatJson, formatStatusSnapshot, formatTaskDetail } from '../format';
+import { formatJson, formatStatusSnapshot } from '../format';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
 export function makeStatusCommand(): Command {
   return new Command('status')
     .description('Get a deterministic status snapshot of a task')
     .argument('<task-id>', 'Task ID')
-    .option('--wait', 'Wait for task to reach terminal status')
+    .option('--wait', 'Block until the task reaches a terminal status, then print the final snapshot and exit with a status-derived code')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (taskId: string, opts) => {
       const client = new ApiClient();
 
+      // ``--wait`` is a pure blocking flag: it polls until terminal,
+      // then renders the SAME snapshot the default path would. There
+      // is no "rich vs compact" split — the snapshot is the status
+      // surface, ``--wait`` just delays it until there is a final
+      // answer. JSON output follows the same rule: same shape, later.
       if (opts.wait) {
-        // ``--wait`` blocks until terminal and prints the full task-detail
-        // view. The snapshot template is recency-biased and less useful
-        // once the task has landed; reuse ``formatTaskDetail`` for that case.
         const task = await waitForTask(client, taskId);
         process.stderr.write('\n');
-        console.log(opts.output === 'json' ? formatJson(task) : formatTaskDetail(task));
+        if (opts.output === 'json') {
+          console.log(formatJson(task));
+        } else {
+          // Fetch recent events so the snapshot renders consistently
+          // with the no-wait path. Cheap follow-up call; the task has
+          // already terminated, so the event window is stable.
+          const { recentEvents } = await client.getStatusSnapshot(taskId);
+          console.log(formatStatusSnapshot(task, recentEvents));
+        }
         process.exitCode = exitCodeForStatus(task.status);
         return;
       }
 
       if (opts.output === 'json') {
-        // JSON consumers keep the existing ``TaskDetail`` contract.
         const task = await client.getTask(taskId);
         console.log(formatJson(task));
         return;

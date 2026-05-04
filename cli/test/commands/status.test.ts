@@ -100,4 +100,61 @@ describe('status command', () => {
     // JSON consumers keep the existing ``TaskDetail`` contract — no snapshot fetch.
     expect(mockGetStatusSnapshot).not.toHaveBeenCalled();
   });
+
+  test('--wait renders the SAME snapshot layout as the default path (no format bifurcation)', async () => {
+    // PR #52 UX carry-forward: pre-fix, ``--wait`` rendered a completely
+    // different ``formatTaskDetail`` view, confusing users who wondered
+    // why they had to add a blocking flag to see a richer output.
+    // The new contract: ``--wait`` is a pure blocking flag; same
+    // snapshot layout renders whether or not it was passed.
+    const terminalTask = {
+      task_id: 'abc',
+      status: 'COMPLETED',
+      repo: 'owner/repo',
+      issue_number: null,
+      task_type: 'new_task',
+      pr_number: null,
+      task_description: 'Fix bug',
+      branch_name: 'bgagent/abc/fix',
+      session_id: null,
+      pr_url: 'https://github.com/owner/repo/pull/1',
+      error_message: null,
+      error_classification: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:01:00Z',
+      started_at: '2026-01-01T00:00:00Z',
+      completed_at: '2026-01-01T00:01:00Z',
+      duration_s: 60,
+      cost_usd: 0.05,
+      build_passed: true,
+      max_turns: 12,
+      max_budget_usd: null,
+      turns_attempted: 5,
+      turns_completed: 5,
+    };
+    mockGetTask.mockResolvedValue(terminalTask);
+    mockGetStatusSnapshot.mockResolvedValue({ task: terminalTask, recentEvents: [] });
+
+    const cmd = makeStatusCommand();
+    await cmd.parseAsync(['node', 'test', 'abc', '--wait']);
+
+    // ``waitForTask`` polled the task (at least once) and the snapshot
+    // formatter was invoked — not the old ``formatTaskDetail`` split.
+    const output = consoleSpy.mock.calls[0][0] as string;
+    expect(output).toContain('Task abc — COMPLETED');
+    expect(output).toContain('Repo:          owner/repo');
+    // Exit code reflects the terminal status.
+    expect(process.exitCode).toBe(0);
+  });
+
+  test('--wait with --output json still returns raw TaskDetail (unchanged for scripting)', async () => {
+    const terminal = { task_id: 'abc', status: 'FAILED' };
+    mockGetTask.mockResolvedValue(terminal);
+
+    const cmd = makeStatusCommand();
+    await cmd.parseAsync(['node', 'test', 'abc', '--wait', '--output', 'json']);
+
+    expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(terminal, null, 2));
+    expect(process.exitCode).toBe(1);
+  });
 });
