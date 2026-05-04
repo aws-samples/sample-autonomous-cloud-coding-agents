@@ -167,3 +167,4 @@ class TaskResult(BaseModel):
     output_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
+    screenshot_urls: list[str] = Field(default_factory=list)

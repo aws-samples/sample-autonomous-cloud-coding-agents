@@ -63,6 +63,13 @@ def test_background_thread_failure_503_and_backup_terminal_write(client, monkeyp
     assert body["status"] == "unhealthy"
     assert body["reason"] == "background_pipeline_failed"
 
+    # Wait for the background thread to finish so write_terminal has been called
+    # (the 503 flag is set before write_terminal in the except block)
+    with server._threads_lock:
+        threads = list(server._active_threads)
+    for t in threads:
+        t.join(timeout=5)
+
     mock_write.assert_called()
     call_kw = mock_write.call_args
     assert call_kw[0][0] == "task-crash-1"

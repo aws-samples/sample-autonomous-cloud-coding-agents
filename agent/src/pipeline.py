@@ -328,6 +328,21 @@ def run_task(
                 pr_url = ensure_pr(
                     config, setup, build_passed, lint_passed, agent_result=agent_result
                 )
+                # Screenshot capture (fail-open)
+                screenshot_urls: list[str] = []
+                if pr_url:
+                    from post_hooks import _append_screenshots_to_pr, capture_pr_screenshots
+
+                    try:
+                        screenshot_urls = capture_pr_screenshots(pr_url, config.task_id)
+                        if screenshot_urls:
+                            _append_screenshots_to_pr(config, setup, screenshot_urls)
+                    except Exception as exc:
+                        log(
+                            "WARN",
+                            f"Screenshot capture failed (non-fatal): {type(exc).__name__}: {exc}",
+                        )
+
                 post_span.set_attribute("build.passed", build_passed)
                 post_span.set_attribute("lint.passed", lint_passed)
                 post_span.set_attribute("pr.url", pr_url or "")
@@ -398,6 +413,7 @@ def run_task(
                 output_tokens=usage.output_tokens if usage else None,
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
+                screenshot_urls=screenshot_urls,
             )
 
             result_dict = result.model_dump()
