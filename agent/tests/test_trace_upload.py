@@ -193,13 +193,17 @@ class TestUploadTraceToS3:
             result = upload_trace_to_s3(task_id="t-9", user_id="u-1", body=b"gz-payload")
 
         assert result == "s3://my-bucket/traces/u-1/t-9.jsonl.gz"
+        # ContentEncoding=gzip intentionally omitted — it triggers Node's
+        # fetch (undici) auto-decompression, which breaks the CLI's trace
+        # download paths. See telemetry.upload_trace_to_s3 comment.
         mock_client.put_object.assert_called_once_with(
             Bucket="my-bucket",
             Key="traces/u-1/t-9.jsonl.gz",
             Body=b"gz-payload",
-            ContentType="application/x-ndjson",
-            ContentEncoding="gzip",
+            ContentType="application/gzip",
         )
+        _, kwargs = mock_client.put_object.call_args
+        assert "ContentEncoding" not in kwargs
 
     def test_fail_open_on_s3_error(self, capsys, monkeypatch):
         monkeypatch.setenv("TRACE_ARTIFACTS_BUCKET_NAME", "my-bucket")

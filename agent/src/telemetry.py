@@ -454,12 +454,16 @@ def upload_trace_to_s3(
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = boto3.client("s3", region_name=region)
+        # Intentionally omit ContentEncoding=gzip: Node's fetch (undici) auto-
+        # decompresses responses whose metadata declares gzip encoding, which
+        # violates the CLI's `-o <file>` "raw gzipped bytes" contract and
+        # breaks the default stdout gunzip path (Z_DATA_ERROR). We store the
+        # actual gzipped bytes and describe them honestly as application/gzip.
         client.put_object(
             Bucket=bucket,
             Key=key,
             Body=body,
-            ContentType="application/x-ndjson",
-            ContentEncoding="gzip",
+            ContentType="application/gzip",
         )
         return f"s3://{bucket}/{key}"
     except ImportError:
