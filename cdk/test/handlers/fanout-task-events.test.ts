@@ -774,7 +774,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       expect(renderArg.durationS).toBeNull();
 
       const warnCall = warnSpy.mock.calls.find(
-        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.numeric_coercion_failed',
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'numeric.coercion_failed',
       );
       expect(warnCall).toBeDefined();
       expect((warnCall?.[1] as Record<string, unknown>).field).toBe('cost_usd');
@@ -805,7 +805,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       expect(renderArg.durationS).toBeNull();
 
       const coercionWarns = warnSpy.mock.calls.filter(
-        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.numeric_coercion_failed',
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'numeric.coercion_failed',
       );
       expect(coercionWarns).toHaveLength(0);
     } finally {

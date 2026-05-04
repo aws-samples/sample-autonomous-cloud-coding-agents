@@ -50,6 +50,7 @@ import type { DynamoDBStreamEvent, DynamoDBStreamHandler, DynamoDBRecord } from 
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { logger } from './shared/logger';
+import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 
@@ -279,40 +280,6 @@ export function effectiveEventType(event: FanOutEvent): string {
   return milestone;
 }
 
-/** Coerce a value that should be a number but may arrive as a string
- *  (DynamoDB Document-client deserializes ``Number`` attributes as
- *  strings) into a finite ``number`` or ``null``. Used at the fan-out
- *  rendering boundary where ``renderCommentBody`` calls ``toFixed`` on
- *  the result — the sibling ``orchestrator.ts`` fallback-episode write
- *  has the same coercion.
- *
- *  Non-finite coercions (``NaN``) collapse to ``null`` so the render
- *  branch stays off rather than emit ``NaN``. A non-null, non-empty
- *  input that fails to parse is a writer bug — we emit a warn so it
- *  surfaces in CloudWatch rather than silently vanishing from the
- *  comment body. ``null`` / ``undefined`` / empty-string inputs are
- *  treated as "absent" and do not warn. */
-function coerceNumericOrNull(
-  value: number | string | null | undefined,
-  fieldName: string,
-  context: { task_id?: string; event_id?: string },
-): number | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string' && value.length === 0) return null;
-  const n = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(n)) {
-    logger.warn('[fanout] non-finite numeric coercion — dropping field', {
-      event: 'fanout.numeric_coercion_failed',
-      field: fieldName,
-      raw: String(value),
-      task_id: context.task_id,
-      event_id: context.event_id,
-    });
-    return null;
-  }
-  return n;
-}
-
 /** True if any subscribed channel wants this event. Used as the outer
  *  guard so events nobody cares about short-circuit before we spin
  *  dispatchers. Matches on the unwrapped effective event type so
@@ -515,18 +482,19 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     latestEventAt: event.timestamp,
     prUrl: task.pr_url ?? null,
     // DDB returns numeric attributes as strings at the Document-client
-    // boundary; the sibling orchestrator path already coerces these
-    // (see ``orchestrator.ts`` fallback-episode write). Without
-    // coercion ``costUsd.toFixed(4)`` throws ``TypeError`` and the
-    // dispatcher is rejected for every terminal event.
-    durationS: coerceNumericOrNull(task.duration_s, 'duration_s', {
-      task_id: task.task_id,
-      event_id: event.event_id,
-    }),
-    costUsd: coerceNumericOrNull(task.cost_usd, 'cost_usd', {
-      task_id: task.task_id,
-      event_id: event.event_id,
-    }),
+    // boundary (see ``shared/numeric.ts``). Without coercion
+    // ``costUsd.toFixed(4)`` throws ``TypeError`` and the dispatcher
+    // is rejected for every terminal event.
+    durationS: coerceNumericOrNull(
+      task.duration_s,
+      { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    costUsd: coerceNumericOrNull(
+      task.cost_usd,
+      { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
   });
 
   const upsertParams = {

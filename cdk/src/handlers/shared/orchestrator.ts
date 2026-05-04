@@ -23,6 +23,7 @@ import { ulid } from 'ulid';
 import { hydrateContext } from './context-hydration';
 import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
+import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import type { TaskRecord } from './types';
@@ -519,13 +520,29 @@ export async function finalizeTask(
     if (MEMORY_ID && !task.memory_written) {
       logger.info('Agent did not write memory — writing fallback episode', { task_id: taskId });
       try {
+        // Coerce at the shared helper rather than ``Number(...)`` so a
+        // corrupt string ``cost_usd`` from the DDB Document client
+        // collapses to ``undefined`` (and logs a warn) rather than
+        // rendering ``Cost: $NaN.`` into the episode text — see
+        // ``memory.ts::writeMinimalEpisode`` line 325 which calls
+        // ``.toFixed(4)`` on the value.
+        const durationS = coerceNumericOrNull(
+          task.duration_s,
+          { field: 'duration_s', task_id: taskId },
+          logger,
+        );
+        const costUsd = coerceNumericOrNull(
+          task.cost_usd,
+          { field: 'cost_usd', task_id: taskId },
+          logger,
+        );
         const written = await writeMinimalEpisode(
           MEMORY_ID,
           task.repo,
           taskId,
           currentStatus,
-          task.duration_s !== undefined ? Number(task.duration_s) : undefined,
-          task.cost_usd !== undefined ? Number(task.cost_usd) : undefined,
+          durationS ?? undefined,
+          costUsd ?? undefined,
         );
         if (!written) {
           logger.warn('Fallback episode write returned false', { task_id: taskId });
