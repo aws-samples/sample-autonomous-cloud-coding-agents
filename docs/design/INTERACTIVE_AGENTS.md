@@ -303,6 +303,8 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `pr_created` | Pipeline | PR opened for the task |
 | `task_completed` / `task_failed` / `task_cancelled` / `task_stranded` | Orchestrator / reconciler | Terminal |
 
+Named milestones (`pr_created`, `nudge_acknowledged`, `repo_setup_complete`, …) are written as `agent_milestone` events with `metadata.milestone` carrying the name. The fan-out router unwraps an allowlisted subset (§6.2) so per-channel default filters can target milestone names directly (e.g. GitHub's default set includes `pr_created`); unlisted milestone names stay wrapped and do not route. The watch CLI renders all milestones regardless of the allowlist.
+
 ### 4.3 Previews and truncation
 
 Text fields (thinking, tool input, tool output, error details) are truncated to 200 characters by default to keep event rows small. The `--trace` flag raises the cap to 4 KB and additionally writes a full trajectory to S3 (see §10).

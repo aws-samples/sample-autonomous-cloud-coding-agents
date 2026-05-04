@@ -229,11 +229,96 @@ export function parseStreamRecord(record: DynamoDBRecord): FanOutEvent | null {
   return { task_id, event_id, event_type, timestamp, metadata };
 }
 
+/**
+ * Allowlist of ``agent_milestone`` names that are eligible to be
+ * unwrapped into their effective routing type. Keeping this narrow is
+ * a **structural** defense against naming drift: a future refactor
+ * that accidentally renames an unrelated milestone (e.g.
+ * ``task_cancelled_acknowledged`` → ``task_cancelled``) must not
+ * silently start fanning out as a terminal. If a new milestone should
+ * reach channels, add it here AND to the relevant channel default.
+ *
+ * The milestones the agent emits today (see
+ * ``agent/src/progress_writer.py``, ``agent/src/pipeline.py``, and
+ * ``agent/src/hooks.py``) are: ``pr_created``, ``nudge_acknowledged``,
+ * ``repo_setup_complete``, ``agent_execution_complete``,
+ * ``task_cancelled_acknowledged``, ``cancel_detected``,
+ * ``trajectory_uploaded``, ``trace_truncated``. Only ``pr_created``
+ * is currently in any channel's default filter (§6.2 Slack + GitHub).
+ */
+const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created']);
+
+/**
+ * Unwrap ``agent_milestone`` events to their milestone name for
+ * routing and rendering purposes.
+ *
+ * The agent writes named checkpoints (``pr_created``,
+ * ``nudge_acknowledged``, ``repo_setup_complete``, …) as a single
+ * ``agent_milestone`` event with ``metadata.milestone`` carrying the
+ * name — see ``agent/src/progress_writer.py::write_agent_milestone``
+ * and the design doc §4.2 event-types table. The watch CLI already
+ * reads ``metadata.milestone`` when rendering those events.
+ *
+ * The fan-out filters are expressed against **effective** event types
+ * (e.g. ``pr_created``, design §6.2 GitHub default set), so the
+ * router must unwrap before matching — otherwise every milestone
+ * routes as the string ``agent_milestone`` and gets dropped.
+ *
+ * Unwrap is restricted to ``ROUTABLE_MILESTONES`` so a future
+ * milestone whose name happens to collide with a terminal / error
+ * event type cannot silently fan out. Non-milestone events, bare
+ * ``agent_milestone`` events without a well-formed milestone name,
+ * and milestones outside the allowlist all keep their original
+ * routing (i.e. match on the wrapper ``agent_milestone``).
+ */
+export function effectiveEventType(event: FanOutEvent): string {
+  if (event.event_type !== 'agent_milestone') return event.event_type;
+  const milestone = event.metadata?.milestone;
+  if (typeof milestone !== 'string' || milestone.length === 0) return event.event_type;
+  if (!ROUTABLE_MILESTONES.has(milestone)) return event.event_type;
+  return milestone;
+}
+
+/** Coerce a value that should be a number but may arrive as a string
+ *  (DynamoDB Document-client deserializes ``Number`` attributes as
+ *  strings) into a finite ``number`` or ``null``. Used at the fan-out
+ *  rendering boundary where ``renderCommentBody`` calls ``toFixed`` on
+ *  the result — the sibling ``orchestrator.ts`` fallback-episode write
+ *  has the same coercion.
+ *
+ *  Non-finite coercions (``NaN``) collapse to ``null`` so the render
+ *  branch stays off rather than emit ``NaN``. A non-null, non-empty
+ *  input that fails to parse is a writer bug — we emit a warn so it
+ *  surfaces in CloudWatch rather than silently vanishing from the
+ *  comment body. ``null`` / ``undefined`` / empty-string inputs are
+ *  treated as "absent" and do not warn. */
+function coerceNumericOrNull(
+  value: number | string | null | undefined,
+  fieldName: string,
+  context: { task_id?: string; event_id?: string },
+): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.length === 0) return null;
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) {
+    logger.warn('[fanout] non-finite numeric coercion — dropping field', {
+      event: 'fanout.numeric_coercion_failed',
+      field: fieldName,
+      raw: String(value),
+      task_id: context.task_id,
+      event_id: context.event_id,
+    });
+    return null;
+  }
+  return n;
+}
+
 /** True if any subscribed channel wants this event. Used as the outer
  *  guard so events nobody cares about short-circuit before we spin
- *  dispatchers. */
+ *  dispatchers. Matches on the unwrapped effective event type so
+ *  ``agent_milestone`` carriers route by their milestone name. */
 export function shouldFanOut(event: FanOutEvent, overrides?: TaskNotificationsConfig): boolean {
-  return unionSubscribedTypes(overrides).has(event.event_type);
+  return unionSubscribedTypes(overrides).has(effectiveEventType(event));
 }
 
 /**
@@ -254,6 +339,7 @@ async function dispatchToSlack(event: FanOutEvent): Promise<void> {
     task_id: event.task_id,
     event_id: event.event_id,
     event_type: event.event_type,
+    effective_event_type: effectiveEventType(event),
   });
 }
 
@@ -416,15 +502,31 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Render the effective event type so comment bodies read
+  // ``pr_created`` / ``nudge_acknowledged`` rather than the wrapper
+  // ``agent_milestone``. Matches the watch CLI's rendering of these
+  // milestones (``cli/src/commands/watch.ts``).
+  const renderedEventType = effectiveEventType(event);
   const body = renderCommentBody({
     taskId: task.task_id,
     status: task.status,
     repo: task.repo,
-    latestEventType: event.event_type,
+    latestEventType: renderedEventType,
     latestEventAt: event.timestamp,
     prUrl: task.pr_url ?? null,
-    durationS: task.duration_s ?? null,
-    costUsd: task.cost_usd ?? null,
+    // DDB returns numeric attributes as strings at the Document-client
+    // boundary; the sibling orchestrator path already coerces these
+    // (see ``orchestrator.ts`` fallback-episode write). Without
+    // coercion ``costUsd.toFixed(4)`` throws ``TypeError`` and the
+    // dispatcher is rejected for every terminal event.
+    durationS: coerceNumericOrNull(task.duration_s, 'duration_s', {
+      task_id: task.task_id,
+      event_id: event.event_id,
+    }),
+    costUsd: coerceNumericOrNull(task.cost_usd, 'cost_usd', {
+      task_id: task.task_id,
+      event_id: event.event_id,
+    }),
   });
 
   const upsertParams = {
@@ -501,6 +603,7 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     comment_id: result.commentId,
     created: result.created,
     event_type: event.event_type,
+    effective_event_type: renderedEventType,
   });
 }
 
@@ -509,6 +612,7 @@ async function dispatchToEmail(event: FanOutEvent): Promise<void> {
     event: 'fanout.email.dispatch_stub',
     task_id: event.task_id,
     event_type: event.event_type,
+    effective_event_type: effectiveEventType(event),
   });
 }
 
@@ -540,9 +644,13 @@ export async function routeEvent(
 ): Promise<NotificationChannel[]> {
   const attempted: NotificationChannel[] = [];
   const tasks: Promise<unknown>[] = [];
+  // Match against the effective type so ``agent_milestone`` carriers
+  // (``pr_created``, ``nudge_acknowledged``, …) reach the channels
+  // subscribed to those milestone names.
+  const effective = effectiveEventType(ev);
   for (const ch of CHANNELS) {
     const filter = resolveChannelFilter(ch, overrides);
-    if (!filter.has(ev.event_type)) continue;
+    if (!filter.has(effective)) continue;
     attempted.push(ch);
     tasks.push(DISPATCHERS[ch](ev));
   }
@@ -568,6 +676,8 @@ export async function routeEvent(
       channel: ch,
       task_id: ev.task_id,
       event_id: ev.event_id,
+      event_type: ev.event_type,
+      effective_event_type: effectiveEventType(ev),
       error: reason,
     });
   });
@@ -607,6 +717,7 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
         task_id: ev.task_id,
         event_id: ev.event_id,
         event_type: ev.event_type,
+        effective_event_type: effectiveEventType(ev),
         cap: MAX_EVENTS_PER_TASK_PER_INVOCATION,
       });
       dropped++;

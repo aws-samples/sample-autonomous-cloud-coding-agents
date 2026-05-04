@@ -157,7 +157,11 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
 
   test.each([
     'task_created', // intentionally dropped in rev-6 defaults
-    'agent_milestone', // intentionally dropped (--verbose opt-in only)
+    // Bare ``agent_milestone`` (no ``metadata.milestone``) stays
+    // dropped; wrapped milestones on the ``ROUTABLE_MILESTONES``
+    // allowlist route by name — see the agent_milestone routing
+    // suite below.
+    'agent_milestone',
     'agent_turn',
     'agent_tool_call',
     'agent_tool_result',
@@ -709,5 +713,242 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     await handler(event, {} as never, () => undefined);
 
     expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:repo-specific');
+  });
+
+  // ---- Scenario 7-extended regression (post-K2 deploy validation) ----
+
+  test('TaskRecord with string-typed cost_usd/duration_s renders without throwing (DDB Number coercion)', async () => {
+    // Regression: the DynamoDB Document-client returns Number
+    // attributes as strings. ``renderCommentBody`` calls
+    // ``costUsd.toFixed(4)`` which throws TypeError on a string,
+    // causing every terminal event on a pr_iteration task to be
+    // rejected by the dispatcher (observed in Scenario 7-extended
+    // deploy validation, task ``01KQSPFXQMYQR0CNGCF56XB9ZM``). The
+    // fan-out boundary must coerce.
+    mockDdbSend
+      .mockResolvedValueOnce({
+        Item: {
+          ...TASK_RECORD_BASE,
+          cost_usd: '0.20939010000000002',
+          duration_s: '96.0',
+        },
+      })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+
+    expect(mockRenderCommentBody).toHaveBeenCalledTimes(1);
+    const renderArg = mockRenderCommentBody.mock.calls[0][0];
+    // Coerced to finite numbers so ``.toFixed`` downstream works.
+    expect(typeof renderArg.costUsd).toBe('number');
+    expect(renderArg.costUsd).toBeCloseTo(0.2094, 4);
+    expect(typeof renderArg.durationS).toBe('number');
+    expect(renderArg.durationS).toBe(96);
+    // Upsert reached the HTTP layer — no TypeError short-circuit.
+    expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
+  });
+
+  test('non-finite string cost collapses to null and emits a warn (surfaces writer bugs)', async () => {
+    // Defense-in-depth: a corrupt ``cost_usd`` that parses to ``NaN``
+    // must not produce a ``$NaN`` row. The coercion returns ``null``
+    // so the optional render branch stays off, but must also emit a
+    // ``fanout.numeric_coercion_failed`` warn so the writer bug is
+    // not silently absorbed.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      mockDdbSend
+        .mockResolvedValueOnce({
+          Item: { ...TASK_RECORD_BASE, cost_usd: 'not-a-number', duration_s: null },
+        })
+        .mockResolvedValueOnce({});
+      mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+      const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+      await handler(event, {} as never, () => undefined);
+
+      const renderArg = mockRenderCommentBody.mock.calls[0][0];
+      expect(renderArg.costUsd).toBeNull();
+      expect(renderArg.durationS).toBeNull();
+
+      const warnCall = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.numeric_coercion_failed',
+      );
+      expect(warnCall).toBeDefined();
+      expect((warnCall?.[1] as Record<string, unknown>).field).toBe('cost_usd');
+      expect((warnCall?.[1] as Record<string, unknown>).raw).toBe('not-a-number');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('absent cost_usd / duration_s fields (not just null) render as absent without warning', async () => {
+    // The DDB Item may simply omit the attributes (task still RUNNING
+    // at the time of the event). ``undefined`` inputs must not warn —
+    // they're not corrupt, they're just not set yet.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const base = { ...TASK_RECORD_BASE } as Record<string, unknown>;
+      delete base.cost_usd;
+      delete base.duration_s;
+      mockDdbSend.mockResolvedValueOnce({ Item: base }).mockResolvedValueOnce({});
+      mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+
+      const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+      await handler(event, {} as never, () => undefined);
+
+      const renderArg = mockRenderCommentBody.mock.calls[0][0];
+      expect(renderArg.costUsd).toBeNull();
+      expect(renderArg.durationS).toBeNull();
+
+      const coercionWarns = warnSpy.mock.calls.filter(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.numeric_coercion_failed',
+      );
+      expect(coercionWarns).toHaveLength(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario 7-extended — agent_milestone routing regression
+// ---------------------------------------------------------------------------
+
+/** Stream record for an ``agent_milestone`` event carrying a named
+ *  milestone in ``metadata.milestone`` — the shape written by
+ *  ``agent/src/progress_writer.py::write_agent_milestone``. */
+function mkMilestoneRecord(milestone: string, taskId = 't-1'): DynamoDBRecord {
+  return mkRecord('INSERT', {
+    task_id: { S: taskId },
+    event_id: { S: `01MILE${milestone}` },
+    event_type: { S: 'agent_milestone' },
+    timestamp: { S: '2026-05-04T14:34:57Z' },
+    metadata: { M: { milestone: { S: milestone } } },
+  });
+}
+
+describe('fanout-task-events: agent_milestone routing (effective event type)', () => {
+  // The agent writes named checkpoints (``pr_created``,
+  // ``nudge_acknowledged``, …) with ``event_type = agent_milestone``
+  // and ``metadata.milestone`` carrying the name (see
+  // ``agent/src/progress_writer.py::write_agent_milestone``). The
+  // channel-default filters are expressed against the milestone names
+  // directly (design §6.2), so routing unwraps the wrapper before
+  // matching. Without unwrap, ``pr_created`` would fan out to zero
+  // channels — observed in Scenario 7-extended.
+
+  const makeMilestone = (milestone: string): FanOutEvent => ({
+    task_id: 't-1',
+    event_id: 'e-1',
+    event_type: 'agent_milestone',
+    timestamp: '2026-05-04T14:34:57Z',
+    metadata: { milestone },
+  });
+
+  test('shouldFanOut unwraps agent_milestone to its milestone name', () => {
+    // ``pr_created`` is in Slack + GitHub defaults → fan out.
+    expect(shouldFanOut(makeMilestone('pr_created'))).toBe(true);
+  });
+
+  test('shouldFanOut drops agent_milestone with a non-subscribed milestone', () => {
+    // ``repo_setup_complete`` is deliberately NOT in any channel's
+    // default — verbose opt-in only, per §6.2.
+    expect(shouldFanOut(makeMilestone('repo_setup_complete'))).toBe(false);
+  });
+
+  test('shouldFanOut keeps old behavior when metadata.milestone is missing or malformed', () => {
+    // Backwards-compat: a bare ``agent_milestone`` event (shouldn't
+    // happen in practice — the writer always sets ``milestone``) must
+    // not crash the router; it simply doesn't match any default. We
+    // cover: missing ``metadata`` entirely, empty ``metadata`` object,
+    // missing ``milestone`` key, empty-string milestone, and a
+    // non-string milestone value.
+    const bare: FanOutEvent = {
+      task_id: 't-1',
+      event_id: 'e-1',
+      event_type: 'agent_milestone',
+      timestamp: '2026-05-04T14:34:57Z',
+    };
+    expect(shouldFanOut(bare)).toBe(false);
+    expect(shouldFanOut({ ...bare, metadata: {} })).toBe(false);
+    expect(shouldFanOut({ ...bare, metadata: { foo: 'bar' } })).toBe(false);
+    expect(shouldFanOut({ ...bare, metadata: { milestone: '' } })).toBe(false);
+    expect(shouldFanOut({ ...bare, metadata: { milestone: 42 as unknown as string } })).toBe(false);
+  });
+
+  test('shouldFanOut rejects milestones outside the routing allowlist even if they match a channel default', () => {
+    // Structural defense against naming drift: a future rename that
+    // accidentally makes ``metadata.milestone`` equal an existing
+    // channel-default entry (e.g. ``task_cancelled``) must NOT start
+    // silently fanning out. Only the allowlist (today: ``pr_created``)
+    // is eligible for unwrap.
+    const colliding: FanOutEvent = {
+      task_id: 't-collide',
+      event_id: 'e-collide',
+      event_type: 'agent_milestone',
+      timestamp: '2026-05-04T14:34:57Z',
+      metadata: { milestone: 'task_cancelled' },
+    };
+    // ``task_cancelled`` is in Slack + GitHub defaults as a terminal
+    // event type — but unwrap must still refuse because the milestone
+    // is outside ``ROUTABLE_MILESTONES``.
+    expect(shouldFanOut(colliding)).toBe(false);
+  });
+
+  test('routeEvent dispatches agent_milestone(pr_created) to Slack + GitHub, not Email', async () => {
+    const channels = await routeEvent(makeMilestone('pr_created'));
+    expect(channels.sort()).toEqual(['github', 'slack']);
+  });
+
+  test('routeEvent drops agent_milestone(agent_turn-like) that no channel subscribes to', async () => {
+    // ``nudge_acknowledged`` is in no channel default today. Must
+    // still route cleanly (empty list) rather than throw.
+    const channels = await routeEvent(makeMilestone('nudge_acknowledged'));
+    expect(channels).toEqual([]);
+  });
+
+  test('handler dispatches GitHub comment on agent_milestone(pr_created) stream record', async () => {
+    // End-to-end guard: the DynamoDB Stream shape for pr_created is
+    // an ``agent_milestone`` wrapper. The handler must read the
+    // milestone name from metadata, match the GitHub default filter,
+    // load the task, and reach ``upsertTaskComment``.
+    mockDdbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't-milestone',
+          user_id: 'u-1',
+          status: 'RUNNING',
+          repo: 'owner/repo',
+          pr_number: 99,
+          branch_name: 'bgagent/t-milestone/fix',
+          channel_source: 'api',
+          status_created_at: 'RUNNING#2026-05-04T14:34:57Z',
+          created_at: '2026-05-04T14:30:00Z',
+          updated_at: '2026-05-04T14:34:57Z',
+        },
+      })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({
+      commentId: 777,
+      etag: '"e"',
+      created: true,
+    });
+
+    const event: DynamoDBStreamEvent = {
+      Records: [mkMilestoneRecord('pr_created', 't-milestone')],
+    };
+    await handler(event, {} as never, () => undefined);
+
+    expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
+    // Comment body renders ``pr_created`` (the effective type),
+    // not the wrapper ``agent_milestone``. Cross-check: the watch
+    // CLI renders ``★ pr_created: ...`` on the same record, so the
+    // two surfaces stay consistent.
+    const renderArg = mockRenderCommentBody.mock.calls[0][0];
+    expect(renderArg.latestEventType).toBe('pr_created');
   });
 });
