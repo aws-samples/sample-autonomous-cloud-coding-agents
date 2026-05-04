@@ -34,6 +34,7 @@ describe('format', () => {
     pr_url: 'https://github.com/owner/repo/pull/1',
     error_message: null,
     error_classification: null,
+    channel_source: 'api',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T01:00:00Z',
     started_at: '2026-01-01T00:01:00Z',

@@ -46,6 +46,11 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
+  /** Provenance of the task's submission — ``api`` for CLI / Cognito
+   *  submissions, ``webhook`` for HMAC-signed inbound webhooks.
+   *  Mirrors ``cdk/src/handlers/shared/types.ts::TaskDetail``; kept
+   *  in sync per the CLI types-sync contract. */
+  readonly channel_source: string;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;

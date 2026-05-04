@@ -150,6 +150,12 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
+  /** Provenance of the task's submission — ``api`` for CLI/Cognito
+   *  submissions, ``webhook`` for HMAC-signed inbound webhooks. Present
+   *  on every task record at creation time (``create-task-core.ts``)
+   *  and surfaced here so CLI / dashboard / audit consumers do not have
+   *  to spelunk CloudWatch to learn which channel created a task. */
+  readonly channel_source: string;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;
@@ -285,6 +291,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     pr_url: record.pr_url ?? null,
     error_message: record.error_message ?? null,
     error_classification: classifyError(record.error_message),
+    channel_source: record.channel_source,
     created_at: record.created_at,
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
