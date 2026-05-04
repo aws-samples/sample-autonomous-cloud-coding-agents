@@ -282,4 +282,27 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).toContain('Cost:          $0.25 / budget $2.00');
     expect(rendered).toContain('Turn:          7 / ~12');
   });
+
+  test('renders Trace S3 line when trace_s3_uri is non-null', () => {
+    // Contract parity with ``formatTaskDetail``: trace-enabled tasks must
+    // surface the S3 URI in the default ``bgagent status <id>`` snapshot so
+    // terminal users don't need to fall back to ``--output json`` to
+    // discover where the trajectory was uploaded.
+    const task = buildTask({
+      trace: true,
+      trace_s3_uri: 's3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain(
+      'Trace S3:      s3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
+    );
+  });
+
+  test('omits Trace S3 line when trace_s3_uri is null', () => {
+    // Zero-diff for non-trace tasks — matches the conditional rendering of
+    // ``PR:`` / ``Cost:`` in ``formatTaskDetail``.
+    const task = buildTask();
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Trace S3:');
+  });
 });

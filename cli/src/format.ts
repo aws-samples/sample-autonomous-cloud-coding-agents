@@ -158,8 +158,11 @@ export function formatStatusSnapshot(
     `  Last milestone: ${describeMilestone(milestoneEvent, now)}`,
     `  Current:       ${describeCurrent(task, lastActivityEvent)}`,
     `  Cost:          ${describeCost(task, lastCostEvent)}`,
-    `  Last event:    ${lastEventLine}`,
   ];
+  if (task.trace_s3_uri) {
+    lines.push(`  Trace S3:      ${task.trace_s3_uri}`);
+  }
+  lines.push(`  Last event:    ${lastEventLine}`);
 
   return lines.join('\n');
 }
