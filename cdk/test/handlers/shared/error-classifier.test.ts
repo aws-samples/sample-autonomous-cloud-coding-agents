@@ -223,6 +223,49 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
+    test('classifies error_max_turns as TIMEOUT with specific title (ordered before generic catch-all)', () => {
+      // Regression guard: pre-fix, the agent's specific
+      // ``agent_status='error_max_turns'`` signal was swallowed by the
+      // generic "Agent task did not succeed" title, leaving users
+      // without a clear remedy. The specific pattern must match first.
+      const result = classifyError(
+        "Task did not succeed (agent_status='error_max_turns', build_ok=False)",
+      );
+      expect(result!.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result!.title).toBe('Exceeded max turns');
+      expect(result!.retryable).toBe(true);
+      expect(result!.remedy).toMatch(/--max-turns/);
+    });
+
+    test('classifies error_max_budget_usd as TIMEOUT with specific title', () => {
+      const result = classifyError(
+        "Task did not succeed (agent_status='error_max_budget_usd', build_ok=False)",
+      );
+      expect(result!.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result!.title).toBe('Exceeded max budget');
+      expect(result!.retryable).toBe(true);
+      expect(result!.remedy).toMatch(/--max-budget/);
+    });
+
+    test('classifies error_during_execution with a mid-turn-error title', () => {
+      const result = classifyError(
+        "Task did not succeed (agent_status='error_during_execution', build_ok=False)",
+      );
+      expect(result!.category).toBe(ErrorCategory.AGENT);
+      expect(result!.title).toBe('Agent errored during execution');
+      expect(result!.retryable).toBe(true);
+    });
+
+    test('matches agent_status with or without quotes around the literal', () => {
+      // Defensive: the agent writer currently emits single-quoted
+      // repr values (``agent_status='error_max_turns'``) but a future
+      // refactor could drop the quotes. The pattern must match both.
+      const quoted = classifyError("Task did not succeed (agent_status='error_max_turns', build_ok=False)");
+      const unquoted = classifyError('Task did not succeed (agent_status=error_max_turns, build_ok=False)');
+      expect(quoted!.title).toBe('Exceeded max turns');
+      expect(unquoted!.title).toBe('Exceeded max turns');
+    });
+
     test('classifies receive_response failure', () => {
       const result = classifyError(
         'receive_response() failed: Connection reset by peer',
