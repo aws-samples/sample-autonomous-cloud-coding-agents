@@ -107,6 +107,8 @@ describe('formatStatusSnapshot', () => {
       [
         'Task abc123 — RUNNING (3m 14s elapsed)',
         '  Repo:          org/repo',
+        '  Channel:       api',
+        '  Description:   fix bug',
         '  Turn:          7 / ~12',
         '  Last milestone: nudge_acknowledged (42s ago)',
         '  Current:       Bash tool call',
@@ -428,5 +430,66 @@ describe('formatStatusSnapshot', () => {
     });
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).not.toContain('Reason:');
+  });
+
+  // ---- Channel + Description (PR #52 CLI UX carry-forward) ----
+
+  test('Channel line shows api for default task records', () => {
+    const task = buildTask({ channel_source: 'api' });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Channel:       api');
+  });
+
+  test('Channel line shows webhook for webhook-submitted tasks', () => {
+    const task = buildTask({ channel_source: 'webhook' });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Channel:       webhook');
+  });
+
+  test('Channel line is always present (even when channel_source is an unexpected value)', () => {
+    // Degrades to the placeholder rather than omitting the line —
+    // consistent with other always-present snapshot rows.
+    const task = buildTask({ channel_source: '' as unknown as string });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Channel:       —');
+  });
+
+  test('Description line renders the user prompt on short inputs', () => {
+    const task = buildTask({ task_description: 'Make a small tweak to README.md' });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Description:   Make a small tweak to README.md');
+  });
+
+  test('Description wraps to continuation lines on long inputs (~60 char cap, word boundaries)', () => {
+    const long = 'This is a much longer description of a task that the user submitted and needs to be wrapped across multiple lines rather than truncated or shoved onto one very long row that overflows a normal terminal window';
+    const task = buildTask({ task_description: long });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    const lines = rendered.split('\n');
+    const descStart = lines.findIndex(l => l.startsWith('  Description:'));
+    expect(descStart).toBeGreaterThan(-1);
+    // At least two physical lines rendered for the description.
+    const continuation = lines[descStart + 1];
+    expect(continuation).toMatch(/^ {17}\S/); // 2-space indent + 15-char gutter + non-space
+    // Every rendered physical line should be <= 80 chars (the snapshot
+    // target terminal width).
+    for (let i = descStart; i < lines.length && lines[i].startsWith(' '); i++) {
+      if (!lines[i].match(/^ {2}[A-Z]/)) break; // next labeled row
+      expect(lines[i].length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  test('Description is omitted when task_description is null (webhook / minimal record)', () => {
+    const task = buildTask({ task_description: null });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Description:');
+  });
+
+  test('Description trims leading/trailing whitespace but preserves inner spacing', () => {
+    const task = buildTask({ task_description: '  Fix   the   bug   ' });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    // Trimmed at the ends; words inside get single-space-joined because
+    // the wrapper splits on whitespace.
+    expect(rendered).toContain('Description:   Fix the bug');
+    expect(rendered).not.toContain('  Description:     ');
   });
 });

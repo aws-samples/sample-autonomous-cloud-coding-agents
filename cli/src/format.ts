@@ -154,6 +154,12 @@ export function formatStatusSnapshot(
   const lines: string[] = [
     header,
     `  Repo:          ${task.repo}`,
+    // Channel provenance — ``api`` for CLI / Cognito submits,
+    // ``webhook`` for HMAC-signed inbound webhook submits. Shown on
+    // every task so a user looking at a surprising task's status can
+    // immediately tell whether it was triggered by an automation / CI
+    // webhook vs. a manual submission.
+    `  Channel:       ${task.channel_source || PLACEHOLDER}`,
   ];
   // Non-default task types carry meaningful context for the default
   // snapshot (a pr_iteration against #42 is a different mental model
@@ -161,6 +167,12 @@ export function formatStatusSnapshot(
   if (task.task_type && task.task_type !== 'new_task') {
     const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
     lines.push(`  Type:          ${task.task_type}${prSuffix}`);
+  }
+  // Render the task description under its own heading with wrapped
+  // continuation lines so long prompts stay readable in a ~80-column
+  // terminal without truncating information the user already typed.
+  if (task.task_description) {
+    lines.push(...formatDescriptionLines(task.task_description));
   }
   lines.push(
     `  Turn:          ${describeTurn(task, lastTurnEvent)}`,
@@ -184,6 +196,42 @@ export function formatStatusSnapshot(
   lines.push(`  Last event:    ${lastEventLine}`);
 
   return lines.join('\n');
+}
+
+/** Word-wrap column width used for the ``Description:`` block in the
+ *  status snapshot. Keeps the rendered snapshot readable at the
+ *  conventional 80-column terminal width while leaving headroom for
+ *  the 2-space indent + 15-char label gutter (``  Description:   ``)
+ *  that the other snapshot lines use. */
+const DESCRIPTION_WRAP_WIDTH = 60;
+
+/** Render the task description across one or more lines with a
+ *  dedicated label on the first line and continuation padding on the
+ *  rest. Preserves the user's intent: no truncation, no
+ *  reflowing inside the paragraph beyond whitespace word-wrap. */
+function formatDescriptionLines(description: string): string[] {
+  const label = '  Description:   ';
+  const indent = ' '.repeat(label.length);
+  const words = description.trim().split(/\s+/);
+  if (words.length === 0 || (words.length === 1 && words[0] === '')) return [];
+
+  const wrapped: string[] = [];
+  let current = '';
+  for (const word of words) {
+    if (current.length === 0) {
+      current = word;
+      continue;
+    }
+    if (current.length + 1 + word.length <= DESCRIPTION_WRAP_WIDTH) {
+      current += ' ' + word;
+    } else {
+      wrapped.push(current);
+      current = word;
+    }
+  }
+  if (current.length > 0) wrapped.push(current);
+
+  return wrapped.map((line, i) => (i === 0 ? label + line : indent + line));
 }
 
 /** Render the terminal-failure reason for the status snapshot. Returns
