@@ -154,17 +154,50 @@ export function formatStatusSnapshot(
   const lines: string[] = [
     header,
     `  Repo:          ${task.repo}`,
+  ];
+  // Non-default task types carry meaningful context for the default
+  // snapshot (a pr_iteration against #42 is a different mental model
+  // than a new_task). Mirrors the ``formatTaskDetail`` treatment.
+  if (task.task_type && task.task_type !== 'new_task') {
+    const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
+    lines.push(`  Type:          ${task.task_type}${prSuffix}`);
+  }
+  lines.push(
     `  Turn:          ${describeTurn(task, lastTurnEvent)}`,
     `  Last milestone: ${describeMilestone(milestoneEvent, now)}`,
     `  Current:       ${describeCurrent(task, lastActivityEvent)}`,
     `  Cost:          ${describeCost(task, lastCostEvent)}`,
-  ];
+  );
+  // Non-COMPLETED terminal statuses should show the reason inline so
+  // users do not have to chase it through ``status --wait`` or an
+  // ``events`` log grep. Prefer the structured classification when the
+  // API computed one; fall back to the raw ``error_message`` so a
+  // classifier gap does not swallow the only signal we have. Never
+  // emit a trailing empty line.
+  const reasonLine = describeReason(task);
+  if (reasonLine !== null) {
+    lines.push(`  Reason:        ${reasonLine}`);
+  }
   if (task.trace_s3_uri) {
     lines.push(`  Trace S3:      ${task.trace_s3_uri}`);
   }
   lines.push(`  Last event:    ${lastEventLine}`);
 
   return lines.join('\n');
+}
+
+/** Render the terminal-failure reason for the status snapshot. Returns
+ *  ``null`` for COMPLETED / still-running tasks so the caller can skip
+ *  the whole line. Prefers ``error_classification.{category, title}``;
+ *  falls back to trimmed ``error_message``; otherwise returns ``null``. */
+function describeReason(task: TaskDetail): string | null {
+  if (task.status === 'COMPLETED') return null;
+  if (!(TERMINAL_STATUSES as readonly string[]).includes(task.status)) return null;
+  const cls = task.error_classification;
+  if (cls) return `${cls.category}: ${cls.title}`;
+  const msg = task.error_message?.trim();
+  if (msg) return msg;
+  return null;
 }
 
 /** Format task events as a timeline. */

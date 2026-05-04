@@ -305,4 +305,127 @@ describe('formatStatusSnapshot', () => {
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).not.toContain('Trace S3:');
   });
+
+  // ---- Type + Reason (PR #52 CLI UX carry-forward) ----
+
+  test('renders Type line for pr_iteration tasks with PR number', () => {
+    const task = buildTask({ task_type: 'pr_iteration', pr_number: 42 });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Type:          pr_iteration (PR #42)');
+  });
+
+  test('renders Type line for pr_review tasks', () => {
+    const task = buildTask({ task_type: 'pr_review', pr_number: 7 });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Type:          pr_review (PR #7)');
+  });
+
+  test('omits Type line for new_task (the compact default path)', () => {
+    const task = buildTask({ task_type: 'new_task' });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Type:');
+  });
+
+  test('omits PR-number suffix on Type line when pr_number is absent', () => {
+    // Defensive: a pr_iteration task without a pr_number would be a
+    // server-side data shape oddity, but the renderer must not emit a
+    // dangling "PR #undefined".
+    const task = buildTask({ task_type: 'pr_iteration', pr_number: null });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Type:          pr_iteration\n');
+    expect(rendered).not.toContain('PR #');
+  });
+
+  test('FAILED status with structured classification renders Reason line', () => {
+    const task = buildTask({
+      status: 'FAILED',
+      error_message: 'Agent exceeded max turns',
+      error_classification: {
+        category: 'timeout',
+        title: 'Exceeded max turns',
+        description: 'The agent hit the configured turn limit.',
+        remedy: 'Raise --max-turns or simplify the task.',
+        retryable: true,
+      },
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Reason:        timeout: Exceeded max turns');
+  });
+
+  test('FAILED without classification falls back to trimmed error_message', () => {
+    const task = buildTask({
+      status: 'FAILED',
+      error_message: '  Guardrail blocked: task_description rejected\n',
+      error_classification: null,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Reason:        Guardrail blocked: task_description rejected');
+  });
+
+  test('FAILED with neither classification nor message omits Reason line (no trailing colon)', () => {
+    const task = buildTask({
+      status: 'FAILED',
+      error_message: null,
+      error_classification: null,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Reason:');
+  });
+
+  test('CANCELLED and TIMED_OUT terminals also render Reason when available', () => {
+    // Regression guard: the ``=== COMPLETED`` check must be exact so
+    // other terminals still surface their cause.
+    const cancelled = buildTask({
+      status: 'CANCELLED',
+      error_classification: {
+        category: 'unknown',
+        title: 'User cancelled',
+        description: '',
+        remedy: '',
+        retryable: true,
+      },
+    });
+    expect(formatStatusSnapshot(cancelled, [], NOW)).toContain('Reason:        unknown: User cancelled');
+
+    const timedOut = buildTask({
+      status: 'TIMED_OUT',
+      error_classification: {
+        category: 'timeout',
+        title: 'Wall-clock budget exceeded',
+        description: '',
+        remedy: '',
+        retryable: false,
+      },
+    });
+    expect(formatStatusSnapshot(timedOut, [], NOW)).toContain('Reason:        timeout: Wall-clock budget exceeded');
+  });
+
+  test('COMPLETED status never renders a Reason line (even if stale classification lingers)', () => {
+    const task = buildTask({
+      status: 'COMPLETED',
+      error_message: 'should-never-render',
+      error_classification: {
+        category: 'timeout',
+        title: 'should-never-render',
+        description: '',
+        remedy: '',
+        retryable: false,
+      },
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Reason:');
+    expect(rendered).not.toContain('should-never-render');
+  });
+
+  test('RUNNING status never renders a Reason line', () => {
+    // Non-terminal. An error_message on a running task would be
+    // in-flight noise — do not render it at snapshot time.
+    const task = buildTask({
+      status: 'RUNNING',
+      error_message: 'transient',
+      error_classification: null,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Reason:');
+  });
 });
