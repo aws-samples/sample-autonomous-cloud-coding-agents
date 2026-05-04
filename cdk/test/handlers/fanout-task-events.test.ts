@@ -474,14 +474,13 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockClearTokenCache.mockReset();
   });
 
-  test('first terminal event POSTs a new comment and persists {id, etag} to TaskTable', async () => {
+  test('first terminal event POSTs a new comment and persists the comment_id to TaskTable', async () => {
     // Get task record → upsert creates → UpdateItem persists.
     mockDdbSend
       .mockResolvedValueOnce({ Item: TASK_RECORD_BASE }) // GetCommand
       .mockResolvedValueOnce({}); // UpdateCommand
     mockUpsertTaskComment.mockResolvedValueOnce({
       commentId: 555,
-      etag: '"new-etag"',
       created: true,
     });
 
@@ -496,19 +495,33 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       token: 'ghp_fake',
       existingCommentId: undefined,
     });
-    // UpdateCommand fired with the new ids.
-    const update = mockDdbSend.mock.calls[1][0] as { input: { ExpressionAttributeValues: Record<string, unknown> } };
+    // Scenario 7-ext (redeploy) BLOCKER regression: the dispatcher
+    // used to carry ``existingEtag`` for an ``If-Match`` PATCH header
+    // that GitHub rejects with HTTP 400. The field must no longer be
+    // passed on.
+    expect(upsertArg).not.toHaveProperty('existingEtag');
+    // UpdateCommand fired with the new id (no etag persistence).
+    const update = mockDdbSend.mock.calls[1][0] as {
+      input: {
+        ExpressionAttributeValues: Record<string, unknown>;
+        UpdateExpression: string;
+        ConditionExpression: string;
+      };
+    };
     expect(update.input.ExpressionAttributeValues[':cid']).toBe(555);
-    expect(update.input.ExpressionAttributeValues[':etag']).toBe('"new-etag"');
+    expect(update.input.UpdateExpression).toBe('SET github_comment_id = :cid');
+    expect(update.input.UpdateExpression).not.toMatch(/etag/);
+    // First-ever POST guard: refuse to overwrite a sibling's comment id
+    // that might have landed between our GetItem and this UpdateItem.
+    expect(update.input.ConditionExpression).toContain('attribute_not_exists(github_comment_id)');
   });
 
   test('subsequent event passes the persisted comment_id so the helper PATCHes', async () => {
     mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...TASK_RECORD_BASE, github_comment_id: 555, github_comment_etag: '"prev"' } })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({ Item: { ...TASK_RECORD_BASE, github_comment_id: 555 } });
+    // No UpdateCommand on a PATCH — nothing new to persist.
     mockUpsertTaskComment.mockResolvedValueOnce({
       commentId: 555,
-      etag: '"after-patch"',
       created: false,
     });
 
@@ -517,6 +530,9 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
 
     const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
     expect(upsertArg.existingCommentId).toBe(555);
+    // No second DDB call (no UpdateCommand) — the PATCH path skips
+    // ``saveCommentState`` since there's no new state.
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
   });
 
   test('task with no issue_number and no pr_number skips the GitHub dispatcher', async () => {
@@ -547,25 +563,32 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
-    // No UpdateCommand fires (no id/etag to persist from a failed upsert).
+    // No UpdateCommand fires (no id to persist from a failed upsert).
     const updateCalls = mockDdbSend.mock.calls.filter(
       c => (c[0] as { _type?: string })._type === 'Update',
     );
     expect(updateCalls).toHaveLength(0);
   });
 
-  test('passes persisted github_comment_etag through to upsertTaskComment (enables steady-state one-call PATCH)', async () => {
-    // Locks the fix for the BLOCKER where the etag was written but
-    // never read — without the pass-through, every subsequent event
-    // would do GET + PATCH instead of just PATCH.
+  test('dispatcher does NOT forward an If-Match-style ETag to upsertTaskComment (BLOCKER regression)', async () => {
+    // Scenario 7-ext (redeploy) found that GitHub rejects any PATCH
+    // on an issue comment carrying a conditional header with HTTP 400
+    // ("Conditional request headers are not allowed in unsafe requests
+    // unless supported by the endpoint"). The fanout dispatcher must
+    // not carry an etag through to the helper, even when stray
+    // ``github_comment_etag`` data exists on legacy TaskRecords from
+    // before this fix landed.
     mockDdbSend
       .mockResolvedValueOnce({
-        Item: { ...TASK_RECORD_BASE, github_comment_id: 555, github_comment_etag: '"cached"' },
-      })
-      .mockResolvedValueOnce({});
+        Item: {
+          ...TASK_RECORD_BASE,
+          github_comment_id: 555,
+          // Legacy field — must be ignored by the new code path.
+          github_comment_etag: '"legacy-etag-from-before-fix"',
+        },
+      });
     mockUpsertTaskComment.mockResolvedValueOnce({
       commentId: 555,
-      etag: '"after"',
       created: false,
     });
 
@@ -573,8 +596,86 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     await handler(event, {} as never, () => undefined);
 
     const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
-    expect(upsertArg.existingEtag).toBe('"cached"');
     expect(upsertArg.existingCommentId).toBe(555);
+    expect(upsertArg).not.toHaveProperty('existingEtag');
+  });
+
+  test('404 → POST fallback persists new comment id with a prev-id condition guard', async () => {
+    // Race guard (silent-failure review SIG-3): when the cached
+    // comment was deleted upstream and the helper POSTed a new one,
+    // the UpdateItem must require ``github_comment_id = :prev`` so
+    // we cannot silently overwrite a sibling fanout invocation that
+    // already re-posted (or that beat us to writing a fresh id).
+    mockDdbSend
+      .mockResolvedValueOnce({
+        Item: { ...TASK_RECORD_BASE, github_comment_id: 555 },
+      })
+      .mockResolvedValueOnce({}); // UpdateCommand for the re-POST
+    mockUpsertTaskComment.mockResolvedValueOnce({
+      commentId: 999, // new id from the fallback POST
+      created: true,
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+    await handler(event, {} as never, () => undefined);
+
+    const update = mockDdbSend.mock.calls[1][0] as {
+      input: {
+        ExpressionAttributeValues: Record<string, unknown>;
+        UpdateExpression: string;
+        ConditionExpression: string;
+      };
+    };
+    expect(update.input.ExpressionAttributeValues[':cid']).toBe(999);
+    expect(update.input.ExpressionAttributeValues[':prev']).toBe(555);
+    expect(update.input.ConditionExpression).toContain('github_comment_id = :prev');
+    expect(update.input.ConditionExpression).not.toContain('attribute_not_exists(github_comment_id)');
+  });
+
+  test('400 from PATCH surfaces as fanout.dispatcher.rejected without duplicate POST (If-Match regression guard)', async () => {
+    // End-to-end version of silent-failure review MINOR-1: if a
+    // future refactor accidentally reintroduces an If-Match (or any
+    // conditional header) header, GitHub returns HTTP 400 for the
+    // PATCH. The fanout handler must NOT retry via POST (only 404
+    // triggers the fallback) and must NOT persist anything new. The
+    // 400 surfaces as a warn through the batch-level
+    // ``fanout.dispatcher.rejected`` log instead.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      mockDdbSend.mockResolvedValueOnce({
+        Item: { ...TASK_RECORD_BASE, github_comment_id: 555 },
+      });
+      const { GitHubCommentError } = jest.requireMock<typeof import('../../src/handlers/shared/github-comment')>(
+        '../../src/handlers/shared/github-comment',
+      );
+      mockUpsertTaskComment.mockRejectedValueOnce(
+        new GitHubCommentError(
+          'PATCH /repos/owner/repo/issues/comments/555 failed: HTTP 400',
+          400,
+        ),
+      );
+
+      const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+      await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+
+      // No UpdateCommand fires — the 400 path has nothing to persist.
+      const updateCalls = mockDdbSend.mock.calls.filter(
+        c => (c[0] as { _type?: string })._type === 'Update',
+      );
+      expect(updateCalls).toHaveLength(0);
+
+      // The 400 surfaced as a dispatcher-rejected warn, not as a
+      // silent swallow.
+      const rejectedWarn = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.dispatcher.rejected',
+      );
+      expect(rejectedWarn).toBeDefined();
+      expect((rejectedWarn?.[1] as Record<string, unknown>).channel).toBe('github');
+      expect(String((rejectedWarn?.[1] as Record<string, unknown>).error)).toContain('HTTP 400');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   test('falls back to issue_number when pr_number is absent', async () => {
@@ -584,7 +685,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
         Item: { ...TASK_RECORD_BASE, pr_number: undefined, issue_number: 7 },
       })
       .mockResolvedValueOnce({});
-    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await handler(event, {} as never, () => undefined);
@@ -602,7 +703,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
       .mockResolvedValueOnce({});
-    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await handler(event, {} as never, () => undefined);
@@ -632,7 +733,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       .mockRejectedValueOnce(
         Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }),
       );
-    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
@@ -656,7 +757,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       .mockRejectedValueOnce(
         Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }),
       );
-    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await handler(event, {} as never, () => undefined);
@@ -681,7 +782,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       .mockResolvedValueOnce({});
     mockUpsertTaskComment
       .mockRejectedValueOnce(new GitHubCommentError('unauthorized', 401))
-      .mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+      .mockResolvedValueOnce({ commentId: 1, created: true });
     // Two token fetches — stale then fresh.
     mockResolveGitHubToken
       .mockResolvedValueOnce('ghp_stale')
@@ -707,7 +808,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
       .mockResolvedValueOnce({});
-    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await handler(event, {} as never, () => undefined);
@@ -734,7 +835,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
         },
       })
       .mockResolvedValueOnce({});
-    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
@@ -764,7 +865,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
           Item: { ...TASK_RECORD_BASE, cost_usd: 'not-a-number', duration_s: null },
         })
         .mockResolvedValueOnce({});
-      mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+      mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
       const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
       await handler(event, {} as never, () => undefined);
@@ -795,7 +896,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       delete base.cost_usd;
       delete base.duration_s;
       mockDdbSend.mockResolvedValueOnce({ Item: base }).mockResolvedValueOnce({});
-      mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, etag: '"e"', created: true });
+      mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
       const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
       await handler(event, {} as never, () => undefined);
@@ -934,7 +1035,6 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
       .mockResolvedValueOnce({});
     mockUpsertTaskComment.mockResolvedValueOnce({
       commentId: 777,
-      etag: '"e"',
       created: true,
     });
 

@@ -234,7 +234,7 @@ Lambda subscribed to `TaskEventsTable` DDB Streams (`ParallelizationFactor: 1`, 
 
 - **SlackDispatchFn** — posts to configured channel / DM. Includes action buttons for `approval_required` events.
 - **EmailDispatchFn** — SES.
-- **GitHubDispatchFn** — edits a single GitHub issue comment in place via `PATCH /repos/{o}/{r}/issues/comments/{id}` with `If-Match` ETag; on 412 Precondition Failed, re-GETs and retries.
+- **GitHubDispatchFn** — edits a single GitHub issue comment in place via `PATCH /repos/{o}/{r}/issues/comments/{id}`. On 404 (comment deleted upstream) falls back to POSTing a fresh comment. Per-task ordering is guaranteed upstream by DDB Stream `ParallelizationFactor: 1`, so no conditional-request header is needed (and GitHub's REST API does not accept `If-Match` on this endpoint — see §6.4).
 
 Detailed routing and default filters in §6.
 
@@ -460,7 +460,19 @@ Rationale: if Slack pings on every milestone, users mute the bot within days. De
 
 ### 6.4 GitHub issue comment — edit-in-place
 
-A single comment per task, edited in place as the agent progresses (terminal states + `pr_created` by default). Concurrency is handled with GitHub's `If-Match` ETag on `PATCH /issues/comments/{id}`: on 412 Precondition Failed, re-GET and retry. This avoids the need for SQS FIFO serialization; DDB Stream ordering + ETag optimistic concurrency is sufficient.
+A single comment per task, edited in place as the agent progresses (terminal states + `pr_created` by default).
+
+**Concurrency:** Per-`task_id` ordering is guaranteed upstream by DDB Streams on `TaskEventsTable` with `ParallelizationFactor: 1`, and the fanout Lambda is the only writer on its own comment, so concurrent edits of the same comment body are not possible — last-writer-wins is safe because there is no concurrent writer to lose to. The dispatcher issues a single PATCH per event (no GET round-trip, no conditional headers). If the comment has been deleted upstream (404), it falls back to POSTing a fresh comment.
+
+**Tolerated races (bounded, logged, not silenced):**
+
+- *Persist failure after successful POST* — if the GitHub POST succeeds but the subsequent `TaskTable` UpdateItem that persists `github_comment_id` fails non-benignly (DDB throttling, IAM deny, etc.), the next event for the same task re-POSTs a second comment. Bounded to at most one duplicate per task per failure window (the per-invocation cap stops runaway). Logged at ERROR with `error_id: FANOUT_GITHUB_PERSIST_FAILED` so operators can alarm and reconcile. A sweeper that matches on the `bgagent:task-id=` marker body prefix is a post-v1 follow-up.
+- *404 → POST race between sibling invocations* — if the previously-posted comment was deleted upstream and two consecutive fanout invocations independently re-POST before either persists the new id, both POSTs land. The UpdateItem uses `ConditionExpression: github_comment_id = :prev` so only the first persist wins; the sibling's `saveCommentState` surfaces a benign `ConditionalCheckFailedException` at INFO and the sibling's comment survives on GitHub as an orphan (the `bgagent:` marker makes it reconcilable offline).
+- *Transient `loadTaskForComment` failure* — if the task record's GetItem fails transiently, `routeEvent`'s `Promise.allSettled` records the dispatcher as rejected and the batch continues. No write lands. The event is effectively dropped; the next event (e.g. `task_completed` after `pr_created`) will render the current task state.
+
+**Legacy field:** A previous revision persisted `github_comment_etag` on the TaskRecord. That field is no longer written or read; items that still carry it from earlier deploys are ignored by the DocumentClient (fields not declared on the typed surface pass through untouched). No migration required.
+
+**Why not ETag / `If-Match`:** An earlier revision attempted optimistic concurrency via GitHub's ETag and `If-Match`. In-account validation (PR #52 Scenario 7-extended) proved this does not work: GitHub's REST API rejects conditional-request headers on `PATCH /issues/comments/{id}` with `HTTP 400 "Conditional request headers are not allowed in unsafe requests unless supported by the endpoint"`. The ETag returned on GET is a cache validator only; the write endpoint does not honor it. Upstream ordering via the DDB-Stream configuration above is sufficient on its own.
 
 ### 6.5 Per-task notification config
 
@@ -664,11 +676,13 @@ Phase 3 ships hard gates. No soft questions, no "proceed with default if no resp
 
 *Why:* Soft-question-with-timeout creates a ticking-clock UX that's actively hostile in an async workflow. "Gate or no gate" is the coherent choice. A future `effect: "advise"` tier (non-blocking FYI events, no timeout) is documented in the Phase 3 design as post-v1.
 
-### AD-9. GitHub edit-in-place via ETag, not SQS FIFO
+### AD-9. GitHub edit-in-place via DDB-Stream ordering, not SQS FIFO
 
-DDB Streams with `ParallelizationFactor: 1` gives per-`task_id` ordering. GitHub's `If-Match` ETag handles the residual race from Lambda retries.
+DDB Streams on `TaskEventsTable` with `ParallelizationFactor: 1` give per-`task_id` ordering. The fanout Lambda is the only writer on its own comment, so no concurrent writer exists to race — last-writer-wins is safe. The dispatcher PATCHes directly (no GET-then-PATCH, no conditional headers).
 
-*Why:* Simpler than FIFO (no queue, no DLQ, no per-group throughput ceiling). Lower latency. GitHub's API already supports optimistic concurrency; use it.
+*Why:* Simpler than SQS FIFO (no queue, no DLQ, no per-group throughput ceiling), and lower latency than a GET-then-PATCH round-trip.
+
+*Rejected alternative — `If-Match` ETag:* An earlier revision of this design used optimistic concurrency via GitHub's ETag. Deploy-validation (PR #52 Scenario 7-extended) proved that `PATCH /issues/comments/{id}` rejects `If-Match` with HTTP 400 (`"Conditional request headers are not allowed in unsafe requests unless supported by the endpoint"`). The ETag returned on GET is a cache validator only. Upstream DDB-Stream ordering makes the ETag unnecessary anyway.
 
 ### AD-10. Stranded-task reconciler with a unified timeout
 
@@ -703,7 +717,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 - `bgagent watch` with adaptive polling interval
 - `bgagent nudge` with combined-turn acknowledgment
 - FanOutConsumer router + per-channel default filters
-- GitHub edit-in-place dispatcher with ETag
+- GitHub edit-in-place dispatcher (DDB-Stream ordering, 404 → POST fallback)
 - Stub Slack/email dispatchers (log-only, ready for real integration in Phase 2)
 - Unified stranded-task reconciler timeout
 - `--trace` debug flag

@@ -76,10 +76,9 @@ describe('github-comment: upsertTaskComment — POST', () => {
       body: '# body',
       token: 'ghp_xxx',
       existingCommentId: undefined,
-      existingEtag: undefined,
     });
 
-    expect(result).toEqual({ commentId: 999, etag: '"abc123"', created: true });
+    expect(result).toEqual({ commentId: 999, created: true });
     // Exactly one POST — no fallback GET/PATCH on first publish.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -87,6 +86,10 @@ describe('github-comment: upsertTaskComment — POST', () => {
     expect((init as RequestInit).method).toBe('POST');
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe('token ghp_xxx');
+    // Defense: GitHub's PATCH endpoint rejects ``If-Match`` with HTTP 400
+    // ("Conditional request headers are not allowed in unsafe requests").
+    // No write path on this helper should ever emit that header. (Scenario
+    // 7-ext deploy validation caught this in production.)
     expect(headers['If-Match']).toBeUndefined();
   });
 
@@ -102,14 +105,17 @@ describe('github-comment: upsertTaskComment — POST', () => {
         body: 'b',
         token: 't',
         existingCommentId: undefined,
-        existingEtag: undefined,
       }),
     ).rejects.toMatchObject({ name: 'GitHubCommentError', httpStatus: 422 });
   });
 
-  test('throws when POST response is missing an ETag (cannot reliably PATCH later)', async () => {
+  test('POST response without an ETag header is accepted (ETag is no longer load-bearing)', async () => {
+    // Pre-fix, a missing ETag header threw because the caller needed
+    // it as ``If-Match`` on the next PATCH. After dropping the
+    // conditional-PATCH path, ETag is merely informational — absence
+    // must not fail the dispatch.
     global.fetch = jest.fn().mockResolvedValue(
-      mockResponse({ status: 201, etag: null, body: { id: 1, body: 'b' } }),
+      mockResponse({ status: 201, etag: null, body: { id: 42, body: 'b' } }),
     ) as unknown as typeof fetch;
 
     await expect(
@@ -119,17 +125,22 @@ describe('github-comment: upsertTaskComment — POST', () => {
         body: 'b',
         token: 't',
         existingCommentId: undefined,
-        existingEtag: undefined,
       }),
-    ).rejects.toThrow(/missing ETag/);
+    ).resolves.toEqual({ commentId: 42, created: true });
   });
 });
 
-describe('github-comment: upsertTaskComment — PATCH with If-Match', () => {
-  test('GETs to capture ETag, then PATCHes with If-Match', async () => {
-    const fetchMock = jest.fn()
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"etag-1"', body: { id: 7, body: 'old' } }))
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"etag-2"', body: { id: 7, body: 'new' } }));
+describe('github-comment: upsertTaskComment — PATCH', () => {
+  test('PATCHes the existing comment directly (one call, no GET, no If-Match header)', async () => {
+    // Design §6.4 post-fix: a single PATCH call per event. GitHub's
+    // REST API does not support ``If-Match`` on ``PATCH /issues/
+    // comments/{id}`` — every conditional PATCH returns HTTP 400
+    // ("Conditional request headers are not allowed in unsafe requests
+    // unless supported by the endpoint"). Concurrency is instead
+    // handled upstream by DDB Stream ordering. See file header.
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      mockResponse({ status: 200, etag: '"after"', body: { id: 7, body: 'new' } }),
+    );
     global.fetch = fetchMock as unknown as typeof fetch;
 
     const result = await upsertTaskComment({
@@ -138,74 +149,22 @@ describe('github-comment: upsertTaskComment — PATCH with If-Match', () => {
       body: 'new',
       token: 't',
       existingCommentId: 7,
-      existingEtag: undefined,
     });
 
-    expect(result).toEqual({ commentId: 7, etag: '"etag-2"', created: false });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const [getUrl, getInit] = fetchMock.mock.calls[0];
-    expect((getInit as RequestInit).method).toBe('GET');
-    expect(getUrl).toContain('/issues/comments/7');
-    const [patchUrl, patchInit] = fetchMock.mock.calls[1];
-    expect((patchInit as RequestInit).method).toBe('PATCH');
-    expect(patchUrl).toContain('/issues/comments/7');
-    const patchHeaders = (patchInit as RequestInit).headers as Record<string, string>;
-    expect(patchHeaders['If-Match']).toBe('"etag-1"');
-  });
-
-  test('on 412 Precondition Failed: re-GETs and retries the PATCH once', async () => {
-    const fetchMock = jest.fn()
-      // initial GET
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"stale"', body: { id: 7 } }))
-      // PATCH rejects with 412
-      .mockResolvedValueOnce(mockResponse({ status: 412, ok: false, etag: null }))
-      // re-GET picks up the current etag
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"fresh"', body: { id: 7 } }))
-      // retry PATCH succeeds
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"after-retry"', body: { id: 7 } }));
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const result = await upsertTaskComment({
-      repo: 'owner/repo',
-      issueOrPrNumber: 42,
-      body: 'new',
-      token: 't',
-      existingCommentId: 7,
-      existingEtag: undefined,
-    });
-
-    expect(result).toEqual({ commentId: 7, etag: '"after-retry"', created: false });
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    // Second PATCH carried the fresh etag, not the stale one.
-    const secondPatch = fetchMock.mock.calls[3];
-    const headers = (secondPatch[1] as RequestInit).headers as Record<string, string>;
-    expect(headers['If-Match']).toBe('"fresh"');
-  });
-
-  test('a second 412 on retry propagates instead of looping forever', async () => {
-    const fetchMock = jest.fn()
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"a"', body: { id: 7 } }))
-      .mockResolvedValueOnce(mockResponse({ status: 412, ok: false, etag: null }))
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"b"', body: { id: 7 } }))
-      .mockResolvedValueOnce(mockResponse({ status: 412, ok: false, etag: null }));
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    await expect(
-      upsertTaskComment({
-        repo: 'owner/repo',
-        issueOrPrNumber: 42,
-        body: 'new',
-        token: 't',
-        existingCommentId: 7,
-        existingEtag: undefined,
-      }),
-    ).rejects.toMatchObject({ name: 'GitHubCommentError', httpStatus: 412 });
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(result).toEqual({ commentId: 7, created: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/owner/repo/issues/comments/7');
+    expect((init as RequestInit).method).toBe('PATCH');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    // BLOCKER regression guard: no conditional headers on PATCH.
+    expect(headers['If-Match']).toBeUndefined();
+    expect(headers['If-None-Match']).toBeUndefined();
   });
 
   test('on 404 (comment deleted upstream): falls back to POSTing a fresh comment', async () => {
     const fetchMock = jest.fn()
-      // GET returns 404
+      // PATCH returns 404
       .mockResolvedValueOnce(mockResponse({ status: 404, ok: false, etag: null }))
       // fallback POST
       .mockResolvedValueOnce(
@@ -219,18 +178,17 @@ describe('github-comment: upsertTaskComment — PATCH with If-Match', () => {
       body: 'new',
       token: 't',
       existingCommentId: 7,
-      existingEtag: undefined,
     });
 
     // NEW comment id, created=true so the caller persists the new id.
-    expect(result).toEqual({ commentId: 8, etag: '"new"', created: true });
+    expect(result).toEqual({ commentId: 8, created: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('PATCH');
     expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe('POST');
   });
 
-  test('non-412/404 error (500) propagates without retry', async () => {
+  test('non-404 error (500) propagates without retry', async () => {
     const fetchMock = jest.fn()
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"a"', body: { id: 7 } }))
       .mockResolvedValueOnce(mockResponse({ status: 500, ok: false, etag: null }));
     global.fetch = fetchMock as unknown as typeof fetch;
 
@@ -241,17 +199,37 @@ describe('github-comment: upsertTaskComment — PATCH with If-Match', () => {
         body: 'new',
         token: 't',
         existingCommentId: 7,
-        existingEtag: undefined,
       }),
     ).rejects.toMatchObject({ name: 'GitHubCommentError', httpStatus: 500 });
     // No retry on generic 5xx — caller's batch-level dispatcher log is
     // the right layer to see the failure.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('non-404 error (400) propagates without retry (guards against the If-Match regression reappearing silently)', async () => {
+    // If a future refactor re-adds a conditional header and GitHub
+    // returns 400, the error should bubble up as a GitHubCommentError
+    // with httpStatus=400 rather than being swallowed. The fallback
+    // POST must NOT fire on 400 — only 404 (comment deleted) triggers
+    // the POST retry.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(mockResponse({ status: 400, ok: false, etag: null }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      upsertTaskComment({
+        repo: 'owner/repo',
+        issueOrPrNumber: 42,
+        body: 'new',
+        token: 't',
+        existingCommentId: 7,
+      }),
+    ).rejects.toMatchObject({ name: 'GitHubCommentError', httpStatus: 400 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test('network error during PATCH is wrapped in GitHubCommentError', async () => {
     const fetchMock = jest.fn()
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"a"', body: { id: 7 } }))
       .mockRejectedValueOnce(new TypeError('fetch failed'));
     global.fetch = fetchMock as unknown as typeof fetch;
 
@@ -262,62 +240,8 @@ describe('github-comment: upsertTaskComment — PATCH with If-Match', () => {
         body: 'new',
         token: 't',
         existingCommentId: 7,
-        existingEtag: undefined,
       }),
     ).rejects.toBeInstanceOf(GitHubCommentError);
-  });
-});
-
-describe('github-comment: upsertTaskComment — cached-etag fast path', () => {
-  test('with existingEtag, skips the GET and PATCHes directly (one GitHub call)', async () => {
-    // Design §6.4 steady-state: caller has the last successful etag
-    // cached on TaskRecord. Use it as If-Match and skip the GET that
-    // would double the API load.
-    const fetchMock = jest.fn().mockResolvedValueOnce(
-      mockResponse({ status: 200, etag: '"after"', body: { id: 7, body: 'new' } }),
-    );
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const result = await upsertTaskComment({
-      repo: 'owner/repo',
-      issueOrPrNumber: 42,
-      body: 'new',
-      token: 't',
-      existingCommentId: 7,
-      existingEtag: '"cached"',
-    });
-
-    expect(result).toEqual({ commentId: 7, etag: '"after"', created: false });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0];
-    expect((init as RequestInit).method).toBe('PATCH');
-    const headers = (init as RequestInit).headers as Record<string, string>;
-    expect(headers['If-Match']).toBe('"cached"');
-  });
-
-  test('cached etag is stale (412) → re-GET + retry with fresh etag', async () => {
-    // The cached etag raced a concurrent edit. Fall back to the GET-then-retry path.
-    const fetchMock = jest.fn()
-      .mockResolvedValueOnce(mockResponse({ status: 412, ok: false, etag: null })) // PATCH with cached
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"fresh"', body: { id: 7 } })) // GET
-      .mockResolvedValueOnce(mockResponse({ status: 200, etag: '"after"', body: { id: 7 } })); // retry PATCH
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const result = await upsertTaskComment({
-      repo: 'owner/repo',
-      issueOrPrNumber: 42,
-      body: 'new',
-      token: 't',
-      existingCommentId: 7,
-      existingEtag: '"stale"',
-    });
-
-    expect(result.etag).toBe('"after"');
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    // First call must have been PATCH with the stale cached etag.
-    const first = fetchMock.mock.calls[0];
-    expect((first[1] as RequestInit).method).toBe('PATCH');
-    expect(((first[1] as RequestInit).headers as Record<string, string>)['If-Match']).toBe('"stale"');
   });
 
   test('PATCH body contains the rendered input verbatim', async () => {
@@ -334,32 +258,10 @@ describe('github-comment: upsertTaskComment — cached-etag fast path', () => {
       body: '# The Body',
       token: 't',
       existingCommentId: 7,
-      existingEtag: '"cached"',
     });
 
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(init.body as string)).toEqual({ body: '# The Body' });
-  });
-
-  test('PATCH response without ETag header throws (cannot reliably PATCH again)', async () => {
-    // Symmetric with the POST-missing-ETag test above — without a
-    // fresh ETag the caller would persist empty-string and every
-    // subsequent edit would 412 permanently.
-    const fetchMock = jest.fn().mockResolvedValueOnce(
-      mockResponse({ status: 200, etag: null, body: { id: 7 } }),
-    );
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    await expect(
-      upsertTaskComment({
-        repo: 'owner/repo',
-        issueOrPrNumber: 42,
-        body: 'new',
-        token: 't',
-        existingCommentId: 7,
-        existingEtag: '"cached"',
-      }),
-    ).rejects.toThrow(/missing ETag/);
   });
 });
 
@@ -382,7 +284,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
       body: 'b',
       token: 't',
       existingCommentId: undefined,
-      existingEtag: undefined,
     });
 
     expect(warnSpy).toHaveBeenCalledWith(
@@ -398,7 +299,7 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
 
   test('emits a WARN when x-ratelimit-remaining < 500 on PATCH response', async () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    // Cached-etag fast-path: a single PATCH call.
+    // Single-call PATCH path.
     global.fetch = jest.fn().mockResolvedValueOnce(
       mockResponse({
         status: 200,
@@ -414,7 +315,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
       body: 'new',
       token: 't',
       existingCommentId: 7,
-      existingEtag: '"cached"',
     });
 
     expect(warnSpy).toHaveBeenCalledWith(
@@ -440,7 +340,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
       body: 'b',
       token: 't',
       existingCommentId: undefined,
-      existingEtag: undefined,
     });
 
     // Rate-limit WARN is the only warn site touched by this path; a
@@ -469,7 +368,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
       body: 'b',
       token: 't',
       existingCommentId: undefined,
-      existingEtag: undefined,
     });
 
     const rateLimitWarns = warnSpy.mock.calls.filter(

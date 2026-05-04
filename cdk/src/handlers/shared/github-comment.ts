@@ -22,11 +22,25 @@
  *
  * The fan-out plane maintains a single GitHub comment per task, edited
  * in place as the agent progresses through terminal states + pr_created
- * by default. Concurrency is handled with GitHub's ``If-Match`` / ETag:
- * on 412 Precondition Failed, re-GET the current comment and retry the
- * PATCH once. If the comment was deleted upstream (404 on GET), fall
- * back to POSTing a fresh one. DDB Stream ordering plus ETag optimistic
- * concurrency avoids the need for SQS FIFO serialization.
+ * by default. Concurrency is handled entirely upstream: DDB Streams on
+ * ``TaskEventsTable`` with ``ParallelizationFactor: 1`` guarantee
+ * per-task ordering, and the fanout Lambda is the only writer on its
+ * own comment. A second writer cannot race us, so last-writer-wins is
+ * safe — there is no concurrent edit to lose.
+ *
+ * (An earlier revision used GitHub's ``If-Match`` / ETag for optimistic
+ * concurrency. That approach was abandoned after in-account validation
+ * proved GitHub's REST API does not support ``If-Match`` on
+ * ``PATCH /issues/comments/{id}``: every conditional PATCH returns
+ * HTTP 400 with
+ * ``"Conditional request headers are not allowed in unsafe requests
+ * unless supported by the endpoint"``. The ETag returned on GET is a
+ * cache validator only. See PR #52 Scenario 7-extended deploy
+ * validation.)
+ *
+ * The 404 fallback path is preserved: if the target comment was
+ * deleted upstream (e.g. a user cleaned up the PR thread), we POST a
+ * fresh one rather than losing the task's status surface.
  *
  * Raw ``fetch`` is used rather than octokit to match the existing
  * codebase pattern (``preflight.ts``, ``context-hydration.ts``).
@@ -75,11 +89,10 @@ function logRateLimitIfLow(response: Response, repo: string): void {
 
 /** Result of a comment upsert. ``created`` distinguishes the initial
  *  POST from subsequent PATCHes so the caller can gate the TaskRecord
- *  UpdateItem (first call persists the comment_id; later calls refresh
- *  only the etag). */
+ *  UpdateItem (first call persists the comment_id; later calls are
+ *  no-ops on the TaskRecord since we no longer track an ETag). */
 export interface UpsertCommentResult {
   readonly commentId: number;
-  readonly etag: string;
   readonly created: boolean;
 }
 
@@ -106,14 +119,11 @@ export class GitHubCommentError extends Error {
  *
  * Flow:
  *   - If ``existingCommentId`` is undefined, POST a new comment and
- *     return its id + etag.
- *   - If ``existingEtag`` is known, try ``PATCH`` directly with
- *     ``If-Match: <etag>`` first (the steady-state happy path — one
- *     GitHub call per event). On 412 we re-GET the current etag and
- *     retry the PATCH exactly once. Without a stored etag we fall
- *     back to the defensive GET-then-PATCH pattern.
- *   - On 404, treat the comment as deleted upstream and POST a
- *     fresh one.
+ *     return its id.
+ *   - Otherwise PATCH the existing comment directly (one GitHub call
+ *     per event, no GET round-trip).
+ *   - On 404, treat the comment as deleted upstream and POST a fresh
+ *     one.
  *
  * All errors are thrown as ``GitHubCommentError`` — the caller is
  * expected to ``try/catch`` and log rather than propagating.
@@ -124,9 +134,8 @@ export async function upsertTaskComment(params: {
   body: string;
   token: string;
   existingCommentId: number | undefined;
-  existingEtag: string | undefined;
 }): Promise<UpsertCommentResult> {
-  const { repo, issueOrPrNumber, body, token, existingCommentId, existingEtag } = params;
+  const { repo, issueOrPrNumber, body, token, existingCommentId } = params;
 
   if (existingCommentId === undefined) {
     return createComment({ repo, issueOrPrNumber, body, token });
@@ -138,7 +147,6 @@ export async function upsertTaskComment(params: {
       commentId: existingCommentId,
       body,
       token,
-      existingEtag,
     });
   } catch (err) {
     if (err instanceof GitHubCommentError && err.httpStatus === 404) {
@@ -155,130 +163,17 @@ export async function upsertTaskComment(params: {
 }
 
 /**
- * PATCH an existing comment, preferring a cached ``If-Match`` etag for
- * the steady-state one-call path (design §6.4). On 412 (the stored
- * etag is stale) we re-GET to capture the current etag and retry the
- * PATCH exactly once. Without a stored etag we GET first — same shape
- * as a cold-start re-resync.
- *
- * A second 412 gives up — something else is racing us too aggressively,
- * and swallowing it silently would mislead operators. 404 (comment
- * deleted upstream) propagates to the caller which triggers the POST
- * fallback.
+ * PATCH an existing comment with the given body. One GitHub call per
+ * event — no GET round-trip, no conditional headers (see file-level
+ * rationale above). 404 propagates so the caller can POST-fallback.
  */
 async function patchExistingComment(params: {
   repo: string;
   commentId: number;
   body: string;
   token: string;
-  existingEtag: string | undefined;
 }): Promise<UpsertCommentResult> {
-  const { repo, commentId, body, token, existingEtag } = params;
-
-  let etag: string;
-  if (existingEtag) {
-    // Steady-state path: use the cached etag. One GitHub call per event.
-    etag = existingEtag;
-  } else {
-    // Cold start / never-patched: fetch the current etag to establish baseline.
-    ({ etag } = await getComment({ repo, commentId, token }));
-  }
-
-  let patch = await tryPatch({ repo, commentId, body, token, etag });
-  if (patch.ok) {
-    return { commentId, etag: patch.etag, created: false };
-  }
-
-  // The GET-not-found path is a distinct failure (404 here means the
-  // tryPatch itself returned 404 — comment was deleted between our
-  // last successful write and this one). Propagate for POST-fallback.
-  if (patch.status === 404) {
-    throw new GitHubCommentError(
-      `PATCH /repos/${repo}/issues/comments/${commentId} failed: HTTP 404`,
-      404,
-    );
-  }
-
-  if (patch.status === 412) {
-    logger.info('[github-comment] PATCH 412, re-fetching ETag and retrying once', {
-      event: 'github.comment.etag_retry',
-      repo,
-      comment_id: commentId,
-    });
-    ({ etag } = await getComment({ repo, commentId, token }));
-    patch = await tryPatch({ repo, commentId, body, token, etag });
-    if (patch.ok) {
-      return { commentId, etag: patch.etag, created: false };
-    }
-  }
-
-  throw new GitHubCommentError(
-    `PATCH /repos/${repo}/issues/comments/${commentId} failed: HTTP ${patch.status}`,
-    patch.status,
-  );
-}
-
-interface GetCommentResult {
-  readonly etag: string;
-}
-
-async function getComment(params: {
-  repo: string;
-  commentId: number;
-  token: string;
-}): Promise<GetCommentResult> {
-  const { repo, commentId, token } = params;
-  const url = `https://api.github.com/repos/${repo}/issues/comments/${commentId}`;
-
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `token ${token}`,
-        'Accept': GITHUB_ACCEPT,
-        'User-Agent': USER_AGENT,
-      },
-      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
-    });
-  } catch (err) {
-    throw new GitHubCommentError(
-      `GET /repos/${repo}/issues/comments/${commentId} network error: ${String(err)}`,
-    );
-  }
-
-  logRateLimitIfLow(res, repo);
-  if (!res.ok) {
-    throw new GitHubCommentError(
-      `GET /repos/${repo}/issues/comments/${commentId} failed: HTTP ${res.status}`,
-      res.status,
-    );
-  }
-
-  const etag = res.headers.get('etag');
-  if (!etag) {
-    // GitHub always returns an ETag on comment GETs. An absent header
-    // is a server contract break — bail rather than silently PATCH
-    // without optimistic concurrency.
-    throw new GitHubCommentError(`GET comment response missing ETag header (repo=${repo}, id=${commentId})`);
-  }
-  return { etag };
-}
-
-interface PatchResult {
-  readonly ok: boolean;
-  readonly status: number;
-  readonly etag: string;
-}
-
-async function tryPatch(params: {
-  repo: string;
-  commentId: number;
-  body: string;
-  token: string;
-  etag: string;
-}): Promise<PatchResult> {
-  const { repo, commentId, body, token, etag } = params;
+  const { repo, commentId, body, token } = params;
   const url = `https://api.github.com/repos/${repo}/issues/comments/${commentId}`;
 
   let res: Response;
@@ -289,7 +184,6 @@ async function tryPatch(params: {
         'Authorization': `token ${token}`,
         'Accept': GITHUB_ACCEPT,
         'User-Agent': USER_AGENT,
-        'If-Match': etag,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ body }),
@@ -303,16 +197,13 @@ async function tryPatch(params: {
 
   logRateLimitIfLow(res, repo);
   if (!res.ok) {
-    return { ok: false, status: res.status, etag: '' };
-  }
-
-  const newEtag = res.headers.get('etag');
-  if (!newEtag) {
     throw new GitHubCommentError(
-      `PATCH comment response missing ETag header (repo=${repo}, id=${commentId})`,
+      `PATCH /repos/${repo}/issues/comments/${commentId} failed: HTTP ${res.status}`,
+      res.status,
     );
   }
-  return { ok: true, status: res.status, etag: newEtag };
+
+  return { commentId, created: false };
 }
 
 async function createComment(params: {
@@ -364,17 +255,7 @@ async function createComment(params: {
       `POST comment response missing numeric id (repo=${repo}, issue=${issueOrPrNumber})`,
     );
   }
-
-  const etag = res.headers.get('etag');
-  if (!etag) {
-    // POST without an ETag means we can't reliably PATCH later. Rather
-    // than carrying an empty string that would always 412 on the first
-    // edit, fail visibly.
-    throw new GitHubCommentError(
-      `POST comment response missing ETag header (repo=${repo}, issue=${issueOrPrNumber})`,
-    );
-  }
-  return { commentId: payload.id, etag, created: true };
+  return { commentId: payload.id, created: true };
 }
 
 // ---------------------------------------------------------------------------

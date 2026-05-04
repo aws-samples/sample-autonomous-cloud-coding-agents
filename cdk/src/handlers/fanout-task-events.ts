@@ -334,34 +334,62 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
 }
 
 /**
- * Persist the ``github_comment_id`` / ``github_comment_etag`` fields on
- * the TaskRecord after a successful upsert. Conditional on the task
- * still existing — a concurrent TTL eviction would otherwise create a
- * zombie record with only these two fields.
+ * Persist the ``github_comment_id`` on the TaskRecord after a
+ * successful POST (either the first-ever dispatch or a 404 re-POST
+ * fallback). Subsequent PATCHes are no-ops on the TaskRecord because
+ * there is no additional state to carry — per-comment concurrency
+ * relies on DDB Stream ordering, not on a stored ETag.
+ *
+ * The ConditionExpression guards two races:
+ *   1. ``attribute_exists(task_id)`` — a concurrent TTL eviction would
+ *      otherwise create a zombie record with only this field.
+ *   2. Comment-id overwrite guard — the write is only allowed if (a)
+ *      no comment has ever been persisted for this task, or (b) the
+ *      stored id matches the one the caller thought was there. Without
+ *      this clause, a 404 → POST fallback racing a concurrent fanout
+ *      invocation could overwrite a sibling's freshly-posted comment id
+ *      with our own new id, silently orphaning the sibling's comment.
+ *      Under the normal single-writer flow the guard is a no-op.
  *
  * The caller (``dispatchToGitHubComment``) decides how to react to
- * each failure mode: ConditionalCheckFailedException (task evicted)
- * is benign because subsequent events will also GetItem-miss and
- * skip; any other error is a real persistence bug that risks a
- * duplicate comment on the next event.
+ * each failure mode: ConditionalCheckFailedException (task evicted or
+ * sibling-writer won the race) is benign; any other error is a real
+ * persistence bug that risks a duplicate comment on the next event
+ * (logged at ERROR with a dedicated ``FANOUT_GITHUB_PERSIST_FAILED``
+ * error_id so operators can alarm).
  */
 async function saveCommentState(
   taskId: string,
   commentId: number,
-  etag: string,
+  previousCommentId: number | undefined,
 ): Promise<void> {
   const tableName = process.env.TASK_TABLE_NAME;
   if (!tableName) return;
-  await ddb.send(new UpdateCommand({
+  const base = {
     TableName: tableName,
     Key: { task_id: taskId },
-    UpdateExpression: 'SET github_comment_id = :cid, github_comment_etag = :etag',
-    ExpressionAttributeValues: {
-      ':cid': commentId,
-      ':etag': etag,
-    },
-    ConditionExpression: 'attribute_exists(task_id)',
-  }));
+    UpdateExpression: 'SET github_comment_id = :cid',
+  };
+  if (previousCommentId === undefined) {
+    // First-ever POST: require the field to be absent so a sibling
+    // invocation that beat us cannot be silently overwritten.
+    await ddb.send(new UpdateCommand({
+      ...base,
+      ExpressionAttributeValues: { ':cid': commentId },
+      ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(github_comment_id)',
+    }));
+  } else {
+    // 404 re-POST fallback: require the stored id to match the one we
+    // thought was there before racing to overwrite it.
+    await ddb.send(new UpdateCommand({
+      ...base,
+      ExpressionAttributeValues: {
+        ':cid': commentId,
+        ':prev': previousCommentId,
+      },
+      ConditionExpression: 'attribute_exists(task_id) AND github_comment_id = :prev',
+    }));
+  }
 }
 
 /** Name of the AWS SDK v3 conditional-failure error. Checking ``name``
@@ -503,7 +531,6 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     body,
     token,
     existingCommentId: task.github_comment_id,
-    existingEtag: task.github_comment_etag,
   };
 
   let result;
@@ -533,35 +560,46 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     }
   }
 
-  try {
-    await saveCommentState(task.task_id, result.commentId, result.etag);
-  } catch (err) {
-    const errName = err instanceof Error ? err.name : '';
-    if (errName === CONDITIONAL_CHECK_FAILED) {
-      // Benign: the task was TTL-evicted between our GetItem and this
-      // UpdateItem. Subsequent events for this task will also find no
-      // TaskRecord (loadTaskForComment → null) and skip dispatching,
-      // so there's no duplicate-comment risk to chase.
-      logger.info('[fanout/github] task evicted before saveCommentState — benign', {
-        event: 'fanout.github.persist_benign_evicted',
-        task_id: task.task_id,
-      });
-    } else {
-      // Non-conditional failure (DDB throttling, IAM deny, etc.) is a
-      // real persistence bug: the comment WAS posted but its id/etag
-      // are not on the TaskRecord. The next event will POST a second
-      // comment instead of PATCHing. Log at ERROR with an error_id so
-      // operators can alarm on persistent GitHub dispatch failures
-      // distinctly from the generic dispatcher-rejected stream.
-      logger.error('[fanout/github] saveCommentState failed — next event may duplicate comment', {
-        event: 'fanout.github.persist_failed',
-        error_id: 'FANOUT_GITHUB_PERSIST_FAILED',
-        task_id: task.task_id,
-        comment_id: result.commentId,
-        created: result.created,
-        error_name: errName,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  // Only the upserts that POSTed (either first-ever or 404 re-POST
+  // fallback) have new state to persist. Steady-state PATCHes reuse
+  // the same ``github_comment_id``, and we no longer track an ETag
+  // since GitHub's PATCH endpoint doesn't honor ``If-Match``
+  // (concurrency is handled upstream by DDB Stream ordering; see
+  // ``shared/github-comment.ts`` file header).
+  if (result.created) {
+    try {
+      await saveCommentState(task.task_id, result.commentId, task.github_comment_id);
+    } catch (err) {
+      const errName = err instanceof Error ? err.name : '';
+      if (errName === CONDITIONAL_CHECK_FAILED) {
+        // Benign: either the task was TTL-evicted between our GetItem
+        // and this UpdateItem (subsequent events for this task will
+        // also GetItem-miss and skip), or a sibling fanout invocation
+        // that raced us already wrote a comment id (our comment
+        // survives as an orphan with the bgagent marker, safe to
+        // reconcile offline). Either way no duplicate-comment-runaway
+        // risk to chase here.
+        logger.info('[fanout/github] saveCommentState condition failed — benign (eviction or sibling race)', {
+          event: 'fanout.github.persist_benign_evicted',
+          task_id: task.task_id,
+        });
+      } else {
+        // Non-conditional failure (DDB throttling, IAM deny, etc.) is a
+        // real persistence bug: the comment WAS posted but its id is
+        // not on the TaskRecord. The next event will POST a second
+        // comment instead of PATCHing. Log at ERROR with an error_id so
+        // operators can alarm on persistent GitHub dispatch failures
+        // distinctly from the generic dispatcher-rejected stream.
+        logger.error('[fanout/github] saveCommentState failed — next event may duplicate comment', {
+          event: 'fanout.github.persist_failed',
+          error_id: 'FANOUT_GITHUB_PERSIST_FAILED',
+          task_id: task.task_id,
+          comment_id: result.commentId,
+          created: result.created,
+          error_name: errName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
