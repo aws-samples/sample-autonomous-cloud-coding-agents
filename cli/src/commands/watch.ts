@@ -22,7 +22,7 @@ import { ApiClient } from '../api-client';
 import { debug, isVerbose } from '../debug';
 import { ApiError } from '../errors';
 import { formatJson } from '../format';
-import { TERMINAL_STATUSES, TaskEvent } from '../types';
+import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
 
 /**
  * Adaptive polling cadence (design INTERACTIVE_AGENTS.md §5.3).
@@ -236,6 +236,34 @@ function logError(message: string): void {
   process.stderr.write(`ERROR: ${message}\n`);
 }
 
+/**
+ * Render the terminal-line message shown when a watch session ends
+ * because the task reached a terminal state. Includes the task_id (so
+ * a user with multiple watches or a scroll-back log can correlate)
+ * and, for non-COMPLETED terminals, a short failure-classification
+ * hint so the cause is visible without a separate ``bgagent status``
+ * round-trip.
+ *
+ * Exported for tests. Safe to call with a bare ``{task_id, status}``
+ * shape or a full ``TaskDetail`` — only those fields plus
+ * ``error_classification`` / ``error_message`` are read.
+ */
+export function formatTerminalMessage(task: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'>): string {
+  const status = task.status.toLowerCase();
+  const prefix = `Task ${task.task_id} ${status}.`;
+  if (task.status === 'COMPLETED') return prefix;
+  // Prefer the structured classification (category + title) when the
+  // server has computed one — it's both stable and user-oriented. Fall
+  // back to the raw ``error_message`` so a classifier gap doesn't
+  // swallow the only signal we have. Never return the whole prefix
+  // with a trailing empty reason.
+  const cls = task.error_classification;
+  if (cls) return `${prefix} ${cls.category}: ${cls.title}`;
+  const msg = task.error_message?.trim();
+  if (msg) return `${prefix} ${msg}`;
+  return prefix;
+}
+
 /* ------------------------------------------------------------------------ */
 /*  Formatter boundary                                                        */
 /* ------------------------------------------------------------------------ */
@@ -270,7 +298,7 @@ interface PollOptions {
   readonly signal: AbortSignal;
   readonly afterEventId?: string;
   readonly onEvent: (ev: TaskEvent) => void;
-  readonly onTerminal: (finalStatus: string) => void;
+  readonly onTerminal: (finalTask: TaskDetail) => void;
 }
 
 /**
@@ -330,7 +358,7 @@ async function pollTaskEvents(
 
     if ((TERMINAL_STATUSES as readonly string[]).includes(task.status)) {
       debug(`[watch/poll] task reached terminal status=${task.status}`);
-      options.onTerminal(task.status);
+      options.onTerminal(task);
       return;
     }
 
@@ -536,7 +564,28 @@ export function makeWatchCommand(): Command {
             formatter.emit(ev);
           }
           if (!isJson) {
-            logInfo(isJson, `Task ${snapshot.taskStatus.toLowerCase()}.`);
+            // Fetch the current task detail so the terminal-line can
+            // include the error classification (``guardrail: PR context
+            // blocked``, ``timeout: Exceeded max turns``, etc.). The
+            // snapshot only carried ``taskStatus``. Best-effort: if the
+            // GET fails transiently we still print a minimal message
+            // rather than erroring out after already streaming the tail.
+            let terminalTask: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'> = {
+              task_id: taskId,
+              status: snapshot.taskStatus,
+              error_classification: null,
+              error_message: null,
+            };
+            try {
+              terminalTask = await withTransientRetry(
+                () => apiClient.getTask(taskId, { signal: abortController.signal }),
+                abortController.signal,
+                'alreadyTerminal.getTask',
+              );
+            } catch (err) {
+              debug(`[watch] already-terminal getTask failed — printing minimal message: ${String(err)}`);
+            }
+            logInfo(isJson, formatTerminalMessage(terminalTask));
           }
           process.exitCode = snapshot.taskStatus === 'COMPLETED' ? 0 : 1;
           return;
@@ -574,16 +623,16 @@ async function runPolling(
   isJson: boolean,
 ): Promise<void> {
   debug(`[watch/poll] runPolling seedCursor=${seedCursor || '<none>'}`);
-  let finalStatus: string | null = null;
+  let finalTask: TaskDetail | null = null;
 
   await pollTaskEvents(apiClient, taskId, {
     signal,
     afterEventId: seedCursor || undefined,
     onEvent: (ev) => formatter.emit(ev),
-    onTerminal: (status) => { finalStatus = status; },
+    onTerminal: (task) => { finalTask = task; },
   });
 
-  // SIGINT always wins. Check ``signal.aborted`` BEFORE ``finalStatus``
+  // SIGINT always wins. Check ``signal.aborted`` BEFORE ``finalTask``
   // so a user who Ctrl+C's between ``onTerminal`` firing and this block
   // evaluating still gets exit 130 — their intent to interrupt is the
   // load-bearing signal, not the coincidental terminal status. POSIX:
@@ -594,10 +643,11 @@ async function runPolling(
     return;
   }
 
-  if (finalStatus !== null) {
+  if (finalTask !== null) {
+    const task = finalTask as TaskDetail;
     if (!isJson) {
-      logInfo(isJson, `Task ${(finalStatus as string).toLowerCase()}.`);
+      logInfo(isJson, formatTerminalMessage(task));
     }
-    process.exitCode = finalStatus === 'COMPLETED' ? 0 : 1;
+    process.exitCode = task.status === 'COMPLETED' ? 0 : 1;
   }
 }

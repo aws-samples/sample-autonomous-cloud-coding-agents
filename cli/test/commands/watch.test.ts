@@ -21,6 +21,7 @@ import { ApiClient } from '../../src/api-client';
 import {
   _getSessionRetries,
   _resetSessionRetries,
+  formatTerminalMessage,
   makeWatchCommand,
   nextCadence,
   renderEvent,
@@ -852,5 +853,81 @@ describe('nextCadence (adaptive polling state)', () => {
     const deepBackoff = { intervalMs: 5_000, consecutiveEmptyPolls: 7 };
     const reset = nextCadence(deepBackoff, true);
     expect(reset).toEqual({ intervalMs: 500, consecutiveEmptyPolls: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatTerminalMessage — carry-forward from Scenario 7-ext take 3 polish
+// ---------------------------------------------------------------------------
+
+describe('formatTerminalMessage', () => {
+  // Pre-fix, watch printed ``Task completed.`` / ``Task failed.`` with
+  // no task_id and no failure classification — a user watching multiple
+  // tasks (or scrolling back through a log) couldn't tell which task
+  // ended or why. The formatter now includes the task_id always, and
+  // the error classification (or raw message) on non-COMPLETED
+  // terminals.
+
+  test('COMPLETED renders task_id + status without an error clause', () => {
+    expect(formatTerminalMessage({
+      task_id: '01KQ...XXX',
+      status: 'COMPLETED',
+      error_classification: null,
+      error_message: null,
+    })).toBe('Task 01KQ...XXX completed.');
+  });
+
+  test('FAILED with structured classification renders category + title', () => {
+    expect(formatTerminalMessage({
+      task_id: 'T1',
+      status: 'FAILED',
+      error_classification: {
+        category: 'guardrail',
+        title: 'PR context blocked',
+        description: 'Bedrock Guardrail flagged the PR context',
+        remedy: 'Tune the guardrail or redact the triggering content',
+        retryable: false,
+      },
+      error_message: 'Guardrail blocked: PR context blocked by content policy: CONTENT/PROMPT_ATTACK (LOW)',
+    })).toBe('Task T1 failed. guardrail: PR context blocked');
+  });
+
+  test('FAILED without classification falls back to error_message', () => {
+    // Classifier gap / older records / transient: the raw
+    // ``error_message`` is the only signal. Trim whitespace so the
+    // fallback doesn't leak leading/trailing newlines into the TTY.
+    expect(formatTerminalMessage({
+      task_id: 'T2',
+      status: 'FAILED',
+      error_classification: null,
+      error_message: '  raw server message with whitespace\n',
+    })).toBe('Task T2 failed. raw server message with whitespace');
+  });
+
+  test('FAILED with neither classification nor message degrades to bare prefix', () => {
+    // Defense-in-depth: never emit a trailing space / orphan colon.
+    expect(formatTerminalMessage({
+      task_id: 'T3',
+      status: 'FAILED',
+      error_classification: null,
+      error_message: null,
+    })).toBe('Task T3 failed.');
+  });
+
+  test('CANCELLED / TIMED_OUT non-COMPLETED terminals also include classification when present', () => {
+    // Regression guard: the ``status === 'COMPLETED'`` check must be
+    // exact so CANCELLED / TIMED_OUT still render the classification.
+    expect(formatTerminalMessage({
+      task_id: 'T4',
+      status: 'CANCELLED',
+      error_classification: {
+        category: 'unknown',
+        title: 'User cancelled',
+        description: 'Task cancelled by user',
+        remedy: '',
+        retryable: true,
+      },
+      error_message: null,
+    })).toBe('Task T4 cancelled. unknown: User cancelled');
   });
 });
