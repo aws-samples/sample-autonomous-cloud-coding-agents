@@ -639,6 +639,138 @@ describe('watch command — polling', () => {
     expect(process.exitCode).not.toBe(130);
   });
 
+  test('initial snapshot retries transient errors before giving up (cold-start hardening)', async () => {
+    // Regression guard: Chunk H wrapped the polling loop's API calls
+    // in ``withTransientRetry`` but left ``fetchInitialSnapshot``
+    // making raw calls. A single cold-start ``fetch failed`` / 5xx on
+    // the snapshot would crash the watch command before the polling
+    // loop got a chance to stabilise (observed Scenario 2 deploy
+    // validation). The snapshot must now retry transient errors too.
+    _resetSessionRetries();
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = ((fn: () => void) => {
+      queueMicrotask(fn);
+      return 0 as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout;
+
+    try {
+      // getTaskEvents: 503 → 503 → success. getTask: succeeds cleanly.
+      mockGetTaskEvents
+        .mockRejectedValueOnce(new ApiError(503, 'SERVICE_UNAVAILABLE', 'cold-start 1', 'req-1'))
+        .mockRejectedValueOnce(new ApiError(503, 'SERVICE_UNAVAILABLE', 'cold-start 2', 'req-2'))
+        .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }) // snapshot success
+        .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }); // first poll
+
+      mockGetTask.mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
+        .mockResolvedValueOnce({ status: 'COMPLETED' }); // first poll
+
+      const cmd = makeWatchCommand();
+      await cmd.parseAsync(['node', 'test', 'task-cold-start']);
+
+      // All three snapshot getTaskEvents attempts fired (2 retries + 1 success).
+      // Plus 1 polling-loop call after snapshot completes.
+      expect(mockGetTaskEvents).toHaveBeenCalledTimes(4);
+      expect(process.exitCode).toBe(0);
+      // The session retry counter recorded the 2 snapshot retries.
+      expect(_getSessionRetries()).toBeGreaterThanOrEqual(2);
+    } finally {
+      global.setTimeout = realSetTimeout;
+    }
+  });
+
+  test('initial snapshot exhausts retry budget on persistent 5xx and surfaces a "re-run" hint', async () => {
+    // Budget-exhaustion path: the retry wrapper gives up after
+    // MAX_TRANSIENT_RETRIES (5) attempts and throws a message that
+    // tells the user to re-run. The cursor is durable, so resumption
+    // is safe.
+    _resetSessionRetries();
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = ((fn: () => void) => {
+      queueMicrotask(fn);
+      return 0 as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout;
+
+    try {
+      // 6 attempts will be made (attempt=1..5 all throw, attempt=6
+      // crosses the budget). getTaskEvents is the only leg that fails;
+      // its sibling getTask succeeds once, and after SIG #2's abort
+      // plumbing kicks in, getTask's retry loop is short-circuited by
+      // the aborted signal rather than burning its own budget.
+      mockGetTaskEvents.mockRejectedValue(
+        new ApiError(503, 'SERVICE_UNAVAILABLE', 'persistent flap', 'req-x'),
+      );
+      mockGetTask.mockResolvedValue({ status: 'RUNNING' });
+
+      const cmd = makeWatchCommand();
+      await expect(cmd.parseAsync(['node', 'test', 'task-exhaust'])).rejects.toThrow(
+        /Exceeded retry budget .* Re-run `bgagent watch/,
+      );
+      // 6 attempts: 5 retries + the initial call.
+      expect(mockGetTaskEvents).toHaveBeenCalledTimes(6);
+    } finally {
+      global.setTimeout = realSetTimeout;
+    }
+  });
+
+  test('snapshot error aborts the shared controller so a sibling retry loop terminates (resource-leak guard)', async () => {
+    // SIG #2 regression guard: the two snapshot calls run under
+    // ``Promise.all`` with independent retry wrappers. If one leg
+    // throws a non-transient error (401), the sibling leg must NOT
+    // keep retrying a flaky 503 in the background — that would pollute
+    // CloudWatch metrics, burn sessionRetries, and hit rate limits
+    // after the command has already decided to fail.
+    _resetSessionRetries();
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = ((fn: () => void) => {
+      queueMicrotask(fn);
+      return 0 as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout;
+
+    try {
+      // getTaskEvents: 401 (non-transient, rethrows immediately).
+      // getTask: would retry 503 indefinitely if not aborted. We
+      // verify the abort cancels the second call before it burns
+      // the full retry budget.
+      mockGetTaskEvents.mockRejectedValueOnce(
+        new ApiError(401, 'UNAUTHORIZED', 'token expired', 'req-e'),
+      );
+      let taskAttempts = 0;
+      mockGetTask.mockImplementation(async () => {
+        taskAttempts += 1;
+        throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'slow flap', 'req-t');
+      });
+
+      const cmd = makeWatchCommand();
+      await expect(cmd.parseAsync(['node', 'test', 'task-abort'])).rejects.toThrow(/token expired/);
+
+      // Without the abort in the snapshot catch, getTask would retry
+      // MAX_TRANSIENT_RETRIES times before giving up. With the abort,
+      // it should stop at most a handful of attempts in (the exact
+      // count depends on Promise.all race timing with queueMicrotask,
+      // but it must be strictly less than 6 = initial + 5 retries).
+      expect(taskAttempts).toBeLessThan(6);
+    } finally {
+      global.setTimeout = realSetTimeout;
+    }
+  });
+
+  test('initial snapshot does NOT retry 4xx errors (auth failures should surface immediately)', async () => {
+    // 4xx errors are deterministic — retrying would be futile and
+    // would delay the user's ``bgagent login`` hint. The retry wrapper
+    // classifies 401 as non-transient and rethrows immediately.
+    mockGetTaskEvents.mockRejectedValueOnce(
+      new ApiError(401, 'UNAUTHORIZED', 'token expired', 'req-1'),
+    );
+    mockGetTask.mockRejectedValueOnce(
+      new ApiError(401, 'UNAUTHORIZED', 'token expired', 'req-2'),
+    );
+
+    const cmd = makeWatchCommand();
+    await expect(cmd.parseAsync(['node', 'test', 'task-401'])).rejects.toThrow(/token expired/);
+    // Exactly one attempt — no retries on 4xx.
+    expect(mockGetTaskEvents).toHaveBeenCalledTimes(1);
+  });
+
   test('SIGINT after terminal status lands still honors exit 130 (POSIX contract)', async () => {
     // If the user Ctrl+Cs between onTerminal firing and the command
     // resolving, their intent to interrupt is the load-bearing signal.

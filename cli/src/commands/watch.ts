@@ -428,18 +428,40 @@ interface SnapshotResult {
  *  seed the polling cursor so we don't re-emit the snapshot's contents on
  *  the first poll iteration.
  *
+ *  Both API calls are wrapped in ``withTransientRetry`` so a cold-start
+ *  hiccup on the Lambda (``fetch failed`` / 5xx / network transients)
+ *  does not crash the watch command before the polling loop gets a
+ *  chance to stabilise. The polling loop itself wraps every subsequent
+ *  call; without the same wrap here, the first request was the weakest
+ *  link (observed Scenario 2 deploy validation, where a cold-start
+ *  failed once then succeeded on re-run).
+ *
+ *  ``signal`` is required so callers commit to a concrete abort
+ *  controller — otherwise SIGINT during the snapshot's retry backoff
+ *  could never abort a retrying call. The production watch command
+ *  always passes its shared ``AbortController`` signal; tests that
+ *  exercise this path do the same via ``makeWatchCommand``.
+ *
  *  Emitted event ordering: events are returned in ascending event_id
  *  order (REST contract). */
 export async function fetchInitialSnapshot(
   apiClient: ApiClient,
   taskId: string,
-  opts?: { signal?: AbortSignal },
+  opts: { signal: AbortSignal },
 ): Promise<SnapshotResult> {
   debug(`[watch/snapshot] fetching initial snapshot task=${taskId}`);
-  const signal = opts?.signal;
+  const { signal } = opts;
   const [eventsPage, task] = await Promise.all([
-    apiClient.getTaskEvents(taskId, { limit: SNAPSHOT_PAGE_SIZE, signal }),
-    apiClient.getTask(taskId, { signal }),
+    withTransientRetry(
+      () => apiClient.getTaskEvents(taskId, { limit: SNAPSHOT_PAGE_SIZE, signal }),
+      signal,
+      'initialSnapshot.getTaskEvents',
+    ),
+    withTransientRetry(
+      () => apiClient.getTask(taskId, { signal }),
+      signal,
+      'initialSnapshot.getTask',
+    ),
   ]);
   const events = eventsPage.data;
   const latestEventId = events.length > 0 ? events[events.length - 1].event_id : null;
@@ -480,14 +502,23 @@ export function makeWatchCommand(): Command {
         try {
           snapshot = await fetchInitialSnapshot(apiClient, taskId, { signal: abortController.signal });
         } catch (err) {
+          // Capture the pre-abort state so the SIGINT-vs-real-error
+          // disambiguation below works. Then abort the shared controller
+          // so any sibling ``Promise.all`` leg still inside
+          // ``withTransientRetry`` stops backing off and burning retries
+          // against the API. Idempotent — calling ``abort`` on an
+          // already-aborted controller is a no-op.
+          const wasUserAborted = abortController.signal.aborted;
+          abortController.abort();
+
           // Only exit 130 if the error IS the abort — i.e., an AbortError
-          // from our signal. Checking only ``signal.aborted`` would race:
-          // a real 401 from an expired token that happens to throw at the
-          // same moment the user Ctrl+Cs would get silently swallowed as
-          // a clean interrupt, and the user would miss the ``bgagent
-          // login`` hint.
+          // from our signal THAT WAS ALREADY ABORTED when the error fired.
+          // Checking post-abort state would swallow a real 401 from an
+          // expired token that happens to throw at the same moment the
+          // user Ctrl+Cs as a clean interrupt, and the user would miss
+          // the ``bgagent login`` hint.
           const isAbortError = err instanceof Error && err.name === 'AbortError';
-          if (isAbortError && abortController.signal.aborted) {
+          if (isAbortError && wasUserAborted) {
             process.exitCode = EXIT_CODE_SIGINT;
             return;
           }
