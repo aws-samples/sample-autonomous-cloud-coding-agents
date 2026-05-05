@@ -110,6 +110,27 @@ describe('get-task handler', () => {
     // Null fields should be present
     expect(body.data.pr_url).toBeNull();
     expect(body.data.error_message).toBeNull();
+    // Provenance — surfaced so CLI / dashboard consumers can distinguish
+    // webhook-submitted tasks from api-submitted tasks without spelunking
+    // CloudWatch. Pre-fix this field was present on the DDB record but
+    // dropped by ``toTaskDetail``.
+    expect(body.data.channel_source).toBe('api');
+  });
+
+  test('surfaces channel_source=webhook for tasks created via the webhook path', async () => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({
+      Item: {
+        ...TASK_RECORD,
+        channel_source: 'webhook',
+      },
+    });
+
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body);
+    expect(body.data.channel_source).toBe('webhook');
   });
 
   test('returns 401 when user is not authenticated', async () => {

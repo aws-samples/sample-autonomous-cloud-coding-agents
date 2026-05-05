@@ -72,3 +72,38 @@ run = [
     { task = "security:bandit" },
     { task = "security:image" },
 ]
+
+# LOCAL DEVELOPMENT (DynamoDB Local for progress events)
+
+[tasks."local:up"]
+description = "Start DynamoDB Local and create tables for local agent testing"
+run = [
+  "docker compose up -d",
+  "bash scripts/create-local-tables.sh",
+]
+
+[tasks."local:down"]
+description = "Stop DynamoDB Local (all data is ephemeral)"
+run = "docker compose down"
+
+[tasks."local:events"]
+description = "Query progress events from DynamoDB Local"
+run = """
+aws dynamodb scan \
+  --table-name TaskEventsTable \
+  --endpoint-url http://localhost:8000 \
+  --region us-east-1 \
+  --no-cli-pager \
+  --output table 2>/dev/null || echo "No events found (is DynamoDB Local running?)"
+"""
+
+[tasks."local:events:json"]
+description = "Query progress events from DynamoDB Local (JSON)"
+run = """
+aws dynamodb scan \
+  --table-name TaskEventsTable \
+  --endpoint-url http://localhost:8000 \
+  --region us-east-1 \
+  --no-cli-pager \
+  --output json 2>/dev/null || echo "{}"
+"""

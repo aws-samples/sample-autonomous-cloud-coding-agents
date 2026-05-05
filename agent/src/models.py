@@ -108,10 +108,46 @@ class TaskConfig(BaseModel):
     branch_name: str = ""
     pr_number: str = ""
     task_id: str = ""
+    # Platform user_id (Cognito ``sub``) threaded from the orchestrator
+    # payload. Required ONLY when ``trace`` is true — the agent writes
+    # the trajectory dump to ``traces/<user_id>/<task_id>.jsonl.gz``
+    # (design §10.1), and the ``get-trace-url`` handler's per-caller-
+    # prefix guard refuses to presign keys outside the caller's own
+    # ``traces/<user_id>/`` prefix. Empty-string default for local
+    # batch runs (no orchestrator in the loop; no trace upload).
+    user_id: str = ""
+    # Opt-in debug preview cap (design §10.1). Threaded to BOTH the
+    # pipeline.py milestone writer AND the runner.py turn/tool writer —
+    # the runner's writer is where thinking/tool_input/tool_result
+    # previews live, so dropping ``trace`` here silently no-ops the
+    # feature for the fields that matter.
+    trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
     issue: GitHubIssue | None = None
     base_branch: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_trace_requires_user_id(self) -> Self:
+        """Fail at construction when trace=True without a user_id.
+
+        The trace trajectory is uploaded to
+        ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1). An empty
+        ``user_id`` produces ``traces//<task_id>.jsonl.gz``, which the
+        ``get-trace-url`` handler's per-caller-prefix guard refuses.
+        Catching this at construction time surfaces the misconfiguration
+        locally / in CI instead of deferring to runtime S3 upload.
+        """
+        if self.trace and not self.user_id:
+            raise ValueError(
+                "trace=True requires a non-empty user_id. Local/batch runs "
+                "without an orchestrator must either set trace=False (the "
+                "default) or supply user_id explicitly. The trace trajectory "
+                "is uploaded to traces/<user_id>/<task_id>.jsonl.gz (design "
+                "§10.1), and the get-trace-url handler refuses keys outside "
+                "the caller's traces/<user_id>/ prefix."
+            )
+        return self
 
 
 class RepoSetup(BaseModel):
@@ -153,7 +189,19 @@ class TaskResult(BaseModel):
     build_passed: bool = False
     lint_passed: bool = False
     cost_usd: float | None = None
+    # Rev-5 DATA-1: historically the `turns` field was set to the SDK's
+    # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
+    # tripped a cap (so `max_turns=6` yields `turns=7` under
+    # `agent_status='error_max_turns'`). That confused operators. We
+    # now expose both fields explicitly:
+    #   * `turns_attempted` — the SDK's authoritative counter (ex-`turns`).
+    #   * `turns_completed` — clamped to max_turns when we know the cap
+    #     fired; otherwise equals `turns_attempted`.
+    # The legacy `turns` field is retained (= `turns_attempted`) so
+    # existing DDB consumers keep working during the transition.
     turns: int | None = None
+    turns_attempted: int | None = None
+    turns_completed: int | None = None
     duration_s: float = 0.0
     task_id: str = ""
     disk_before: str = ""
@@ -167,3 +215,9 @@ class TaskResult(BaseModel):
     output_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
+    # S3 URI of the uploaded --trace trajectory dump, or ``None`` when
+    # the task did not run with ``--trace`` / the upload was skipped or
+    # failed. Threaded into ``task_state.write_terminal`` so the
+    # TaskRecord's ``trace_s3_uri`` field is set atomically with the
+    # terminal-status transition (design §10.1).
+    trace_s3_uri: str | None = None

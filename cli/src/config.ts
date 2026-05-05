@@ -62,6 +62,19 @@ export function saveConfig(config: CliConfig): void {
   fs.writeFileSync(configPath(), JSON.stringify(config, null, 2) + '\n', { mode: 0o644 });
 }
 
+/** Load existing CLI config if present, else return null (no error). */
+export function tryLoadConfig(): CliConfig | null {
+  const p = configPath();
+  if (!fs.existsSync(p)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf-8')) as CliConfig;
+  } catch {
+    return null;
+  }
+}
+
 /** Load cached credentials. Returns null if no credentials file exists. */
 export function loadCredentials(): Credentials | null {
   const p = credentialsPath();

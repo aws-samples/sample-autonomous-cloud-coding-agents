@@ -108,6 +108,27 @@ docker stats bgagent-run                          # CPU, memory usage
 docker exec -it bgagent-run bash                  # shell into the container
 ```
 
+#### Testing with progress events (DynamoDB Local)
+
+By default, progress events and task state writes are silently skipped during local runs (the `TASK_EVENTS_TABLE_NAME` and `TASK_TABLE_NAME` env vars are not set). To enable them locally using DynamoDB Local:
+
+```bash
+# 1. Start DynamoDB Local and create tables
+cd agent && mise run local:up
+
+# 2. Run the agent with --local-events
+./agent/run.sh --local-events "owner/repo" 42
+
+# 4. In another terminal — query progress events
+mise run local:events          # table format
+mise run local:events:json     # JSON format
+
+# 5. When done — tear down DynamoDB Local
+mise run local:down
+```
+
+The `--local-events` flag connects the agent container to DynamoDB Local on the `agent-local` Docker network and sets the appropriate env vars. The agent code writes to DDB Local using the same code path as production — no mocks or alternate implementations.
+
 #### Environment variables
 
 | Variable | Default | Description |

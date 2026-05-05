@@ -76,6 +76,11 @@ export class TaskEventsTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
+      // DynamoDB Streams feed the Phase 1b fan-out plane (Slack, GitHub comments,
+      // email) via a Lambda subscriber. NEW_IMAGE is sufficient — consumers only
+      // need the event payload, not old/new diffs. Enabling Streams on an existing
+      // table is an in-place CloudFormation update (no table replacement).
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
   }

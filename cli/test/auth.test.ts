@@ -56,6 +56,7 @@ describe('auth', () => {
       mockSend.mockResolvedValue({
         AuthenticationResult: {
           IdToken: 'id-token-123',
+          AccessToken: 'access-token-123',
           RefreshToken: 'refresh-token-123',
           ExpiresIn: 3600,
         },
@@ -81,33 +82,34 @@ describe('auth', () => {
     test('returns cached token when not expired', async () => {
       const futureExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       saveCredentials({
-        id_token: 'cached-token',
+        id_token: 'cached-id',
         refresh_token: 'refresh-token',
         token_expiry: futureExpiry,
       });
 
+      // getAuthToken returns the ID token used by the REST API.
       const token = await getAuthToken();
-      expect(token).toBe('cached-token');
+      expect(token).toBe('cached-id');
       expect(mockSend).not.toHaveBeenCalled();
     });
 
     test('refreshes expired token', async () => {
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({
-        id_token: 'old-token',
+        id_token: 'old-id',
         refresh_token: 'refresh-token',
         token_expiry: pastExpiry,
       });
 
       mockSend.mockResolvedValue({
         AuthenticationResult: {
-          IdToken: 'new-token',
+          IdToken: 'new-id',
           ExpiresIn: 3600,
         },
       });
 
       const token = await getAuthToken();
-      expect(token).toBe('new-token');
+      expect(token).toBe('new-id');
     });
 
     test('throws when no credentials exist', async () => {

@@ -60,7 +60,15 @@ export interface TaskOrchestratorProps {
 
   /**
    * Maximum concurrent tasks per user.
-   * @default 3
+   *
+   * Raised from 3 to 10 in rev 5 to accommodate power-user CLI flows
+   * (developer running `bgagent run` a few times while iterating on a
+   * feature, reviewing queued PRs, etc.). 3 was a conservative starter
+   * that led to surprise admission rejections in practice. The
+   * stranded-task reconciler (scheduled handler) prevents abandoned
+   * tasks from permanently consuming slots.
+   *
+   * @default 10
    */
   readonly maxConcurrentTasksPerUser?: number;
 
@@ -160,7 +168,7 @@ export class TaskOrchestrator extends Construct {
     }
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
-    const maxConcurrent = props.maxConcurrentTasksPerUser ?? 3;
+    const maxConcurrent = props.maxConcurrentTasksPerUser ?? 10;
 
     this.fn = new lambda.NodejsFunction(this, 'OrchestratorFn', {
       entry: path.join(handlersDir, 'orchestrate-task.ts'),
@@ -197,7 +205,19 @@ export class TaskOrchestrator extends Construct {
         }),
       },
       bundling: {
-        externalModules: ['@aws-sdk/*'],
+        // Bundle `@aws-sdk/client-bedrock-agentcore` — newer commands (e.g.
+        // StopRuntimeSessionCommand) are not in the Lambda runtime's pinned
+        // SDK and throw `<Command> is not a constructor` if externalized.
+        // See cancel-task silent-failure mode (task-api.ts commonBundling).
+        externalModules: [
+          '@aws-sdk/client-dynamodb',
+          '@aws-sdk/client-ecs',
+          '@aws-sdk/client-lambda',
+          '@aws-sdk/client-bedrock-runtime',
+          '@aws-sdk/client-secrets-manager',
+          '@aws-sdk/lib-dynamodb',
+          '@aws-sdk/util-dynamodb',
+        ],
       },
     });
 

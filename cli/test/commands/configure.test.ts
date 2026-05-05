@@ -57,4 +57,61 @@ describe('configure command', () => {
     expect(config.client_id).toBe('client-xyz');
     expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
   });
+
+  test('partial update: new field value merges onto existing config', async () => {
+    const cmd1 = makeConfigureCommand();
+    await cmd1.parseAsync([
+      'node', 'test',
+      '--api-url', 'https://api.example.com',
+      '--region', 'us-east-1',
+      '--user-pool-id', 'us-east-1_xyz',
+      '--client-id', 'client-123',
+    ]);
+
+    // Update only --region; other fields should persist.
+    const cmd2 = makeConfigureCommand();
+    await cmd2.parseAsync(['node', 'test', '--region', 'us-west-1']);
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'),
+    );
+    expect(config.api_url).toBe('https://api.example.com');
+    expect(config.region).toBe('us-west-1');
+    expect(config.user_pool_id).toBe('us-east-1_xyz');
+    expect(config.client_id).toBe('client-123');
+  });
+
+  test('first-time configure without all required fields → CliError', async () => {
+    const cmd = makeConfigureCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--api-url', 'https://api.example.com',
+        // missing --region, --user-pool-id, --client-id
+      ]),
+    ).rejects.toThrow(/Missing required configuration/);
+  });
+
+  test('no flags with complete existing config → reports "No configuration changes" without re-saving', async () => {
+    // Seed a complete config.
+    const cmd1 = makeConfigureCommand();
+    await cmd1.parseAsync([
+      'node', 'test',
+      '--api-url', 'https://api.example.com',
+      '--region', 'us-east-1',
+      '--user-pool-id', 'us-east-1_abc',
+      '--client-id', 'client-123',
+    ]);
+    const initialMtime = fs.statSync(path.join(tmpDir, 'config.json')).mtimeMs;
+
+    // Run configure again with no flags.
+    const cmd2 = makeConfigureCommand();
+    await cmd2.parseAsync(['node', 'test']);
+
+    // File was not rewritten.
+    expect(fs.statSync(path.join(tmpDir, 'config.json')).mtimeMs).toBe(initialMtime);
+    // User-facing message is honest about the no-op.
+    expect(consoleSpy).toHaveBeenCalledWith('No configuration changes — all flags were omitted.');
+    expect(consoleSpy).not.toHaveBeenLastCalledWith('Configuration saved.');
+  });
 });

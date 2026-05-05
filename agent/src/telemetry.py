@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 from config import AGENT_WORKSPACE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from models import TokenUsage
 
 
@@ -97,18 +99,57 @@ class _TrajectoryWriter:
     Events are progressively truncated to stay under the CloudWatch Logs 262 KB
     event-size limit: large fields (thinking, tool result content) are truncated
     first, then a hard byte-level safety-net truncation is applied.
+
+    --trace accumulator (design §10.1)
+    ----------------------------------
+    When ``accumulate=True`` (set only for ``--trace`` tasks), each event is
+    also appended in-memory so it can be dumped as a single gzipped JSONL
+    artifact on terminal state (``dump_gzipped_jsonl``). The accumulator
+    is bounded at ``_ACCUMULATOR_MAX_BYTES`` — further events are dropped
+    silently (but ``dump_gzipped_jsonl`` reports the drop in the header)
+    so a runaway task does not OOM the container.
     """
 
     _CW_MAX_EVENT_BYTES = 262_144  # CloudWatch limit per event
 
+    # Bound the in-memory accumulator. Expected worst case: ~100 turns
+    # x ~10 events/turn x 4 KB trace preview ~= 4 MB. 50 MB is a 10x
+    # margin before the container starts thinking about memory.
+    _ACCUMULATOR_MAX_BYTES = 50 * 1024 * 1024
+
     _MAX_FAILURES = 3
 
-    def __init__(self, task_id: str) -> None:
+    def __init__(self, task_id: str, accumulate: bool = False) -> None:
         self._task_id = task_id
         self._log_group = os.environ.get("LOG_GROUP_NAME")
         self._client = None
         self._disabled = False
         self._failure_count = 0
+        # --trace accumulator state. ``_accumulated_bytes`` is tracked
+        # separately so ``dump_gzipped_jsonl`` can report how much it
+        # serialized vs. how much was dropped — without re-walking
+        # ``_events`` to re-measure.
+        self._accumulate = accumulate
+        self._events: list[dict] = []
+        self._accumulated_bytes = 0
+        self._accumulator_dropped = 0
+        # K2 review Finding #3 — fire-once callback when the accumulator
+        # cap first trips, so the pipeline can emit a user-visible
+        # ``trace_truncated`` milestone in ``TaskEventsTable`` (surfaced
+        # by ``bgagent watch``) rather than users discovering the
+        # truncation only after downloading + inspecting the header.
+        self._truncation_callback: Callable[[int, int], None] | None = None
+        self._truncation_announced = False
+
+    def set_truncation_callback(self, cb) -> None:
+        """Register a callback fired once when the accumulator cap trips.
+
+        Signature: ``cb(max_bytes: int, first_dropped_so_far: int) -> None``.
+        Called at most one time per writer lifetime. Errors in the
+        callback are swallowed — a broken callback must not stop event
+        capture or derail the pipeline.
+        """
+        self._truncation_callback = cb
 
     def _ensure_client(self):
         """Lazily create the CloudWatch Logs client and log stream."""
@@ -131,6 +172,50 @@ class _TrajectoryWriter:
 
     def _put_event(self, payload: dict) -> None:
         """Serialize *payload* to JSON, truncate if needed, and write."""
+        # --trace accumulator: capture BEFORE any CW-specific truncation
+        # or the disabled short-circuit, so the S3 artifact is independent
+        # of CloudWatch health. We serialize to measure size and then
+        # keep the original dict (the serialization happens again at
+        # dump time) so bytes stay small and JSON-encodable.
+        if self._accumulate:
+            try:
+                event_json = json.dumps(payload, default=str)
+                event_size = len(event_json.encode("utf-8"))
+                if self._accumulated_bytes + event_size <= self._ACCUMULATOR_MAX_BYTES:
+                    self._events.append(payload)
+                    self._accumulated_bytes += event_size
+                else:
+                    self._accumulator_dropped += 1
+                    # Fire-once user-visible signal the first time we
+                    # drop. Subsequent drops increment the counter but
+                    # do not re-announce (debounce — one milestone is
+                    # enough, the downloaded artifact's header has the
+                    # exact final drop count).
+                    if not self._truncation_announced and self._truncation_callback is not None:
+                        self._truncation_announced = True
+                        try:
+                            self._truncation_callback(
+                                self._ACCUMULATOR_MAX_BYTES,
+                                self._accumulator_dropped,
+                            )
+                        except Exception as cb_exc:
+                            print(
+                                f"[trajectory/accumulator] truncation callback "
+                                f"raised (swallowed): {type(cb_exc).__name__}: "
+                                f"{cb_exc}",
+                                flush=True,
+                            )
+            except (TypeError, ValueError) as e:
+                # A non-JSON-encodable payload can't be serialized at
+                # dump time either — drop it here so CloudWatch still
+                # gets whatever it can write (the CW path does its own
+                # ``default=str`` handling below).
+                print(
+                    f"[trajectory/accumulator] drop non-serializable event: "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
+
         if not self._log_group or self._disabled:
             return
         try:
@@ -285,6 +370,118 @@ class _TrajectoryWriter:
                 "duration_ms": duration_ms,
             }
         )
+
+    def dump_gzipped_jsonl(self) -> bytes | None:
+        """Serialize accumulated events as gzipped JSONL for --trace upload.
+
+        Returns ``None`` if the writer was not constructed with
+        ``accumulate=True`` or if no events were captured. Otherwise
+        returns gzip-compressed bytes — one JSON object per line, plus
+        a synthetic header event that records any accumulator drops so
+        a consumer can tell a truncated trace from a complete one.
+        """
+        if not self._accumulate or not self._events:
+            return None
+
+        # Peak memory ~= accumulator size + gzip output buffer. With the default
+        # 50 MB cap and typical ~8x JSONL compression, the transient peak is
+        # ~55-60 MB during dump. Raising the cap needs matching container
+        # memory headroom.
+        import gzip
+        import io
+
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+            # Header: self-describing so ``zcat | head -1`` tells you
+            # the shape. ``dropped`` > 0 means later events didn't
+            # make it into the artifact (accumulator hit its cap).
+            header = {
+                "event": "TRAJECTORY_ARTIFACT_HEADER",
+                "task_id": self._task_id,
+                "accumulated_events": len(self._events),
+                "accumulated_bytes": self._accumulated_bytes,
+                "dropped": self._accumulator_dropped,
+                "max_bytes": self._ACCUMULATOR_MAX_BYTES,
+            }
+            gz.write((json.dumps(header, default=str) + "\n").encode("utf-8"))
+            for event in self._events:
+                gz.write((json.dumps(event, default=str) + "\n").encode("utf-8"))
+        return buf.getvalue()
+
+
+def upload_trace_to_s3(
+    task_id: str,
+    user_id: str,
+    body: bytes,
+) -> str | None:
+    """Upload *body* (gzipped JSONL) to the --trace artifact bucket.
+
+    Fail-open: any error logs a warning and returns ``None`` so the
+    caller can continue to terminal state. Only called when the task
+    was submitted with ``--trace`` and has a non-empty ``user_id``
+    (design §10.1). Returns the ``s3://bucket/key`` URI on success.
+
+    Contract enforcement (K2 Stage 3 review Finding #1):
+      - Empty ``user_id`` is treated as a programming bug at the call
+        site — this function WARNs and returns ``None`` rather than
+        writing to ``traces//<task_id>.jsonl.gz`` (an unreachable key:
+        no Cognito caller has an empty ``sub``, so the
+        ``get-trace-url`` handler's per-caller-prefix guard would 403
+        every download attempt).
+    """
+    if not task_id:
+        print("[trace/upload] skip: empty task_id", flush=True)
+        return None
+    if not user_id:
+        print(
+            f"[trace/upload] skip: empty user_id (would have produced "
+            f"an unreachable key). task_id={task_id!r}",
+            flush=True,
+        )
+        return None
+
+    bucket = os.environ.get("TRACE_ARTIFACTS_BUCKET_NAME")
+    if not bucket:
+        print(
+            f"[trace/upload] skip: TRACE_ARTIFACTS_BUCKET_NAME unset. task_id={task_id!r}",
+            flush=True,
+        )
+        return None
+
+    key = f"traces/{user_id}/{task_id}.jsonl.gz"
+    try:
+        import boto3
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("s3", region_name=region)
+        # Intentionally omit ContentEncoding=gzip: Node's fetch (undici) auto-
+        # decompresses responses whose metadata declares gzip encoding, which
+        # violates the CLI's `-o <file>` "raw gzipped bytes" contract and
+        # breaks the default stdout gunzip path (Z_DATA_ERROR). We store the
+        # actual gzipped bytes and describe them honestly as application/gzip.
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/gzip",
+        )
+        return f"s3://{bucket}/{key}"
+    except ImportError:
+        print("[trace/upload] boto3 not available — skipping", flush=True)
+        return None
+    except Exception as e:
+        exc_type = type(e).__name__
+        print(
+            f"[trace/upload] S3 put_object failed: {exc_type}: {e}. "
+            f"task_id={task_id!r} bucket={bucket!r} key={key!r}",
+            flush=True,
+        )
+        if "Credential" in exc_type or "AccessDenied" in str(e):
+            print(
+                "[trace/upload] WARNING: IAM misconfiguration likely — trace artifact is lost.",
+                flush=True,
+            )
+        return None
 
 
 # Values under these keys may contain tool stderr, paths, or incidental secrets.

@@ -31,7 +31,7 @@ import { logger } from './logger';
 import { checkRepoOnboarded } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
 import { type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -123,6 +123,14 @@ export async function createTaskCore(
   }
   const userMaxBudgetUsd = maxBudgetResult;
 
+  // --trace is a strict boolean — reject strings / numbers so a
+  // misbehaving client can't accidentally enable it with ``"trace":
+  // "false"`` (which would be truthy).
+  if (body.trace !== undefined && typeof body.trace !== 'boolean') {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid trace. Must be a boolean.', requestId);
+  }
+  const userTrace = body.trace === true;
+
   // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
@@ -196,6 +204,7 @@ export async function createTaskCore(
     branch_name: branchName,
     ...(userMaxTurns !== undefined && { max_turns: userMaxTurns }),
     ...(userMaxBudgetUsd !== undefined && { max_budget_usd: userMaxBudgetUsd }),
+    ...(userTrace && { trace: true }),
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
@@ -253,9 +262,17 @@ export async function createTaskCore(
         InvocationType: 'Event',
         Payload: new TextEncoder().encode(JSON.stringify({ task_id: taskId })),
       }));
-      logger.info('Orchestrator invoked', { task_id: taskId });
+      logger.info('Orchestrator invoked', {
+        event: 'task.admitted.orchestrator_invoked',
+        task_id: taskId,
+        request_id: requestId,
+      });
     } catch (orchErr) {
-      logger.error('Failed to invoke orchestrator', { error: String(orchErr), task_id: taskId });
+      logger.error('Failed to invoke orchestrator', {
+        event: 'task.admitted.orchestrator_invoke_failed',
+        error: String(orchErr),
+        task_id: taskId,
+      });
     }
   }
 

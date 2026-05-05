@@ -84,6 +84,14 @@ describe('TaskEventsTable', () => {
       ],
     });
   });
+
+  test('enables DynamoDB Streams with NEW_IMAGE view type (Phase 1b fan-out plane)', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      StreamSpecification: {
+        StreamViewType: 'NEW_IMAGE',
+      },
+    });
+  });
 });
 
 describe('TaskEventsTable with custom props', () => {

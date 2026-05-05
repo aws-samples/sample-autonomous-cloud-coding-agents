@@ -52,6 +52,8 @@ def build_config(
     task_type: str = "new_task",
     branch_name: str = "",
     pr_number: str = "",
+    trace: bool = False,
+    user_id: str = "",
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -102,6 +104,8 @@ def build_config(
         branch_name=branch_name,
         pr_number=pr_number,
         task_id=task_id or uuid.uuid4().hex[:12],
+        trace=trace,
+        user_id=user_id,
     )
 
 
@@ -118,6 +122,14 @@ def get_config() -> TaskConfig:
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,
             aws_region=os.environ.get("AWS_REGION", ""),
             dry_run=os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes"),
+            # Local-batch ``--trace`` parity (design §10.1). Without
+            # these env vars a developer running the agent outside
+            # AgentCore could never exercise the trace path. Both are
+            # opt-in; empty ``USER_ID`` with ``TRACE=1`` logs a skip
+            # warning (see ``pipeline.run_task``) rather than writing
+            # an unreachable ``traces//`` key.
+            trace=os.environ.get("TRACE", "").lower() in ("1", "true", "yes"),
+            user_id=os.environ.get("USER_ID", ""),
         )
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
