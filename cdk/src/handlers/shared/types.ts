@@ -18,11 +18,24 @@
  */
 
 import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+
+/**
+ * Provenance of a task's submission. ``api`` covers CLI / Cognito-authenticated
+ * submissions; ``webhook`` covers HMAC-signed inbound webhook submissions.
+ *
+ * Narrowed from ``string`` so switches and predicates that read
+ * ``channel_source`` get exhaustiveness checking at compile time; matches the
+ * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
+ * Keep in sync with ``cli/src/types.ts::ChannelSource``.
+ */
+export type ChannelSource = 'api' | 'webhook';
 
 /** Task types that operate on an existing pull request. */
 export function isPrTaskType(taskType: TaskType): boolean {
@@ -51,7 +64,7 @@ export interface TaskRecord {
   readonly pr_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
-  readonly channel_source: string;
+  readonly channel_source: ChannelSource;
   readonly channel_metadata?: Record<string, string>;
   readonly status_created_at: string;
   readonly created_at: string;
@@ -155,7 +168,7 @@ export interface TaskDetail {
    *  on every task record at creation time (``create-task-core.ts``)
    *  and surfaced here so CLI / dashboard / audit consumers do not have
    *  to spelunk CloudWatch to learn which channel created a task. */
-  readonly channel_source: string;
+  readonly channel_source: ChannelSource;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;
@@ -274,10 +287,21 @@ export interface Attachment {
 
 /**
  * Map a DynamoDB task record to the API detail response shape.
+ *
+ * All numeric fields sourced from the DDB record are routed through
+ * ``coerceNumericOrNull`` — the Document-client deserializes DynamoDB
+ * ``Number`` attributes as JavaScript ``string``s in some code paths
+ * (see ``shared/numeric.ts`` for rationale), and any downstream caller
+ * doing arithmetic (``.toFixed``, comparison, math) on a string-typed
+ * "number" crashes at runtime. Coercing uniformly here means no caller
+ * has to guess which TaskDetail numeric fields are safe — do not bypass
+ * the helper when adding new numeric fields.
+ *
  * @param record - the DynamoDB task record.
  * @returns the API-facing task detail.
  */
 export function toTaskDetail(record: TaskRecord): TaskDetail {
+  const ctx = { task_id: record.task_id };
   return {
     task_id: record.task_id,
     status: record.status,
@@ -296,13 +320,13 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
     completed_at: record.completed_at ?? null,
-    duration_s: record.duration_s ?? null,
-    cost_usd: record.cost_usd ?? null,
+    duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
+    cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
-    max_turns: record.max_turns ?? null,
-    max_budget_usd: record.max_budget_usd ?? null,
-    turns_attempted: record.turns_attempted ?? null,
-    turns_completed: record.turns_completed ?? null,
+    max_turns: coerceNumericOrNull(record.max_turns, { ...ctx, field: 'max_turns' }, logger),
+    max_budget_usd: coerceNumericOrNull(record.max_budget_usd, { ...ctx, field: 'max_budget_usd' }, logger),
+    turns_attempted: coerceNumericOrNull(record.turns_attempted, { ...ctx, field: 'turns_attempted' }, logger),
+    turns_completed: coerceNumericOrNull(record.turns_completed, { ...ctx, field: 'turns_completed' }, logger),
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,

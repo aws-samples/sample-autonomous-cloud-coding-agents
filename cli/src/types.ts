@@ -20,6 +20,15 @@
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
+/**
+ * Provenance of a task's submission. ``api`` covers CLI / Cognito-authenticated
+ * submissions; ``webhook`` covers HMAC-signed inbound webhook submissions.
+ * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
+ * types-sync contract so downstream switches/predicates get exhaustiveness
+ * checking on both sides of the wire.
+ */
+export type ChannelSource = 'api' | 'webhook';
+
 /** Error categories produced by the runtime error classifier. */
 export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
 
@@ -50,7 +59,7 @@ export interface TaskDetail {
    *  submissions, ``webhook`` for HMAC-signed inbound webhooks.
    *  Mirrors ``cdk/src/handlers/shared/types.ts::TaskDetail``; kept
    *  in sync per the CLI types-sync contract. */
-  readonly channel_source: string;
+  readonly channel_source: ChannelSource;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;
@@ -62,11 +71,14 @@ export interface TaskDetail {
   readonly max_budget_usd: number | null;
   /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
    *  when `agent_status='error_max_turns'` — the aborted attempt is
-   *  counted). */
-  readonly turns_attempted?: number | null;
+   *  counted). Required to match ``cdk/src/handlers/shared/types.ts``
+   *  (server always emits the field, defaulted to ``null`` in
+   *  ``toTaskDetail`` when absent on the record). */
+  readonly turns_attempted: number | null;
   /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when the cap tripped). */
-  readonly turns_completed?: number | null;
+   *  `max_turns` when the cap tripped). Required; see
+   *  ``turns_attempted`` above. */
+  readonly turns_completed: number | null;
   /** Whether the task was submitted with ``--trace``. Surfaces in
    *  ``bgagent status --output json`` so scripts can confirm trace
    *  capture is active. Non-optional because the server always

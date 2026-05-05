@@ -420,7 +420,7 @@ describe('classifyError', () => {
       repo: 'owner/repo',
       task_type: 'new_task',
       branch_name: 'bgagent/task-1/fix',
-      channel_source: 'cli',
+      channel_source: 'api',
       status_created_at: 'FAILED#2026-01-01T00:00:00Z',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
@@ -445,6 +445,66 @@ describe('classifyError', () => {
       const detail = toTaskDetail(record);
       expect(detail.error_classification).not.toBeNull();
       expect(detail.error_classification!.category).toBe('unknown');
+    });
+
+    // Regression: all numeric fields coerce through ``coerceNumericOrNull``
+    // so the DDB Document-client's string-typed Number deserialization
+    // cannot leak into downstream consumers (same bug class as the
+    // ``costUsd.toFixed`` crash fixed in commit ``c09bfd7``). The cast
+    // to ``unknown as TaskRecord`` simulates a record produced by the
+    // Document client where ``Number`` attributes came back as strings.
+    test('coerces string-typed numeric DDB fields to numbers on output', () => {
+      const record = {
+        ...baseRecord,
+        duration_s: '12.5',
+        cost_usd: '0.0042',
+        max_turns: '30',
+        max_budget_usd: '1.50',
+        turns_attempted: '7',
+        turns_completed: '6',
+      } as unknown as TaskRecord;
+      const detail = toTaskDetail(record);
+      expect(typeof detail.duration_s).toBe('number');
+      expect(detail.duration_s).toBe(12.5);
+      expect(typeof detail.cost_usd).toBe('number');
+      expect(detail.cost_usd).toBe(0.0042);
+      expect(typeof detail.max_turns).toBe('number');
+      expect(detail.max_turns).toBe(30);
+      expect(typeof detail.max_budget_usd).toBe('number');
+      expect(detail.max_budget_usd).toBe(1.5);
+      expect(typeof detail.turns_attempted).toBe('number');
+      expect(detail.turns_attempted).toBe(7);
+      expect(typeof detail.turns_completed).toBe('number');
+      expect(detail.turns_completed).toBe(6);
+    });
+
+    test('coerces unparseable numeric strings to null (does not crash)', () => {
+      const record = {
+        ...baseRecord,
+        turns_attempted: 'not-a-number',
+        turns_completed: 'NaN',
+      } as unknown as TaskRecord;
+      const detail = toTaskDetail(record);
+      expect(detail.turns_attempted).toBeNull();
+      expect(detail.turns_completed).toBeNull();
+    });
+
+    // Compile-time regression for Finding #10 — ``ChannelSource`` is a
+    // literal union, not ``string``. The ``satisfies`` assertions below
+    // exercise the valid members; the ``@ts-expect-error`` comments pin
+    // the narrowing — if someone widens ``ChannelSource`` to ``string``
+    // these will become un-erroring and fail the build.
+    test('channel_source narrows to the literal union', () => {
+      const apiRecord: TaskRecord = { ...baseRecord, channel_source: 'api' };
+      const webhookRecord: TaskRecord = { ...baseRecord, channel_source: 'webhook' };
+      expect(toTaskDetail(apiRecord).channel_source).toBe('api');
+      expect(toTaskDetail(webhookRecord).channel_source).toBe('webhook');
+
+      // @ts-expect-error — 'slack' is not a valid ChannelSource
+      const invalid: TaskRecord = { ...baseRecord, channel_source: 'slack' };
+      // Keep ``invalid`` used so the block doesn't get DCE'd and the
+      // ``@ts-expect-error`` above remains anchored to a real assignment.
+      expect(invalid.channel_source).toBeDefined();
     });
   });
 });

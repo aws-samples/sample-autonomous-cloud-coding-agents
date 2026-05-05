@@ -18,7 +18,7 @@
  */
 
 import { formatStatusSnapshot } from '../src/format';
-import { TaskDetail, TaskEvent } from '../src/types';
+import { ChannelSource, TaskDetail, TaskEvent } from '../src/types';
 
 const NOW = Date.parse('2026-04-29T15:30:20Z');
 
@@ -447,9 +447,11 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('Channel line is always present (even when channel_source is an unexpected value)', () => {
-    // Degrades to the placeholder rather than omitting the line —
-    // consistent with other always-present snapshot rows.
-    const task = buildTask({ channel_source: '' as unknown as string });
+    // Defence-in-depth: even though ``ChannelSource`` narrows the type to
+    // ``api | webhook``, a corrupt DDB record could still arrive at the
+    // formatter. The snapshot degrades to the placeholder rather than
+    // omitting the line — consistent with other always-present rows.
+    const task = buildTask({ channel_source: '' as unknown as ChannelSource });
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).toContain('Channel:       —');
   });

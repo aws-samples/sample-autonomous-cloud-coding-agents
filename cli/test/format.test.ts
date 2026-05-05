@@ -44,6 +44,8 @@ describe('format', () => {
     build_passed: true,
     max_turns: 100,
     max_budget_usd: null,
+    turns_attempted: null,
+    turns_completed: null,
     trace: false,
     trace_s3_uri: null,
   };
