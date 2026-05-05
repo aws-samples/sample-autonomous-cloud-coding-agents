@@ -141,6 +141,13 @@ export interface SlackLinkResponse {
   readonly linked_at: string;
 }
 
+/** Linear link response from POST /v1/linear/link. */
+export interface LinearLinkResponse {
+  readonly linear_workspace_id: string;
+  readonly linear_user_id: string;
+  readonly linked_at: string;
+}
+
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;

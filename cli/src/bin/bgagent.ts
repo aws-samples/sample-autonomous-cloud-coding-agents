@@ -23,6 +23,7 @@ import { Command } from 'commander';
 import { makeCancelCommand } from '../commands/cancel';
 import { makeConfigureCommand } from '../commands/configure';
 import { makeEventsCommand } from '../commands/events';
+import { makeLinearCommand } from '../commands/linear';
 import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
 import { makeSlackCommand } from '../commands/slack';
@@ -55,6 +56,7 @@ program.addCommand(makeStatusCommand());
 program.addCommand(makeCancelCommand());
 program.addCommand(makeEventsCommand());
 program.addCommand(makeSlackCommand());
+program.addCommand(makeLinearCommand());
 program.addCommand(makeWebhookCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {
