@@ -353,7 +353,7 @@
     </mxGraphModel>
   </diagram>
   <diagram name="2. bgagent watch (adaptive polling)" id="watch-flow">
-    <mxGraphModel dx="1384" dy="817" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
+    <mxGraphModel dx="1937" dy="1144" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -418,7 +418,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m1-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_42" vertex="1">
-          <mxGeometry height="20" width="300" x="340" y="240" as="geometry" />
+          <mxGeometry height="20" width="300" x="340" y="234" as="geometry" />
         </mxCell>
         <mxCell id="m2" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -433,7 +433,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m3-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="Query pk=TASK#{id}, sk &gt; evt_42" vertex="1">
-          <mxGeometry height="20" width="340" x="1180" y="280" as="geometry" />
+          <mxGeometry height="20" width="340" x="1180" y="274" as="geometry" />
         </mxCell>
         <mxCell id="m4" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -442,7 +442,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m4-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="[evt_43..evt_47] (5 events)" vertex="1">
-          <mxGeometry height="20" width="300" x="1200" y="310" as="geometry" />
+          <mxGeometry height="20" width="300" x="1200" y="307" as="geometry" />
         </mxCell>
         <mxCell id="m5" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -457,7 +457,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m6-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="200 OK — 5 events, next cursor=evt_47" vertex="1">
-          <mxGeometry height="20" width="360" x="290" y="360" as="geometry" />
+          <mxGeometry height="20" width="360" x="290" y="354" as="geometry" />
         </mxCell>
         <mxCell id="m7-label" parent="1" style="text;html=1;align=left;fontSize=11;fontStyle=0;strokeColor=#3F51B5;fillColor=#E8EAF6;rounded=1;spacing=6;spacingLeft=8" value="CLI renders events → sleep 0.5s → poll again (cursor advanced)" vertex="1">
           <mxGeometry height="30" width="540" x="160" y="410" as="geometry" />
@@ -469,7 +469,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m8-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="ProgressWriter.append_event()  (agent_turn, tool_call, …)" vertex="1">
-          <mxGeometry height="20" width="400" x="1560" y="440" as="geometry" />
+          <mxGeometry height="20" width="400" x="1560" y="435" as="geometry" />
         </mxCell>
         <mxCell id="m9-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=#0277BD;fillColor=#E1F5FE;rounded=1;spacing=6;spacingLeft=8" value="Events written async by the agent; reader is eventually-consistent within DDB propagation" vertex="1">
           <mxGeometry height="30" width="660" x="1400" y="490" as="geometry" />
@@ -481,7 +481,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m10-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_47  (poll)" vertex="1">
-          <mxGeometry height="20" width="300" x="340" y="610" as="geometry" />
+          <mxGeometry height="20" width="300" x="340" y="605" as="geometry" />
         </mxCell>
         <mxCell id="m11" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -496,7 +496,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m12-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="[] (empty page)" vertex="1">
-          <mxGeometry height="20" width="200" x="1220" y="670" as="geometry" />
+          <mxGeometry height="20" width="200" x="1220" y="665" as="geometry" />
         </mxCell>
         <mxCell id="m13" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -505,7 +505,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m13-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="200 OK — 0 events" vertex="1">
-          <mxGeometry height="20" width="300" x="320" y="700" as="geometry" />
+          <mxGeometry height="20" width="300" x="320" y="694" as="geometry" />
         </mxCell>
         <mxCell id="m14-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=11;fontStyle=1;spacing=6;spacingLeft=8" value="CLI: sleep 1s (first idle backoff)" vertex="1">
           <mxGeometry height="30" width="260" x="160" y="740" as="geometry" />
@@ -517,7 +517,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m15-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_47  (still empty → sleep 2s next)" vertex="1">
-          <mxGeometry height="20" width="460" x="280" y="770" as="geometry" />
+          <mxGeometry height="20" width="460" x="280" y="766" as="geometry" />
         </mxCell>
         <mxCell id="m16-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=11;fontStyle=1;spacing=6;spacingLeft=8" value="…back off: 1s → 2s → 5s cap. Stays at 5s until an event arrives." vertex="1">
           <mxGeometry height="30" width="540" x="160" y="810" as="geometry" />
@@ -529,7 +529,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m17-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="append task_completed" vertex="1">
-          <mxGeometry height="20" width="340" x="1560" y="840" as="geometry" />
+          <mxGeometry height="20" width="340" x="1560" y="834" as="geometry" />
         </mxCell>
         <mxCell id="m18" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -538,7 +538,7 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="m18-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_47 (next poll — 5s cap elapsed)" vertex="1">
-          <mxGeometry height="20" width="460" x="280" y="870" as="geometry" />
+          <mxGeometry height="20" width="460" x="280" y="863" as="geometry" />
         </mxCell>
         <mxCell id="m19" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
           <mxGeometry relative="1" as="geometry">
@@ -947,7 +947,7 @@
     </mxGraphModel>
   </diagram>
   <diagram name="5. FanOutConsumer + GitHub edit-in-place" id="fanout-gh">
-    <mxGraphModel dx="2285" dy="1184" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="1760" math="0" shadow="0">
+    <mxGraphModel grid="0" page="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="2400" pageHeight="1760" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
