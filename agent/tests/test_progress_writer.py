@@ -10,7 +10,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from progress_writer import _generate_ulid, _ProgressWriter, _truncate_preview
+from progress_writer import (
+    _classify_ddb_error,
+    _generate_ulid,
+    _ProgressWriter,
+    _reset_circuit_breakers,
+    _truncate_preview,
+)
+
+
+# Reset the shared circuit-breaker state between every test so a tripped
+# breaker in one test does not silently disable the writer-under-test in
+# the next.  Forgetting this was the single largest hazard flagged when
+# review finding #8 consolidated per-writer state into a shared map.
+@pytest.fixture(autouse=True)
+def _reset_shared_circuit_breaker_state():
+    _reset_circuit_breakers()
+    yield
+    _reset_circuit_breakers()
 
 # ---------------------------------------------------------------------------
 # _generate_ulid
@@ -416,3 +433,332 @@ class TestProgressWriterLazyInit:
             pw.write_agent_milestone("test", "")
 
         assert pw._disabled is True
+
+
+# ---------------------------------------------------------------------------
+# krokoko PR #52 review finding #6 — error classification
+# ---------------------------------------------------------------------------
+
+
+def _make_client_error(code: str, message: str = "boom") -> Exception:
+    """Build a duck-typed ``ClientError``-like exception.
+
+    We avoid ``from botocore.exceptions import ClientError`` to keep the
+    test module importable in environments where ``botocore`` is missing
+    — matching the classifier's own structural duck-typing in
+    :func:`progress_writer._classify_ddb_error`.
+    """
+    err = Exception(message)
+    err.response = {  # type: ignore[attr-defined]
+        "Error": {"Code": code, "Message": message},
+        "ResponseMetadata": {"HTTPStatusCode": 400},
+    }
+    return err
+
+
+class TestClassifyDdbError:
+    """Unit-level coverage of the classifier so higher-level tests can
+    focus on the writer's flow rather than re-testing the taxonomy."""
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "ValidationException",
+            "ItemCollectionSizeLimitExceededException",
+            "ResourceNotFoundException",
+            "AccessDeniedException",
+            "UnauthorizedOperation",
+        ],
+    )
+    def test_permanent_aws_codes(self, code):
+        assert _classify_ddb_error(_make_client_error(code)) == "permanent"
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "ProvisionedThroughputExceededException",
+            "RequestLimitExceeded",
+            "ThrottlingException",
+            "ServiceUnavailable",
+            "InternalServerError",
+        ],
+    )
+    def test_transient_aws_codes(self, code):
+        assert _classify_ddb_error(_make_client_error(code)) == "transient"
+
+    def test_unknown_aws_code_falls_through_to_unknown(self):
+        assert _classify_ddb_error(_make_client_error("SomeNewException")) == "unknown"
+
+    def test_network_class_name_treated_as_transient(self):
+        class EndpointConnectionError(Exception):
+            pass
+
+        assert _classify_ddb_error(EndpointConnectionError("no route to host")) == "transient"
+
+    def test_arbitrary_exception_is_unknown(self):
+        assert _classify_ddb_error(RuntimeError("wat")) == "unknown"
+
+
+class TestProgressWriterFailOpenClassified:
+    """Finding #6: bare ``except Exception`` folded permanent and
+    transient errors into the same breaker.  These tests lock the new
+    contract so a regression (e.g. re-introducing a bare handler) fails
+    immediately."""
+
+    @pytest.fixture()
+    def writer(self, monkeypatch):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        return _ProgressWriter("task-finding6")
+
+    def test_permanent_error_does_not_trip_breaker(self, writer):
+        # ValidationException is the canonical case: a trace-heavy event
+        # pushes the item over the 400 KB DDB limit.  Subsequent events
+        # are smaller and would succeed — so we must NOT trip the
+        # counter on this class of error.
+        table = MagicMock()
+        table.put_item.side_effect = _make_client_error("ValidationException")
+        writer._table = table
+
+        # Fire WELL past the transient threshold.  Any bare-except
+        # regression would trip the breaker here.
+        for _ in range(10):
+            writer.write_agent_milestone("test", "")
+
+        assert writer._failure_count == 0, (
+            "Permanent errors must not increment the shared counter"
+        )
+        assert writer._disabled is False, (
+            "ValidationException must keep the stream alive for smaller events"
+        )
+
+    def test_transient_error_trips_breaker_as_before(self, writer):
+        # Regression guard: the original circuit-breaker contract is
+        # preserved for transient errors.
+        table = MagicMock()
+        table.put_item.side_effect = _make_client_error(
+            "ProvisionedThroughputExceededException"
+        )
+        writer._table = table
+
+        for _ in range(_ProgressWriter._MAX_FAILURES):
+            writer.write_agent_milestone("test", "")
+
+        assert writer._disabled is True
+        assert writer._failure_count == _ProgressWriter._MAX_FAILURES
+
+    def test_access_denied_disables_writer_immediately_with_loud_log(
+        self, writer, capsys
+    ):
+        # AccessDeniedException is permanent AND catastrophic: IAM
+        # misconfig means every single future write will fail the same
+        # way.  Flip the breaker on the FIRST occurrence so we don't
+        # waste three rounds of CloudWatch noise discovering it.
+        table = MagicMock()
+        table.put_item.side_effect = _make_client_error("AccessDeniedException")
+        writer._table = table
+
+        writer.write_agent_milestone("test", "")
+
+        assert writer._disabled is True, (
+            "AccessDeniedException must flip the breaker on first occurrence"
+        )
+        # Loud log line: operators need to spot this during rollouts.
+        captured = capsys.readouterr()
+        assert "permanent error" in captured.out.lower()
+        assert "AccessDeniedException" in captured.out
+        assert "disabling" in captured.out.lower()
+
+    def test_resource_not_found_disables_writer_immediately(self, writer):
+        # Same fast-path as AccessDeniedException: a missing table will
+        # never un-miss itself, so retry is pointless.
+        table = MagicMock()
+        table.put_item.side_effect = _make_client_error("ResourceNotFoundException")
+        writer._table = table
+
+        writer.write_agent_milestone("test", "")
+
+        assert writer._disabled is True
+
+    def test_unknown_exception_treated_as_transient_with_error_log(
+        self, writer, capsys
+    ):
+        # Unknown exceptions default to transient-style counting (so a
+        # new botocore release adding a transient code does not instantly
+        # silence the stream) but log at ERROR level so operators notice
+        # and add the code to the classifier.
+        table = MagicMock()
+        table.put_item.side_effect = RuntimeError("mystery")
+        writer._table = table
+
+        writer.write_agent_milestone("test", "")
+
+        assert writer._failure_count == 1
+        assert writer._disabled is False  # below threshold
+        captured = capsys.readouterr()
+        # Loud ERROR marker so it stands out in CloudWatch Logs.
+        assert "ERROR" in captured.out
+        assert "UNKNOWN" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# krokoko PR #52 review finding #8 — shared circuit-breaker state
+# ---------------------------------------------------------------------------
+
+
+class TestSharedCircuitBreaker:
+    """Before this change the runner and pipeline writers kept
+    independent state, so a throttling burst would trip one while the
+    other kept emitting milestones — producing a visibly half-alive
+    stream.  These tests lock the shared-state contract."""
+
+    @pytest.fixture()
+    def env(self, monkeypatch):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+    def test_shared_circuit_breaker_across_writers_same_task_id(self, env):
+        # Two writers for the same task: tripping the first must disable
+        # the second.  This is the core half-alive-stream regression
+        # guard.
+        w1 = _ProgressWriter("task-shared")
+        w2 = _ProgressWriter("task-shared")
+
+        t1 = MagicMock()
+        t1.put_item.side_effect = _make_client_error(
+            "ProvisionedThroughputExceededException"
+        )
+        w1._table = t1
+
+        for _ in range(_ProgressWriter._MAX_FAILURES):
+            w1.write_agent_milestone("turn", "")
+
+        assert w1._disabled is True
+        assert w2._disabled is True, (
+            "Shared breaker must also disable the sibling writer"
+        )
+
+        # Second writer must not hit DDB once the shared breaker is open
+        # — early-return on ``_disabled`` check at the top of
+        # ``_put_event``.
+        t2 = MagicMock()
+        w2._table = t2
+        w2.write_agent_milestone("milestone", "")
+        t2.put_item.assert_not_called()
+
+    def test_separate_tasks_have_independent_breakers(self, env):
+        # State is keyed by ``task_id``, not shared globally — tripping
+        # task A must not disable task B (critical when two tasks run in
+        # the same process, e.g. local batch mode or future shared-runtime
+        # deploys).
+        w_a = _ProgressWriter("task-a")
+        w_b = _ProgressWriter("task-b")
+
+        t_a = MagicMock()
+        t_a.put_item.side_effect = _make_client_error(
+            "ProvisionedThroughputExceededException"
+        )
+        w_a._table = t_a
+
+        for _ in range(_ProgressWriter._MAX_FAILURES):
+            w_a.write_agent_milestone("x", "")
+        assert w_a._disabled is True
+
+        # Task B is untouched.
+        assert w_b._disabled is False
+        assert w_b._failure_count == 0
+
+        # And still writes.
+        t_b = MagicMock()
+        w_b._table = t_b
+        w_b.write_agent_milestone("y", "")
+        t_b.put_item.assert_called_once()
+
+    def test_unknown_sentinel_task_id_is_isolated(self, env):
+        # ``runner.py`` falls back to ``config.task_id or "unknown"`` —
+        # lock that the sentinel does not bleed state across two real
+        # tasks that both end up using it.  (Two ``"unknown"`` writers
+        # legitimately share state; this test pins that a real task_id
+        # and the sentinel remain distinct.)
+        w_real = _ProgressWriter("task-real")
+        w_unknown = _ProgressWriter("unknown")
+
+        t = MagicMock()
+        t.put_item.side_effect = _make_client_error(
+            "ProvisionedThroughputExceededException"
+        )
+        w_unknown._table = t
+
+        for _ in range(_ProgressWriter._MAX_FAILURES):
+            w_unknown.write_agent_milestone("x", "")
+        assert w_unknown._disabled is True
+
+        # Real task is unaffected.
+        assert w_real._disabled is False
+
+    def test_reset_helper_clears_shared_state_between_tests(self, env):
+        # Pinned because forgetting to reset is the single largest
+        # hazard of shared state — every test in this module relies on
+        # the autouse fixture clearing the map.
+        w = _ProgressWriter("task-reset")
+        t = MagicMock()
+        t.put_item.side_effect = _make_client_error(
+            "ProvisionedThroughputExceededException"
+        )
+        w._table = t
+        for _ in range(_ProgressWriter._MAX_FAILURES):
+            w.write_agent_milestone("x", "")
+        assert w._disabled is True
+
+        # Reset and confirm a fresh writer for the same task starts
+        # clean.
+        _reset_circuit_breakers()
+        w2 = _ProgressWriter("task-reset")
+        assert w2._disabled is False
+        assert w2._failure_count == 0
+
+    def test_success_on_one_writer_resets_shared_counter(self, env):
+        # A successful write on any writer for the task must reset the
+        # shared failure counter — otherwise transient errors on two
+        # writers interleaved with successes would still trip the
+        # breaker counter as if they were consecutive.
+        w1 = _ProgressWriter("task-share-success")
+        w2 = _ProgressWriter("task-share-success")
+
+        t1 = MagicMock()
+        t1.put_item.side_effect = _make_client_error(
+            "ProvisionedThroughputExceededException"
+        )
+        w1._table = t1
+        w1.write_agent_milestone("turn", "")
+        assert w1._failure_count == 1
+
+        # w2 writes successfully — shared counter must reset, so the
+        # sibling writer sees it as fresh too.
+        t2 = MagicMock()
+        w2._table = t2
+        w2.write_agent_milestone("milestone", "")
+        assert w1._failure_count == 0
+        assert w2._failure_count == 0
+
+    def test_permanent_error_on_one_writer_does_not_affect_sibling_breaker(
+        self, env
+    ):
+        # Cross-check of the #6 + #8 interaction: a permanent error on
+        # one writer must NOT trip the shared breaker, so the sibling
+        # writer continues to function.
+        w1 = _ProgressWriter("task-perm-cross")
+        w2 = _ProgressWriter("task-perm-cross")
+
+        t1 = MagicMock()
+        t1.put_item.side_effect = _make_client_error("ValidationException")
+        w1._table = t1
+        for _ in range(10):
+            w1.write_agent_milestone("oversized", "x" * 10)
+        assert w1._disabled is False
+
+        # Sibling is still writing.
+        t2 = MagicMock()
+        w2._table = t2
+        w2.write_agent_milestone("normal", "y")
+        t2.put_item.assert_called_once()
