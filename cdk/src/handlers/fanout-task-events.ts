@@ -734,14 +734,14 @@ export async function routeEvent(
 // ``DynamoDBStreamHandler`` constrains the return to ``void | Promise<void>``,
 // which blocks the ``DynamoDBBatchResponse`` we must return for
 // ``reportBatchItemFailures: true`` to work (finding #1). Typing the
-// handler as a plain async function preserves the 3-arg Lambda
-// signature for existing call sites (tests pass ``event, context, cb``)
-// while allowing a structured return. Lambda's runtime accepts either
-// shape.
+// handler as a plain 1-arg async function lets us return a structured
+// response; Lambda's nodejs24.x runtime detects any 3-arg shape as
+// callback-style and rejects it at init with
+// ``Runtime.CallbackHandlerDeprecated`` (observed 2026-05-05 post-
+// redeploy). Tests still invoke with trailing args — JS silently
+// ignores extra params, so ``handler(event, ctx, cb)`` keeps working.
 export const handler = async (
   event: DynamoDBStreamEvent,
-  _context?: unknown,
-  _callback?: unknown,
 ): Promise<DynamoDBBatchResponse> => {
   const perTaskCounts = new Map<string, number>();
   const batchItemFailures: DynamoDBBatchItemFailure[] = [];

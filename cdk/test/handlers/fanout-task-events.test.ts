@@ -413,7 +413,7 @@ describe('fanout-task-events: handler', () => {
     // Handler returns a ``DynamoDBBatchResponse`` so ``reportBatchItemFailures``
     // semantics are honored end-to-end (finding #1). Empty ``batchItemFailures``
     // means every record succeeded from the event-source-mapping's perspective.
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
   });
 
   test('per-task cap drops events beyond 20 per invocation', async () => {
@@ -423,7 +423,7 @@ describe('fanout-task-events: handler', () => {
       records.push(mkEvent('agent_milestone', 't-chatty'));
     }
     const event: DynamoDBStreamEvent = { Records: records };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
     // No strong assertion possible without mocking logger — but the
     // call must not throw, and the cap path is exercised.
   });
@@ -436,14 +436,14 @@ describe('fanout-task-events: handler', () => {
         mkEvent('task_completed'),
       ],
     };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
   });
 
   test('REMOVE events are skipped', async () => {
     const event: DynamoDBStreamEvent = {
       Records: [mkRecord('REMOVE', undefined)],
     };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
   });
 });
 
@@ -488,7 +488,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
     const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
@@ -529,7 +529,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
     expect(upsertArg.existingCommentId).toBe(555);
@@ -544,7 +544,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
     // No UpdateItem either — nothing to persist.
@@ -555,7 +555,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockDdbSend.mockResolvedValueOnce({ Item: undefined });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-missing')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
 
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
   });
@@ -565,7 +565,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockRejectedValueOnce(new Error('github 500'));
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
     // No UpdateCommand fires (no id to persist from a failed upsert).
     const updateCalls = mockDdbSend.mock.calls.filter(
       c => (c[0] as { _type?: string })._type === 'Update',
@@ -596,7 +596,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
     expect(upsertArg.existingCommentId).toBe(555);
@@ -620,7 +620,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     const update = mockDdbSend.mock.calls[1][0] as {
       input: {
@@ -660,7 +660,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       );
 
       const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-      await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+      await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
 
       // No UpdateCommand fires — the 400 path has nothing to persist.
       const updateCalls = mockDdbSend.mock.calls.filter(
@@ -691,7 +691,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     expect(mockUpsertTaskComment.mock.calls[0][0].issueOrPrNumber).toBe(7);
   });
@@ -709,7 +709,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     // Fallback to the platform env-var ARN (set at the top of this file).
     expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:aws:secretsmanager:us-east-1:0:secret:platform');
@@ -722,7 +722,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockResolveGitHubToken.mockRejectedValueOnce(new Error('secrets manager down'));
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
 
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
   });
@@ -739,7 +739,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
 
     // Upsert fired (comment posted); handler didn't throw.
     expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
@@ -763,7 +763,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     // The dedicated error_id tag must fire so operators can alarm on it.
     const errorCall = errorSpy.mock.calls.find(
@@ -792,7 +792,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       .mockResolvedValueOnce('ghp_fresh');
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     expect(mockClearTokenCache).toHaveBeenCalledTimes(1);
     expect(mockUpsertTaskComment).toHaveBeenCalledTimes(2);
@@ -814,7 +814,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:repo-specific');
   });
@@ -841,7 +841,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
 
     expect(mockRenderCommentBody).toHaveBeenCalledTimes(1);
     const renderArg = mockRenderCommentBody.mock.calls[0][0];
@@ -871,7 +871,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
       const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-      await handler(event, {} as never, () => undefined);
+      await handler(event);
 
       const renderArg = mockRenderCommentBody.mock.calls[0][0];
       expect(renderArg.costUsd).toBeNull();
@@ -902,7 +902,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
       const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-      await handler(event, {} as never, () => undefined);
+      await handler(event);
 
       const renderArg = mockRenderCommentBody.mock.calls[0][0];
       expect(renderArg.costUsd).toBeNull();
@@ -1044,7 +1044,7 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
     const event: DynamoDBStreamEvent = {
       Records: [mkMilestoneRecord('pr_created', 't-milestone')],
     };
-    await handler(event, {} as never, () => undefined);
+    await handler(event);
 
     expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
     // Comment body renders ``pr_created`` (the effective type),
@@ -1147,7 +1147,7 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
         Records: [mkEventWithId('task_completed', poisonId, 't-boom')],
       };
 
-      const result = await handler(event, {} as never, () => undefined);
+      const result = await handler(event);
 
       // Containment invariant: ``Promise.allSettled`` caught the
       // rejection; the handler sees no throw.
@@ -1205,11 +1205,7 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
         records.push(mkEventWithId('task_completed', `evt-${i}`, 't-chatty'));
       }
 
-      const result = await handler(
-        { Records: records },
-        {} as never,
-        () => undefined,
-      );
+      const result = await handler({ Records: records });
 
       expect(warnCalls).toBeGreaterThan(0);
       // The 21st record (index 20) is the one that hit the cap and
@@ -1245,11 +1241,7 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
       for (let i = 0; i < 21; i++) {
         records.push(mkEventWithId('task_completed', `evt-chatty-${i}`, 't-chatty'));
       }
-      const result = await handler(
-        { Records: records },
-        {} as never,
-        () => undefined,
-      );
+      const result = await handler({ Records: records });
 
       expect(result.batchItemFailures).toHaveLength(1);
       expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: 'evt-chatty-20' });
@@ -1279,7 +1271,7 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
       for (let i = 0; i < 21; i++) {
         records.push(mkEventWithId('task_completed', `evt-${i}`, 't-chatty'));
       }
-      await handler({ Records: records }, {} as never, () => undefined);
+      await handler({ Records: records });
 
       const failedWarn = allWarns.find(w => w.meta?.event === 'fanout.record.failed');
       expect(failedWarn).toBeDefined();
@@ -1303,7 +1295,7 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
         mkEvent('task_completed'), // dispatched (GitHub short-circuits on missing task)
       ],
     };
-    const result = await handler(event, {} as never, () => undefined);
+    const result = await handler(event);
     expect(result).toEqual({ batchItemFailures: [] });
   });
 });
