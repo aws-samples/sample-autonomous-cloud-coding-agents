@@ -38,6 +38,7 @@ import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { RepoTable } from '../constructs/repo-table';
+import { LinearIntegration } from '../constructs/linear-integration';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
@@ -428,6 +429,38 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'SlackUserMappingTableName', {
       value: slackIntegration.userMappingTable.tableName,
       description: 'Name of the DynamoDB Slack user mapping table',
+    });
+
+    // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
+    const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    new CfnOutput(this, 'LinearWebhookSecretArn', {
+      value: linearIntegration.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',
+    });
+
+    new CfnOutput(this, 'LinearApiTokenSecretArn', {
+      value: linearIntegration.apiTokenSecret.secretArn,
+      description: 'Secrets Manager ARN for the Linear personal API token (agent-side MCP) — populate via `bgagent linear setup`',
+    });
+
+    new CfnOutput(this, 'LinearProjectMappingTableName', {
+      value: linearIntegration.projectMappingTable.tableName,
+      description: 'Name of the DynamoDB Linear project → repo mapping table',
+    });
+
+    new CfnOutput(this, 'LinearUserMappingTableName', {
+      value: linearIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Linear user mapping table',
     });
 
     // --- Bedrock model invocation logging (account-level) ---
