@@ -248,6 +248,21 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     if not task_id:
         return []
 
+    # Belt-and-braces second guard against the "cancel consumes nudges" hazard
+    # (krokoko PR #52 review finding #3).  The primary guard is the loop-level
+    # break in :func:`stop_hook` which short-circuits the dispatcher as soon as
+    # any earlier hook sets ``_cancel_requested``.  That assumes
+    # ``_cancel_between_turns_hook`` runs BEFORE this hook — true for the
+    # module-level ``between_turns_hooks`` registry today (line 340), but a
+    # future reorder (or a test that rebinds the list without preserving
+    # order) would silently reintroduce the bug: ``read_pending`` +
+    # ``mark_consumed`` would flip the DDB rows to consumed and stamp
+    # ``_INJECTED_NUDGES`` for a dying agent that will never see the text.
+    # Early-returning here makes the invariant structural — no nudges are
+    # ever consumed once cancel is flagged, regardless of hook ordering.
+    if ctx.get("_cancel_requested"):
+        return []
+
     try:
         pending = nudge_reader.read_pending(task_id)
     except Exception as exc:
@@ -334,9 +349,15 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
     return []
 
 
-# Global list of between-turns hooks.  Cancel runs first so it can short-circuit
-# nudges on cancelled tasks (no point injecting nudges into a dying agent).
-# Phase 3 (approval gates) will ``append`` additional hooks here.
+# Global list of between-turns hooks.  Cancel MUST run first so it can
+# short-circuit nudges on cancelled tasks (no point injecting nudges into a
+# dying agent — worse, the nudge reader mutates DDB state that the agent will
+# never act on; see krokoko PR #52 review finding #3).  The :func:`stop_hook`
+# dispatcher breaks out of the loop as soon as ``_cancel_requested`` is set,
+# and :func:`_nudge_between_turns_hook` early-returns when the flag is already
+# present — belt-and-braces in case a future ``append`` reorders this list.
+# Phase 3 (approval gates) should ``append`` additional hooks AFTER the
+# nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
     _nudge_between_turns_hook,
@@ -371,6 +392,20 @@ async def stop_hook(
         "progress": progress,
     }
 
+    # Cancel-before-nudge short-circuit (krokoko PR #52 review finding #3).
+    # Previously the loop ran ALL hooks before checking ``_cancel_requested``,
+    # which meant the nudge hook's ``read_pending`` + ``mark_consumed`` path
+    # executed even on cancelled tasks — flipping the DDB rows to consumed
+    # and stamping ``_INJECTED_NUDGES`` for a dying agent.  The user saw a
+    # 202 Accepted for their nudge but the injection was discarded when we
+    # returned ``continue_=False`` below.  Breaking out of the loop as soon
+    # as any hook sets ``_cancel_requested`` guarantees subsequent hooks
+    # (notably the nudge reader) never run, so DDB state is never mutated
+    # for work the agent will never do.  The registry at line 340 keeps
+    # ``_cancel_between_turns_hook`` first so this break fires before the
+    # nudge hook gets a chance.  ``_nudge_between_turns_hook`` also carries
+    # an internal cancel-check as belt-and-braces in case a future refactor
+    # reorders the registry.
     chunks: list[str] = []
     for hook in between_turns_hooks:
         try:
@@ -383,6 +418,13 @@ async def stop_hook(
             continue
         if produced:
             chunks.extend(produced)
+        if ctx.get("_cancel_requested"):
+            # Any text produced by earlier hooks in this same loop iteration
+            # is discarded below — the ``_cancel_requested`` branch returns
+            # ``continue_=False`` and never reads ``chunks``.  This is
+            # intentional: cancel wins, and we would rather drop a
+            # simultaneous nudge than inject into a dying agent.
+            break
 
     # Cancel takes precedence over nudge injection.  ``continue_: False`` tells
     # the SDK to end the turn loop and return control to the caller, which
