@@ -35,6 +35,7 @@ export function makeSubmitCommand(): Command {
     .option('--pr <number>', 'PR number to iterate on (sets task_type to pr_iteration)', parseInt)
     .option('--review-pr <number>', 'PR number to review (sets task_type to pr_review)', parseInt)
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
+    .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
@@ -74,6 +75,7 @@ export function makeSubmitCommand(): Command {
         // Note: --pr and --review-pr are mutually exclusive (validated above).
         ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
         ...(opts.reviewPr !== undefined && { task_type: 'pr_review' as const, pr_number: opts.reviewPr }),
+        ...(opts.trace && { trace: true }),
       };
 
       const task = await client.createTask(body, opts.idempotencyKey);

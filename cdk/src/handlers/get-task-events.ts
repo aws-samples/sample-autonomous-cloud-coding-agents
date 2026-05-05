@@ -25,14 +25,47 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
 import type { EventRecord, TaskRecord } from './shared/types';
-import { decodePaginationToken, encodePaginationToken, parseLimit } from './shared/validation';
+import {
+  decodePaginationToken,
+  encodePaginationToken,
+  isValidUlid,
+  parseLimit,
+} from './shared/validation';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
+const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'INFO').toUpperCase();
+const DEBUG_ENABLED = LOG_LEVEL === 'DEBUG';
+
+/** Query mode resolved from query parameters for structured logging. */
+type QueryMode = 'from_beginning' | 'next_token' | 'after' | 'desc';
 
 /**
  * GET /v1/tasks/{task_id}/events — Get task event audit trail.
+ *
+ * Supports three alternative query modes (plus the default "from the beginning"):
+ *
+ *   - ``?after=<event_id>`` — ULID cursor. Query returns events with
+ *     ``event_id > after``. Used by CLI polling and webhook replay to
+ *     resume from a known event id. ULIDs are lexicographically sortable
+ *     by timestamp, so string ``>`` compare is correct.
+ *   - ``?next_token=<base64>`` — opaque DynamoDB ``LastEvaluatedKey``,
+ *     used for normal forward pagination.
+ *   - ``?desc=1`` — return the newest events first. Used by ``bgagent
+ *     status`` to render a recency-biased snapshot in O(limit) rather
+ *     than walking the full event stream. Mutually exclusive with
+ *     ``after`` (a forward cursor has no meaning against a descending
+ *     scan); the combination is rejected as 400.
+ *
+ * If both ``after`` and ``next_token`` are provided, ``after`` wins (a WARN
+ * is logged — likely a client bug). If none are provided, the query starts
+ * from the oldest event. In all modes, when the result is truncated at
+ * ``limit`` a ``next_token`` is emitted so the caller can continue
+ * paginating.
+ *
+ * @param event - API Gateway proxy event.
+ * @returns API Gateway proxy result.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
@@ -50,7 +83,77 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
-    // 3. Verify task exists and user owns it
+    // 3. Parse pagination parameters
+    const params = event.queryStringParameters ?? {};
+    const limit = parseLimit(params.limit, 50, 100);
+    const afterRaw = params.after;
+    const nextTokenRaw = params.next_token;
+    const descRaw = params.desc;
+    // ``desc`` accepts "1" or "true" (case-insensitive). Anything else falls
+    // through to ascending order — we do not treat a malformed value as an
+    // error to keep the surface lenient for clients that send defaults.
+    const desc = typeof descRaw === 'string'
+      && (descRaw === '1' || descRaw.toLowerCase() === 'true');
+
+    // 3a. Validate ``after`` if provided. An invalid ULID shape is a client
+    // error — fail fast rather than silently ignoring the cursor.
+    if (afterRaw !== undefined && afterRaw !== null && afterRaw !== '' && !isValidUlid(afterRaw)) {
+      logger.warn('Invalid after cursor rejected', {
+        request_id: requestId,
+        task_id: taskId,
+        after_len: afterRaw.length,
+      });
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid `after` parameter: must be a 26-character ULID.',
+        requestId,
+      );
+    }
+
+    const afterValid = typeof afterRaw === 'string' && afterRaw.length === 26 ? afterRaw : undefined;
+
+    // 3b. ``desc`` combined with ``after`` makes no semantic sense: ``after``
+    // is a forward-walking ULID cursor. Reject the combination rather than
+    // silently honoring one — the caller has a bug and a 400 surfaces it.
+    if (desc && afterValid) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Parameters `desc` and `after` are mutually exclusive.',
+        requestId,
+      );
+    }
+
+    // 3c. ``after`` and ``next_token`` together is always a client bug —
+    // one is a user-driven event_id cursor, the other is an opaque
+    // pagination token. Prefer ``after`` because it is the more specific,
+    // user-driven intent.
+    if (afterValid && nextTokenRaw) {
+      logger.warn('Both after and next_token provided; preferring after', {
+        request_id: requestId,
+        task_id: taskId,
+      });
+    }
+
+    const startKey = afterValid ? undefined : decodePaginationToken(nextTokenRaw ?? undefined);
+
+    const queryMode: QueryMode = afterValid
+      ? 'after'
+      : desc
+        ? 'desc'
+        : startKey
+          ? 'next_token'
+          : 'from_beginning';
+
+    logger.info('get-task-events invoked', {
+      request_id: requestId,
+      task_id: taskId,
+      limit,
+      query_mode: queryMode,
+    });
+
+    // 4. Verify task exists and user owns it
     const taskResult = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { task_id: taskId },
@@ -65,26 +168,49 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(403, ErrorCode.FORBIDDEN, 'You do not have access to this task.', requestId);
     }
 
-    // 4. Parse pagination parameters
-    const params = event.queryStringParameters ?? {};
-    const limit = parseLimit(params.limit, 50, 100);
-    const startKey = decodePaginationToken(params.next_token);
-
-    // 5. Query events
+    // 5. Build DDB query. When ``after`` is provided we add a sort-key
+    // filter ``event_id > :after`` — safe because ULIDs are lexicographic.
+    // ``desc`` flips ``ScanIndexForward`` so the newest events return first,
+    // which is what ``bgagent status`` needs to render a recency-biased
+    // snapshot cheaply.
     const queryInput: Record<string, unknown> = {
       TableName: EVENTS_TABLE_NAME,
-      KeyConditionExpression: 'task_id = :tid',
-      ExpressionAttributeValues: { ':tid': taskId },
-      ScanIndexForward: true,
+      KeyConditionExpression: afterValid
+        ? 'task_id = :tid AND event_id > :after'
+        : 'task_id = :tid',
+      ExpressionAttributeValues: afterValid
+        ? { ':tid': taskId, ':after': afterValid }
+        : { ':tid': taskId },
+      ScanIndexForward: !desc,
       Limit: limit,
     };
 
-    if (startKey) {
+    if (!afterValid && startKey) {
       queryInput.ExclusiveStartKey = startKey;
+    }
+
+    if (DEBUG_ENABLED) {
+      logger.info('DDB query prepared (debug)', {
+        level_override: 'DEBUG',
+        request_id: requestId,
+        task_id: taskId,
+        key_condition: queryInput.KeyConditionExpression,
+        has_exclusive_start_key: Boolean(queryInput.ExclusiveStartKey),
+      });
     }
 
     const result = await ddb.send(new QueryCommand(queryInput as any));
     const events = (result.Items ?? []) as EventRecord[];
+
+    if (DEBUG_ENABLED) {
+      logger.info('DDB query returned (debug)', {
+        level_override: 'DEBUG',
+        request_id: requestId,
+        task_id: taskId,
+        count: events.length,
+        has_last_evaluated_key: Boolean(result.LastEvaluatedKey),
+      });
+    }
 
     // 6. Strip task_id from event records (redundant in response context)
     const eventData = events.map(e => ({
@@ -94,11 +220,41 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       metadata: e.metadata ?? {},
     }));
 
-    const nextToken = encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
+    // For descending scans we intentionally suppress ``next_token``. DDB's
+    // ``LastEvaluatedKey`` carries no direction — a follow-up request that
+    // passes ``?next_token=...`` without also passing ``desc=1`` would
+    // silently scan ascending from mid-stream and interleave results.
+    // ``bgagent status`` only ever requests one page anyway; surfacing a
+    // token here would invite future callers into that footgun.
+    const nextToken = desc
+      ? null
+      : encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
+
+    // 7. Warn on unexpectedly empty catch-up — helps debug CLI reconnect logic.
+    // We only warn for ``after`` mode because "no events yet" is normal on cold start.
+    if (afterValid && events.length === 0) {
+      logger.warn('after cursor returned empty page (caller may be at tail)', {
+        request_id: requestId,
+        task_id: taskId,
+        after: afterValid,
+      });
+    }
+
+    logger.info('get-task-events complete', {
+      request_id: requestId,
+      task_id: taskId,
+      event_count: events.length,
+      has_more: nextToken !== null,
+      query_mode: queryMode,
+    });
 
     return paginatedResponse(eventData, nextToken, requestId);
   } catch (err) {
-    logger.error('Failed to get task events', { error: String(err), request_id: requestId });
+    logger.error('Failed to get task events', {
+      error: String(err),
+      error_type: err instanceof Error ? err.constructor.name : typeof err,
+      request_id: requestId,
+    });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
   }
 }

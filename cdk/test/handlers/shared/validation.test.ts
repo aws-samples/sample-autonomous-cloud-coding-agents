@@ -26,6 +26,7 @@ import {
   isValidRepo,
   isValidTaskDescriptionLength,
   isValidTaskType,
+  isValidUlid,
   isValidWebhookName,
   MAX_TASK_DESCRIPTION_LENGTH,
   parseBody,
@@ -340,6 +341,49 @@ describe('isValidTaskType', () => {
     expect(isValidTaskType('')).toBe(false);
     expect(isValidTaskType(42)).toBe(false);
     expect(isValidTaskType(true)).toBe(false);
+  });
+});
+
+describe('isValidUlid', () => {
+  test('accepts a canonical 26-char Crockford Base32 ULID', () => {
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAV')).toBe(true);
+  });
+
+  test('accepts ULIDs containing every allowed character', () => {
+    // timestamp-only characters 0-9 and a spread of allowed letters
+    expect(isValidUlid('0123456789ABCDEFGHJKMNPQRS')).toBe(true);
+    expect(isValidUlid('TVWXYZ0123456789ABCDEFGHJK')).toBe(true);
+  });
+
+  test('accepts lowercase input (case-insensitive)', () => {
+    expect(isValidUlid('01arz3ndektsv4rrffq69g5fav')).toBe(true);
+  });
+
+  test('rejects wrong length', () => {
+    expect(isValidUlid('')).toBe(false);
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FA')).toBe(false); // 25
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAVX')).toBe(false); // 27
+  });
+
+  test('rejects Crockford-excluded letters I, L, O, U', () => {
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAI')).toBe(false);
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAL')).toBe(false);
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAO')).toBe(false);
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAU')).toBe(false);
+  });
+
+  test('rejects non-Base32 punctuation', () => {
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5F!V')).toBe(false);
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5F-V')).toBe(false);
+  });
+
+  test('rejects non-string input', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(isValidUlid(42 as any)).toBe(false);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(isValidUlid(null as any)).toBe(false);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(isValidUlid(undefined as any)).toBe(false);
   });
 });
 

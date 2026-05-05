@@ -23,6 +23,7 @@ import { ulid } from 'ulid';
 import { hydrateContext } from './context-hydration';
 import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
+import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import type { TaskRecord } from './types';
@@ -324,6 +325,14 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
+    // user_id is required by the agent ONLY when ``trace`` is true —
+    // the agent writes the trajectory to
+    // ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1) and the
+    // handler's per-caller-prefix guard relies on the agent landing
+    // under the submitter's prefix. Threaded unconditionally so
+    // scripts that inspect the payload can always see it; costs one
+    // Cognito-sub-sized string in the JSON.
+    user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
     task_type: task.task_type ?? 'new_task',
@@ -332,6 +341,10 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
+    // Only include when true so the agent's ``inp.get("trace", False)``
+    // default semantics remain the no-op path. Keeps the wire payload
+    // slim for the common non-trace case.
+    ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
@@ -507,13 +520,29 @@ export async function finalizeTask(
     if (MEMORY_ID && !task.memory_written) {
       logger.info('Agent did not write memory — writing fallback episode', { task_id: taskId });
       try {
+        // Coerce at the shared helper rather than ``Number(...)`` so a
+        // corrupt string ``cost_usd`` from the DDB Document client
+        // collapses to ``undefined`` (and logs a warn) rather than
+        // rendering ``Cost: $NaN.`` into the episode text — see
+        // ``memory.ts::writeMinimalEpisode`` line 325 which calls
+        // ``.toFixed(4)`` on the value.
+        const durationS = coerceNumericOrNull(
+          task.duration_s,
+          { field: 'duration_s', task_id: taskId },
+          logger,
+        );
+        const costUsd = coerceNumericOrNull(
+          task.cost_usd,
+          { field: 'cost_usd', task_id: taskId },
+          logger,
+        );
         const written = await writeMinimalEpisode(
           MEMORY_ID,
           task.repo,
           taskId,
           currentStatus,
-          task.duration_s !== undefined ? Number(task.duration_s) : undefined,
-          task.cost_usd !== undefined ? Number(task.cost_usd) : undefined,
+          durationS ?? undefined,
+          costUsd ?? undefined,
         );
         if (!written) {
           logger.warn('Fallback episode write returned false', { task_id: taskId });

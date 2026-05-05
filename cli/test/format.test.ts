@@ -34,6 +34,7 @@ describe('format', () => {
     pr_url: 'https://github.com/owner/repo/pull/1',
     error_message: null,
     error_classification: null,
+    channel_source: 'api',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T01:00:00Z',
     started_at: '2026-01-01T00:01:00Z',
@@ -43,6 +44,10 @@ describe('format', () => {
     build_passed: true,
     max_turns: 100,
     max_budget_usd: null,
+    turns_attempted: null,
+    turns_completed: null,
+    trace: false,
+    trace_s3_uri: null,
   };
 
   describe('formatTaskDetail', () => {
@@ -101,6 +106,23 @@ describe('format', () => {
       const output = formatTaskDetail(task);
       expect(output).not.toContain('Type:');
       expect(output).not.toContain('PR #:');
+    });
+
+    test('renders Trace S3 line when trace_s3_uri is non-null', () => {
+      const traced: TaskDetail = {
+        ...task,
+        trace: true,
+        trace_s3_uri: 's3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
+      };
+      const output = formatTaskDetail(traced);
+      expect(output).toContain(
+        'Trace S3:    s3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
+      );
+    });
+
+    test('omits Trace S3 line when trace_s3_uri is null', () => {
+      const output = formatTaskDetail(task);
+      expect(output).not.toContain('Trace S3:');
     });
 
     test('shows classified error with raw detail when error_classification is present', () => {

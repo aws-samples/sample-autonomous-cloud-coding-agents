@@ -57,20 +57,39 @@ export async function login(username: string, password: string): Promise<void> {
   });
 }
 
-/** Get a valid auth token, refreshing automatically if needed. */
+/** Get a valid auth token, refreshing automatically if needed.
+ *
+ * The REST API Gateway's Cognito authorizer validates **ID tokens** (checks
+ * the `aud` claim against the app client ID). All CLI calls go through the
+ * REST path, so this is the only token we need.
+ */
 export async function getAuthToken(): Promise<string> {
+  return getIdToken();
+}
+
+/** Get the Cognito ID token — for REST API Gateway calls. */
+export async function getIdToken(): Promise<string> {
+  const creds = await ensureFreshCredentials();
+  return creds.id_token;
+}
+
+/** Internal: return non-expired credentials, refreshing if needed. */
+async function ensureFreshCredentials(): Promise<Credentials> {
   const creds = loadCredentials();
   if (!creds) {
     throw new CliError('Not authenticated. Run `bgagent login` first.');
   }
-
   if (!isExpired(creds)) {
-    debug('Using cached token (not expired)');
-    return creds.id_token;
+    debug('Using cached tokens (not expired)');
+    return creds;
   }
-
-  debug('Token expired or near expiry, refreshing...');
-  return refreshToken(creds);
+  debug('Tokens expired or near expiry, refreshing...');
+  await refreshToken(creds);
+  const fresh = loadCredentials();
+  if (!fresh) {
+    throw new CliError('Credentials vanished after refresh. Run `bgagent login`.');
+  }
+  return fresh;
 }
 
 function isExpired(creds: Credentials): boolean {
@@ -78,7 +97,7 @@ function isExpired(creds: Credentials): boolean {
   return Date.now() >= expiryMs - TOKEN_REFRESH_BUFFER_MS;
 }
 
-async function refreshToken(creds: Credentials): Promise<string> {
+async function refreshToken(creds: Credentials): Promise<void> {
   const config = loadConfig();
   const client = new CognitoIdentityProviderClient({ region: config.region });
 
@@ -102,8 +121,6 @@ async function refreshToken(creds: Credentials): Promise<string> {
       refresh_token: creds.refresh_token,
       token_expiry: expiry,
     });
-
-    return auth.IdToken;
   } catch (err) {
     if (err instanceof CliError) throw err;
     throw new CliError('Session expired. Run `bgagent login` to re-authenticate.');

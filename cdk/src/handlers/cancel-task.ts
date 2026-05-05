@@ -81,6 +81,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const wasRunning = record.status === TaskStatus.RUNNING;
     const runtimeSessionId = record.session_id;
+    // Prefer the ARN recorded on the task record (agent container writes
+    // this when the session starts). Fall back to the stack's single
+    // runtime ARN for the pre-session window — the task was admitted but
+    // the container hasn't written its session info yet.
     const agentRuntimeArn = record.agent_runtime_arn ?? RUNTIME_ARN;
 
     // 6. Update task to CANCELLED with condition to prevent race
@@ -156,12 +160,38 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           });
         }
       } else {
-        logger.warn('Running task has no recognized compute backend to stop', {
+        // Task status was flipped to CANCELLED in DDB but we have no
+        // compute handle to actually stop the container. This is a
+        // resource-leak risk: the container may still be running and
+        // consuming tokens/concurrency. Emit a dedicated event so ops
+        // dashboards / alarms can surface the orphan.
+        logger.error('Running task has no recognized compute backend to stop — possible orphan', {
           task_id: taskId,
           request_id: requestId,
           compute_type: computeType,
           has_runtime_arn: !!agentRuntimeArn,
         });
+        try {
+          await ddb.send(new PutCommand({
+            TableName: EVENTS_TABLE_NAME,
+            Item: {
+              task_id: taskId,
+              event_id: ulid(),
+              event_type: 'task_cancel_compute_orphan',
+              timestamp: now,
+              ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
+              metadata: {
+                compute_type: computeType,
+                reason: 'missing_runtime_handle',
+              },
+            },
+          }));
+        } catch (eventErr) {
+          logger.warn('Failed to write task_cancel_compute_orphan event', {
+            task_id: taskId,
+            error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+          });
+        }
       }
     }
 

@@ -18,11 +18,24 @@
  */
 
 import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+
+/**
+ * Provenance of a task's submission. ``api`` covers CLI / Cognito-authenticated
+ * submissions; ``webhook`` covers HMAC-signed inbound webhook submissions.
+ *
+ * Narrowed from ``string`` so switches and predicates that read
+ * ``channel_source`` get exhaustiveness checking at compile time; matches the
+ * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
+ * Keep in sync with ``cli/src/types.ts::ChannelSource``.
+ */
+export type ChannelSource = 'api' | 'webhook';
 
 /** Task types that operate on an existing pull request. */
 export function isPrTaskType(taskType: TaskType): boolean {
@@ -51,7 +64,7 @@ export interface TaskRecord {
   readonly pr_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
-  readonly channel_source: string;
+  readonly channel_source: ChannelSource;
   readonly channel_metadata?: Record<string, string>;
   readonly status_created_at: string;
   readonly created_at: string;
@@ -63,11 +76,74 @@ export interface TaskRecord {
   readonly build_passed?: boolean;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  /**
+   * Whether the task was submitted with ``--trace`` (design §10.1).
+   * When true the orchestrator threads a ``trace: true`` flag into the
+   * agent payload; the agent's ``_ProgressWriter`` raises its preview
+   * cap from 200 chars to 4 KB so debug captures aren't silently
+   * clipped. Opt-in per task — not routine observability.
+   */
+  readonly trace?: boolean;
+  /**
+   * S3 URI of the gzipped JSONL trajectory dump written by the agent on
+   * terminal state when ``trace`` is true (design §10.1). Shape:
+   * ``s3://<trace-bucket>/traces/<user_id>/<task_id>.jsonl.gz``. Absent
+   * until the agent finishes the upload; also absent for tasks that ran
+   * without ``--trace`` or whose upload failed. The
+   * ``get-trace-url`` handler reads this to issue presigned download URLs.
+   */
+  readonly trace_s3_uri?: string;
+  /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
+   *  tripped any cap. Equals the legacy `turns` value. */
+  readonly turns_attempted?: number;
+  /** Rev-5 DATA-1: turns that actually completed (clamped to
+   *  `max_turns` when `agent_status='error_max_turns'`). */
+  readonly turns_completed?: number;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
+  /**
+   * Optional per-task override for the FanOutConsumer's channel filters
+   * (design §6.5). When present, the router uses these settings instead
+   * of the per-channel defaults. Chunk I introduced the type and the
+   * resolution path; Chunk K adds a submit-time API parameter and the
+   * DDB read that populates this field — until then it is always
+   * ``undefined`` at runtime and every task inherits the defaults.
+   */
+  readonly notifications?: TaskNotificationsConfig;
+  /**
+   * ID of the single GitHub issue comment the fan-out plane maintains
+   * for this task (design §6.4 — edit-in-place). Written by the
+   * GitHub dispatcher on the first delivery; read on subsequent
+   * deliveries to PATCH instead of POST. Absent until the first
+   * dispatch fires successfully.
+   */
+  readonly github_comment_id?: number;
+}
+
+/** Per-channel override for one notification channel. See
+ *  ``handlers/fanout-task-events.ts::resolveChannelFilter`` for the
+ *  resolution semantics — explicit ``events`` REPLACE the channel
+ *  default; a ``"default"`` token inside ``events`` expands to the
+ *  default set. */
+export interface ChannelConfig {
+  /** If false, the channel is opted-out and no events dispatch. */
+  readonly enabled?: boolean;
+  /** Override the subscribed event types. ``["default"]`` resolves to
+   *  the channel default; an explicit list replaces defaults entirely. */
+  readonly events?: readonly string[];
+}
+
+/** Per-task notification overrides (design §6.5). Single source of truth;
+ *  imported by both ``TaskRecord`` (producer side) and
+ *  ``fanout-task-events.ts`` (consumer side) so a Chunk K schema change
+ *  lands in one place and both sides pick it up at compile time. */
+export interface TaskNotificationsConfig {
+  readonly slack?: ChannelConfig;
+  readonly email?: ChannelConfig;
+  readonly github?: ChannelConfig;
 }
 
 /**
@@ -87,6 +163,12 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
+  /** Provenance of the task's submission — ``api`` for CLI/Cognito
+   *  submissions, ``webhook`` for HMAC-signed inbound webhooks. Present
+   *  on every task record at creation time (``create-task-core.ts``)
+   *  and surfaced here so CLI / dashboard / audit consumers do not have
+   *  to spelunk CloudWatch to learn which channel created a task. */
+  readonly channel_source: ChannelSource;
   readonly created_at: string;
   readonly updated_at: string;
   readonly started_at: string | null;
@@ -96,7 +178,23 @@ export interface TaskDetail {
   readonly build_passed: boolean | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
+  /** Rev-5 DATA-1: SDK-attempted turn count (may exceed `max_turns` by 1
+   *  under `agent_status='error_max_turns'`). */
+  readonly turns_attempted: number | null;
+  /** Rev-5 DATA-1: actually-completed turns, clamped to `max_turns`
+   *  when the cap tripped. */
+  readonly turns_completed: number | null;
   readonly prompt_version: string | null;
+  /** True when the task was submitted with ``--trace`` — surfaces the
+   *  opt-in state to scripts / CLI consumers without making them
+   *  guess from secondary signals. */
+  readonly trace: boolean;
+  /** S3 URI of the uploaded ``--trace`` trajectory dump, or ``null``
+   *  until the agent finishes the terminal upload (or for tasks that
+   *  ran without ``--trace``). Non-optional so scripts can rely on
+   *  the field being present; CLI download resolves this via the
+   *  ``get-trace-url`` handler rather than hitting S3 directly. */
+  readonly trace_s3_uri: string | null;
 }
 
 /**
@@ -129,7 +227,39 @@ export interface EventRecord {
 }
 
 /**
+ * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
+ *
+ * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
+ * used by CLI polling and webhook replay to resume from a known event id)
+ * over ``next_token`` (an opaque DynamoDB pagination token). If both are
+ * provided, the handler uses ``after`` and logs a WARN. Neither is required
+ * — callers may start from the beginning of the task's event stream.
+ *
+ * When a page is truncated at ``limit``, the response includes a
+ * ``next_token`` so the caller can continue paginating forward regardless
+ * of which mode they started with.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
+ */
+export interface GetTaskEventsQuery {
+  readonly limit?: number;
+  readonly next_token?: string;
+  /** ULID event_id cursor. Returns events with ``event_id > after``. */
+  readonly after?: string;
+  /**
+   * When truthy (``"1"`` or ``"true"``), return events in descending
+   * ``event_id`` order (newest first). Used by ``bgagent status`` to
+   * render a recency-biased snapshot without walking the full event
+   * stream. Mutually exclusive with ``after`` — the handler rejects
+   * the combination with 400.
+   */
+  readonly desc?: string;
+}
+
+/**
  * Create task request body.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -140,6 +270,8 @@ export interface CreateTaskRequest {
   readonly task_type?: TaskType;
   readonly pr_number?: number;
   readonly attachments?: Attachment[];
+  /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
+  readonly trace?: boolean;
 }
 
 /**
@@ -155,10 +287,21 @@ export interface Attachment {
 
 /**
  * Map a DynamoDB task record to the API detail response shape.
+ *
+ * All numeric fields sourced from the DDB record are routed through
+ * ``coerceNumericOrNull`` — the Document-client deserializes DynamoDB
+ * ``Number`` attributes as JavaScript ``string``s in some code paths
+ * (see ``shared/numeric.ts`` for rationale), and any downstream caller
+ * doing arithmetic (``.toFixed``, comparison, math) on a string-typed
+ * "number" crashes at runtime. Coercing uniformly here means no caller
+ * has to guess which TaskDetail numeric fields are safe — do not bypass
+ * the helper when adding new numeric fields.
+ *
  * @param record - the DynamoDB task record.
  * @returns the API-facing task detail.
  */
 export function toTaskDetail(record: TaskRecord): TaskDetail {
+  const ctx = { task_id: record.task_id };
   return {
     task_id: record.task_id,
     status: record.status,
@@ -172,17 +315,82 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     pr_url: record.pr_url ?? null,
     error_message: record.error_message ?? null,
     error_classification: classifyError(record.error_message),
+    channel_source: record.channel_source,
     created_at: record.created_at,
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
     completed_at: record.completed_at ?? null,
-    duration_s: record.duration_s ?? null,
-    cost_usd: record.cost_usd ?? null,
+    duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
+    cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
-    max_turns: record.max_turns ?? null,
-    max_budget_usd: record.max_budget_usd ?? null,
+    max_turns: coerceNumericOrNull(record.max_turns, { ...ctx, field: 'max_turns' }, logger),
+    max_budget_usd: coerceNumericOrNull(record.max_budget_usd, { ...ctx, field: 'max_budget_usd' }, logger),
+    turns_attempted: coerceNumericOrNull(record.turns_attempted, { ...ctx, field: 'turns_attempted' }, logger),
+    turns_completed: coerceNumericOrNull(record.turns_completed, { ...ctx, field: 'turns_completed' }, logger),
     prompt_version: record.prompt_version ?? null,
+    trace: record.trace === true,
+    trace_s3_uri: record.trace_s3_uri ?? null,
   };
+}
+
+/**
+ * Maximum length (in characters, after trim) of a nudge ``message``.
+ *
+ * Mirrored in ``cli/src/types.ts`` as ``NUDGE_MAX_MESSAGE_LENGTH`` and
+ * consumed both client-side (for fail-fast rejection without a round-trip)
+ * and server-side (in ``cdk/src/handlers/nudge-task.ts``).
+ */
+export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
+
+/**
+ * Nudge request body for POST /v1/tasks/{task_id}/nudge (Phase 2).
+ *
+ * A nudge is a short, between-turns steering message from the user to a
+ * running agent. It is written to `TaskNudgesTable` after guardrail
+ * screening + rate limiting, then picked up by the agent's nudge_reader
+ * at the next between-turns seam and injected as an authoritative
+ * `<user_nudge>` XML block.
+ *
+ * Keep in sync with `cli/src/types.ts`.
+ */
+export interface NudgeRequest {
+  /** Free-text steering message. Max 2000 chars after trim; guardrail-screened. */
+  readonly message: string;
+}
+
+/**
+ * Nudge response body. Returned with HTTP 202 Accepted — the nudge has
+ * been persisted but has not yet reached the agent; it will be injected
+ * at the next between-turns seam. Callers wanting confirmation that the
+ * agent saw the nudge should watch task events for `nudge_consumed`.
+ */
+export interface NudgeResponse {
+  readonly task_id: string;
+  readonly nudge_id: string;
+  readonly submitted_at: string;
+}
+
+/**
+ * Full nudge record as stored in `TaskNudgesTable`.
+ *
+ * - PK = `task_id` (groups all nudges for a task together)
+ * - SK = `nudge_id` (ULID — lexicographic sort == chronological sort)
+ *
+ * The agent-side reader queries by `task_id` with `consumed = false`
+ * filter, orders by `nudge_id` (implicit sort-key order), and marks
+ * each consumed nudge with an atomic conditional UpdateItem
+ * (ConditionExpression: `consumed = :false`) for idempotency across
+ * restarts mid-consume.
+ */
+export interface NudgeRecord {
+  readonly task_id: string;
+  readonly nudge_id: string;
+  readonly user_id: string;
+  readonly message: string;
+  readonly created_at: string;
+  readonly consumed: boolean;
+  readonly consumed_at?: string;
+  readonly ttl?: number;
 }
 
 /**

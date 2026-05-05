@@ -26,6 +26,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -43,6 +44,18 @@ export interface TaskApiProps {
    * The DynamoDB task events table.
    */
   readonly taskEventsTable: dynamodb.ITable;
+
+  /**
+   * The DynamoDB task nudges table (Phase 2). When provided, the
+   * `POST /tasks/{task_id}/nudge` endpoint is created.
+   */
+  readonly taskNudgesTable?: dynamodb.ITable;
+
+  /**
+   * Per-task per-minute nudge rate limit.
+   * @default 10
+   */
+  readonly nudgeRateLimitPerMinute?: number;
 
   /**
    * The DynamoDB repo config table. When provided, task creation checks
@@ -96,10 +109,18 @@ export interface TaskApiProps {
   readonly webhookRetentionDays?: number;
 
   /**
-   * AgentCore runtime ARNs for which cancel-task may call `StopRuntimeSession`.
-   * First ARN is also passed as `RUNTIME_ARN` when the task record has no `agent_runtime_arn`.
+   * AgentCore runtime ARN for which cancel-task may call `StopRuntimeSession`.
+   * Also passed as `RUNTIME_ARN` to cancel-task so it can resolve the target
+   * runtime when a task record lacks `agent_runtime_arn`.
    */
-  readonly agentCoreStopSessionRuntimeArns?: string[];
+  readonly agentCoreStopSessionRuntimeArn?: string;
+
+  /**
+   * S3 bucket storing ``--trace`` trajectory artifacts. When provided,
+   * a ``GET /v1/tasks/{task_id}/trace`` route is created that issues
+   * short-lived presigned download URLs (design §10.1).
+   */
+  readonly traceArtifactsBucket?: s3.IBucket;
 
   /**
    * ECS cluster ARN for cancel-task to stop ECS-backed tasks.
@@ -135,6 +156,11 @@ export class TaskApi extends Construct {
   public readonly userPool: cognito.UserPool;
 
   /**
+   * The Cognito User Pool App Client.
+   */
+  public readonly appClient: cognito.UserPoolClient;
+
+  /**
    * The Cognito User Pool App Client ID.
    */
   public readonly appClientId: string;
@@ -159,14 +185,14 @@ export class TaskApi extends Construct {
       removalPolicy,
     });
 
-    const appClient = this.userPool.addClient('AppClient', {
+    this.appClient = this.userPool.addClient('AppClient', {
       authFlows: {
         userPassword: true,
         userSrp: true,
       },
       generateSecret: false,
     });
-    this.appClientId = appClient.userPoolClientId;
+    this.appClientId = this.appClient.userPoolClientId;
 
     // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
@@ -286,8 +312,24 @@ export class TaskApi extends Construct {
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
     };
+    // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
+    // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
+    // shipped new commands (e.g. StopRuntimeSessionCommand) that are not in
+    // the runtime's bundled SDK, so externalizing it causes Lambdas to throw
+    // `<Command> is not a constructor` at runtime — a silent failure mode
+    // because catch blocks swallow the error and log a best-effort warning.
+    // Bundle bedrock-agentcore explicitly; keep stable clients external to
+    // keep Lambda sizes small.
     const commonBundling: lambda.BundlingOptions = {
-      externalModules: ['@aws-sdk/*'],
+      externalModules: [
+        '@aws-sdk/client-dynamodb',
+        '@aws-sdk/client-ecs',
+        '@aws-sdk/client-lambda',
+        '@aws-sdk/client-bedrock-runtime',
+        '@aws-sdk/client-secrets-manager',
+        '@aws-sdk/lib-dynamodb',
+        '@aws-sdk/util-dynamodb',
+      ],
     };
 
     // --- Lambda handlers ---
@@ -331,9 +373,9 @@ export class TaskApi extends Construct {
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
-    const stopSessionArns = props.agentCoreStopSessionRuntimeArns ?? [];
-    if (stopSessionArns.length > 0) {
-      cancelTaskEnv.RUNTIME_ARN = stopSessionArns[0]!;
+    const stopSessionArn = props.agentCoreStopSessionRuntimeArn;
+    if (stopSessionArn) {
+      cancelTaskEnv.RUNTIME_ARN = stopSessionArn;
     }
     if (props.ecsClusterArn) {
       cancelTaskEnv.ECS_CLUSTER_ARN = props.ecsClusterArn;
@@ -346,6 +388,12 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: cancelTaskEnv,
       bundling: commonBundling,
+      // Cancel performs: DDB GetItem + DDB UpdateItem + ECS StopTask or
+      // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
+      // is not enough once cold-start TLS handshakes for bedrock-agentcore
+      // are added.  15s gives comfortable headroom.
+      timeout: Duration.seconds(15),
+      memorySize: 256,
     });
 
     const getTaskEventsFn = new lambda.NodejsFunction(this, 'GetTaskEventsFn', {
@@ -364,11 +412,10 @@ export class TaskApi extends Construct {
     props.taskTable.grantReadWriteData(cancelTaskFn);
     props.taskEventsTable.grantReadWriteData(cancelTaskFn);
 
-    if (stopSessionArns.length > 0) {
-      const runtimeResources = stopSessionArns.flatMap(arn => [arn, `${arn}/*`]);
+    if (stopSessionArn) {
       cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['bedrock-agentcore:StopRuntimeSession'],
-        resources: runtimeResources,
+        resources: [stopSessionArn, `${stopSessionArn}/*`],
       }));
     }
 
@@ -431,6 +478,101 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
+    if (props.traceArtifactsBucket) {
+      const traceBucket = props.traceArtifactsBucket;
+      const getTraceUrlFn = new lambda.NodejsFunction(this, 'GetTraceUrlFn', {
+        entry: path.join(handlersDir, 'get-trace-url.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: {
+          ...commonEnv,
+          TRACE_ARTIFACTS_BUCKET_NAME: traceBucket.bucketName,
+        },
+        bundling: {
+          ...commonBundling,
+          // Defensive future-proofing: if ``@aws-sdk/client-s3`` or
+          // ``@aws-sdk/s3-request-presigner`` are ever added to
+          // ``commonBundling.externalModules`` (e.g. because a future
+          // Node runtime ships them), this filter ensures they stay
+          // bundled for *this* function — the Node 24 Lambda runtime
+          // does not ship either, and ``getSignedUrl`` will throw
+          // ``Cannot find module`` at cold start if it's externalized.
+          // Today this is a no-op (neither module is in the common
+          // external list); the filter exists to guard against drift.
+          externalModules: commonBundling.externalModules?.filter(
+            m => m !== '@aws-sdk/client-s3' && m !== '@aws-sdk/s3-request-presigner',
+          ),
+        },
+        // Cold-start SDK load (s3-client + s3-request-presigner + lib-dynamodb)
+        // exceeds Lambda's 3s default, causing INIT timeout → 502 Bad Gateway.
+        timeout: Duration.seconds(15),
+        memorySize: 512,
+      });
+
+      props.taskTable.grantReadData(getTraceUrlFn);
+      // Minimal grant — the handler only needs ``s3:GetObject`` (which
+      // implicitly covers ``s3:HeadObject``) on trace objects to sign
+      // presigned URLs and HEAD-check for existence before presigning.
+      // ``grantRead`` would expand to ``s3:GetObject*`` + ``s3:GetBucket*``
+      // + ``s3:List*``; ``ListBucket`` / ``GetBucketLocation`` / etc. are
+      // unnecessary scope. Tightening to an explicit statement (L3 item 2).
+      getTraceUrlFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [`${traceBucket.bucketArn}/*`],
+      }));
+
+      const trace = taskById.addResource('trace');
+      trace.addMethod('GET', new apigw.LambdaIntegration(getTraceUrlFn), cognitoAuthOptions);
+
+      allFunctions.push(getTraceUrlFn);
+    }
+
+    // --- Nudge endpoint (Phase 2): POST /tasks/{task_id}/nudge ---
+    if (props.taskNudgesTable) {
+      const nudgeTaskEnv: Record<string, string> = {
+        ...commonEnv,
+        NUDGES_TABLE_NAME: props.taskNudgesTable.tableName,
+        NUDGE_RATE_LIMIT_PER_MINUTE: String(props.nudgeRateLimitPerMinute ?? 10),
+      };
+      if (props.guardrailId && props.guardrailVersion) {
+        nudgeTaskEnv.GUARDRAIL_ID = props.guardrailId;
+        nudgeTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+      }
+
+      const nudgeTaskFn = new lambda.NodejsFunction(this, 'NudgeTaskFn', {
+        entry: path.join(handlersDir, 'nudge-task.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: nudgeTaskEnv,
+        bundling: commonBundling,
+      });
+
+      // Read tasks (ownership + state), read/write nudges (persist + rate-limit counter).
+      props.taskTable.grantReadData(nudgeTaskFn);
+      props.taskNudgesTable.grantReadWriteData(nudgeTaskFn);
+
+      if (props.guardrailId) {
+        nudgeTaskFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['bedrock:ApplyGuardrail'],
+          resources: [
+            Stack.of(this).formatArn({
+              service: 'bedrock',
+              resource: 'guardrail',
+              resourceName: props.guardrailId,
+            }),
+          ],
+        }));
+      }
+
+      const nudge = taskById.addResource('nudge');
+      nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn), cognitoAuthOptions);
+
+      allFunctions.push(nudgeTaskFn);
+    }
 
     // --- Webhook endpoints (only when webhookTable is provided) ---
     if (props.webhookTable) {

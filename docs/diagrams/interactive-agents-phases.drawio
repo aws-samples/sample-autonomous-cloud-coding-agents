@@ -1,0 +1,1223 @@
+<mxfile host="Electron" agent="Claude Code rev-6 regen" pages="5">
+  <diagram name="1. Rev-6 architecture (async-only)" id="rev6-arch">
+    <mxGraphModel dx="1614" dy="953" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="notif-group" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#F57F17;fontSize=12;fontStyle=1;verticalAlign=top;spacing=8;fontFamily=Helvetica;" value="Notification plane — AD-4 first-class" vertex="1">
+          <mxGeometry height="300" width="2240" x="90" y="1057" as="geometry" />
+        </mxCell>
+        <mxCell id="lambdas-group" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9900;fontSize=12;fontStyle=1;verticalAlign=top;spacing=8;fontFamily=Helvetica;" value="Lambda handlers (per-endpoint, stateless)" vertex="1">
+          <mxGeometry height="200" width="1600" x="80" y="475" as="geometry" />
+        </mxCell>
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontFamily=Helvetica;" value="ABCA - Interactive Agents&lt;div&gt;&lt;i&gt;&lt;font style=&quot;font-size: 14px;&quot;&gt;Single runtime · polling-only CLI · DynamoDB event spine · notification plane&lt;/font&gt;&lt;/i&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="50" width="2000" x="200" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend" parent="1" style="text;html=1;strokeColor=#9E9E9E;fillColor=#F5F5F5;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;spacing=8;spacingLeft=10;fontFamily=Helvetica;" value="&lt;b&gt;Legend&lt;br&gt;&lt;/b&gt;&lt;font style=&quot;color: light-dark(rgb(51, 153, 255), rgb(255, 109, 0));&quot;&gt;—&lt;/font&gt; blue arrow: synchronous call&lt;br&gt;&lt;font style=&quot;color: light-dark(rgb(102, 204, 0), rgb(0, 204, 0));&quot;&gt;—&lt;/font&gt; green arrow: async invoke / DDB stream&lt;br&gt;&lt;font style=&quot;color: light-dark(rgb(255, 109, 0), rgb(255, 109, 0));&quot;&gt;—&lt;/font&gt; orange arrow: CLI polling loop (adaptive 0.5-5s)&lt;br&gt;- - dashed: durable writes to DynamoDB" vertex="1">
+          <mxGeometry height="110" width="420" x="97" y="1391" as="geometry" />
+        </mxCell>
+        <mxCell id="clients-group" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#3F51B5;fontSize=13;fontStyle=1;verticalAlign=top;spacing=8;fontFamily=Helvetica;" value="Client surfaces" vertex="1">
+          <mxGeometry height="160" width="2240" x="80" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="cli" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3F51B5;fontSize=12;spacing=8;fontFamily=Helvetica;" value="bgagent CLI&#xa;(submit / watch / status /&#xa;nudge / trace download)" vertex="1">
+          <mxGeometry height="80" width="240" x="140" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-webhook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3F51B5;fontSize=12;spacing=8;fontFamily=Helvetica;" value="GitHub webhook&#xa;(issue / PR events)" vertex="1">
+          <mxGeometry height="80" width="220" x="460" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="slack-btn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3F51B5;fontSize=12;spacing=8;fontFamily=Helvetica;" value="Slack action buttons&#xa;(approve / deny — P3)" vertex="1">
+          <mxGeometry height="80" width="220" x="760" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="user-note" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=10;fontFamily=Helvetica;rounded=1;fillColor=light-dark(#D4E1F5,#FFFFFF);strokeColor=light-dark(#6666FF,#FFFFFF);arcSize=8;" value="&lt;blockquote style=&quot;margin: 0 0 0 40px; border: none; padding: 0px;&quot;&gt;User&lt;br&gt; (closes laptop; task survives — durability in DDB)&lt;/blockquote&gt;" vertex="1">
+          <mxGeometry height="60" width="340" x="1040" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="apigw" parent="1" style="shape=mxgraph.aws4.api_gateway;sketch=0;points=[[0,0.5],[1,0.5],[0.5,0],[0.5,1]];outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#E7157B;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;shadow=0;labelPosition=center;fontFamily=Helvetica;" value="&lt;div&gt;Cognito JWT + HMAC webhook authorizers&lt;br&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="78" width="78" x="1080" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="apigw-label" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=top;whiteSpace=wrap;fontSize=11;fontStyle=1;fontFamily=Helvetica;" value="API Gateway&#xa;REST, JWT-authed" vertex="1">
+          <mxGeometry height="40" width="240" x="998" y="245" as="geometry" />
+        </mxCell>
+        <mxCell id="apigw-routes" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCE4EC;strokeColor=#E7157B;fontSize=10;align=left;spacing=6;spacingLeft=8;fontFamily=Helvetica;" value="POST /tasks              (submit)&#xa;GET  /tasks/{id}          (status)&#xa;GET  /tasks/{id}/events   (watch — polling)&#xa;POST /tasks/{id}/nudge    (nudge)&#xa;GET  /tasks/{id}/trace-url (trace download)&#xa;DELETE /tasks/{id}         (cancel)&#xa;POST /webhooks/tasks       (GH webhook — HMAC)" vertex="1">
+          <mxGeometry height="130" width="380" x="1251" y="284" as="geometry" />
+        </mxCell>
+        <mxCell id="submit-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="&lt;b&gt;SubmitTaskFn&lt;br&gt;(preflight + write&lt;br&gt;TaskRecord + async&lt;br&gt;invoke orchestrator)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="60" x="140" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="status-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="300" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="status-fn-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="StatusFn&#xa;(deterministic&#xa;templated snapshot — AD-6)" vertex="1">
+          <mxGeometry height="60" width="180" x="243" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="events-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="480" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="events-fn-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="EventsFn&#xa;(cursor read of&#xa;TaskEventsTable)" vertex="1">
+          <mxGeometry height="50" width="180" x="420" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="nudge-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="660" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="nudge-fn-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="NudgeFn&#xa;(rate-limit +&#xa;TaskNudgesTable&#xa;write)" vertex="1">
+          <mxGeometry height="60" width="180" x="600" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="trace-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="840" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="trace-fn-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="TraceUrlFn&#xa;(presigned S3 URL)" vertex="1">
+          <mxGeometry height="40" width="180" x="780" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="webhook-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1020" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="webhook-fn-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="WebhookFn&#xa;(HMAC + repo&#xa;event routing)" vertex="1">
+          <mxGeometry height="50" width="180" x="960" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="orch-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1280" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="orch-fn-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="OrchestratorFn&#xa;(admission check +&#xa;SigV4 InvokeAgentRuntime)" vertex="1">
+          <mxGeometry height="50" width="220" x="1200" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="runtime-group" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5FE;strokeColor=#0277BD;fontSize=12;fontStyle=1;verticalAlign=top;spacing=8;fontFamily=Helvetica;" value="AgentCore Runtime (single, IAM/SigV4-authed) — AD-1" vertex="1">
+          <mxGeometry height="260" width="540" x="1780" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="agent-container" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0277BD;fontSize=11;fontStyle=1;spacing=8;fontFamily=Helvetica;" value="Agent container&#xa;(Claude Agent SDK + pipeline + runner + hooks)" vertex="1">
+          <mxGeometry height="60" width="460" x="1820" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="progress-writer" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BBDEFB;strokeColor=#0277BD;fontSize=10;spacing=6;fontFamily=Helvetica;" value="ProgressWriter&#xa;writes events" vertex="1">
+          <mxGeometry height="50" width="140" x="1820" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="nudge-reader" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BBDEFB;strokeColor=#0277BD;fontSize=10;spacing=6;fontFamily=Helvetica;" value="nudge_reader.py&#xa;between-turns hook&#xa;(combined-turn ack — AD-5)" vertex="1">
+          <mxGeometry height="50" width="160" x="1985" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="trace-uploader" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BBDEFB;strokeColor=#0277BD;fontSize=10;spacing=6;fontFamily=Helvetica;" value="trace uploader&#xa;gzipped NDJSON → S3&#xa;(opt-in via --trace)" vertex="1">
+          <mxGeometry height="50" width="130" x="2170" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="task-record-reader" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=10;fontStyle=2;fontFamily=Helvetica;" value="reads TaskTable/Nudges" vertex="1">
+          <mxGeometry height="30" width="460" x="1820" y="675" as="geometry" />
+        </mxCell>
+        <mxCell id="data-group" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#388E3C;fontSize=12;fontStyle=1;verticalAlign=top;spacing=8;fontFamily=Helvetica;" value="Durable state (DynamoDB + S3) — AD-3 TaskEventsTable is the single event spine" vertex="1">
+          <mxGeometry height="240" width="2240" x="90" y="783" as="geometry" />
+        </mxCell>
+        <mxCell id="task-table" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed;fontStyle=1;fontFamily=Helvetica;" value="TaskTable&#xa;(task state +&#xa;current turn)" vertex="1">
+          <mxGeometry height="78" width="78" x="200" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="events-table" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="&lt;b&gt;TaskEventsTable&lt;br&gt;(event spine +&lt;br&gt;DDB Streams)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="78" width="78" x="560" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="nudges-table" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="78" width="78" x="920" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="nudges-table-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=11;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="TaskNudgesTable&#xa;(pending nudges)" vertex="1">
+          <mxGeometry height="40" width="210" x="855" y="935" as="geometry" />
+        </mxCell>
+        <mxCell id="approvals-table" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="78" width="78" x="1280" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="approvals-table-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=11;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="TaskApprovalsTable&#xa;(Phase 3 HITL — AD-8)" vertex="1">
+          <mxGeometry height="40" width="240" x="1200" y="935" as="geometry" />
+        </mxCell>
+        <mxCell id="trace-bucket" parent="1" style="shape=mxgraph.aws4.s3;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#7AA116;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="&lt;b&gt;TraceBucket&lt;br&gt;s3://.../traces/&lt;br&gt;/.jsonl.gz&lt;br&gt;7-day TTL&lt;/b&gt;" vertex="1">
+          <mxGeometry height="78" width="78" x="1660" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="iam" parent="1" style="shape=mxgraph.aws4.identity_and_access_management;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#C925D1;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="&lt;b&gt;IAM&lt;br&gt;(SigV4 +&lt;br&gt;least privilege)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="78" width="78" x="2010" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="fanout" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="240" y="1140" as="geometry" />
+        </mxCell>
+        <mxCell id="fanout-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="FanOutConsumer&#xa;(DDB Stream → per-channel router;&#xa;ParallelizationFactor=1 preserves&#xa;per-task ordering — §6.1)" vertex="1">
+          <mxGeometry height="70" width="260" x="140" y="1205" as="geometry" />
+        </mxCell>
+        <mxCell id="defaults-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#F57F17;fontSize=10;align=left;spacing=6;spacingLeft=8;fontFamily=Helvetica;" value="Per-channel default filters (AD-4, §6.2)&#xa;&#xa;Slack:  task_completed, task_failed, task_cancelled,&#xa;        pr_created, agent_error, approval_required,&#xa;        status_response     (--verbose adds agent_milestone)&#xa;Email:  task_completed, task_failed, approval_required&#xa;GitHub: pr_created + terminal status (edit-in-place)" vertex="1">
+          <mxGeometry height="140" width="297" x="390" y="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="slack-dispatch" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1000" y="1140" as="geometry" />
+        </mxCell>
+        <mxCell id="slack-dispatch-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="SlackDispatchFn&#xa;→ Slack Web API" vertex="1">
+          <mxGeometry height="40" width="180" x="940" y="1205" as="geometry" />
+        </mxCell>
+        <mxCell id="email-dispatch" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1220" y="1147" as="geometry" />
+        </mxCell>
+        <mxCell id="email-dispatch-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="EmailDispatchFn&#xa;→ SES" vertex="1">
+          <mxGeometry height="40" width="180" x="1160" y="1212" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-dispatch" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1440" y="1147" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-dispatch-label" parent="1" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontFamily=Helvetica;" value="GitHubDispatchFn&#xa;edit-in-place via If-Match&#xa;ETag on single PR comment&#xa;(AD-9, §6.4)" vertex="1">
+          <mxGeometry height="60" width="220" x="1360" y="1212" as="geometry" />
+        </mxCell>
+        <mxCell id="slack-api" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A154B;fontSize=11;spacing=6;fontFamily=Helvetica;" value="Slack Web API" vertex="1">
+          <mxGeometry height="40" width="221" x="1720" y="1071" as="geometry" />
+        </mxCell>
+        <mxCell id="ses" parent="1" style="shape=mxgraph.aws4.simple_email_service;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#277116;strokeColor=#ffffff;aspect=fixed;fontFamily=Helvetica;" value="SES" vertex="1">
+          <mxGeometry height="60" width="60" x="1800.5" y="1151" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-rest" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#24292F;fontSize=11;spacing=6;fontFamily=Helvetica;" value="GitHub REST API&#xa;(PATCH issues/comments/{id}&#xa;+ If-Match ETag)" vertex="1">
+          <mxGeometry height="60" width="220" x="1722" y="1261" as="geometry" />
+        </mxCell>
+        <mxCell id="e-cli-apigw" edge="1" parent="1" source="cli" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#EF6C00;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="apigw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="260" y="288" />
+              <mxPoint x="1119" y="288" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-cli-apigw-label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF;fontFamily=Helvetica;" value="REST (JWT) - polling loop for /events" vertex="1">
+          <mxGeometry height="21" width="351" x="630" y="296" as="geometry" />
+        </mxCell>
+        <mxCell id="e-webhook-apigw" edge="1" parent="1" source="gh-webhook" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="apigw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="570" y="280" />
+              <mxPoint x="1119" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-apigw-submit" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="submit-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-apigw-status" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="status-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-apigw-events" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="events-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-apigw-nudge" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="nudge-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-apigw-trace" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="trace-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-apigw-webhook" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="webhook-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-submit-orch" edge="1" parent="1" source="submit-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#43A047;strokeWidth=2;endArrow=classic;dashed=0;fontFamily=Helvetica;" target="orch-fn">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="170" y="648" />
+              <mxPoint x="1310" y="648" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-submit-orch-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF;fontFamily=Helvetica;" value="async invoke" vertex="1">
+          <mxGeometry height="20" width="100" x="638" y="426" as="geometry" />
+        </mxCell>
+        <mxCell id="e-webhook-orch" edge="1" parent="1" source="webhook-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#43A047;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="orch-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-orch-rt" edge="1" parent="1" source="orch-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=3;endArrow=classic;fontFamily=Helvetica;" target="agent-container">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-orch-rt-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF;fontFamily=Helvetica;" value="SigV4 InvokeAgentRuntime" vertex="1">
+          <mxGeometry height="20" width="200" x="1440" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="e-pw-events" edge="1" parent="1" source="progress-writer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#388E3C;strokeWidth=2;endArrow=classic;dashed=1;fontFamily=Helvetica;" target="events-table">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1890" y="746" />
+              <mxPoint x="667" y="746" />
+              <mxPoint x="667" y="889" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-pw-events-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF;fontFamily=Helvetica;" value="append events (durable)" vertex="1">
+          <mxGeometry height="20" width="159" x="1240.5" y="725" as="geometry" />
+        </mxCell>
+        <mxCell id="e-trace-up" edge="1" parent="1" source="trace-uploader" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#388E3C;strokeWidth=2;endArrow=classic;dashed=1;fontFamily=Helvetica;" target="trace-bucket">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2235" y="816" />
+              <mxPoint x="1792" y="816" />
+              <mxPoint x="1792" y="889" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-nr-nudges" edge="1" parent="1" source="nudge-reader" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#388E3C;strokeWidth=2;endArrow=classic;startArrow=classic;fontFamily=Helvetica;" target="nudges-table">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2065" y="769" />
+              <mxPoint x="1050" y="769" />
+              <mxPoint x="1050" y="889" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-evt-fanout" edge="1" parent="1" source="events-table" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#43A047;strokeWidth=3;endArrow=classic;fontFamily=Helvetica;" target="fanout">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="599" y="1100" />
+              <mxPoint x="270" y="1100" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-evt-fanout-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF;fontFamily=Helvetica;" value="DDB Stream (NEW_IMAGE)&#xa;ParallelizationFactor=1" vertex="1">
+          <mxGeometry height="30" width="220" x="350" y="1065" as="geometry" />
+        </mxCell>
+        <mxCell id="e-fo-slack" edge="1" parent="1" source="fanout" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="slack-dispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="368" y="1170" />
+              <mxPoint x="368" y="1310" />
+              <mxPoint x="955" y="1310" />
+              <mxPoint x="955" y="1170" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-fo-email" edge="1" parent="1" source="fanout" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="email-dispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="368" y="1170" />
+              <mxPoint x="368" y="1311" />
+              <mxPoint x="1172" y="1311" />
+              <mxPoint x="1172" y="1177" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-fo-gh" edge="1" parent="1" source="fanout" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="gh-dispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="368" y="1170" />
+              <mxPoint x="368" y="1311" />
+              <mxPoint x="1384" y="1311" />
+              <mxPoint x="1384" y="1177" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-sd-slack" edge="1" parent="1" source="slack-dispatch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="slack-api">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1030" y="1091" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-ed-ses" edge="1" parent="1" source="email-dispatch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="ses">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1326" y="1177" />
+              <mxPoint x="1326" y="1115" />
+              <mxPoint x="1638" y="1115" />
+              <mxPoint x="1638" y="1177" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-gd-gh" edge="1" parent="1" source="gh-dispatch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;fontFamily=Helvetica;" target="gh-rest">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1562" y="1177" />
+              <mxPoint x="1562" y="1291" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-events-fn-table" edge="1" parent="1" source="events-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;dashed=0;fontFamily=Helvetica;" target="events-table">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-status-fn-events" edge="1" parent="1" source="status-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;dashed=0;fontFamily=Helvetica;" target="events-table">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="420" y="550" />
+              <mxPoint x="420" y="698" />
+              <mxPoint x="599" y="698" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-status-fn-task" edge="1" parent="1" source="status-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;dashed=0;fontFamily=Helvetica;" target="task-table">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-trace-fn-bucket" edge="1" parent="1" source="trace-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;dashed=0;fontFamily=Helvetica;" target="trace-bucket">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="975" y="550" />
+              <mxPoint x="975" y="705" />
+              <mxPoint x="1699" y="705" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-submit-fn-task" edge="1" parent="1" source="submit-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;dashed=1;fontFamily=Helvetica;" target="task-table">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-nudge-fn-table" edge="1" parent="1" source="nudge-fn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E88E5;strokeWidth=2;endArrow=classic;dashed=0;fontFamily=Helvetica;" target="nudges-table">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="760" y="550" />
+              <mxPoint x="760" y="705" />
+              <mxPoint x="959" y="705" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="2. bgagent watch (adaptive polling)" id="watch-flow">
+    <mxGraphModel dx="1937" dy="1144" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="phB" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=11;fontStyle=1;verticalAlign=top;spacing=6;opacity=60" value="Phase B — idle (no new events; back off 1s → 2s → 5s cap)" vertex="1">
+          <mxGeometry height="340" width="2000" x="100" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="w-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1" value="bgagent watch — adaptive polling (§5.3, AD-2)&#xa;0.5s when events arrive · back off 1s → 2s → 5s when idle · reset to 0.5s on next event&#xa;NO SSE · NO WebSockets · DDB eventually-consistent reads with event_id cursor" vertex="1">
+          <mxGeometry height="70" width="2000" x="100" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-cli" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#3F51B5;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="bgagent CLI&#xa;(watch loop)" vertex="1">
+          <mxGeometry height="60" width="200" x="140" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-cli-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#3F51B5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="180" as="sourcePoint" />
+            <mxPoint x="240" y="1240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lane-apigw" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCE4EC;strokeColor=#E7157B;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="API Gateway&#xa;GET /tasks/{id}/events?after=" vertex="1">
+          <mxGeometry height="60" width="240" x="620" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-apigw-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#E7157B;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="180" as="sourcePoint" />
+            <mxPoint x="740" y="1240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lane-fn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9900;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="EventsFn (Lambda)" vertex="1">
+          <mxGeometry height="60" width="200" x="1040" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-fn-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#FF9900;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1140" y="180" as="sourcePoint" />
+            <mxPoint x="1140" y="1240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lane-ddb" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#388E3C;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="TaskEventsTable&#xa;(DynamoDB)" vertex="1">
+          <mxGeometry height="60" width="200" x="1440" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-ddb-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1540" y="180" as="sourcePoint" />
+            <mxPoint x="1540" y="1240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lane-agent" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5FE;strokeColor=#0277BD;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="Agent container&#xa;(ProgressWriter — async)" vertex="1">
+          <mxGeometry height="60" width="240" x="1820" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-agent-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#0277BD;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1940" y="180" as="sourcePoint" />
+            <mxPoint x="1940" y="1240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="phA" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#F57F17;fontSize=11;fontStyle=1;verticalAlign=top;spacing=6;opacity=60" value="Phase A — active (events arriving, 0.5s interval)" vertex="1">
+          <mxGeometry height="340" width="2000" x="100" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="m1" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="260" as="sourcePoint" />
+            <mxPoint x="740" y="260" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m1-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_42" vertex="1">
+          <mxGeometry height="20" width="300" x="340" y="234" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="280" as="sourcePoint" />
+            <mxPoint x="1140" y="280" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m3" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1140" y="300" as="sourcePoint" />
+            <mxPoint x="1540" y="300" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m3-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="Query pk=TASK#{id}, sk &gt; evt_42" vertex="1">
+          <mxGeometry height="20" width="340" x="1180" y="274" as="geometry" />
+        </mxCell>
+        <mxCell id="m4" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1540" y="330" as="sourcePoint" />
+            <mxPoint x="1140" y="330" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m4-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="[evt_43..evt_47] (5 events)" vertex="1">
+          <mxGeometry height="20" width="300" x="1200" y="307" as="geometry" />
+        </mxCell>
+        <mxCell id="m5" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1140" y="360" as="sourcePoint" />
+            <mxPoint x="740" y="360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m6" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="380" as="sourcePoint" />
+            <mxPoint x="240" y="380" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m6-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="200 OK — 5 events, next cursor=evt_47" vertex="1">
+          <mxGeometry height="20" width="360" x="290" y="354" as="geometry" />
+        </mxCell>
+        <mxCell id="m7-label" parent="1" style="text;html=1;align=left;fontSize=11;fontStyle=0;strokeColor=#3F51B5;fillColor=#E8EAF6;rounded=1;spacing=6;spacingLeft=8" value="CLI renders events → sleep 0.5s → poll again (cursor advanced)" vertex="1">
+          <mxGeometry height="30" width="540" x="160" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="m8" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#0277BD;strokeWidth=2;dashed=1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1940" y="460" as="sourcePoint" />
+            <mxPoint x="1540" y="460" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m8-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="ProgressWriter.append_event()  (agent_turn, tool_call, …)" vertex="1">
+          <mxGeometry height="20" width="400" x="1560" y="435" as="geometry" />
+        </mxCell>
+        <mxCell id="m9-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=#0277BD;fillColor=#E1F5FE;rounded=1;spacing=6;spacingLeft=8" value="Events written async by the agent; reader is eventually-consistent within DDB propagation" vertex="1">
+          <mxGeometry height="30" width="660" x="1400" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="m10" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="630" as="sourcePoint" />
+            <mxPoint x="740" y="630" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m10-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_47  (poll)" vertex="1">
+          <mxGeometry height="20" width="300" x="340" y="605" as="geometry" />
+        </mxCell>
+        <mxCell id="m11" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1140" y="660" as="sourcePoint" />
+            <mxPoint x="1540" y="660" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m12" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1540" y="690" as="sourcePoint" />
+            <mxPoint x="1140" y="690" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m12-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="[] (empty page)" vertex="1">
+          <mxGeometry height="20" width="200" x="1220" y="665" as="geometry" />
+        </mxCell>
+        <mxCell id="m13" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="720" as="sourcePoint" />
+            <mxPoint x="240" y="720" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m13-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="200 OK — 0 events" vertex="1">
+          <mxGeometry height="20" width="300" x="320" y="694" as="geometry" />
+        </mxCell>
+        <mxCell id="m14-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=11;fontStyle=1;spacing=6;spacingLeft=8" value="CLI: sleep 1s (first idle backoff)" vertex="1">
+          <mxGeometry height="30" width="260" x="160" y="740" as="geometry" />
+        </mxCell>
+        <mxCell id="m15" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="790" as="sourcePoint" />
+            <mxPoint x="740" y="790" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m15-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_47  (still empty → sleep 2s next)" vertex="1">
+          <mxGeometry height="20" width="460" x="280" y="766" as="geometry" />
+        </mxCell>
+        <mxCell id="m16-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=11;fontStyle=1;spacing=6;spacingLeft=8" value="…back off: 1s → 2s → 5s cap. Stays at 5s until an event arrives." vertex="1">
+          <mxGeometry height="30" width="540" x="160" y="810" as="geometry" />
+        </mxCell>
+        <mxCell id="m17" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#0277BD;strokeWidth=2;dashed=1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1940" y="860" as="sourcePoint" />
+            <mxPoint x="1540" y="860" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m17-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="append task_completed" vertex="1">
+          <mxGeometry height="20" width="340" x="1560" y="834" as="geometry" />
+        </mxCell>
+        <mxCell id="m18" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="890" as="sourcePoint" />
+            <mxPoint x="740" y="890" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m18-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="GET /events?after=evt_47 (next poll — 5s cap elapsed)" vertex="1">
+          <mxGeometry height="20" width="460" x="280" y="863" as="geometry" />
+        </mxCell>
+        <mxCell id="m19" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="900" as="sourcePoint" />
+            <mxPoint x="240" y="900" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m19-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=#2E7D32;fillColor=#E8F5E9;rounded=1;spacing=6;spacingLeft=8" value="200 OK — [evt_48 task_completed] → reset to 0.5s, render, exit (terminal)" vertex="1">
+          <mxGeometry height="30" width="660" x="140" y="910" as="geometry" />
+        </mxCell>
+        <mxCell id="chart-title" parent="1" style="text;html=1;align=center;fontSize=13;fontStyle=1;strokeColor=none;fillColor=none" value="Adaptive interval (§5.3)" vertex="1">
+          <mxGeometry height="30" width="500" x="100" y="960" as="geometry" />
+        </mxCell>
+        <mxCell id="chart-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#546E7A;fontSize=11" value="" vertex="1">
+          <mxGeometry height="220" width="2000" x="100" y="1000" as="geometry" />
+        </mxCell>
+        <mxCell id="c-active" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=11;fontStyle=1;spacing=4" value="active&#xa;0.5s" vertex="1">
+          <mxGeometry height="140" width="80" x="130" y="1050" as="geometry" />
+        </mxCell>
+        <mxCell id="c-active-arrow" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#2E7D32;strokeWidth=3">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="210" y="1120" as="sourcePoint" />
+            <mxPoint x="290" y="1120" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c-active-txt" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=none" value="events arriving" vertex="1">
+          <mxGeometry height="20" width="80" x="210" y="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="c-idle1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE082;strokeColor=#F57F17;fontSize=11;fontStyle=1;spacing=4" value="idle 1&#xa;1.0s" vertex="1">
+          <mxGeometry height="140" width="100" x="300" y="1050" as="geometry" />
+        </mxCell>
+        <mxCell id="c-idle2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFCCBC;strokeColor=#E64A19;fontSize=11;fontStyle=1;spacing=4" value="idle 2&#xa;2.0s" vertex="1">
+          <mxGeometry height="140" width="140" x="420" y="1050" as="geometry" />
+        </mxCell>
+        <mxCell id="c-idle3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFCDD2;strokeColor=#C62828;fontSize=11;fontStyle=1;spacing=4" value="idle cap&#xa;5.0s (hold)" vertex="1">
+          <mxGeometry height="140" width="300" x="580" y="1050" as="geometry" />
+        </mxCell>
+        <mxCell id="c-reset-arrow" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#2E7D32;strokeWidth=3;dashed=0">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="900" y="1120" as="sourcePoint" />
+            <mxPoint x="1000" y="1120" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c-reset-txt" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=none" value="event arrives → reset to 0.5s" vertex="1">
+          <mxGeometry height="20" width="220" x="885" y="1090" as="geometry" />
+        </mxCell>
+        <mxCell id="c-active2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=11;fontStyle=1;spacing=4" value="active&#xa;0.5s" vertex="1">
+          <mxGeometry height="140" width="80" x="1020" y="1050" as="geometry" />
+        </mxCell>
+        <mxCell id="cost-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F8E9;strokeColor=#558B2F;fontSize=11;fontStyle=2;align=left;spacing=6;spacingLeft=10" value="Cost profile: 50 concurrent watchers × 0.5 RCU × 5s idle ≈ negligible (&lt; $0.05/mo). &#xa;No persistent connection, no infrastructure to scale or operate." vertex="1">
+          <mxGeometry height="120" width="880" x="1200" y="1060" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="3. Nudge flow (combined-turn ack)" id="nudge-flow">
+    <mxGraphModel dx="2820" dy="1430" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="1500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="n-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1" value="bgagent nudge — combined-turn acknowledgment (§5.4, AD-5)&#xa;Durable DDB write · between-turns hook reads pending · ack emitted BEFORE returning to SDK · nudge injected on next turn" vertex="1">
+          <mxGeometry height="70" width="2200" x="100" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="n-user" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#3F51B5;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="User (CLI)" vertex="1">
+          <mxGeometry height="60" width="160" x="120" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-user-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#3F51B5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="200" y="180" as="sourcePoint" />
+            <mxPoint x="200" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-nudgefn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9900;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="NudgeFn (Lambda)&#xa;POST /tasks/{id}/nudge" vertex="1">
+          <mxGeometry height="60" width="200" x="440" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-nudgefn-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#FF9900;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="540" y="180" as="sourcePoint" />
+            <mxPoint x="540" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-nudges-tbl" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#388E3C;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="TaskNudgesTable" vertex="1">
+          <mxGeometry height="60" width="200" x="800" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-nudges-tbl-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="900" y="180" as="sourcePoint" />
+            <mxPoint x="900" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-hook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5FE;strokeColor=#0277BD;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="between-turns hook&#xa;(nudge_reader.py)" vertex="1">
+          <mxGeometry height="60" width="220" x="1160" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-hook-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#0277BD;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1270" y="180" as="sourcePoint" />
+            <mxPoint x="1270" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-pw" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5FE;strokeColor=#0277BD;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="ProgressWriter" vertex="1">
+          <mxGeometry height="60" width="180" x="1540" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-pw-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#0277BD;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1630" y="180" as="sourcePoint" />
+            <mxPoint x="1630" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-sdk" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="Claude Agent SDK&#xa;(runner loop)" vertex="1">
+          <mxGeometry height="60" width="200" x="1860" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-sdk-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#6A1B9A;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1960" y="180" as="sourcePoint" />
+            <mxPoint x="1960" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-events" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#388E3C;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="TaskEventsTable" vertex="1">
+          <mxGeometry height="60" width="180" x="2180" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n-events-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="2270" y="180" as="sourcePoint" />
+            <mxPoint x="2270" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-step1" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#1E88E5;strokeColor=#ffffff;fontColor=#ffffff;fontSize=14;fontStyle=1;aspect=fixed" value="1" vertex="1">
+          <mxGeometry height="32" width="32" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e1" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="200" y="250" as="sourcePoint" />
+            <mxPoint x="540" y="250" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e1-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="POST /tasks/{id}/nudge&#xa;{ text: &quot;also fix the logging module&quot; }" vertex="1">
+          <mxGeometry height="40" width="320" x="210" y="202" as="geometry" />
+        </mxCell>
+        <mxCell id="n-step2" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#1E88E5;strokeColor=#ffffff;fontColor=#ffffff;fontSize=14;fontStyle=1;aspect=fixed" value="2" vertex="1">
+          <mxGeometry height="32" width="32" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e2" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="540" y="320" as="sourcePoint" />
+            <mxPoint x="900" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e2-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="rate-limit cond. update + PutItem&#xa;{ nudge_id, task_id, text, created_at, consumed_at: null }" vertex="1">
+          <mxGeometry height="40" width="323" x="550" y="272" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e2-back" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#EF6C00;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="540" y="360" as="sourcePoint" />
+            <mxPoint x="200" y="360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e2-back-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="202 Accepted { nudge_id } — CLI prints and exits" vertex="1">
+          <mxGeometry height="20" width="320" x="230" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="n-gap" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;fontStyle=2" value="⋯ time passes: agent finishes current turn ⋯" vertex="1">
+          <mxGeometry height="30" width="1200" x="600" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="n-stop-hook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontSize=11;fontStyle=2;align=center" value="SDK triggers Stop / between-turns hook" vertex="1">
+          <mxGeometry height="30" width="460" x="1600" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="n-stop-arrow" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#6A1B9A;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1960" y="465" as="sourcePoint" />
+            <mxPoint x="1375" y="465" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-step3" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#1E88E5;strokeColor=#ffffff;fontColor=#ffffff;fontSize=14;fontStyle=1;aspect=fixed" value="3" vertex="1">
+          <mxGeometry height="32" width="32" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e3" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1270" y="530" as="sourcePoint" />
+            <mxPoint x="900" y="530" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e3-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="nudge_reader.read_pending(task_id)&#xa;Query pk=TASK#{id}, consumed_at=null" vertex="1">
+          <mxGeometry height="40" width="340" x="917" y="483" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e3-back" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="900" y="570" as="sourcePoint" />
+            <mxPoint x="1270" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e3-back-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="[nudge_01JX…] (one or more pending)" vertex="1">
+          <mxGeometry height="20" width="300" x="943" y="545" as="geometry" />
+        </mxCell>
+        <mxCell id="n-step4" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#D32F2F;strokeColor=#ffffff;fontColor=#ffffff;fontSize=14;fontStyle=1;aspect=fixed" value="4" vertex="1">
+          <mxGeometry height="32" width="32" y="620" as="geometry" />
+        </mxCell>
+        <mxCell id="n-step4-label" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#D32F2F;fontSize=11;fontStyle=1;spacing=6;spacingLeft=8" value="CRITICAL: ack emitted BEFORE returning to SDK (AD-5)" vertex="1">
+          <mxGeometry height="30" width="400" x="150" y="617" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e4" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#0277BD;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1270" y="680" as="sourcePoint" />
+            <mxPoint x="1630" y="680" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e4-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="emit_milestone(&quot;nudge_acknowledged&quot;, {nudge_ids, preview})" vertex="1">
+          <mxGeometry height="20" width="420" x="1249" y="648" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e4b" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2;dashed=1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1630" y="710" as="sourcePoint" />
+            <mxPoint x="2270" y="710" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e4b-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="append_event(nudge_acknowledged) — visible to watch/Slack immediately" vertex="1">
+          <mxGeometry height="20" width="600" x="1660" y="678" as="geometry" />
+        </mxCell>
+        <mxCell id="n-step5" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#1E88E5;strokeColor=#ffffff;fontColor=#ffffff;fontSize=14;fontStyle=1;aspect=fixed" value="5" vertex="1">
+          <mxGeometry height="32" width="32" y="770" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e5" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1270" y="790" as="sourcePoint" />
+            <mxPoint x="900" y="790" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e5-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="UpdateItem SET consumed_at = now&#xa;ConditionExpression: consumed_at = null (idempotent)" vertex="1">
+          <mxGeometry height="40" width="340" x="920" y="742" as="geometry" />
+        </mxCell>
+        <mxCell id="n-step6" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#1E88E5;strokeColor=#ffffff;fontColor=#ffffff;fontSize=14;fontStyle=1;aspect=fixed" value="6" vertex="1">
+          <mxGeometry height="32" width="32" y="870" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e6" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#6A1B9A;strokeWidth=3">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1270" y="890" as="sourcePoint" />
+            <mxPoint x="1960" y="890" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e6-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=#FFFFFF" value="return { decision: &quot;block&quot;, reason: &quot;&lt;user_nudge&gt;...&lt;/user_nudge&gt;&quot; }" vertex="1">
+          <mxGeometry height="20" width="620" x="1298" y="858" as="geometry" />
+        </mxCell>
+        <mxCell id="n-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontSize=11;fontStyle=2;align=left;spacing=6;spacingLeft=10" value="The SDK treats decision:&quot;block&quot;+reason as the start of the next user turn.&#xa;One turn is burned for the combined ack + integration — honest cost surfaced to the user (§5.4).&#xa;The nudge text appears in the agent&#39;s context as the next user message." vertex="1">
+          <mxGeometry height="70" width="900" x="1400" y="920" as="geometry" />
+        </mxCell>
+        <mxCell id="n-next-turn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontSize=12;fontStyle=1;align=center;spacing=6" value="Next turn — agent incorporates the nudge" vertex="1">
+          <mxGeometry height="30" width="460" x="1600" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="n-e7" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#0277BD;strokeWidth=2;dashed=1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1960" y="1070" as="sourcePoint" />
+            <mxPoint x="2270" y="1070" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n-e7-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="agent_turn events + tool calls + (eventually) task_completed" vertex="1">
+          <mxGeometry height="20" width="340" x="1965" y="1044" as="geometry" />
+        </mxCell>
+        <mxCell id="ad5-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#EF6C00;fontSize=11;align=left;spacing=8;spacingLeft=10;fontStyle=0" value="AD-5 rationale — why combined-turn ack&#xa;&#xa;The Claude Agent SDK does NOT expose a mid-conversation context-injection API:&#xa;— HookEvent enum is fixed (no custom events)&#xa;— ClaudeAgentOptions.system_prompt is construction-time only&#xa;— hookSpecificOutput.additionalContext is user-visible-only (Anthropic not-planned)&#xa;&#xa;The Stop/between-turns hook is the only surface; decision:&quot;block&quot; burns exactly one turn.&#xa;We ack BEFORE returning so the user sees nudge_acknowledged via watch/Slack&#xa;even if the subsequent turn takes minutes. Cost is surfaced honestly — the alternative&#xa;(silent multi-turn overhead) would be an operator trap." vertex="1">
+          <mxGeometry height="250" width="1400" x="120" y="1100" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-key" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#3F51B5;fontSize=11;align=left;spacing=8;spacingLeft=10;fontFamily=Courier New" value="Ordered steps&#xa;1  CLI POST /nudge (durable)&#xa;2  NudgeFn: rate-limit + PutItem + 202&#xa;3  Between-turns hook reads pending&#xa;4  Emit nudge_acknowledged event (BEFORE returning — AD-5)&#xa;5  Mark nudge consumed (idempotent)&#xa;6  Return decision:&quot;block&quot; with nudge text — SDK treats as user turn" vertex="1">
+          <mxGeometry height="170" width="780" x="1540" y="1100" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="4. Status + trace download" id="status-trace">
+    <mxGraphModel dx="1614" dy="953" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t-right" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F8E9;strokeColor=#558B2F;fontSize=13;fontStyle=1;verticalAlign=top;spacing=8" value="bgagent trace download abc123 — presigned S3 URL (§10.1)" vertex="1">
+          <mxGeometry height="1200" width="1245" x="1145" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="s-left" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontSize=13;fontStyle=1;verticalAlign=top;spacing=8" value="bgagent status abc123 — deterministic read (AD-6)" vertex="1">
+          <mxGeometry height="1200" width="1080" x="53" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="s-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1" value="bgagent status (deterministic snapshot — AD-6)   +   bgagent trace download (§10.1)&#xa;No LLM · no hallucination · no agent interruption   |   Opt-in S3 trajectory for debugging" vertex="1">
+          <mxGeometry height="70" width="2200" x="100" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s-cli" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3F51B5;fontSize=12;fontStyle=1;spacing=6" value="bgagent CLI&#xa;status abc123" vertex="1">
+          <mxGeometry height="60" width="180" x="140" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="s-apigw" parent="1" style="shape=mxgraph.aws4.api_gateway;sketch=0;labelPosition=right;verticalLabelPosition=middle;verticalAlign=middle;align=left;html=1;fontSize=11;outlineConnect=0;fillColor=#E7157B;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="50" width="50" x="440" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="s-apigw-label" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="API Gateway&#xa;GET /tasks/{id}" vertex="1">
+          <mxGeometry height="40" width="160" x="495" y="195" as="geometry" />
+        </mxCell>
+        <mxCell id="s-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="680" y="185" as="geometry" />
+        </mxCell>
+        <mxCell id="s-fn-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="StatusFn&#xa;(no LLM)" vertex="1">
+          <mxGeometry height="40" width="120" x="650" y="250" as="geometry" />
+        </mxCell>
+        <mxCell id="s-task-tbl" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="900" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="s-task-tbl-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=1;strokeColor=none;fillColor=none" value="TaskTable&#xa;(current turn, status, cost)" vertex="1">
+          <mxGeometry height="40" width="200" x="830" y="195" as="geometry" />
+        </mxCell>
+        <mxCell id="s-events-tbl" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="900" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="s-events-tbl-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=1;strokeColor=none;fillColor=none" value="TaskEventsTable&#xa;(last N milestone events)" vertex="1">
+          <mxGeometry height="40" width="200" x="830" y="325" as="geometry" />
+        </mxCell>
+        <mxCell id="s-e1" edge="1" parent="1" source="s-cli" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="s-apigw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s-e2" edge="1" parent="1" source="s-apigw" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="s-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s-e3" edge="1" parent="1" source="s-fn" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2" target="s-task-tbl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s-e4" edge="1" parent="1" source="s-fn" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2" target="s-events-tbl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s-template" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BBDEFB;strokeColor=#1565C0;fontSize=12;fontStyle=1;align=center;spacing=6" value="Fixed template render (no LLM)" vertex="1">
+          <mxGeometry height="30" width="800" x="200" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="s-output" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#424242;fontSize=12;align=left;spacing=10;spacingLeft=14;fontFamily=Courier New" value="Task abc123 — RUNNING (3m 14s elapsed)&#xa;  Repo: org/repo&#xa;  Turn: 7 / ~12&#xa;  Last milestone: nudge_acknowledged (42s ago)&#xa;  Current: Bash tool call&#xa;  Cost: $0.18 / budget $2.00&#xa;  Last event: 2026-04-29T15:30:12Z" vertex="1">
+          <mxGeometry height="200" width="800" x="200" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="s-ad6-note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontSize=11;align=left;spacing=8;spacingLeft=12;fontStyle=0" value="AD-6: deterministic ≠ question-to-agent&#xa;— Fast (&lt; 200 ms P95), free, safe to call repeatedly&#xa;— Never calls an LLM. Never hallucinates.&#xa;— Does NOT interrupt the agent or burn a turn&#xa;— For natural-language questions, see bgagent ask (Phase 2)" vertex="1">
+          <mxGeometry height="140" width="800" x="200" y="720" as="geometry" />
+        </mxCell>
+        <mxCell id="s-safety" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#546E7A;fontSize=11;align=left;spacing=8;spacingLeft=12" value="Concurrency safety&#xa;&#xa;• StatusFn reads from the same TaskEventsTable the agent writes to.&#xa;• Eventually-consistent reads are OK — snapshot may lag by milliseconds,&#xa;  never stale by more than one poll window.&#xa;• Multiple concurrent readers (CLI + Slack bot + web UI) are fine:&#xa;  DDB scales horizontally; no locking or coordination." vertex="1">
+          <mxGeometry height="190" width="800" x="200" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="s-perf" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F8E9;strokeColor=#558B2F;fontSize=11;align=left;spacing=8;spacingLeft=12" value="Performance budget&#xa;&#xa;• DDB GetItem on TaskTable: ~5 ms P95&#xa;• DDB Query last N events: ~10 ms P95 (N ≤ 20)&#xa;• Template render: &lt; 1 ms&#xa;• API Gateway + Lambda cold-path: ~80 ms&#xa;—&#xa;P95 end-to-end: &lt; 200 ms" vertex="1">
+          <mxGeometry height="190" width="800" x="200" y="1110" as="geometry" />
+        </mxCell>
+        <mxCell id="t-cli" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3F51B5;fontSize=12;fontStyle=1;spacing=6" value="bgagent CLI&#xa;trace download abc123 [-o file]" vertex="1">
+          <mxGeometry height="60" width="260" x="1260" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="t-apigw" parent="1" style="shape=mxgraph.aws4.api_gateway;sketch=0;labelPosition=right;verticalLabelPosition=middle;verticalAlign=middle;align=left;html=1;fontSize=11;outlineConnect=0;fillColor=#E7157B;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="50" width="50" x="1620" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="t-apigw-label" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="API Gateway&#xa;GET /tasks/{id}/trace-url" vertex="1">
+          <mxGeometry height="40" width="220" x="1680" y="195" as="geometry" />
+        </mxCell>
+        <mxCell id="t-fn" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1950" y="185" as="geometry" />
+        </mxCell>
+        <mxCell id="t-fn-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="TraceUrlFn&#xa;(ownership check +&#xa;S3 presign)" vertex="1">
+          <mxGeometry height="50" width="200" x="1880" y="250" as="geometry" />
+        </mxCell>
+        <mxCell id="t-bucket" parent="1" style="shape=mxgraph.aws4.s3;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#7AA116;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="2180" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="t-bucket-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=1;strokeColor=none;fillColor=none" value="TraceBucket&#xa;s3://…/traces/&lt;user&gt;/&lt;task&gt;.jsonl.gz&#xa;7-day TTL lifecycle" vertex="1">
+          <mxGeometry height="50" width="240" x="2080" y="195" as="geometry" />
+        </mxCell>
+        <mxCell id="t-e1" edge="1" parent="1" source="t-cli" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="t-apigw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="t-e2" edge="1" parent="1" source="t-apigw" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="t-fn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="t-e3" edge="1" parent="1" source="t-fn" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2;dashed=1" target="t-bucket">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="t-e3-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=none;" value="sigv4 presign&#xa;GetObject (5 min TTL)" vertex="1">
+          <mxGeometry height="40" width="160" x="1991" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="t-resp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#558B2F;fontSize=11;align=center;spacing=6;fontFamily=Courier New" value="Response: 200 OK { url: &quot;https://s3.../&lt;task&gt;.jsonl.gz?X-Amz-…&quot; }" vertex="1">
+          <mxGeometry height="40" width="1020" x="1260" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="t-stream" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCEDC8;strokeColor=#558B2F;fontSize=12;fontStyle=1;align=center;spacing=6" value="CLI streams gzipped NDJSON directly from S3" vertex="1">
+          <mxGeometry height="30" width="1020" x="1260" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="t-cli2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3F51B5;fontSize=11;fontStyle=1;spacing=6" value="bgagent CLI" vertex="1">
+          <mxGeometry height="40" width="160" x="1260" y="475" as="geometry" />
+        </mxCell>
+        <mxCell id="t-bucket2" parent="1" style="shape=mxgraph.aws4.s3;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#7AA116;strokeColor=#ffffff;aspect=fixed" value="TraceBucket" vertex="1">
+          <mxGeometry height="60" width="60" x="1600" y="465" as="geometry" />
+        </mxCell>
+        <mxCell id="t-stdout" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#424242;fontSize=11;fontStyle=1;spacing=6" value="stdout | -o file&#xa;(gzipped bytes)" vertex="1">
+          <mxGeometry height="50" width="240" x="1900" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="t-se1" edge="1" parent="1" source="t-cli2" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="t-bucket2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="t-se1-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=none;" value="GET presigned URL&#xa;(bypasses API Gateway)" vertex="1">
+          <mxGeometry height="30" width="220" x="1389" y="450" as="geometry" />
+        </mxCell>
+        <mxCell id="t-se2" edge="1" parent="1" source="t-bucket2" style="html=1;endArrow=classic;strokeColor=#558B2F;strokeWidth=2" target="t-stdout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="t-se2-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=none;" value="stream bytes (no decompression in Lambda)" vertex="1">
+          <mxGeometry height="30" width="260" x="1646" y="460" as="geometry" />
+        </mxCell>
+        <mxCell id="t-lifecycle" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#558B2F;fontSize=11;align=left;spacing=8;spacingLeft=12" value="--trace lifecycle (opt-in per task)&#xa;&#xa;1. User runs: bgagent submit --trace &quot;fix the auth bug&quot;&#xa;2. Task record stores trace_enabled=true&#xa;3. Agent&#39;s ProgressWriter raises preview truncation 200 → 4 KB (§10.1)&#xa;4. On task completion, agent uploads full trajectory (SDK message log,&#xa;   tool I/O, hook callbacks) to S3 as gzipped NDJSON&#xa;5. Agent emits trajectory_uploaded milestone with s3_uri&#xa;6. CLI surfaces the URI at end of watch / status&#xa;7. User runs bgagent trace download &lt;task_id&gt; to fetch&#xa;&#xa;Storage:&#xa;— s3://&lt;bucket&gt;/traces/&lt;user_id&gt;/&lt;task_id&gt;.jsonl.gz&#xa;— 7-day lifecycle TTL&#xa;— User-scoped prefix isolates across tenants" vertex="1">
+          <mxGeometry height="370" width="1012" x="1260" y="570" as="geometry" />
+        </mxCell>
+        <mxCell id="t-when" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=11;align=left;spacing=8;spacingLeft=12;fontStyle=0" value="When to use --trace (§10.2)&#xa;&#xa;• Reproducible failure modes during development&#xa;• Customer-reported &quot;agent did the wrong thing&quot; incidents&#xa;• Reward-hacking / hallucination audits&#xa;&#xa;NOT intended for routine observability — that&#39;s what watch and&#xa;notifications are for. Default-off keeps storage cost flat across the fleet." vertex="1">
+          <mxGeometry height="200" width="1020" x="1260" y="970" as="geometry" />
+        </mxCell>
+        <mxCell id="t-security" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#EF6C00;fontSize=11;align=left;spacing=8;spacingLeft=12;verticalAlign=top;" value="Security — user-scoped prefix + presign + ownership" vertex="1">
+          <mxGeometry height="100" width="1020" x="1260" y="1200" as="geometry" />
+        </mxCell>
+        <mxCell id="t-security-text" parent="1" style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none" value="TraceUrlFn verifies task.user_id matches Cognito claim before presigning.&#xa;Presigned URL TTL 5 min. S3 bucket blocks public access + enforces SSL.&#xa;Output scanners in ProgressWriter redact secrets before upload." vertex="1">
+          <mxGeometry height="70" width="990" x="1278" y="1234" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="5. FanOutConsumer + GitHub edit-in-place" id="fanout-gh">
+    <mxGraphModel grid="0" page="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="2400" pageHeight="1760" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="f-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1" value="Notification plane — FanOutConsumer per-channel routing (AD-4, §6.2) + GitHub edit-in-place (AD-9, §6.4)&#xa;DDB Stream → single router → per-channel dispatcher Lambdas · per-task notification config · default filters curate the milestone set" vertex="1">
+          <mxGeometry height="70" width="2240" x="80" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="f-events" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="78" width="78" x="180" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="f-events-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="TaskEventsTable&#xa;(event spine)" vertex="1">
+          <mxGeometry height="40" width="240" x="100" y="245" as="geometry" />
+        </mxCell>
+        <mxCell id="f-stream" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=11;fontStyle=1;align=center;spacing=6" value="DDB Stream&#xa;(NEW_IMAGE)&#xa;ParallelizationFactor=1" vertex="1">
+          <mxGeometry height="70" width="220" x="400" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="f-fanout" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="740" y="175" as="geometry" />
+        </mxCell>
+        <mxCell id="f-fanout-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="FanOutConsumer&#xa;(stateless router)" vertex="1">
+          <mxGeometry height="40" width="180" x="680" y="235" as="geometry" />
+        </mxCell>
+        <mxCell id="f-config" parent="1" style="shape=mxgraph.aws4.dynamodb;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#3334B9;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="78" width="78" x="940" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="f-config-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="NotificationConfig&#xa;(resolves channel enablement&#xa;+ event-type filters)" vertex="1">
+          <mxGeometry height="50" width="260" x="850" y="245" as="geometry" />
+        </mxCell>
+        <mxCell id="f-e1" edge="1" parent="1" source="f-events" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;strokeColor=#43A047;strokeWidth=3" target="f-stream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f-e2" edge="1" parent="1" source="f-stream" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;strokeColor=#43A047;strokeWidth=3" target="f-fanout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f-e3" edge="1" parent="1" source="f-fanout" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2;dashed=1" target="f-config">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f-e3-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="read config&#xa;for this task_id" vertex="1">
+          <mxGeometry height="30" width="140" x="810" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="f-slack-dispatch" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1200" y="102" as="geometry" />
+        </mxCell>
+        <mxCell id="f-slack-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="SlackDispatchFn" vertex="1">
+          <mxGeometry height="20" width="180" x="1140" y="166" as="geometry" />
+        </mxCell>
+        <mxCell id="f-email-dispatch" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1200" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="f-email-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="EmailDispatchFn" vertex="1">
+          <mxGeometry height="20" width="180" x="1140" y="305" as="geometry" />
+        </mxCell>
+        <mxCell id="f-gh-dispatch" parent="1" style="shape=mxgraph.aws4.lambda;sketch=0;labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="60" width="60" x="1200" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="f-gh-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="GitHubDispatchFn" vertex="1">
+          <mxGeometry height="20" width="180" x="1140" y="415" as="geometry" />
+        </mxCell>
+        <mxCell id="f-fo-s" edge="1" parent="1" source="f-fanout" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="f-slack-dispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="770" y="131" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f-fo-s-label" parent="1" style="text;html=1;align=center;fontSize=10;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="if slack.enabled + event passes filter" vertex="1">
+          <mxGeometry height="20" width="280" x="870" y="105" as="geometry" />
+        </mxCell>
+        <mxCell id="f-fo-e" edge="1" parent="1" source="f-fanout" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="f-email-dispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="770" y="340" />
+              <mxPoint x="1158" y="340" />
+              <mxPoint x="1158" y="270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f-fo-g" edge="1" parent="1" source="f-fanout" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="f-gh-dispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="770" y="380" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f-slack-api" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A154B;fontSize=11;fontStyle=1;spacing=6" value="Slack Web API" vertex="1">
+          <mxGeometry height="50" width="240" x="1440" y="107" as="geometry" />
+        </mxCell>
+        <mxCell id="f-ses" parent="1" style="shape=mxgraph.aws4.simple_email_service;sketch=0;labelPosition=right;verticalLabelPosition=middle;verticalAlign=middle;align=left;html=1;fontSize=11;outlineConnect=0;fillColor=#277116;strokeColor=#ffffff;aspect=fixed" value="" vertex="1">
+          <mxGeometry height="50" width="50" x="1440" y="247" as="geometry" />
+        </mxCell>
+        <mxCell id="f-ses-label" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;strokeColor=none;fillColor=none" value="SES" vertex="1">
+          <mxGeometry height="30" width="100" x="1495" y="257" as="geometry" />
+        </mxCell>
+        <mxCell id="f-gh-api" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#24292F;fontSize=11;fontStyle=1;spacing=6;fontFamily=Courier New" value="GitHub REST API&#xa;POST /repos/{o}/{r}/issues/{n}/comments  (first event)&#xa;PATCH /repos/{o}/{r}/issues/comments/{id}  (subsequent)&#xa;No conditional headers — single-shot" vertex="1">
+          <mxGeometry height="70" width="380" x="1440" y="345" as="geometry" />
+        </mxCell>
+        <mxCell id="f-sd-s" edge="1" parent="1" source="f-slack-dispatch" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="f-slack-api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f-ed-ses" edge="1" parent="1" source="f-email-dispatch" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="f-ses">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f-gd-gh" edge="1" parent="1" source="f-gh-dispatch" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2" target="f-gh-api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f-defaults" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#F57F17;fontSize=11;align=left;spacing=8;spacingLeft=10;fontFamily=Courier New" value="Per-channel default filters (v1 — AD-4, §6.2)&#xa;&#xa;     Channel      │ Default subscribed events                                                │ --verbose adds&#xa;     ─────────────┼──────────────────────────────────────────────────────────────────────────┼──────────────────&#xa;     Slack        │ task_completed, task_failed, task_cancelled, pr_created, agent_error,    │ agent_milestone&#xa;                  │ approval_required, status_response                                        │&#xa;     Email        │ task_completed, task_failed, approval_required                            │ —&#xa;     GitHub       │ pr_created + terminal status (edit-in-place single comment)              │ — already minimal&#xa;&#xa;agent_milestone unwrap (effectiveEventType): router unwraps agent_milestone events whose&#xa;metadata.milestone is in the narrow allowlist (today: {pr_created}) to the underlying name before&#xa;matching channel filters. Unlisted milestone names stay wrapped and do not route. The watch CLI&#xa;renders all milestones regardless of this allowlist.&#xa;Numeric coercion: DDB returns Number attributes as strings — dispatcher coerces cost_usd /&#xa;duration_s via a shared helper before calling renderCommentBody.&#xa;&#xa;Rationale: if Slack pings on every milestone, users mute the bot within days. Default to the minimal&#xa;set that surfaces decision-requiring events + completion; power users opt into verbose streams." vertex="1">
+          <mxGeometry height="320" width="1700" x="100" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="f-gh-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=14;fontStyle=1" value="GitHub edit-in-place — single-shot PATCH, DDB-Stream ordering (AD-9, §6.4)&#xa;One comment per task, edited in place. No GET round-trip, no If-Match, no 412. ETag/If-Match was rejected by GitHub&#39;s API (400); see §6.4 AD-9." vertex="1">
+          <mxGeometry height="60" width="2240" x="100" y="820" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-fanout" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9900;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="FanOutConsumer&#xa;(DDB Stream, PF=1)" vertex="1">
+          <mxGeometry height="60" width="220" x="160" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-fanout-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#FF9900;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="960" as="sourcePoint" />
+            <mxPoint x="270" y="1500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-disp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9900;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="GitHubDispatchFn&#xa;(sole writer on its comment)" vertex="1">
+          <mxGeometry height="60" width="240" x="550" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-disp-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#FF9900;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="960" as="sourcePoint" />
+            <mxPoint x="670" y="1500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-state" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#388E3C;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="TaskTable&#xa;(github_comment_id only —&#xa;no etag field anymore)" vertex="1">
+          <mxGeometry height="60" width="260" x="960" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-state-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1090" y="960" as="sourcePoint" />
+            <mxPoint x="1090" y="1500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-rest-lane" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#24292F;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="GitHub REST API" vertex="1">
+          <mxGeometry height="60" width="220" x="1380" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-rest-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#24292F;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1490" y="960" as="sourcePoint" />
+            <mxPoint x="1490" y="1500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-pr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#24292F;fontSize=12;fontStyle=1;verticalAlign=middle;spacing=6" value="PR / issue comment&#xa;(single, edited in place)" vertex="1">
+          <mxGeometry height="60" width="260" x="1780" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-pr-line" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#24292F;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1910" y="960" as="sourcePoint" />
+            <mxPoint x="1910" y="1500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e1" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="1000" as="sourcePoint" />
+            <mxPoint x="670" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e1-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="invoke(event=pr_created | task_completed | …)" vertex="1">
+          <mxGeometry height="20" width="340" x="310" y="976" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-e2" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="1030" as="sourcePoint" />
+            <mxPoint x="1090" y="1030" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e2-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF" value="loadTaskForComment — GetItem (read github_comment_id)" vertex="1">
+          <mxGeometry height="20" width="420" x="690" y="1006" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-decision" parent="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9900;fontSize=11;fontStyle=1;align=center" value="github_comment_id&#xa;exists?" vertex="1">
+          <mxGeometry height="70" width="180" x="580" y="1055" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-post-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#1565C0" value="NO → POST path (first event for this task)" vertex="1">
+          <mxGeometry height="20" width="500" x="280" y="1140" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-e3-post" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="1170" as="sourcePoint" />
+            <mxPoint x="1490" y="1170" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e3-post-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF;fontFamily=Courier New" value="POST /issues/{n}/comments    body: rendered template (bgagent:task-id=… marker + status + PR link)" vertex="1">
+          <mxGeometry height="20" width="820" x="700" y="1142" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-e3-post-resp" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#2E7D32;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1490" y="1200" as="sourcePoint" />
+            <mxPoint x="670" y="1200" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e3-post-resp-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="201 Created → { id: &lt;new_comment_id&gt; }" vertex="1">
+          <mxGeometry height="20" width="360" x="900" y="1178" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-save-first" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="1235" as="sourcePoint" />
+            <mxPoint x="1090" y="1235" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-save-first-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF;fontFamily=Courier New" value="saveCommentState — UpdateItem SET github_comment_id=:id  ConditionExpression: attribute_not_exists(github_comment_id)" vertex="1">
+          <mxGeometry height="20" width="960" x="690" y="1209" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-patch-title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#1565C0" value="YES → PATCH path (subsequent events) — single-shot, no GET, no conditional headers" vertex="1">
+          <mxGeometry height="20" width="900" x="280" y="1270" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-e3-patch" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="1300" as="sourcePoint" />
+            <mxPoint x="1490" y="1300" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e3-patch-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF;fontFamily=Courier New" value="patchExistingComment — PATCH /issues/comments/{id}    body: rendered template (no If-Match header)" vertex="1">
+          <mxGeometry height="20" width="753" x="817" y="1270" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-e3-patch-ok" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#2E7D32;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1490" y="1330" as="sourcePoint" />
+            <mxPoint x="670" y="1330" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e3-patch-ok-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="200 OK — comment body replaced (same comment_id)" vertex="1">
+          <mxGeometry height="20" width="420" x="880" y="1308" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-upd-inline" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#24292F;strokeWidth=2;dashed=1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1490" y="1360" as="sourcePoint" />
+            <mxPoint x="1910" y="1360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-upd-inline-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="comment edited in place (no new DDB write)" vertex="1">
+          <mxGeometry height="20" width="380" x="1520" y="1340" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-404-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=11;fontStyle=1;align=center;spacing=6" value="404 fallback — comment deleted upstream (user cleaned up PR thread)" vertex="1">
+          <mxGeometry height="30" width="1400" x="560" y="1395" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-e5-patch404" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#C62828;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1490" y="1445" as="sourcePoint" />
+            <mxPoint x="670" y="1445" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-e5-patch404-label" parent="1" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=#FFFFFF" value="404 Not Found (PATCH)" vertex="1">
+          <mxGeometry height="20" width="260" x="950" y="1418" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-repost" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#1E88E5;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="1475" as="sourcePoint" />
+            <mxPoint x="1490" y="1475" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-repost-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF;fontFamily=Courier New" value="POST /issues/{n}/comments (re-create)  →  log fanout.github.recreated" vertex="1">
+          <mxGeometry height="20" width="700" x="700" y="1451" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-save-prev" edge="1" parent="1" style="html=1;endArrow=classic;strokeColor=#388E3C;strokeWidth=2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="1505" as="sourcePoint" />
+            <mxPoint x="1090" y="1505" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gh-save-prev-label" parent="1" style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=#FFFFFF;fontFamily=Courier New" value="saveCommentState — UpdateItem SET github_comment_id=:new  ConditionExpression: github_comment_id = :prev  (guards 404-race orphans)" vertex="1">
+          <mxGeometry height="20" width="1000" x="680" y="1478" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-rationale" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontSize=11;align=left;spacing=8;spacingLeft=12" value="Why no If-Match / ETag (AD-9, §6.4) — validated in PR #52 Scenario 7-extended&#xa;— GitHub&#39;s REST API REJECTS conditional-request headers on PATCH /issues/comments/{id} with HTTP 400: &quot;Conditional request headers are not allowed in unsafe requests unless supported by the endpoint&quot;. The ETag on GET is a cache validator only; the write endpoint does not honor it.&#xa;— DDB Streams with ParallelizationFactor=1 already gives per-task_id ordering for free, and the fanout Lambda is the only writer on its own comment — last-writer-wins is safe because no concurrent writer exists to lose to.&#xa;— Legacy field github_comment_etag is no longer written or read. Items that still carry it from earlier deploys are ignored (DocumentClient passes through unknown fields). No migration required.&#xa;— Non-404 errors (400, 500, IAM, throttling) propagate through routeEvent&#39;s Promise.allSettled → fanout.dispatcher.rejected warn log; the batch continues so other channels dispatch independently." vertex="1">
+          <mxGeometry height="180" width="2200" x="120" y="1540" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

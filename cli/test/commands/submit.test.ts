@@ -283,6 +283,39 @@ describe('submit command', () => {
     ).rejects.toThrow('--pr and --review-pr cannot be used together');
   });
 
+  test('--trace sets trace:true in the create-task request body', async () => {
+    mockCreateTask.mockResolvedValue({ task_id: 't-trace', status: 'SUBMITTED' });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'deep debugging',
+      '--trace',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', task_description: 'deep debugging', trace: true },
+      undefined,
+    );
+  });
+
+  test('--trace is opt-in — absent flag omits the field entirely (not false)', async () => {
+    // Keeping the wire payload slim: omit rather than send ``trace:
+    // false`` so the server's default-false branch is the common path.
+    mockCreateTask.mockResolvedValue({ task_id: 't-normal', status: 'SUBMITTED' });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'normal task',
+    ]);
+
+    const [body] = mockCreateTask.mock.calls[0];
+    expect(body).not.toHaveProperty('trace');
+  });
+
   test('submits a pr_iteration task with --pr and --task', async () => {
     mockCreateTask.mockResolvedValue({
       task_id: 'pr-abc',
