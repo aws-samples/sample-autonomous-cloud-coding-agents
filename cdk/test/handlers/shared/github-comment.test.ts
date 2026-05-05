@@ -21,6 +21,7 @@ import {
   BGAGENT_COMMENT_MARKER_PREFIX,
   GitHubCommentError,
   renderCommentBody,
+  sanitizeMarkdownLinkTarget,
   upsertTaskComment,
 } from '../../../src/handlers/shared/github-comment';
 import { logger } from '../../../src/handlers/shared/logger';
@@ -472,5 +473,210 @@ describe('github-comment: renderCommentBody', () => {
     // Required rows still present.
     expect(body).toContain('| Task  | `abc` |');
     expect(body).toContain('| Status | **SUBMITTED** |');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Krokoko code review finding #9 — renderCommentBody self-defends against
+// uncoerced DDB string numerics
+// ---------------------------------------------------------------------------
+
+describe('github-comment: renderCommentBody numeric self-defense (finding #9)', () => {
+  // The fanout dispatcher coerces ``cost_usd`` / ``duration_s`` at its
+  // own boundary, but that coverage is brittle: a future caller (a
+  // Chunk K reconciler, a Phase 3 rehydration path) that forgets the
+  // step would hit the same ``TypeError: toFixed is not a function``
+  // bug commit 9fe704e fixed in the fanout dispatcher. ``renderCommentBody``
+  // now coerces again so the crash surface is closed at the render site.
+
+  test('string-typed costUsd from an uncoerced DDB Item does NOT throw', () => {
+    // Direct repro of the Scenario-7-ext symptom at the render boundary.
+    // The body must render a valid Cost row, not throw TypeError.
+    const body = renderCommentBody({
+      taskId: 'abc',
+      status: 'COMPLETED',
+      repo: 'o/r',
+      latestEventType: 'task_completed',
+      latestEventAt: '2026-05-05T00:00:00Z',
+      prUrl: null,
+      // DynamoDB Document-client deserialization: Number → string.
+      durationS: '96.0' as unknown as number,
+      costUsd: '0.20939010000000002' as unknown as number,
+    });
+    expect(body).toContain('| Cost | $0.2094 |');
+    expect(body).toContain('| Duration | 96s |');
+  });
+
+  test('non-finite string costUsd collapses to null and omits the Cost row', () => {
+    // A corrupt writer emitting ``'NaN'`` or ``'Infinity'`` must NOT
+    // produce a ``$NaN`` row. Coercion returns null, row is omitted,
+    // and a ``numeric.coercion_failed`` warn fires via the shared
+    // coercion helper so the writer bug surfaces in CloudWatch.
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const body = renderCommentBody({
+        taskId: 'abc',
+        status: 'COMPLETED',
+        repo: 'o/r',
+        latestEventType: 'task_completed',
+        latestEventAt: '2026-05-05T00:00:00Z',
+        prUrl: null,
+        durationS: null,
+        costUsd: 'not-a-number' as unknown as number,
+      });
+      expect(body).not.toContain('$NaN');
+      expect(body).not.toContain('| Cost |');
+      const coercionWarn = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'numeric.coercion_failed',
+      );
+      expect(coercionWarn).toBeDefined();
+      expect((coercionWarn?.[1] as Record<string, unknown>).field).toBe('cost_usd');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('null cost / duration render no row (unchanged behavior — absent is not corrupt)', () => {
+    // Regression guard: the self-defense must NOT start warning on the
+    // legitimate "absent" case. Only non-finite coercions warn.
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      renderCommentBody({
+        taskId: 'abc',
+        status: 'RUNNING',
+        repo: 'o/r',
+        latestEventType: 'agent_turn',
+        latestEventAt: '2026-05-05T00:00:00Z',
+        prUrl: null,
+        durationS: null,
+        costUsd: null,
+      });
+      const coercionWarns = warnSpy.mock.calls.filter(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'numeric.coercion_failed',
+      );
+      expect(coercionWarns).toHaveLength(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Krokoko code review finding #12 — Markdown injection via prUrl
+// ---------------------------------------------------------------------------
+
+describe('github-comment: sanitizeMarkdownLinkTarget (finding #12)', () => {
+  // The helper is exported so callers outside renderCommentBody (e.g.
+  // future Slack / email renderers that may interpolate into markdown)
+  // can share the same validation surface.
+
+  test('accepts a well-formed https GitHub PR URL unchanged', () => {
+    const ok = 'https://github.com/owner/repo/pull/42';
+    expect(sanitizeMarkdownLinkTarget(ok)).toBe(ok);
+  });
+
+  test('accepts a plain http URL unchanged', () => {
+    // Enterprise / self-hosted GitHub may serve over plain HTTP in
+    // internal networks; we still allow it. Non-http(s) schemes are
+    // rejected below.
+    const ok = 'http://github.internal/owner/repo/pull/7';
+    expect(sanitizeMarkdownLinkTarget(ok)).toBe(ok);
+  });
+
+  test.each([
+    // Each of these, if interpolated into ``[link](<url>)`` verbatim,
+    // would break the Markdown table layout or inject trailing content.
+    ['close-paren', 'https://evil.example.com/a)|injected'],
+    ['pipe', 'https://evil.example.com/a|new-col'],
+    ['newline', 'https://evil.example.com/a\nnew line'],
+    ['carriage-return', 'https://evil.example.com/a\rnew line'],
+    ['bracket', 'https://evil.example.com/a]extra'],
+    ['quote', 'https://evil.example.com/a"title"'],
+    ['space', 'https://evil.example.com/a b'],
+    ['tab', 'https://evil.example.com/a\tb'],
+    ['backtick', 'https://evil.example.com/a`b'],
+  ])('rejects %s injection attempt: %s', (_label, crafted) => {
+    expect(sanitizeMarkdownLinkTarget(crafted)).toBeNull();
+  });
+
+  test.each([
+    ['javascript', 'javascript:alert(1)'],
+    ['data', 'data:text/html,<script>alert(1)</script>'],
+    ['file', 'file:///etc/passwd'],
+    ['ftp', 'ftp://evil.example.com/x'],
+  ])('rejects non-http(s) scheme: %s', (_label, bad) => {
+    expect(sanitizeMarkdownLinkTarget(bad)).toBeNull();
+  });
+
+  test('rejects a malformed URL that cannot be parsed', () => {
+    expect(sanitizeMarkdownLinkTarget('not a url at all')).toBeNull();
+  });
+
+  test('null / undefined pass through as null (omits the row)', () => {
+    expect(sanitizeMarkdownLinkTarget(null)).toBeNull();
+    expect(sanitizeMarkdownLinkTarget(undefined)).toBeNull();
+  });
+});
+
+describe('github-comment: renderCommentBody Markdown-link injection guard (finding #12)', () => {
+  test('crafted prUrl with ) | ] does not break the Markdown table', () => {
+    // End-to-end: what happens at the render boundary when the PR URL
+    // is hostile. Pre-fix, the body contained ``[link](evil)|injected)``
+    // which rendered a broken link AND started a new table column.
+    // Post-fix, the row is omitted entirely.
+    const body = renderCommentBody({
+      taskId: 'abc',
+      status: 'COMPLETED',
+      repo: 'o/r',
+      latestEventType: 'task_completed',
+      latestEventAt: '2026-05-05T00:00:00Z',
+      prUrl: 'evil)|injected' as unknown as string,
+      durationS: null,
+      costUsd: null,
+    });
+    // The Pull-request row is omitted because the URL failed validation.
+    expect(body).not.toContain('Pull request');
+    // Defense-in-depth: none of the injection characters appear in a
+    // link-like context. Specifically, no ``[link](`` with a trailing
+    // pipe or close-paren that could close the link and open a new
+    // column.
+    expect(body).not.toMatch(/\[link\]\([^)]*[|)]/);
+  });
+
+  test('javascript: scheme prUrl is rejected (omits the row rather than rendering)', () => {
+    // An attacker who controlled ``pr_url`` (e.g. via a future webhook
+    // field) could supply ``javascript:...``. Browsers don't execute
+    // clicks on Markdown links in GitHub comments (GitHub rewrites
+    // targets) but the row would still display the attacker-chosen
+    // label. Safer to omit entirely.
+    const body = renderCommentBody({
+      taskId: 'abc',
+      status: 'RUNNING',
+      repo: 'o/r',
+      latestEventType: 'task_created',
+      latestEventAt: '2026-05-05T00:00:00Z',
+      prUrl: 'javascript:alert(1)' as unknown as string,
+      durationS: null,
+      costUsd: null,
+    });
+    expect(body).not.toContain('javascript:');
+    expect(body).not.toContain('Pull request');
+  });
+
+  test('legitimate https PR URL still renders the link row unchanged', () => {
+    // Regression guard: the sanitization must NOT reject real GitHub
+    // PR links — that would mask terminal comments silently.
+    const prUrl = 'https://github.com/owner/repo/pull/42';
+    const body = renderCommentBody({
+      taskId: 'abc',
+      status: 'COMPLETED',
+      repo: 'owner/repo',
+      latestEventType: 'task_completed',
+      latestEventAt: '2026-05-05T00:00:00Z',
+      prUrl,
+      durationS: null,
+      costUsd: null,
+    });
+    expect(body).toContain(`| Pull request | [link](${prUrl}) |`);
   });
 });

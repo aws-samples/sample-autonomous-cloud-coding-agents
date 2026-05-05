@@ -47,6 +47,7 @@
  */
 
 import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 
 /** GitHub REST v3 media type — required on writes for stable behavior. */
 const GITHUB_ACCEPT = 'application/vnd.github.v3+json';
@@ -284,14 +285,66 @@ function sanitizeEventType(eventType: string): string {
   return eventType.replace(/[`|\r\n]/g, '');
 }
 
+/**
+ * Sanitize a ``prUrl`` before interpolating it into a Markdown link
+ * target (``[link](<here>)``). Without this guard a crafted URL could
+ * break the table layout or inject trailing Markdown: ``)`` closes the
+ * link prematurely, ``|`` starts a new table column, and CR / LF / ``]``
+ * / ``"`` each let an attacker extend the comment body past the link.
+ *
+ * Strategy: strip the six characters that are meaningful inside
+ * ``[text](target)`` Markdown AND reject anything that does not parse
+ * as an ``http://`` or ``https://`` URL after the strip. The strip is
+ * deliberately conservative — a legitimate GitHub PR URL
+ * (``https://github.com/owner/repo/pull/42``) never contains any of the
+ * listed characters, so false positives are effectively zero. Any URL
+ * that fails validation returns ``null`` and the caller must omit the
+ * Pull-request row entirely rather than risk a broken-layout comment.
+ *
+ * Refs: PR #52 krokoko code review finding #12 (Markdown injection
+ * possible via ``prUrl`` in GitHub comment body).
+ */
+export function sanitizeMarkdownLinkTarget(url: string | null | undefined): string | null {
+  if (url === null || url === undefined) return null;
+  // Reject anything carrying a Markdown-significant character. We do
+  // NOT attempt to URL-encode these — encoded ``)`` (``%29``) would
+  // render correctly, but encoding opens a harder surface to reason
+  // about (e.g. an attacker who gets ``%0A`` past this function could
+  // still break the table on some Markdown renderers). A flat reject
+  // keeps the contract simple and the comment row trustworthy.
+  if (/[\r\n\t\s)|\]"<>`]/.test(url)) return null;
+  // Validate the parsed URL is http(s). A ``javascript:`` link target
+  // is also attacker-controlled content and has no place in a status
+  // comment. ``new URL`` throws on malformed input.
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  return url;
+}
+
 function bgagentMarker(taskId: string): string {
   return `<!-- ${BGAGENT_COMMENT_MARKER_PREFIX}${taskId} -->`;
 }
 
-/** A compact terminal-friendly summary the GitHub comment displays as
- *  the task progresses. Kept small on purpose — GitHub truncates long
- *  comments in mobile / email notifications and the PR activity log
- *  accumulates the full history anyway. */
+/**
+ * A compact terminal-friendly summary the GitHub comment displays as
+ * the task progresses. Kept small on purpose — GitHub truncates long
+ * comments in mobile / email notifications and the PR activity log
+ * accumulates the full history anyway.
+ *
+ * The numeric fields accept ``string`` alongside ``number | null`` to
+ * honestly model the DynamoDB Document-client boundary: ``Number``
+ * attributes deserialize as JS ``string`` in some code paths (see
+ * ``shared/numeric.ts``). ``renderCommentBody`` coerces defensively so
+ * a future caller that forgets to run the shared coercion helper at
+ * its own boundary does not crash the way the fanout dispatcher did in
+ * Scenario 7-ext (``costUsd.toFixed is not a function``, commit
+ * ``9fe704e``).
+ */
 export interface CommentBodyInput {
   readonly taskId: string;
   readonly status: string;
@@ -299,16 +352,55 @@ export interface CommentBodyInput {
   readonly latestEventType: string;
   readonly latestEventAt: string;
   readonly prUrl: string | null;
-  readonly durationS: number | null;
-  readonly costUsd: number | null;
+  readonly durationS: number | string | null;
+  readonly costUsd: number | string | null;
 }
 
 /**
- * Render the Markdown body for the in-place comment. Pure: no logger,
- * no timing, no side effects — callers can snapshot-test the exact
- * bytes without monkey-patching anything.
+ * Render the Markdown body for the in-place comment. Pure: no timing,
+ * no network — callers can snapshot-test the exact bytes. The only
+ * side effect is a ``logger.warn`` via ``coerceNumericOrNull`` if a
+ * numeric field arrives with a non-finite value (e.g. ``'NaN'``), which
+ * surfaces upstream writer bugs instead of silently dropping the row.
+ *
+ * Defense-in-depth vs. the caller's coercion (finding #9):
+ *   - Callers SHOULD coerce DDB numerics at their own boundary using
+ *     ``coerceNumericOrNull`` so the warn log carries their context
+ *     (task_id, event_id). The fanout dispatcher does this today.
+ *   - ``renderCommentBody`` coerces again internally so a future caller
+ *     that forgets the boundary step (e.g. a Chunk K reconciler
+ *     reading raw DDB items) still degrades to a null-omitted row
+ *     instead of throwing ``TypeError: .toFixed is not a function``.
+ *     Non-finite values (``NaN``, ``Infinity``) collapse to null and
+ *     omit the row; finite values (including parseable strings) render
+ *     normally.
+ *
+ * Markdown-link target sanitization (finding #12):
+ *   - ``prUrl`` is interpolated into a Markdown link (``[link](<here>)``).
+ *     Without sanitization a crafted URL containing ``)`` / ``|`` / CR
+ *     / LF could break the table layout or inject trailing content.
+ *     ``sanitizeMarkdownLinkTarget`` strips the injection surface and
+ *     validates the URL is http(s); a rejected URL omits the row
+ *     rather than rendering a broken or misleading link.
  */
 export function renderCommentBody(input: CommentBodyInput): string {
+  // Coerce DDB-string numerics defensively — see doc block above. The
+  // context object gives the ``numeric.coercion_failed`` warn enough
+  // breadcrumbs (field + task_id) to trace back to the upstream writer.
+  const durationS = coerceNumericOrNull(
+    input.durationS,
+    { field: 'duration_s', task_id: input.taskId },
+    logger,
+  );
+  const costUsd = coerceNumericOrNull(
+    input.costUsd,
+    { field: 'cost_usd', task_id: input.taskId },
+    logger,
+  );
+  // Sanitize the PR link target before interpolation. A rejected URL
+  // returns null and the row is omitted.
+  const safePrUrl = sanitizeMarkdownLinkTarget(input.prUrl);
+
   const lines: string[] = [];
   lines.push(bgagentMarker(input.taskId));
   lines.push(`### Background agent — ${input.status}`);
@@ -319,14 +411,14 @@ export function renderCommentBody(input: CommentBodyInput): string {
   lines.push(`| Repo  | \`${input.repo}\` |`);
   lines.push(`| Status | **${input.status}** |`);
   lines.push(`| Last event | \`${sanitizeEventType(input.latestEventType)}\` @ ${input.latestEventAt} |`);
-  if (input.prUrl) {
-    lines.push(`| Pull request | [link](${input.prUrl}) |`);
+  if (safePrUrl) {
+    lines.push(`| Pull request | [link](${safePrUrl}) |`);
   }
-  if (input.durationS !== null) {
-    lines.push(`| Duration | ${input.durationS}s |`);
+  if (durationS !== null) {
+    lines.push(`| Duration | ${durationS}s |`);
   }
-  if (input.costUsd !== null) {
-    lines.push(`| Cost | $${input.costUsd.toFixed(4)} |`);
+  if (costUsd !== null) {
+    lines.push(`| Cost | $${costUsd.toFixed(4)} |`);
   }
   const rendered = lines.join('\n');
   if (rendered.length <= MAX_COMMENT_BODY_CHARS) return rendered;

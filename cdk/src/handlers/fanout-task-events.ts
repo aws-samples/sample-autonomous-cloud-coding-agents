@@ -46,7 +46,12 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { DynamoDBStreamEvent, DynamoDBStreamHandler, DynamoDBRecord } from 'aws-lambda';
+import type {
+  DynamoDBBatchItemFailure,
+  DynamoDBBatchResponse,
+  DynamoDBRecord,
+  DynamoDBStreamEvent,
+} from 'aws-lambda';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { logger } from './shared/logger';
@@ -693,9 +698,53 @@ export async function routeEvent(
 /**
  * Lambda entry point. Invoked by the DynamoDB Streams event source
  * mapping with batches of NEW_IMAGE records from `TaskEventsTable`.
+ *
+ * Returns a ``DynamoDBBatchResponse`` so the event-source-mapping's
+ * ``reportBatchItemFailures: true`` setting (see
+ * ``constructs/fanout-consumer.ts``) can honor partial-batch semantics.
+ * Without a structured return, a single poisonous record would cause
+ * Lambda to retry the **entire batch** from the stream checkpoint,
+ * replaying every sibling event and defeating the per-task ordering
+ * guarantee promised by ``ParallelizationFactor: 1`` upstream.
+ *
+ * Partial-failure surface (per-record try/catch below):
+ *   - ``routeEvent`` wraps each dispatcher in ``Promise.allSettled``, so
+ *     dispatcher rejections are already caught at the channel granularity
+ *     and do not reach here. What DOES reach here is a throw BEFORE the
+ *     ``allSettled`` — e.g. ``resolveTokenSecretArn`` throwing
+ *     ``AccessDeniedException`` on an IAM misconfig (deliberate hard fail
+ *     inside ``dispatchToGitHubComment``), a synchronous throw in
+ *     ``loadTaskForComment`` on a broken DDB env, or any future writer
+ *     that opens a non-``allSettled`` code path.
+ *   - Parse / filter / rate-limit errors are defensive — today they
+ *     cannot throw, but catching them keeps one stray ``throw`` in a
+ *     future refactor (e.g. a stricter ``parseStreamRecord``) from
+ *     crashing the whole batch.
+ *
+ * On any caught throw we push ``{ itemIdentifier: record.eventID }`` so
+ * Lambda retries ONLY that record, isolating the poison pill per
+ * design §6 + §8.9 expectations. Successful records are NOT in
+ * ``batchItemFailures`` and advance the stream checkpoint normally.
+ *
+ * Refs: PR #52 krokoko code review findings #1 and #5 (the fanout
+ * handler returned ``void`` despite ``reportBatchItemFailures: true``,
+ * and a ``routeEvent`` throw from ``resolveTokenSecretArn`` could crash
+ * the whole batch).
  */
-export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent) => {
+// ``DynamoDBStreamHandler`` constrains the return to ``void | Promise<void>``,
+// which blocks the ``DynamoDBBatchResponse`` we must return for
+// ``reportBatchItemFailures: true`` to work (finding #1). Typing the
+// handler as a plain async function preserves the 3-arg Lambda
+// signature for existing call sites (tests pass ``event, context, cb``)
+// while allowing a structured return. Lambda's runtime accepts either
+// shape.
+export const handler = async (
+  event: DynamoDBStreamEvent,
+  _context?: unknown,
+  _callback?: unknown,
+): Promise<DynamoDBBatchResponse> => {
   const perTaskCounts = new Map<string, number>();
+  const batchItemFailures: DynamoDBBatchItemFailure[] = [];
   let processed = 0;
   let dispatched = 0;
   let dropped = 0;
@@ -706,33 +755,57 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
 
   for (const record of event.Records) {
     processed++;
-    const ev = parseStreamRecord(record);
-    if (!ev) {
-      dropped++;
-      continue;
-    }
-    if (!shouldFanOut(ev, overrides)) {
-      dropped++;
-      continue;
-    }
+    try {
+      const ev = parseStreamRecord(record);
+      if (!ev) {
+        dropped++;
+        continue;
+      }
+      if (!shouldFanOut(ev, overrides)) {
+        dropped++;
+        continue;
+      }
 
-    const seen = perTaskCounts.get(ev.task_id) ?? 0;
-    if (seen >= MAX_EVENTS_PER_TASK_PER_INVOCATION) {
-      logger.warn('[fanout] per-task cap hit — dropping event', {
-        event: 'fanout.rate_limit.hit',
-        task_id: ev.task_id,
-        event_id: ev.event_id,
-        event_type: ev.event_type,
-        effective_event_type: effectiveEventType(ev),
-        cap: MAX_EVENTS_PER_TASK_PER_INVOCATION,
+      const seen = perTaskCounts.get(ev.task_id) ?? 0;
+      if (seen >= MAX_EVENTS_PER_TASK_PER_INVOCATION) {
+        logger.warn('[fanout] per-task cap hit — dropping event', {
+          event: 'fanout.rate_limit.hit',
+          task_id: ev.task_id,
+          event_id: ev.event_id,
+          event_type: ev.event_type,
+          effective_event_type: effectiveEventType(ev),
+          cap: MAX_EVENTS_PER_TASK_PER_INVOCATION,
+        });
+        dropped++;
+        continue;
+      }
+      perTaskCounts.set(ev.task_id, seen + 1);
+
+      const channels = await routeEvent(ev, overrides);
+      if (channels.length > 0) dispatched++;
+    } catch (err) {
+      // Poison-pill isolation: one record's unhandled throw must not
+      // crash the batch. See the handler doc block for the full list of
+      // paths that can reach here (notably AccessDeniedException from
+      // ``resolveTokenSecretArn``, finding #5).
+      //
+      // ``eventID`` is the stream-record identifier Lambda uses for the
+      // retry cursor; on Kinesis-style event-source-mappings with
+      // ``reportBatchItemFailures: true`` the service retries all
+      // records at-or-after the lowest-sequence failure. Returning even
+      // one failed itemIdentifier is enough to preserve ordering across
+      // the whole batch for that task.
+      const eventID = record.eventID;
+      logger.warn('[fanout] record threw — flagging for partial-batch retry', {
+        event: 'fanout.record.failed',
+        event_id: eventID,
+        error: err instanceof Error ? err.message : String(err),
+        error_name: err instanceof Error ? err.name : undefined,
       });
-      dropped++;
-      continue;
+      if (eventID !== undefined) {
+        batchItemFailures.push({ itemIdentifier: eventID });
+      }
     }
-    perTaskCounts.set(ev.task_id, seen + 1);
-
-    const channels = await routeEvent(ev, overrides);
-    if (channels.length > 0) dispatched++;
   }
 
   logger.info('[fanout] batch complete', {
@@ -741,6 +814,9 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
     processed,
     dispatched,
     dropped,
+    failed: batchItemFailures.length,
     unique_tasks: perTaskCounts.size,
   });
+
+  return { batchItemFailures };
 };

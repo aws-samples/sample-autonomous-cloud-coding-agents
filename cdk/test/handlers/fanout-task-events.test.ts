@@ -410,7 +410,10 @@ describe('fanout-task-events: handler', () => {
       ],
     };
     // Must not throw; the log-only dispatchers just call logger.info.
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    // Handler returns a ``DynamoDBBatchResponse`` so ``reportBatchItemFailures``
+    // semantics are honored end-to-end (finding #1). Empty ``batchItemFailures``
+    // means every record succeeded from the event-source-mapping's perspective.
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
   });
 
   test('per-task cap drops events beyond 20 per invocation', async () => {
@@ -420,7 +423,7 @@ describe('fanout-task-events: handler', () => {
       records.push(mkEvent('agent_milestone', 't-chatty'));
     }
     const event: DynamoDBStreamEvent = { Records: records };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
     // No strong assertion possible without mocking logger — but the
     // call must not throw, and the cap path is exercised.
   });
@@ -433,14 +436,14 @@ describe('fanout-task-events: handler', () => {
         mkEvent('task_completed'),
       ],
     };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
   });
 
   test('REMOVE events are skipped', async () => {
     const event: DynamoDBStreamEvent = {
       Records: [mkRecord('REMOVE', undefined)],
     };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
   });
 });
 
@@ -552,7 +555,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockDdbSend.mockResolvedValueOnce({ Item: undefined });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-missing')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
 
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
   });
@@ -562,7 +565,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockRejectedValueOnce(new Error('github 500'));
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
     // No UpdateCommand fires (no id to persist from a failed upsert).
     const updateCalls = mockDdbSend.mock.calls.filter(
       c => (c[0] as { _type?: string })._type === 'Update',
@@ -657,7 +660,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       );
 
       const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-      await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+      await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
 
       // No UpdateCommand fires — the 400 path has nothing to persist.
       const updateCalls = mockDdbSend.mock.calls.filter(
@@ -719,7 +722,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockResolveGitHubToken.mockRejectedValueOnce(new Error('secrets manager down'));
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
 
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
   });
@@ -736,7 +739,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
 
     // Upsert fired (comment posted); handler didn't throw.
     expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
@@ -838,7 +841,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    await expect(handler(event, {} as never, () => undefined)).resolves.toEqual({ batchItemFailures: [] });
 
     expect(mockRenderCommentBody).toHaveBeenCalledTimes(1);
     const renderArg = mockRenderCommentBody.mock.calls[0][0];
@@ -1050,5 +1053,257 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
     // two surfaces stay consistent.
     const renderArg = mockRenderCommentBody.mock.calls[0][0];
     expect(renderArg.latestEventType).toBe('pr_created');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Krokoko code review findings #1 + #5 — partial-batch response contract
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream record with a caller-supplied ``eventID`` so the test can
+ * assert which record surfaces in ``batchItemFailures``. ``mkEvent``
+ * uses ``Math.random()`` for the id which is fine for parse tests but
+ * useless when we need to cross-reference the failure identifier.
+ */
+function mkEventWithId(type: string, eventID: string, taskId = 't-fail'): DynamoDBRecord {
+  return {
+    eventID,
+    eventName: 'INSERT',
+    eventSource: 'aws:dynamodb',
+    dynamodb: {
+      NewImage: {
+        task_id: { S: taskId },
+        event_id: { S: `01ABC${type}` },
+        event_type: { S: type },
+        timestamp: { S: '2026-05-05T00:00:00Z' },
+        metadata: { M: { code: { S: 'OK' } } },
+      } as never,
+    },
+  } as unknown as DynamoDBRecord;
+}
+
+describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => {
+  // Finding #1: the construct sets ``reportBatchItemFailures: true`` on
+  // the event-source-mapping, but the handler used to return ``void``.
+  // That combination makes Lambda retry the WHOLE batch on any
+  // unhandled throw — replaying every sibling event and defeating the
+  // per-task ordering guarantee promised upstream by
+  // ``ParallelizationFactor: 1``.
+  //
+  // Finding #5: the architecturally reachable poison-pill path is a
+  // throw that bypasses ``routeEvent``'s ``Promise.allSettled``. The
+  // isolation works today for async rejections (``resolveTokenSecretArn``
+  // → ``AccessDeniedException`` is caught), but a future refactor that
+  // drops ``allSettled`` or introduces a sync-throw path before the
+  // dispatcher list is built would surface that throw at the handler.
+  // The tests below exercise the handler's defensive try/catch by
+  // injecting a throw from a dependency the handler uses OUTSIDE
+  // ``routeEvent`` — the ``logger.warn`` call in the rate-limit path —
+  // which is the same failure shape the handler must tolerate for any
+  // future escape from ``allSettled`` containment.
+
+  beforeEach(() => {
+    mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
+    mockUpsertTaskComment.mockReset();
+    mockRenderCommentBody.mockReset().mockReturnValue('rendered body');
+    mockLoadRepoConfig.mockReset().mockResolvedValue(null);
+    mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
+    mockClearTokenCache.mockReset();
+  });
+
+  test('AccessDeniedException from resolveTokenSecretArn stays isolated via allSettled; batch still succeeds (finding #5 today)', async () => {
+    // Baseline: today's ``routeEvent`` catches the AccessDenied throw
+    // via ``Promise.allSettled`` so it surfaces as a
+    // ``fanout.dispatcher.rejected`` warn, NOT as a handler-level
+    // throw. The structured response is therefore an empty
+    // ``batchItemFailures`` — the record advances past the cursor.
+    // This test pins the current containment so a future change that
+    // accidentally rethrows past ``allSettled`` will flip it from
+    // "empty failures" to "one failure" and fail loudly here.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          task_id: 't-boom',
+          user_id: 'u-1',
+          status: 'COMPLETED',
+          repo: 'owner/repo',
+          pr_number: 42,
+          branch_name: 'bgagent/t-boom/fix',
+          channel_source: 'api',
+          status_created_at: 'COMPLETED#2026-05-05T00:00:00Z',
+          created_at: '2026-05-05T00:00:00Z',
+          updated_at: '2026-05-05T00:00:00Z',
+        },
+      });
+      mockLoadRepoConfig.mockRejectedValueOnce(
+        Object.assign(new Error('iam deny'), { name: 'AccessDeniedException' }),
+      );
+
+      const poisonId = 'evt-access-denied';
+      const event: DynamoDBStreamEvent = {
+        Records: [mkEventWithId('task_completed', poisonId, 't-boom')],
+      };
+
+      const result = await handler(event, {} as never, () => undefined);
+
+      // Containment invariant: ``Promise.allSettled`` caught the
+      // rejection; the handler sees no throw.
+      expect(result).toEqual({ batchItemFailures: [] });
+      // … but the rejection WAS observed by operators through the
+      // dispatcher-rejected warn (existing coverage path).
+      const rejectedWarn = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.dispatcher.rejected',
+      );
+      expect(rejectedWarn).toBeDefined();
+      expect((rejectedWarn?.[1] as Record<string, unknown>).channel).toBe('github');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('unhandled throw OUTSIDE routeEvent flags the record as a batch item failure (finding #1 defense)', async () => {
+    // Defense-in-depth proof: when SOMETHING in the record-processing
+    // loop throws past ``routeEvent``'s containment (simulated here by
+    // making ``logger.warn`` throw on the rate-limit path — the
+    // closest real non-``routeEvent`` code path), the handler's
+    // per-record try/catch must push the record's ``eventID`` into
+    // ``batchItemFailures`` so Lambda retries ONLY that record. Pre-fix
+    // the handler returned void and Lambda would retry the ENTIRE
+    // batch, replaying every sibling event and defeating per-task
+    // ordering.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    // Rate-limit warn on the 21st event throws; earlier events succeed.
+    let warnCalls = 0;
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(
+      (_msg: string, meta?: Record<string, unknown>) => {
+        if (meta?.event === 'fanout.rate_limit.hit') {
+          warnCalls++;
+          throw new Error('simulated: logger broke during rate-limit warn');
+        }
+      },
+    );
+    try {
+      // 21 events for the same task — the 21st triggers the rate-limit
+      // warn, which throws, escaping ``routeEvent`` entirely (the
+      // cap check happens BEFORE ``routeEvent`` is called).
+      const records: DynamoDBRecord[] = [];
+      for (let i = 0; i < 21; i++) {
+        records.push(mkEventWithId('agent_milestone', `evt-${i}`, 't-chatty'));
+      }
+      // Only the 21st record should be in batchItemFailures — events
+      // 0..19 succeed (within cap), event 20 trips the cap and throws.
+      // Note that ``agent_milestone`` with no metadata.milestone does
+      // not match any filter (so it's dropped), but the cap check is
+      // purely per-task per invocation and fires regardless; to make
+      // the record reach the cap check we use ``task_completed`` which
+      // routes to all three channels and survives ``shouldFanOut``.
+      records.length = 0;
+      for (let i = 0; i < 21; i++) {
+        records.push(mkEventWithId('task_completed', `evt-${i}`, 't-chatty'));
+      }
+
+      const result = await handler(
+        { Records: records },
+        {} as never,
+        () => undefined,
+      );
+
+      expect(warnCalls).toBeGreaterThan(0);
+      // The 21st record (index 20) is the one that hit the cap and
+      // threw via the broken warn. Everything before it succeeded
+      // from the handler's perspective (``routeEvent`` short-circuits
+      // on "task not found" since the shared DDB mock returns no Item).
+      expect(result.batchItemFailures).toEqual([
+        { itemIdentifier: 'evt-20' },
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('successful records do NOT appear in batchItemFailures (mixed batch)', async () => {
+    // Mixed batch: one record throws past routeEvent (via the same
+    // rate-limit-warn trick as above but in a simpler shape — we make
+    // the second record specifically trigger the throw), the other
+    // routes cleanly. The response must list ONLY the failing eventID.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(
+      (_msg: string, meta?: Record<string, unknown>) => {
+        if (meta?.event === 'fanout.rate_limit.hit') {
+          throw new Error('simulated broken logger');
+        }
+      },
+    );
+    try {
+      // Send 21 events for 't-chatty' (trips the cap on #21 → throws)
+      // preceded by ONE event for 't-ok' (dispatches cleanly).
+      const records: DynamoDBRecord[] = [];
+      records.push(mkEventWithId('task_completed', 'evt-ok', 't-ok'));
+      for (let i = 0; i < 21; i++) {
+        records.push(mkEventWithId('task_completed', `evt-chatty-${i}`, 't-chatty'));
+      }
+      const result = await handler(
+        { Records: records },
+        {} as never,
+        () => undefined,
+      );
+
+      expect(result.batchItemFailures).toHaveLength(1);
+      expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: 'evt-chatty-20' });
+      // Specifically NOT the successful record.
+      expect(result.batchItemFailures.map(f => f.itemIdentifier)).not.toContain('evt-ok');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('poisonous record emits a fanout.record.failed warn so operators can alarm', async () => {
+    // The warn is the observability counterpart to the structured
+    // retry response — operators grep CloudWatch for the event name
+    // and alarm on its rate.
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const allWarns: Array<{ msg: string; meta?: Record<string, unknown> }> = [];
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(
+      (msg: string, meta?: Record<string, unknown>) => {
+        allWarns.push({ msg, meta });
+        if (meta?.event === 'fanout.rate_limit.hit') {
+          throw new Error('simulated broken logger for rate-limit path');
+        }
+      },
+    );
+    try {
+      const records: DynamoDBRecord[] = [];
+      for (let i = 0; i < 21; i++) {
+        records.push(mkEventWithId('task_completed', `evt-${i}`, 't-chatty'));
+      }
+      await handler({ Records: records }, {} as never, () => undefined);
+
+      const failedWarn = allWarns.find(w => w.meta?.event === 'fanout.record.failed');
+      expect(failedWarn).toBeDefined();
+      expect(failedWarn?.meta?.event_id).toBe('evt-20');
+      // The underlying error message propagates into the warn so the
+      // alarm can point at the root cause rather than just the fact of
+      // a failure.
+      expect(String(failedWarn?.meta?.error)).toContain('simulated broken logger');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('batch with zero throws returns an empty batchItemFailures array', async () => {
+    // Regression guard: the structured-response shape must hold even
+    // when nothing fails. Lambda's event-source-mapping treats an
+    // empty array as "all records succeeded" and advances the cursor.
+    const event: DynamoDBStreamEvent = {
+      Records: [
+        mkEvent('agent_turn'), // dropped (verbose)
+        mkEvent('task_completed'), // dispatched (GitHub short-circuits on missing task)
+      ],
+    };
+    const result = await handler(event, {} as never, () => undefined);
+    expect(result).toEqual({ batchItemFailures: [] });
   });
 });
