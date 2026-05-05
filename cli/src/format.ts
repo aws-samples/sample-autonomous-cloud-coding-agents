@@ -190,6 +190,9 @@ export function formatStatusSnapshot(
   if (reasonLine !== null) {
     lines.push(`  Reason:        ${reasonLine}`);
   }
+  if (task.pr_url) {
+    lines.push(`  PR:            ${task.pr_url}`);
+  }
   if (task.trace_s3_uri) {
     lines.push(`  Trace S3:      ${task.trace_s3_uri}`);
   }
@@ -355,20 +358,26 @@ function isTerminalStatus(status: string): boolean {
 }
 
 function elapsedDescription(task: TaskDetail, now: number): string {
-  // Prefer the authoritative SDK-reported duration once the task has
-  // landed terminal — it accounts for clock drift between the orchestrator
-  // and agent. Fall back to ``completed_at - started_at`` so the status
-  // snapshot still renders something sensible if ``duration_s`` is missing.
-  if (isTerminalStatus(task.status) && task.duration_s != null) {
-    return `${humanizeSeconds(task.duration_s)} total`;
-  }
+  // Use ``started_at`` → ``completed_at`` (or ``now``) as the primary
+  // elapsed-time source. This matches what the user observed during the
+  // RUNNING phase and avoids a visible "jump back" when the task lands
+  // terminal — ``duration_s`` only covers agent compute time (excludes
+  // container startup, repo clone, etc.) so it is strictly shorter than
+  // the wall-clock interval the CLI was displaying.
+  // Fall back to ``duration_s`` only when timestamps are missing.
   const start = task.started_at ?? task.created_at;
   const startMs = Date.parse(start);
-  if (Number.isNaN(startMs)) return PLACEHOLDER;
+  if (Number.isNaN(startMs)) {
+    if (isTerminalStatus(task.status) && task.duration_s != null) {
+      return `${humanizeSeconds(task.duration_s)} total`;
+    }
+    return PLACEHOLDER;
+  }
   const endMs = task.completed_at ? Date.parse(task.completed_at) : now;
   if (Number.isNaN(endMs)) return PLACEHOLDER;
   const diffS = Math.max(0, Math.round((endMs - startMs) / 1000));
-  return `${humanizeSeconds(diffS)} elapsed`;
+  const suffix = isTerminalStatus(task.status) ? 'total' : 'elapsed';
+  return `${humanizeSeconds(diffS)} ${suffix}`;
 }
 
 function describeTurn(task: TaskDetail, turnEvent: TaskEvent | null): string {
