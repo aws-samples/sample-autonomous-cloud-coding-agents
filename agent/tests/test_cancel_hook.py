@@ -332,9 +332,7 @@ class TestCancelShortCircuitsNudgeConsumption:
         # And the in-process dedup set was not stamped.
         assert "t-preloop" not in hooks_mod._INJECTED_NUDGES
 
-    def test_nudge_hook_internal_guard_fires_even_if_registry_reordered(
-        self, monkeypatch
-    ):
+    def test_nudge_hook_internal_guard_fires_even_if_registry_reordered(self, monkeypatch):
         """If a future refactor accidentally puts nudge before cancel in the
         registry, the loop-level break no longer helps — but the nudge
         hook's own ``_cancel_requested`` check still has to short-circuit.

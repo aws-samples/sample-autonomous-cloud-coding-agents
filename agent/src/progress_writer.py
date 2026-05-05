@@ -346,7 +346,7 @@ class _ProgressWriter:
 
     @property
     def _failure_count(self) -> int:
-        with _CIRCUIT_BREAKERS._lock:  # noqa: SLF001 — same-module read
+        with _CIRCUIT_BREAKERS._lock:
             return int(_CIRCUIT_BREAKERS._state.get(self._task_id, {}).get("failure_count", 0))
 
     @_failure_count.setter
@@ -354,7 +354,7 @@ class _ProgressWriter:
         # Test seam: allow direct writes so legacy tests that assign
         # ``writer._failure_count = 0`` keep working.  Production code
         # should use ``record_success`` / ``record_failure`` instead.
-        with _CIRCUIT_BREAKERS._lock:  # noqa: SLF001
+        with _CIRCUIT_BREAKERS._lock:
             entry = _CIRCUIT_BREAKERS._state.setdefault(
                 self._task_id, {"failure_count": 0, "disabled": False}
             )
@@ -442,12 +442,20 @@ class _ProgressWriter:
                 # codes (IAM denial, missing table) genuinely mean the
                 # whole stream is dead — flip the breaker for those so we
                 # don't spam CloudWatch with repeats.
-                code = (
-                    e.response.get("Error", {}).get("Code")  # type: ignore[attr-defined]
-                    if hasattr(e, "response") and isinstance(getattr(e, "response", None), dict)
-                    else None
-                )
-                if code in {"AccessDeniedException", "UnauthorizedOperation", "ResourceNotFoundException"}:
+                response = getattr(e, "response", None)
+                code: str | None = None
+                if isinstance(response, dict):
+                    error_block = response.get("Error") or {}
+                    if isinstance(error_block, dict):
+                        raw_code = error_block.get("Code")
+                        if isinstance(raw_code, str):
+                            code = raw_code
+                permanent_codes = {
+                    "AccessDeniedException",
+                    "UnauthorizedOperation",
+                    "ResourceNotFoundException",
+                }
+                if code in permanent_codes:
                     # Immediate disable: retrying an IAM / missing-table
                     # error will only produce more copies of the same
                     # error.  Loud log so operators notice.

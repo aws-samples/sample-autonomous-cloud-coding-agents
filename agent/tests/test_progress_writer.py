@@ -29,6 +29,7 @@ def _reset_shared_circuit_breaker_state():
     yield
     _reset_circuit_breakers()
 
+
 # ---------------------------------------------------------------------------
 # _generate_ulid
 # ---------------------------------------------------------------------------
@@ -449,10 +450,14 @@ def _make_client_error(code: str, message: str = "boom") -> Exception:
     :func:`progress_writer._classify_ddb_error`.
     """
     err = Exception(message)
-    err.response = {  # type: ignore[attr-defined]
-        "Error": {"Code": code, "Message": message},
-        "ResponseMetadata": {"HTTPStatusCode": 400},
-    }
+    setattr(  # noqa: B010 — intentional dynamic attr to duck-type ClientError
+        err,
+        "response",
+        {
+            "Error": {"Code": code, "Message": message},
+            "ResponseMetadata": {"HTTPStatusCode": 400},
+        },
+    )
     return err
 
 
@@ -525,9 +530,7 @@ class TestProgressWriterFailOpenClassified:
         for _ in range(10):
             writer.write_agent_milestone("test", "")
 
-        assert writer._failure_count == 0, (
-            "Permanent errors must not increment the shared counter"
-        )
+        assert writer._failure_count == 0, "Permanent errors must not increment the shared counter"
         assert writer._disabled is False, (
             "ValidationException must keep the stream alive for smaller events"
         )
@@ -536,9 +539,7 @@ class TestProgressWriterFailOpenClassified:
         # Regression guard: the original circuit-breaker contract is
         # preserved for transient errors.
         table = MagicMock()
-        table.put_item.side_effect = _make_client_error(
-            "ProvisionedThroughputExceededException"
-        )
+        table.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         writer._table = table
 
         for _ in range(_ProgressWriter._MAX_FAILURES):
@@ -547,9 +548,7 @@ class TestProgressWriterFailOpenClassified:
         assert writer._disabled is True
         assert writer._failure_count == _ProgressWriter._MAX_FAILURES
 
-    def test_access_denied_disables_writer_immediately_with_loud_log(
-        self, writer, capsys
-    ):
+    def test_access_denied_disables_writer_immediately_with_loud_log(self, writer, capsys):
         # AccessDeniedException is permanent AND catastrophic: IAM
         # misconfig means every single future write will fail the same
         # way.  Flip the breaker on the FIRST occurrence so we don't
@@ -580,9 +579,7 @@ class TestProgressWriterFailOpenClassified:
 
         assert writer._disabled is True
 
-    def test_unknown_exception_treated_as_transient_with_error_log(
-        self, writer, capsys
-    ):
+    def test_unknown_exception_treated_as_transient_with_error_log(self, writer, capsys):
         # Unknown exceptions default to transient-style counting (so a
         # new botocore release adding a transient code does not instantly
         # silence the stream) but log at ERROR level so operators notice
@@ -625,18 +622,14 @@ class TestSharedCircuitBreaker:
         w2 = _ProgressWriter("task-shared")
 
         t1 = MagicMock()
-        t1.put_item.side_effect = _make_client_error(
-            "ProvisionedThroughputExceededException"
-        )
+        t1.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         w1._table = t1
 
         for _ in range(_ProgressWriter._MAX_FAILURES):
             w1.write_agent_milestone("turn", "")
 
         assert w1._disabled is True
-        assert w2._disabled is True, (
-            "Shared breaker must also disable the sibling writer"
-        )
+        assert w2._disabled is True, "Shared breaker must also disable the sibling writer"
 
         # Second writer must not hit DDB once the shared breaker is open
         # — early-return on ``_disabled`` check at the top of
@@ -655,9 +648,7 @@ class TestSharedCircuitBreaker:
         w_b = _ProgressWriter("task-b")
 
         t_a = MagicMock()
-        t_a.put_item.side_effect = _make_client_error(
-            "ProvisionedThroughputExceededException"
-        )
+        t_a.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         w_a._table = t_a
 
         for _ in range(_ProgressWriter._MAX_FAILURES):
@@ -684,9 +675,7 @@ class TestSharedCircuitBreaker:
         w_unknown = _ProgressWriter("unknown")
 
         t = MagicMock()
-        t.put_item.side_effect = _make_client_error(
-            "ProvisionedThroughputExceededException"
-        )
+        t.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         w_unknown._table = t
 
         for _ in range(_ProgressWriter._MAX_FAILURES):
@@ -702,9 +691,7 @@ class TestSharedCircuitBreaker:
         # the autouse fixture clearing the map.
         w = _ProgressWriter("task-reset")
         t = MagicMock()
-        t.put_item.side_effect = _make_client_error(
-            "ProvisionedThroughputExceededException"
-        )
+        t.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         w._table = t
         for _ in range(_ProgressWriter._MAX_FAILURES):
             w.write_agent_milestone("x", "")
@@ -726,9 +713,7 @@ class TestSharedCircuitBreaker:
         w2 = _ProgressWriter("task-share-success")
 
         t1 = MagicMock()
-        t1.put_item.side_effect = _make_client_error(
-            "ProvisionedThroughputExceededException"
-        )
+        t1.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         w1._table = t1
         w1.write_agent_milestone("turn", "")
         assert w1._failure_count == 1
@@ -741,9 +726,7 @@ class TestSharedCircuitBreaker:
         assert w1._failure_count == 0
         assert w2._failure_count == 0
 
-    def test_permanent_error_on_one_writer_does_not_affect_sibling_breaker(
-        self, env
-    ):
+    def test_permanent_error_on_one_writer_does_not_affect_sibling_breaker(self, env):
         # Cross-check of the #6 + #8 interaction: a permanent error on
         # one writer must NOT trip the shared breaker, so the sibling
         # writer continues to function.

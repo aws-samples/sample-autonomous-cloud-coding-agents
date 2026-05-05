@@ -179,7 +179,7 @@ describe('reconcile-stranded-tasks', () => {
     // Spy on the logger module used by the handler. We import the logger
     // directly and replace the three level methods with jest.fn before
     // each test so we can assert exactly which level was called.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
     const loggerModule = require('../../src/handlers/shared/logger') as {
       logger: {
         info: (m: string, d?: Record<string, unknown>) => void;
