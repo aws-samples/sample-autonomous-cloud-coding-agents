@@ -284,10 +284,46 @@ export async function handler(): Promise<void> {
     }
   }
 
-  logger.info('Stranded-task reconciler finished', {
+  // Severity escalation for the final log line.
+  //
+  // Per-task failures upstream are caught and swallowed (logged at WARN)
+  // so one flaky DDB call doesn't abort the entire reconcile window. But
+  // a systemic failure — IAM outage, table-level throttling, schema
+  // corruption — can silently strand 100% of candidates while each
+  // individual WARN line looks ignorable. We classify the terminal log
+  // three ways so CloudWatch Log Insights / metric filters can alarm on
+  // the dedicated `error_id` strings:
+  //
+  //   1. totalStranded > 0 AND totalFailed == 0 AND totalErrors > 0
+  //      → SYSTEMIC failure. Every candidate hit an exception. Log ERROR
+  //        with error_id='RECONCILER_TOTAL_FAILURE' (alarm-worthy).
+  //   2. totalErrors > 0 AND totalFailed > 0
+  //      → PARTIAL failure. Some tasks transitioned, some didn't. Log
+  //        WARN with error_id='RECONCILER_PARTIAL_FAILURE' (dashboard
+  //        signal, not an alarm — expected under occasional DDB flakes).
+  //   3. Otherwise (no stranded, or all-success with zero errors)
+  //      → SUCCESS. Log INFO as before.
+  //
+  // We do NOT throw — the EventBridge schedule invocation should still
+  // complete "normally" (no retry storm against an already-degraded
+  // DDB). The log-level escalation IS the alarm signal.
+  const finalPayload = {
     stranded: totalStranded,
     failed: totalFailed,
     skipped: totalSkipped,
     errors: totalErrors,
-  });
+  };
+  if (totalStranded > 0 && totalFailed === 0 && totalErrors > 0) {
+    logger.error('Stranded-task reconciler finished — every candidate failed to transition', {
+      ...finalPayload,
+      error_id: 'RECONCILER_TOTAL_FAILURE',
+    });
+  } else if (totalErrors > 0 && totalFailed > 0) {
+    logger.warn('Stranded-task reconciler finished with partial failures', {
+      ...finalPayload,
+      error_id: 'RECONCILER_PARTIAL_FAILURE',
+    });
+  } else {
+    logger.info('Stranded-task reconciler finished', finalPayload);
+  }
 }

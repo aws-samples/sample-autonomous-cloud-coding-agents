@@ -127,6 +127,28 @@ class TaskConfig(BaseModel):
     issue: GitHubIssue | None = None
     base_branch: str | None = None
 
+    @model_validator(mode="after")
+    def _validate_trace_requires_user_id(self) -> Self:
+        """Fail at construction when trace=True without a user_id.
+
+        The trace trajectory is uploaded to
+        ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1). An empty
+        ``user_id`` produces ``traces//<task_id>.jsonl.gz``, which the
+        ``get-trace-url`` handler's per-caller-prefix guard refuses.
+        Catching this at construction time surfaces the misconfiguration
+        locally / in CI instead of deferring to runtime S3 upload.
+        """
+        if self.trace and not self.user_id:
+            raise ValueError(
+                "trace=True requires a non-empty user_id. Local/batch runs "
+                "without an orchestrator must either set trace=False (the "
+                "default) or supply user_id explicitly. The trace trajectory "
+                "is uploaded to traces/<user_id>/<task_id>.jsonl.gz (design "
+                "§10.1), and the get-trace-url handler refuses keys outside "
+                "the caller's traces/<user_id>/ prefix."
+            )
+        return self
+
 
 class RepoSetup(BaseModel):
     model_config = ConfigDict(frozen=True)

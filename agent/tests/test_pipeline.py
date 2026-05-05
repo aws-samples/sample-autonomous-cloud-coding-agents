@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+from pydantic import ValidationError
+
 from models import AgentResult, RepoSetup, TaskConfig
 from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
 
@@ -439,12 +442,14 @@ class TestTraceThreading:
                 aws_region="us-east-1",
                 task_id="t-trace",
                 trace=True,
+                user_id="cognito-sub-trace-user",
             )
 
         assert captured_config is not None
         # The config reaching run_agent carries trace=True so runner.py's
         # _ProgressWriter(config.task_id, trace=config.trace) picks it up.
         assert captured_config.trace is True
+        assert captured_config.user_id == "cognito-sub-trace-user"
 
     @patch("pipeline.run_agent")
     @patch("pipeline.build_system_prompt")
@@ -668,9 +673,17 @@ class TestTraceS3Upload:
         mock_upload,
         monkeypatch,
     ):
-        """K2 Stage 3 review Finding #1 — empty user_id with trace=True
-        must skip the upload to avoid writing an unreachable
-        ``traces//<task_id>.jsonl.gz`` artifact."""
+        """krokoko review Finding #11 — trace=True with empty user_id now
+        fails at ``TaskConfig`` construction time (pre-flight validation)
+        rather than silently skipping the upload and returning
+        ``trace_s3_uri=None``.
+
+        Previously (rev-5) this was a best-effort defensive skip inside
+        ``pipeline.run_task``'s trace-upload block; shifting the check to
+        the Pydantic model means misconfigured callers surface the error
+        immediately, before any agent work runs. The upload mock is never
+        exercised because we never reach the upload path.
+        """
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
@@ -700,18 +713,18 @@ class TestTraceS3Upload:
         ):
             from pipeline import run_task
 
-            result = run_task(
-                repo_url="owner/repo",
-                task_description="trace without user",
-                github_token="ghp_test",
-                aws_region="us-east-1",
-                task_id="t-no-uid",
-                trace=True,
-                user_id="",  # empty — must gate upload
-            )
+            with pytest.raises(ValidationError, match="trace=True requires a non-empty user_id"):
+                run_task(
+                    repo_url="owner/repo",
+                    task_description="trace without user",
+                    github_token="ghp_test",
+                    aws_region="us-east-1",
+                    task_id="t-no-uid",
+                    trace=True,
+                    user_id="",  # empty — now rejected at TaskConfig construction
+                )
 
         assert not mock_upload.called
-        assert result["trace_s3_uri"] is None
 
     @patch("pipeline.upload_trace_to_s3")
     @patch("pipeline.run_agent")

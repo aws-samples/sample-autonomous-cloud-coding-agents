@@ -175,6 +175,152 @@ describe('reconcile-stranded-tasks', () => {
     expect(statusValues).toEqual(expect.arrayContaining(['SUBMITTED', 'HYDRATING']));
   });
 
+  describe('final log severity escalation', () => {
+    // Spy on the logger module used by the handler. We import the logger
+    // directly and replace the three level methods with jest.fn before
+    // each test so we can assert exactly which level was called.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const loggerModule = require('../../src/handlers/shared/logger') as {
+      logger: {
+        info: (m: string, d?: Record<string, unknown>) => void;
+        warn: (m: string, d?: Record<string, unknown>) => void;
+        error: (m: string, d?: Record<string, unknown>) => void;
+      };
+    };
+
+    let infoSpy: jest.SpyInstance;
+    let warnSpy: jest.SpyInstance;
+    let errorSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      infoSpy = jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => { /* silence */ });
+      warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => { /* silence */ });
+      errorSpy = jest.spyOn(loggerModule.logger, 'error').mockImplementation(() => { /* silence */ });
+    });
+
+    afterEach(() => {
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    /**
+     * Find the final reconciler log line (i.e. the one whose message
+     * starts with 'Stranded-task reconciler finished') across all spies
+     * and return its [level, message, payload] triple.
+     */
+    function findFinalLog(): { level: 'INFO' | 'WARN' | 'ERROR'; message: string; payload: Record<string, unknown> } {
+      const match = (spy: jest.SpyInstance, level: 'INFO' | 'WARN' | 'ERROR') => {
+        const call = spy.mock.calls.find(
+          (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).startsWith('Stranded-task reconciler finished'),
+        );
+        return call ? { level, message: call[0] as string, payload: (call[1] ?? {}) as Record<string, unknown> } : null;
+      };
+      return match(errorSpy, 'ERROR') ?? match(warnSpy, 'WARN') ?? match(infoSpy, 'INFO')
+        ?? (() => { throw new Error('No final reconciler log line found'); })();
+    }
+
+    test('test_logs_ERROR_with_RECONCILER_TOTAL_FAILURE_error_id_when_every_task_fails', async () => {
+      // Two candidates both hit an exception on the first DDB write
+      // (UpdateItem transition). None transition cleanly, so totalFailed=0,
+      // totalStranded=2, totalErrors=2 → systemic failure path.
+      const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+      const ddbErr = Object.assign(new Error('DDB blew up'), { name: 'InternalServerError' });
+      primeResponses([
+        // SUBMITTED query → two candidates.
+        {
+          Items: [
+            mockTaskRow({ task_id: 't-fail-1', user_id: 'u-1', created_at: ancient }),
+            mockTaskRow({ task_id: 't-fail-2', user_id: 'u-2', created_at: ancient }),
+          ],
+        },
+        ddbErr, // UpdateItem for t-fail-1 → throws
+        ddbErr, // UpdateItem for t-fail-2 → throws
+        { Items: [] }, // HYDRATING query
+      ]);
+
+      await handler();
+
+      const final = findFinalLog();
+      expect(final.level).toBe('ERROR');
+      expect(final.payload.error_id).toBe('RECONCILER_TOTAL_FAILURE');
+      expect(final.payload.stranded).toBe(2);
+      expect(final.payload.failed).toBe(0);
+      expect(final.payload.errors).toBe(2);
+    });
+
+    test('test_logs_WARN_with_RECONCILER_PARTIAL_FAILURE_when_some_tasks_fail', async () => {
+      // One success (4 writes), one failure (throws on UpdateItem).
+      const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+      const ddbErr = Object.assign(new Error('DDB throttled'), { name: 'ProvisionedThroughputExceededException' });
+      primeResponses([
+        // SUBMITTED query → two candidates.
+        {
+          Items: [
+            mockTaskRow({ task_id: 't-ok', user_id: 'u-a', created_at: ancient }),
+            mockTaskRow({ task_id: 't-fail', user_id: 'u-b', created_at: ancient }),
+          ],
+        },
+        {}, // UpdateItem t-ok (transition) → success
+        {}, // PutItem task_stranded event
+        {}, // PutItem task_failed event
+        {}, // UpdateItem decrement concurrency
+        ddbErr, // UpdateItem t-fail (transition) → throws
+        { Items: [] }, // HYDRATING query
+      ]);
+
+      await handler();
+
+      const final = findFinalLog();
+      expect(final.level).toBe('WARN');
+      expect(final.payload.error_id).toBe('RECONCILER_PARTIAL_FAILURE');
+      expect(final.payload.stranded).toBe(2);
+      expect(final.payload.failed).toBe(1);
+      expect(final.payload.errors).toBe(1);
+    });
+
+    test('test_logs_INFO_on_full_success', async () => {
+      // Two candidates, both transition cleanly.
+      const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+      primeResponses([
+        {
+          Items: [
+            mockTaskRow({ task_id: 't-1', user_id: 'u-a', created_at: ancient }),
+            mockTaskRow({ task_id: 't-2', user_id: 'u-b', created_at: ancient }),
+          ],
+        },
+        {}, {}, {}, {}, // t-1: transition + 2 events + decrement
+        {}, {}, {}, {}, // t-2: transition + 2 events + decrement
+        { Items: [] }, // HYDRATING
+      ]);
+
+      await handler();
+
+      const final = findFinalLog();
+      expect(final.level).toBe('INFO');
+      expect(final.payload.error_id).toBeUndefined();
+      expect(final.payload.stranded).toBe(2);
+      expect(final.payload.failed).toBe(2);
+      expect(final.payload.errors).toBe(0);
+    });
+
+    test('test_no_stranded_tasks_logs_INFO_not_ERROR', async () => {
+      // Empty-query case: totalStranded=0. Must NOT alarm.
+      primeResponses([
+        { Items: [] }, // SUBMITTED
+        { Items: [] }, // HYDRATING
+      ]);
+
+      await handler();
+
+      const final = findFinalLog();
+      expect(final.level).toBe('INFO');
+      expect(final.payload.stranded).toBe(0);
+      expect(final.payload.errors).toBe(0);
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+  });
+
   test('query paginates with ExclusiveStartKey when LastEvaluatedKey present', async () => {
     const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     // findStrandedCandidates paginates internally and returns ALL rows

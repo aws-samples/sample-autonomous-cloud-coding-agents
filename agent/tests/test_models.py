@@ -280,6 +280,40 @@ class TestTaskConfig:
         config.max_turns = 50
         assert config.max_turns == 50
 
+    def test_trace_true_with_empty_user_id_raises_at_construction(self):
+        """trace=True + user_id='' must fail at construction, not at S3 upload."""
+        with pytest.raises(ValidationError, match="trace=True requires a non-empty user_id"):
+            TaskConfig(
+                repo_url="owner/repo",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                trace=True,
+                # user_id omitted — defaults to ""
+            )
+
+    def test_trace_true_with_valid_user_id_constructs_cleanly(self):
+        """Happy path: trace=True with a non-empty user_id is accepted."""
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            trace=True,
+            user_id="cognito-sub-abc-123",
+        )
+        assert config.trace is True
+        assert config.user_id == "cognito-sub-abc-123"
+
+    def test_trace_false_allows_empty_user_id(self):
+        """Negative control: local batch runs (trace=False, user_id='') still work."""
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            # trace defaults to False; user_id defaults to ""
+        )
+        assert config.trace is False
+        assert config.user_id == ""
+
 
 class TestRepoSetup:
     def test_construction(self):
