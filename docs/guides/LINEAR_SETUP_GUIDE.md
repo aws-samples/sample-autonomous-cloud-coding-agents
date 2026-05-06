@@ -97,7 +97,7 @@ ABCA needs to know which platform user a Linear actor maps to so tasks are attri
    bgagent linear link <code>
    ```
 
-> A comment-triggered link-code generator is on the v2 roadmap. Until then, additional-user linking is admin-assisted — see [Roadmap](./ROADMAP.md).
+> A comment-triggered link-code generator is a planned follow-up. Until then, additional-user linking is admin-assisted — an admin generates the code and shares it with the user.
 
 ### Step 7: Test it
 
