@@ -16,6 +16,7 @@ import task_state
 from channel_mcp import configure_channel_mcp
 from config import AGENT_WORKSPACE, build_config, get_config, resolve_linear_api_token
 from context import assemble_prompt, fetch_github_issue
+from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import task_span
 from post_hooks import (
@@ -292,6 +293,15 @@ def run_task(
                 resolve_linear_api_token()
             configure_channel_mcp(setup.repo_dir, config.channel_source)
 
+            # 👀 on the Linear issue — acknowledges the task is picked up.
+            # No-op for non-Linear tasks. Best-effort; failures are logged
+            # but do not block the pipeline. Capture the reaction id so we
+            # can delete it at terminal status (👀 → ✅/❌).
+            linear_eyes_reaction_id = react_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
             # Log discovered repo-level project configuration
             # (all files loaded by setting_sources=["project"])
             repo_dir = setup.repo_dir
@@ -389,6 +399,15 @@ def run_task(
                 pr_url=pr_url,
             )
 
+            # ✅/❌ on the Linear issue (removes the 👀 first so the final
+            # status stands alone). No-op for non-Linear tasks.
+            react_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=(overall_status == "success"),
+                started_reaction_id=linear_eyes_reaction_id,
+            )
+
             # Build TaskResult
             usage = agent_result.usage
             result = TaskResult(
@@ -461,6 +480,16 @@ def run_task(
                 agent_status=agent_for_chain.status if agent_for_chain else "unknown",
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
+            # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
+            # No-op for non-Linear tasks; network/GraphQL failures are swallowed.
+            # `linear_eyes_reaction_id` may be unbound if we crashed before the
+            # start-reaction call — guarded with locals() to stay safe.
+            react_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=False,
+                started_reaction_id=locals().get("linear_eyes_reaction_id"),
+            )
             raise
 
 
