@@ -29,7 +29,7 @@ ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is presen
 
 | Component | Billing Model | Idle Cost |
 |-----------|--------------|-----------|
-| DynamoDB (5 tables) | PAY_PER_REQUEST | $0 |
+| DynamoDB (6 tables) | PAY_PER_REQUEST | $0 |
 | Lambda (all functions) | Per invocation | $0 |
 | API Gateway REST | Per request | $0 |
 | ECS Fargate tasks (when enabled) | Per running task | $0 (cluster is free) |
@@ -63,7 +63,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/architect
 |---------|---------|---------------|
 | Bedrock AgentCore Runtime (MicroVMs) | Agent sessions (default) | Yes |
 | ECS Fargate (when enabled) | Agent sessions (opt-in) | Yes |
-| Lambda (Node.js 24, ARM64) | Orchestrator, API handlers, reconciler, custom resources | Yes |
+| Lambda (Node.js 24, ARM64) | Orchestrator, API handlers, fanout consumer, reconcilers, custom resources | Yes |
 
 ### AI/ML
 
@@ -88,8 +88,10 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/architect
 
 | Service | Used By | Scales to Zero |
 |---------|---------|---------------|
-| DynamoDB (5 tables, PAY_PER_REQUEST) | Task state, events, concurrency, webhooks, repo config | Yes |
-| S3 | CDK asset bucket, ECR image layers, FUSE session storage | Minimal |
+| DynamoDB (6 tables, PAY_PER_REQUEST) | Task state, events, nudges, concurrency, webhooks, repo config | Yes |
+| DynamoDB Streams | TaskEventsTable → FanOut Consumer Lambda | Yes |
+| S3 | CDK asset bucket, ECR image layers, FUSE session storage, trace artifacts (7-day lifecycle) | Minimal |
+| SQS (DLQ) | FanOut Consumer dead-letter queue | Yes |
 | Secrets Manager | GitHub PAT, webhook HMAC secrets | **No** (~$0.40/secret/mo) |
 
 ### API / Auth
@@ -99,6 +101,12 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/architect
 | API Gateway (REST) | Task REST API | Yes |
 | Cognito User Pool | CLI/API authentication | Yes (free tier) |
 | WAF v2 | API Gateway protection (managed rules + rate limiting) | **No** (~$5/mo base) |
+
+### Scheduling
+
+| Service | Used By | Scales to Zero |
+|---------|---------|---------------|
+| EventBridge (scheduled rule) | Stranded task reconciler (every 5 min) | Yes (rule is free; Lambda invocation is the cost) |
 
 ### Observability
 
