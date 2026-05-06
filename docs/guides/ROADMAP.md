@@ -7,10 +7,11 @@ What's shipped and what's coming next.
 ### Core platform
 
 - [x] **Autonomous agent execution** - Isolated MicroVM (AgentCore Runtime) per task with shell, filesystem, and git access
-- [x] **CLI and REST API** - Submit, list, get, cancel tasks; view audit events; Cognito auth with token caching
+- [x] **CLI and REST API** - Submit, list, get, cancel, nudge, watch, trace, webhook management; view audit events; Cognito auth with token caching
 - [x] **Durable orchestrator** - Lambda Durable Functions with checkpoint/resume; survives transient failures up to 9 hours
 - [x] **Task state machine** - SUBMITTED → HYDRATING → RUNNING → COMPLETED / FAILED / CANCELLED / TIMED_OUT
 - [x] **Concurrency control** - Per-user limits (default 3) with atomic admission and automated drift reconciliation
+- [x] **Stranded task reconciler** - Scheduled Lambda detects tasks stuck in non-terminal states and drives them to failure with proper cleanup
 - [x] **Idempotency** - `Idempotency-Key` header on POST requests (24-hour TTL)
 
 ### Task types
@@ -59,6 +60,22 @@ What's shipped and what's coming next.
 - [x] **Cost budget** - Per-task max budget in USD ($0.01-$100)
 - [x] **Data retention** - Automatic TTL-based cleanup (default 90 days)
 
+### Interactive task UX
+
+- [x] **Real-time watch** - `bgagent watch` streams progress events with adaptive polling (500 ms active; 1/2/5 s idle backoff), cold-start retry, clean exit on terminal state
+- [x] **Mid-run steering (nudge)** - `bgagent nudge` sends guidance to a running agent; combined-turn acknowledgement (agent emits `nudge_acknowledged` before incorporating)
+- [x] **Execution tracing** - `--trace` on submit raises preview cap to 4 KB and uploads full gzipped NDJSON trajectory to S3; `bgagent trace download` retrieves it
+- [x] **Deterministic status snapshot** - `bgagent status` derives all fields from task record + recent events with no LLM in the loop
+- [x] **Debug output** - `--verbose` flag emits full HTTP request/response on stderr for any CLI command
+
+### Notification plane
+
+- [x] **DDB Stream fanout** - FanOut Consumer Lambda on TaskEventsTable streams (ParallelizationFactor: 1 for per-task ordering) routes events to channel dispatchers
+- [x] **GitHub edit-in-place** - Single status comment per task on the target PR, edited in place as progress events fire (phase, milestone, cost, link)
+- [x] **Routable agent milestones** - Named checkpoints (`pr_created`, `nudge_acknowledged`) unwrapped against allowlist for channel filter matching
+- [ ] **Slack dispatcher** - Log-only stub; pending full Slack Block Kit integration
+- [ ] **Email dispatcher** - Log-only stub; pending SES integration
+
 ### Observability
 
 - [x] **OpenTelemetry** - Custom spans for pipeline phases with CloudWatch querying
@@ -66,6 +83,7 @@ What's shipped and what's coming next.
 - [x] **Alarms** - Stuck tasks, orchestration failures, counter drift, crash rate, guardrail failures
 - [x] **Audit trail** - TaskEvents table with chronological event log per task
 - [x] **Runtime error classifier** - Pattern-matching classifier that categorizes task errors (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown) with human-readable titles, descriptions, remedies, and retryability flags. Computed at API response time; powers structured CLI error display and CloudWatch alarm routing
+- [x] **Enhanced error classifiers** - Specific terminal-state classifiers (`error_max_turns`, `error_max_budget_usd`, `error_during_execution`) for precise CLI display and alarm routing
 
 ### Agent harness
 
@@ -142,8 +160,8 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Additional git providers** | GitLab (and optionally Bitbucket). Same workflow, provider-specific API adapters. |
 | **Slack integration** | Submit tasks, check status, receive notifications from Slack. Block Kit rendering. |
 | **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. |
-| **Real-time event streaming** | WebSocket API for live task updates. Replaces polling for CLI, control panel, Slack. |
-| **Outbound notification pipeline** | Canonical internal notification schema emitted on task lifecycle events; channel adapters (Slack, email, CLI) render and deliver. Complements polling and WebSocket. |
+| **Slack notification dispatcher** | Full Slack Block Kit rendering for the existing DDB-Stream fanout pipeline. Stub exists today (logs only). |
+| **Email notification dispatcher** | SES-based email notifications via the existing fanout pipeline. Stub exists today (logs only). |
 | **Per-user notification preferences** | DynamoDB (or equivalent) store for preferred channels, per-channel config, and event filters (`INPUT_GATEWAY.md`). |
 | **Browser extension channel** | Lightweight extension to open tasks from GitHub issue/PR pages using existing webhook or OAuth-issued JWT; same internal message contract as other channels. |
 
@@ -183,8 +201,8 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 |------------|-------------|
 | **Multi-user and teams** | Team visibility, shared approval queues, team concurrency/cost budgets, memory isolation. |
 | **Agent swarm** | Planner-worker architecture for complex multi-file tasks. DAG of subtasks, merge orchestrator, one consolidated PR. |
-| **Configurable human-in-the-loop (operator gate)** | Blueprint- or task-level workflow with **multiple gates per run** (for example: draft plan → operator review → implement → operator review). **Each gate is configured** as **human-review** (pause until the operator responds) or **auto** (continue through that checkpoint without blocking). Mix gates in one run—for example plan review enforced, implementation review auto. Resume, timeout, and cancel stay well-defined at every human-review wait. Complements **Iterative feedback** (soft inject without a hard pause). |
-| **Iterative feedback** | Follow-up instructions to running tasks. Multiple users inject context. Per-prompt commit attribution. |
+| **Cedar-driven HITL approval gates** | Three-outcome model (allow/hard-deny/soft-deny) for tool-call governance with Cedar policy engine. |
+| **Multi-user nudge** | Extend `bgagent nudge` to support multiple users injecting context into the same running task. Per-nudge commit attribution. (Single-user nudge shipped.) |
 | **Scheduled triggers** | Cron-based task creation via EventBridge (dependency updates, nightly flaky test checks). |
 
 ### Platform maturity
@@ -196,8 +214,8 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Blueprint custom steps and step sequences** | Lambda-backed `pre-agent` / `post-agent` steps and optional `step_sequence` overrides with CDK synth + runtime validation and `INVALID_STEP_SEQUENCE` on misconfiguration (`REPO_ONBOARDING.md`, `ORCHESTRATOR.md`). |
 | **Blueprint RepoConfig parity** | Extend the Blueprint construct to persist per-repo default `max_budget_usd` and `memory_token_budget` in DynamoDB (orchestrator already merges `max_budget_usd` when present; hydration uses a fixed memory token cap today). |
 | **Orchestrator DLQ** | Dead-letter path for task orchestration after retry exhaustion so operators can inspect and replay failed durable executions (`ORCHESTRATOR.md`). |
-| **Automated stuck-task reconciliation** | Scheduled job beyond passive alarms: detect tasks stuck in non-terminal states longer than policy allows and drive explicit resume, fail, or notify (`ORCHESTRATOR.md`). |
-| **Task lifecycle push notifications** | On terminal transitions, publish events (e.g. EventBridge/SNS) for email, chat, or **Per-user notification preferences** without requiring clients to poll. |
+| **Stuck-task reconciliation (operator notify/resume)** | The scheduled stranded-task reconciler shipped (detects and fails stuck tasks). Further: operator notification before forced failure, manual resume option (`ORCHESTRATOR.md`). |
+| **EventBridge / SNS integration** | Publish task lifecycle events to EventBridge or SNS for external consumers beyond the built-in DDB-Stream fanout (which already powers GitHub edit-in-place, Slack, and email dispatchers). |
 | **CDK constructs library** | Publish reusable constructs to Construct Hub with semver versioning. |
 | **Centralized policy framework** | Unified Cedar-based framework with `PolicyDecisionEvent` audit schema. Three enforcement modes with observe-before-enforce rollout. |
 | **Formal verification** | TLA+ specification of task state machine, concurrency, cancellation races, reconciler interleavings. |

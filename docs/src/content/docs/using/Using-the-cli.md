@@ -75,6 +75,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
+| `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
@@ -145,6 +146,48 @@ node lib/bin/bgagent.js watch <TASK_ID> --output json
 
 Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`. Press Ctrl+C to exit early without affecting the task.
 
+### Steering a running task (nudge)
+
+Send a mid-run message to the agent while it is working. The agent emits a `nudge_acknowledged` milestone before incorporating your guidance into its next turn.
+
+```bash
+node lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
+
+# Example: redirect scope mid-task
+node lib/bin/bgagent.js nudge <TASK_ID> "Skip the docs update, just fix the handler"
+```
+
+Nudges are delivered between turns — the agent finishes its current tool call before reading the message. You can send multiple nudges; each one is acknowledged in order.
+
+### Tracing a task
+
+Submit a task with `--trace` to enable detailed tracing. This raises the progress-writer preview cap from 200 chars to 4 KB and uploads a full gzipped NDJSON trajectory to S3 when the task finishes.
+
+```bash
+# Submit with tracing enabled
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace
+
+# Download the trace after the task completes
+node lib/bin/bgagent.js trace download <TASK_ID>
+
+# Pipe to jq for analysis
+node lib/bin/bgagent.js trace download <TASK_ID> | gunzip | jq -s .
+
+# Save raw gzip to a file
+node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz
+
+# Overwrite existing file
+node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz --force
+```
+
+### Debug output
+
+Add `--verbose` to any `bgagent` command to emit the full HTTP request/response cycle on stderr. This is useful for diagnosing auth, network, or API contract issues.
+
+```bash
+node lib/bin/bgagent.js --verbose status <TASK_ID>
+node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
+```
 
 ### Cancelling a task
 

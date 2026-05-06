@@ -4,7 +4,22 @@ title: Webhook integration
 
 Webhooks allow external systems (CI pipelines, GitHub Actions, custom automation) to create tasks without Cognito credentials. Each webhook integration has its own HMAC-SHA256 shared secret.
 
-### Managing webhooks
+### Managing webhooks (CLI)
+
+The `bgagent webhook` commands manage webhook integrations directly from the terminal:
+
+```bash
+# Create a webhook — returns the secret (shown once)
+node lib/bin/bgagent.js webhook create --name "My CI Pipeline"
+
+# List active webhooks
+node lib/bin/bgagent.js webhook list
+
+# Revoke a webhook (soft delete — 7-day secret recovery window)
+node lib/bin/bgagent.js webhook revoke <WEBHOOK_ID>
+```
+
+### Managing webhooks (REST API)
 
 Webhook management requires Cognito authentication (same as the REST API).
 
