@@ -3,7 +3,7 @@
     "SessionStart": [
       {
         "type": "prompt",
-        "prompt": "The ABCA plugin is active. Available skills:\n- /setup — first-time setup walkthrough\n- /deploy — deploy, diff, or destroy the CDK stack\n- /onboard-repo — add a GitHub repository\n- /submit-task — submit a coding task (guided or quick mode)\n- /troubleshoot — diagnose deployment, auth, or task issues\n- /status — platform health check (stack, tasks, build)\n\nAvailable agents: cdk-expert (CDK infrastructure), agent-debugger (task failure investigation).\n\nSuggest relevant skills when the user's request matches."
+        "prompt": "The ABCA plugin is active. Available skills:\n- /setup — first-time setup walkthrough\n- /deploy — deploy, diff, or destroy the CDK stack\n- /onboard-repo — add a GitHub repository\n- /submit-task — submit a coding task (guided or quick mode)\n- /troubleshoot — diagnose deployment, auth, or task issues\n- /status — platform health check (stack, tasks, build)\n\nAvailable agents: cdk-expert (CDK infrastructure), agent-debugger (task failure investigation).\n\nInteractive task commands (suggest when user is monitoring or steering a running task):\n- bgagent watch <task-id> — stream progress events in real time\n- bgagent nudge <task-id> \"<message>\" — steer the agent mid-run\n- bgagent trace download <task-id> — download full execution trace\n- bgagent webhook create/list/revoke — manage webhook integrations\n- --trace flag on submit — enable detailed tracing for a task\n- --verbose flag — HTTP debug output on any command\n\nSuggest relevant skills when the user's request matches."
       }
     ]
   }

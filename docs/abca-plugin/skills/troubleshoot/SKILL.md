@@ -176,9 +176,15 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Sta
 # Stack outputs
 aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table
 
-# Task status
-node cli/lib/bin/bgagent.js status <TASK_ID>
+# Task status (use --verbose for HTTP-level debug output)
+node cli/lib/bin/bgagent.js --verbose status <TASK_ID>
 node cli/lib/bin/bgagent.js events <TASK_ID> --output json
+
+# Watch task progress in real time
+node cli/lib/bin/bgagent.js watch <TASK_ID>
+
+# Download full execution trace (task must have been submitted with --trace)
+node cli/lib/bin/bgagent.js trace download <TASK_ID>
 
 # List running tasks
 node cli/lib/bin/bgagent.js list --status RUNNING
@@ -186,3 +192,5 @@ node cli/lib/bin/bgagent.js list --status RUNNING
 # Build health
 mise run build
 ```
+
+**Tip:** Add `--verbose` to any `bgagent` command to see the full HTTP request/response cycle on stderr. This is the fastest way to diagnose auth, network, or API contract issues.

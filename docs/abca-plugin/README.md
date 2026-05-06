@@ -25,8 +25,8 @@ Or add to your project's `.claude/settings.json`:
 | `/setup` | First-time setup, prerequisites | Walk through prerequisites, toolchain, and first deployment |
 | `/deploy` | Deploy, diff, destroy | Deploy, diff, or destroy the CDK stack |
 | `/onboard-repo` | Add a repository | Onboard a GitHub repo via Blueprint CDK construct |
-| `/submit-task` | Submit a coding task | Submit tasks with prompt quality guidance and cost controls (supports quick mode) |
-| `/troubleshoot` | Debug, errors, failures | Diagnose build, deployment, auth, and task execution issues |
+| `/submit-task` | Submit a coding task | Submit tasks with prompt quality guidance and cost controls (supports quick mode, `--trace`) |
+| `/troubleshoot` | Debug, errors, failures | Diagnose build, deployment, auth, and task execution issues (supports `--verbose`) |
 | `/status` | Status, health check | Check stack health, running tasks, and recent history |
 
 ### Agents
@@ -38,7 +38,7 @@ Or add to your project's `.claude/settings.json`:
 
 ### Hook
 
-- **SessionStart** — Advertises available skills and agents so Claude can proactively suggest them when your request matches.
+- **SessionStart** — Advertises available skills, agents, and interactive task commands (`watch`, `nudge`, `trace`, `webhook`) so Claude can proactively suggest them when your request matches.
 
 ## Plugin Structure
 

@@ -422,6 +422,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
+| `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
@@ -492,6 +493,48 @@ node lib/bin/bgagent.js watch <TASK_ID> --output json
 
 Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`. Press Ctrl+C to exit early without affecting the task.
 
+### Steering a running task (nudge)
+
+Send a mid-run message to the agent while it is working. The agent emits a `nudge_acknowledged` milestone before incorporating your guidance into its next turn.
+
+```bash
+node lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
+
+# Example: redirect scope mid-task
+node lib/bin/bgagent.js nudge <TASK_ID> "Skip the docs update, just fix the handler"
+```
+
+Nudges are delivered between turns — the agent finishes its current tool call before reading the message. You can send multiple nudges; each one is acknowledged in order.
+
+### Tracing a task
+
+Submit a task with `--trace` to enable detailed tracing. This raises the progress-writer preview cap from 200 chars to 4 KB and uploads a full gzipped NDJSON trajectory to S3 when the task finishes.
+
+```bash
+# Submit with tracing enabled
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace
+
+# Download the trace after the task completes
+node lib/bin/bgagent.js trace download <TASK_ID>
+
+# Pipe to jq for analysis
+node lib/bin/bgagent.js trace download <TASK_ID> | gunzip | jq -s .
+
+# Save raw gzip to a file
+node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz
+
+# Overwrite existing file
+node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz --force
+```
+
+### Debug output
+
+Add `--verbose` to any `bgagent` command to emit the full HTTP request/response cycle on stderr. This is useful for diagnosing auth, network, or API contract issues.
+
+```bash
+node lib/bin/bgagent.js --verbose status <TASK_ID>
+node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
+```
 
 ### Cancelling a task
 
@@ -503,7 +546,22 @@ node lib/bin/bgagent.js cancel <TASK_ID>
 
 Webhooks allow external systems (CI pipelines, GitHub Actions, custom automation) to create tasks without Cognito credentials. Each webhook integration has its own HMAC-SHA256 shared secret.
 
-### Managing webhooks
+### Managing webhooks (CLI)
+
+The `bgagent webhook` commands manage webhook integrations directly from the terminal:
+
+```bash
+# Create a webhook — returns the secret (shown once)
+node lib/bin/bgagent.js webhook create --name "My CI Pipeline"
+
+# List active webhooks
+node lib/bin/bgagent.js webhook list
+
+# Revoke a webhook (soft delete — 7-day secret recovery window)
+node lib/bin/bgagent.js webhook revoke <WEBHOOK_ID>
+```
+
+### Managing webhooks (REST API)
 
 Webhook management requires Cognito authentication (same as the REST API).
 
@@ -652,7 +710,16 @@ Available events:
 - **Lifecycle** - `task_created`, `session_started`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
 - **Orchestration** - `admission_rejected`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
+- **Interactive** - `nudge_acknowledged`, `agent_milestone`
 - **Output** - `pr_created`, `pr_updated`
+
+**Error classifiers** on terminal failure events provide a specific reason:
+
+| Classifier | Meaning |
+|---|---|
+| `error_max_turns` | Agent exhausted its turn limit without completing |
+| `error_max_budget_usd` | Agent hit the cost budget ceiling |
+| `error_during_execution` | Agent encountered a runtime error during execution |
 
 Event records follow the same 90-day retention as task records.
 
@@ -678,6 +745,14 @@ Alternatively, the application logs are in the CloudWatch log group:
 ```
 
 Filter by task ID to find logs for a specific task.
+
+### Notifications (GitHub edit-in-place)
+
+When a task targets a pull request (`pr_iteration` or `pr_review`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
+
+The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers. Currently the GitHub edit-in-place dispatcher is active; Slack and Email dispatchers are planned.
+
+The status comment shows: current phase, last milestone, cost so far, and a link to the task. It updates on key events (`session_started`, `pr_created`, `task_completed`, `task_failed`, `nudge_acknowledged`, and routable agent milestones).
 
 ## What the agent does
 
