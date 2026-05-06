@@ -29,30 +29,39 @@ This guide walks through setting up the ABCA Linear integration. Once configured
 
 ### Step 1: Generate a Linear personal API key
 
-Open [Linear Settings → API](https://linear.app/settings/api) and create a personal API key. Copy the token — it starts with `lin_api_…`. You won't be able to see it again.
+Open [Linear Settings → Security](https://linear.app/settings/account/security), scroll to **Personal API keys**, and create one. Copy the token — it starts with `lin_api_…`. You won't be able to see it again.
 
 This key is used by the agent to post comments and update issue state. Personal API keys are full-workspace-scoped; document internally that you're handing that authority to ABCA.
 
-### Step 2: Create a Linear webhook
-
-Still in [Linear Settings → API](https://linear.app/settings/api), create a new webhook:
-
-- **URL**: `https://<your-api>/v1/linear/webhook` (the `bgagent linear setup` command prints the exact URL)
-- **Events**: subscribe to **Issues** (both create and update)
-- **Resource types**: Issues
-- Save, then copy the webhook **signing secret** from the webhook's detail page.
-
-### Step 3: Run the setup wizard
+### Step 2: Run the setup wizard
 
 ```bash
 bgagent linear setup
 ```
 
-This prompts for the webhook signing secret and the personal API key you generated in Steps 1 and 2, then stores them in Secrets Manager (`LinearWebhookSecret` and `LinearApiTokenSecret`).
+The wizard prints the exact webhook URL for your deployment, then waits at a **Webhook signing secret:** prompt. Leave it running; go create the webhook in the next step, then return and paste both values.
 
-The wizard validates that the personal API key starts with `lin_api_`. Full authentication is verified the first time a webhook arrives or the agent calls the Linear MCP.
+### Step 3: Create the Linear webhook
 
-### Step 4: Onboard a Linear project
+In [Linear Settings → API](https://linear.app/settings/api), under **Webhooks**, click **+**:
+
+- **URL**: paste the URL the wizard printed in Step 2.
+- **Resource types**: check **Issues** only.
+- **Team**: whichever team owns the projects you'll map to ABCA (or all teams).
+- Save, then open the webhook's detail page and copy the **signing secret**.
+
+### Step 4: Finish the wizard
+
+Back in your terminal at the paused `bgagent linear setup` prompt:
+
+- Paste the **webhook signing secret** (from Step 3).
+- Paste the **personal API key** (from Step 1).
+
+Both are stored in Secrets Manager (`LinearWebhookSecret` and `LinearApiTokenSecret`). The wizard validates that the personal API key starts with `lin_api_`. Full authentication is verified the first time a webhook arrives or the agent calls the Linear MCP.
+
+As a final step, `setup` calls the Linear API with the token you just stored, looks up the token owner, and auto-links that Linear identity to the Cognito user currently logged in to the CLI. This skips the code-exchange ceremony for the common case where one person installs ABCA for their own workspace. If the auto-link fails (token invalid, not logged in, etc.) setup prints a warning and continues — you can always fall back to the manual link flow in Step 6.
+
+### Step 5: Onboard a Linear project
 
 Map a Linear project UUID to the GitHub repo you want tasks routed to:
 
@@ -69,22 +78,32 @@ Optional flags:
 | `--region <region>` | AWS region | from `bgagent configure` |
 | `--stack-name <name>` | CloudFormation stack name | `backgroundagent-dev` |
 
-You can find the Linear project UUID in the URL of the project page in Linear (`https://linear.app/<workspace>/project/<slug>-<uuid>`).
+**Finding the Linear project UUID.** Linear's project URL (`https://linear.app/<workspace>/project/<slug>-<short>`) contains a *truncated* UUID at the end — that's not the full UUID the webhook sends. List the full UUIDs for all projects visible to the stored API token:
 
-### Step 5: Link your Linear account
+```bash
+bgagent linear list-projects
+```
+
+Copy the `id` of the project you want to onboard. `onboard-project` validates the UUID format and will reject the truncated slug version with a pointer back to this command.
+
+### Step 6: Link your Linear account
 
 ABCA needs to know which platform user a Linear actor maps to so tasks are attributed correctly.
 
-1. In a comment on any Linear issue in a mapped project, type: `bgagent link`. (This v1 flow requires manual admin-side triggering via the CLI — see `bgagent linear link --help`; a richer Linear-side flow is planned for v2.)
+**The token owner is linked automatically.** `bgagent linear setup` calls Linear's `viewer` query with the token you just pasted and writes the mapping for the Cognito user running the CLI. Look for `✓ Linked Linear user …` in the setup output — if you saw that, you're done. Skip to Step 7.
+
+**Linking additional Linear users** (anyone other than the API token owner) still needs the code-exchange flow:
+
+1. In a comment on any Linear issue in a mapped project, type: `bgagent link`.
 2. Copy the link code.
 3. In your terminal:
    ```bash
    bgagent linear link <code>
    ```
 
-This associates your Linear identity with your Cognito user. Only linked users can trigger tasks.
+> A comment-triggered link-code generator is on the v2 roadmap. Until then, additional-user linking is admin-assisted — see [Roadmap](/roadmap/roadmap).
 
-### Step 6: Test it
+### Step 7: Test it
 
 Add the `bgagent` label to a Linear issue in a mapped project. Within a few seconds:
 
