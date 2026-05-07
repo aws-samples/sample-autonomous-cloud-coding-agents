@@ -175,6 +175,76 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     return otlp_endpoint, otlp_protocol
 
 
+def _initialize_policy_engine_and_hooks(
+    *,
+    config: TaskConfig,
+    trajectory: _TrajectoryWriter | None,
+    progress: _ProgressWriter,
+) -> tuple[Any, dict]:
+    """Construct the per-task ``PolicyEngine`` and wire its hook matchers.
+
+    Extracted from ``run_agent`` so the policy-engine bootstrap path is
+    directly unit-testable without spinning up the full SDK / agent loop.
+    Handles:
+
+    * Threading per-task approval params (``initial_approvals``,
+      ``approval_timeout_s``, and Chunk 7's ``initial_approval_gate_count``)
+      through to ``PolicyEngine.__init__``.
+    * Emitting the ``pre_approvals_loaded`` milestone (§4 step 7, §11.1)
+      unconditionally so "no pre-approvals seeded" is explicit rather than
+      inferred from silence.
+    * Building the SDK hook matchers that route PreToolUse / PostToolUse /
+      Stop invocations through the engine.
+    """
+    from hooks import build_hook_matchers
+    from policy import PolicyEngine
+
+    cedar_policies = config.cedar_policies
+    # Cedar HITL (§7.3, §10.2) — per-task approval defaults threaded
+    # from the orchestrator payload. Engine clamps invalid values
+    # at construction.
+    engine_kwargs: dict = {}
+    if config.initial_approvals:
+        engine_kwargs["initial_approvals"] = list(config.initial_approvals)
+    if config.approval_timeout_s is not None:
+        engine_kwargs["task_default_timeout_s"] = config.approval_timeout_s
+    # Chunk 7 (§13.6): seed the session counter from the TaskTable
+    # persisted value so a container restart mid-task resumes the
+    # cumulative gate budget and the ``approval_gate_cap`` remains
+    # the terminal bound across restarts.
+    if config.initial_approval_gate_count:
+        engine_kwargs["initial_approval_gate_count"] = config.initial_approval_gate_count
+    policy_engine = PolicyEngine(
+        task_type=config.task_type,
+        repo=config.repo_url,
+        extra_policies=cedar_policies if cedar_policies else None,
+        **engine_kwargs,
+    )
+    log(
+        "AGENT",
+        f"Cedar policy engine initialized for task_type={config.task_type}"
+        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else ""),
+    )
+
+    # §4 step 7, §11.1: surface the starting pre-approval posture to the
+    # live SSE stream + 90d DDB record so operators can see exactly which
+    # scopes were seeded at task start. Emit unconditionally (count=0,
+    # scopes=[]) so "no pre-approvals seeded" is explicit rather than
+    # inferred from silence.
+    progress.write_approval_pre_approvals_loaded(
+        count=len(config.initial_approvals),
+        scopes=list(config.initial_approvals),
+    )
+
+    hooks = build_hook_matchers(
+        engine=policy_engine,
+        trajectory=trajectory,
+        task_id=config.task_id or "",
+        progress=progress,
+    )
+    return policy_engine, hooks
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -243,36 +313,11 @@ async def run_agent(
     # in UserMessages (ToolResultBlock carries only the id, not the name).
     tool_use_id_to_name: dict[str, str] = {}
 
-    from hooks import build_hook_matchers
-    from policy import PolicyEngine
-
-    task_type = config.task_type
-    repo_url = config.repo_url
-    cedar_policies = config.cedar_policies
-    # Cedar HITL (§7.3, §10.2) — per-task approval defaults threaded
-    # from the orchestrator payload. Engine clamps invalid values
-    # at construction.
-    engine_kwargs: dict = {}
-    if config.initial_approvals:
-        engine_kwargs["initial_approvals"] = list(config.initial_approvals)
-    if config.approval_timeout_s is not None:
-        engine_kwargs["task_default_timeout_s"] = config.approval_timeout_s
-    policy_engine = PolicyEngine(
-        task_type=task_type,
-        repo=repo_url,
-        extra_policies=cedar_policies if cedar_policies else None,
-        **engine_kwargs,
-    )
-    log(
-        "AGENT",
-        f"Cedar policy engine initialized for task_type={task_type}"
-        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else ""),
-    )
-
-    hooks = build_hook_matchers(
-        engine=policy_engine,
+    # Engine is consumed by ``build_hook_matchers`` inside the helper; the
+    # caller only needs the hook matchers for ``ClaudeAgentOptions``.
+    _policy_engine, hooks = _initialize_policy_engine_and_hooks(
+        config=config,
         trajectory=trajectory,
-        task_id=config.task_id or "",
         progress=progress,
     )
 

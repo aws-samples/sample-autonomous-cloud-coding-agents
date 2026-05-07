@@ -501,3 +501,63 @@ class TestExtractUserId:
         assert "user_id payload field is not a string" in captured.out
         assert "type=int" in captured.out
         assert "'t-warn'" in captured.out
+
+
+class TestExtractInitialApprovalGateCount:
+    """Chunk 7 (§13.6): ``initial_approval_gate_count`` is the TaskTable-
+    persisted counter threaded by the orchestrator on container spawn so
+    a restart resumes the cumulative gate budget instead of resetting.
+    Shape mirrors ``approval_timeout_s`` — integer, optional, fail-open
+    on a malformed field."""
+
+    def _base_payload(self, **extra):
+        return {
+            "repo_url": "org/repo",
+            "task_description": "Fix it",
+            "task_id": "t-1",
+            **extra,
+        }
+
+    def _fake_req(self) -> Any:
+        return _FakeRequest()
+
+    def test_absent_defaults_to_zero(self):
+        params = server._extract_invocation_params(
+            self._base_payload(),
+            self._fake_req(),
+        )
+        assert params["initial_approval_gate_count"] == 0
+
+    def test_positive_int_extracts_verbatim(self):
+        params = server._extract_invocation_params(
+            self._base_payload(initial_approval_gate_count=12),
+            self._fake_req(),
+        )
+        assert params["initial_approval_gate_count"] == 12
+
+    def test_int_like_string_is_accepted_via_int_coercion(self):
+        # DDB responses pass through orchestrator as numbers, but a
+        # misbehaving caller that passes "12" as a string should still
+        # coerce cleanly — int() handles digits-as-string.
+        params = server._extract_invocation_params(
+            self._base_payload(initial_approval_gate_count="12"),
+            self._fake_req(),
+        )
+        assert params["initial_approval_gate_count"] == 12
+
+    def test_non_numeric_string_coerces_to_zero_and_warns(self, capsys):
+        params = server._extract_invocation_params(
+            self._base_payload(initial_approval_gate_count="not-a-number", task_id="t-warn"),
+            self._fake_req(),
+        )
+        assert params["initial_approval_gate_count"] == 0
+        captured = capsys.readouterr()
+        assert "[server/warn]" in captured.out
+        assert "initial_approval_gate_count payload field is not an int" in captured.out
+
+    def test_none_coerces_to_zero(self):
+        params = server._extract_invocation_params(
+            self._base_payload(initial_approval_gate_count=None),
+            self._fake_req(),
+        )
+        assert params["initial_approval_gate_count"] == 0

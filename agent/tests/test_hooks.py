@@ -316,11 +316,19 @@ class TestBuildHookMatchers:
 #   - ``permissionDecisionReason`` is ANSI-stripped and ≤500 chars on DENY.
 
 
+import hashlib
+import json as _json
 from collections import deque
 from typing import Any
 
 import hooks
 from hooks import _denial_between_turns_hook
+
+
+def _sha256_of(tool_input: dict) -> str:
+    """Mirror of ``policy._sha256_tool_input`` for seeding the cache in tests."""
+    return hashlib.sha256(_json.dumps(tool_input, sort_keys=True).encode("utf-8")).hexdigest()
+
 
 # --- Test scaffolding -----------------------------------------------------
 
@@ -369,6 +377,13 @@ class _FakeTaskState:
         self.update_calls: list[tuple[str, str, str, str | None]] = []
         self.resume_calls: list[tuple[str, str]] = []
         self.get_calls: list[tuple[str, str, bool]] = []
+        # Chunk 7: Persisted gate-counter bumps recorded per call so tests
+        # can assert the hook fires the DDB write on the REQUIRE_APPROVAL
+        # path (§13.6). Kept separate from session counter (in-engine).
+        self.gate_count_calls: list[str] = []
+        # Allow tests to force the DDB increment to return False (best-effort
+        # failure) without raising; hook should keep going.
+        self.gate_count_return = True
         # Poll behaviour — deque of row dicts or exceptions returned by
         # successive get_approval_row calls during the poll phase.
         self.get_row_script: deque[Any] = deque()
@@ -406,6 +421,11 @@ class _FakeTaskState:
     ) -> bool:
         self.update_calls.append((task_id, request_id, new_status, reason))
         return self.best_effort_return
+
+    def increment_approval_gate_count_in_ddb(self, task_id: str, *, client=None) -> bool:
+        """Record Chunk 7 DDB counter bumps; return configurable best-effort bool."""
+        self.gate_count_calls.append(task_id)
+        return self.gate_count_return
 
     def get_approval_row(
         self, task_id: str, request_id: str, *, consistent_read: bool = True, client=None
@@ -629,6 +649,164 @@ class TestDeniedPath:
         assert follow_up.outcome.value == "deny"
         assert "Recent DENIED" in follow_up.reason
         assert "write_approval_denied" in progress.milestones()
+
+
+class TestPersistentGateCount:
+    """Chunk 7 (§13.6): REQUIRE_APPROVAL path must bump BOTH the session
+    counter and the TaskTable-persisted counter so a container restart
+    resumes the cumulative gate budget.
+    """
+
+    def test_require_approval_path_calls_ddb_counter_bump(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"},
+        )
+
+        _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        # Session counter bumped (existing behavior).
+        assert engine_with_soft_gate.approval_gate_count == 1
+        # DDB counter bump called with the task_id.
+        assert fake_task_state.gate_count_calls == ["01KTASK"]
+
+    def test_ddb_counter_failure_does_not_block_the_gate(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        """§13.6: counter is a safety bound, not a correctness bound.
+        Best-effort failure must NOT short-circuit the approval flow."""
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"},
+        )
+        # Signal a best-effort failure on the DDB counter write (e.g. IAM
+        # drift, throttling, missing env). The hook must keep going.
+        fake_task_state.gate_count_return = False
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        # Approval flow still completes — user approved, hook allows.
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+        # Session counter still bumped even though DDB write "failed".
+        assert engine_with_soft_gate.approval_gate_count == 1
+        # DDB bump was still attempted.
+        assert fake_task_state.gate_count_calls == ["01KTASK"]
+
+    def test_cap_exceeded_does_not_call_ddb_counter(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        """Cap short-circuit happens BEFORE Step 6, so no DDB bump."""
+        _fast_poll(monkeypatch)
+        engine_with_soft_gate._approval_gate_count = engine_with_soft_gate.approval_gate_cap
+
+        _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert fake_task_state.gate_count_calls == []
+
+
+class TestCacheHitObservability:
+    """IMPL-23: a recent-decision cache hit must emit a `policy_decision`
+    milestone so cache-driven denies remain visible in the event stream.
+    """
+
+    def test_cache_hit_emits_policy_decision_cached(
+        self, fake_task_state, progress, engine_with_soft_gate
+    ):
+        # Seed the cache so the next identical call hits Step 2.5 cache
+        # and returns DENY with cache_hit_metadata populated.
+        engine_with_soft_gate.recent_decisions.record(
+            "Bash",
+            _sha256_of({"command": "echo foo"}),
+            "DENIED",
+            "user said too risky",
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        # Cache-hit event emitted with IMPL-23 metadata.
+        assert "write_policy_decision_cached" in progress.milestones()
+        cached_calls = [c for c in progress.calls if c[0] == "write_policy_decision_cached"]
+        assert len(cached_calls) == 1
+        metadata = cached_calls[0][1]
+        assert metadata["tool_name"] == "Bash"
+        assert metadata["cached_decision"] == "DENIED"
+        assert metadata["cached_reason"] == "user said too risky"
+        assert metadata["original_decision_ts"] == "2026-05-07T12:00:00Z"
+        # No approval row written — cache hits intentionally bypass the
+        # approval pipeline (§12.8).
+        assert fake_task_state.write_calls == []
+
+    def test_non_cache_deny_does_not_emit_cached_milestone(
+        self, fake_task_state, progress, engine_with_soft_gate
+    ):
+        """Hard-deny and soft-deny DENY paths don't populate cache_hit_metadata,
+        so the cache-hit observability event must NOT fire for them."""
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+
+        _run(
+            pre_tool_use_hook(
+                _hook_input(command="rm -rf /"),  # hard-deny
+                "tu-1",
+                {},
+                engine=engine,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert "write_policy_decision_cached" not in progress.milestones()
 
 
 class TestTimedOutPath:

@@ -115,6 +115,35 @@ class TestPolicyDecisionConstruction:
         assert a == b
         assert hash(a) == hash(b)
 
+    def test_cache_hit_metadata_default_none(self):
+        d = PolicyDecision(outcome=Outcome.ALLOW, reason="ok")
+        assert d.cache_hit_metadata is None
+
+    def test_cache_hit_metadata_can_be_populated(self):
+        payload = {
+            "tool_name": "Bash",
+            "tool_input_sha256": "abc",
+            "cached_decision": "DENIED",
+            "cached_reason": "prior deny",
+            "original_decision_ts": "2026-05-07T12:00:00Z",
+        }
+        d = PolicyDecision(outcome=Outcome.DENY, reason="Recent DENIED", cache_hit_metadata=payload)
+        assert d.cache_hit_metadata == payload
+
+    def test_cache_hit_metadata_not_in_equality(self):
+        # Metadata is observability-only — two DENYs with the same outcome
+        # and reason are the "same" decision even if their original_decision_ts
+        # differs. Keeps __eq__/__hash__ stable for legacy callers that put
+        # PolicyDecision values in sets / dicts.
+        bare = PolicyDecision(outcome=Outcome.DENY, reason="x")
+        with_meta = PolicyDecision(
+            outcome=Outcome.DENY,
+            reason="x",
+            cache_hit_metadata={"tool_name": "Bash"},
+        )
+        assert bare == with_meta
+        assert hash(bare) == hash(with_meta)
+
 
 # ---------------------------------------------------------------------------
 # ApprovalAllowlist — §6.4
@@ -234,6 +263,33 @@ class TestRecentDecisionCache:
 
     def test_cache_max_entries_default(self):
         assert CACHE_MAX_ENTRIES == 50
+
+    def test_record_stores_original_decision_ts(self):
+        # IMPL-23: cache hits must surface when the original decision landed
+        # so operators can correlate the cache-driven deny back to the gate.
+        cache = RecentDecisionCache()
+        cache.record(
+            "Bash",
+            "sha-a",
+            "DENIED",
+            "too risky",
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+        entry = cache.get("Bash", "sha-a")
+        assert entry is not None
+        assert entry.original_decision_ts == "2026-05-07T12:00:00Z"
+
+    def test_record_defaults_original_decision_ts_to_now(self):
+        # Legacy callers that omit the kwarg still get a valid ISO string.
+        cache = RecentDecisionCache()
+        cache.record("Bash", "sha-a", "DENIED", "x")
+        entry = cache.get("Bash", "sha-a")
+        assert entry is not None
+        assert entry.original_decision_ts.endswith("Z")
+        # Shape sanity: 2026-05-07T12:34:56.789012Z (26-27 chars) or
+        # 2026-05-07T12:34:56Z (20 chars) depending on Python's subsecond
+        # behavior — either way starts with the year.
+        assert entry.original_decision_ts[:4].isdigit()
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +426,47 @@ class TestRecentDecisionCacheIntegration:
         assert d.outcome == Outcome.DENY
         assert "Hard-deny" in d.reason
         assert "Recent" not in d.reason
+
+    def test_cache_hit_attaches_metadata_for_impl_23(self):
+        # IMPL-23: a cache hit must carry the metadata the hook will forward
+        # to progress_writer.write_policy_decision_cached so cache-driven
+        # denies are visible in the TaskEventsTable event stream.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        import hashlib
+        import json as _json
+
+        tool_input = {"command": "git push --force origin feature"}
+        sha = hashlib.sha256(_json.dumps(tool_input, sort_keys=True).encode()).hexdigest()
+        engine.recent_decisions.record(
+            "Bash",
+            sha,
+            "DENIED",
+            "user said force-push is too risky",
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+        d = engine.evaluate_tool_use("Bash", tool_input)
+        assert d.outcome == Outcome.DENY
+        assert d.cache_hit_metadata == {
+            "tool_name": "Bash",
+            "tool_input_sha256": sha,
+            "cached_decision": "DENIED",
+            "cached_reason": "user said force-push is too risky",
+            "original_decision_ts": "2026-05-07T12:00:00Z",
+        }
+
+    def test_non_cache_decisions_have_no_cache_hit_metadata(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        # ALLOW path
+        assert engine.evaluate_tool_use("Bash", {"command": "npm test"}).cache_hit_metadata is None
+        # Hard-deny path
+        assert engine.evaluate_tool_use("Bash", {"command": "rm -rf /"}).cache_hit_metadata is None
+        # Soft-deny path
+        assert (
+            engine.evaluate_tool_use(
+                "Bash", {"command": "git push --force origin feature"}
+            ).cache_hit_metadata
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +736,26 @@ class TestApprovalGateCounter:
             e.increment_approval_gate_count()
         # Counter itself is unbounded — the cap check is enforced in the hook.
         assert e.approval_gate_count == 75
+
+    def test_initial_approval_gate_count_seeds_counter(self):
+        # Chunk 7: container restarts resume the cumulative gate budget so
+        # the cap is respected across restarts (§13.6). The kwarg threads
+        # the TaskTable-persisted value into a fresh PolicyEngine.
+        e = PolicyEngine(task_type="new_task", repo="owner/repo", initial_approval_gate_count=12)
+        assert e.approval_gate_count == 12
+
+    def test_initial_approval_gate_count_adds_to_increments(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo", initial_approval_gate_count=12)
+        e.increment_approval_gate_count()
+        e.increment_approval_gate_count()
+        assert e.approval_gate_count == 14
+
+    def test_initial_approval_gate_count_default_is_zero(self):
+        assert PolicyEngine(task_type="new_task", repo="owner/repo").approval_gate_count == 0
+
+    def test_initial_approval_gate_count_rejects_negative(self):
+        with pytest.raises(ValueError, match="initial_approval_gate_count must be >= 0"):
+            PolicyEngine(task_type="new_task", repo="owner/repo", initial_approval_gate_count=-1)
 
 
 class TestApprovalRateWindow:

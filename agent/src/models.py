@@ -130,6 +130,11 @@ class TaskConfig(BaseModel):
     # the per-task timeout default.
     approval_timeout_s: int | None = None
     initial_approvals: list[str] = []
+    # Chunk 7: TaskTable-persisted ``approval_gate_count`` seeded into
+    # the session counter so container restarts (§13.6) resume the
+    # cumulative gate budget without resetting to 0. Threaded from the
+    # orchestrator payload; zero default preserves legacy callers.
+    initial_approval_gate_count: int = 0
     issue: GitHubIssue | None = None
     base_branch: str | None = None
 

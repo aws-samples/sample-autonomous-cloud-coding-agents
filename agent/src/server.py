@@ -256,6 +256,7 @@ def _run_task_background(
     cedar_policies: list[str] | None = None,
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
+    initial_approval_gate_count: int = 0,
     trace: bool = False,
     user_id: str = "",
 ) -> None:
@@ -305,6 +306,7 @@ def _run_task_background(
             cedar_policies=cedar_policies,
             approval_timeout_s=approval_timeout_s,
             initial_approvals=initial_approvals,
+            initial_approval_gate_count=initial_approval_gate_count,
             trace=trace,
             user_id=user_id,
         )
@@ -357,6 +359,22 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     # validates shape at construction time and raises on bad input.
     approval_timeout_s = inp.get("approval_timeout_s")
     initial_approvals = inp.get("initial_approvals") or []
+    # Chunk 7: TaskTable-persisted ``approval_gate_count`` threaded by
+    # the orchestrator so a container restart (§13.6) resumes the
+    # cumulative gate budget instead of resetting to 0. Non-int payloads
+    # coerce to 0 to keep the invocation path fail-open on a malformed
+    # field; the downstream PolicyEngine rejects negatives loudly.
+    raw_gate_count = inp.get("initial_approval_gate_count", 0)
+    try:
+        initial_approval_gate_count = int(raw_gate_count)
+    except (TypeError, ValueError):
+        print(
+            "[server/warn] initial_approval_gate_count payload field is not an int "
+            f"(type={type(raw_gate_count).__name__}, value={raw_gate_count!r}); "
+            f"coerced to 0. task_id={inp.get('task_id', '')!r}",
+            flush=True,
+        )
+        initial_approval_gate_count = 0
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -415,6 +433,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "cedar_policies": cedar_policies,
         "approval_timeout_s": approval_timeout_s,
         "initial_approvals": initial_approvals,
+        "initial_approval_gate_count": initial_approval_gate_count,
         "trace": trace,
         "user_id": user_id,
     }
