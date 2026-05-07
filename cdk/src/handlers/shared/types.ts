@@ -472,3 +472,258 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     updated_at: record.updated_at,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Cedar HITL approval types (design §7, §10.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scope of an approval grant. Narrowed from `string` so the approve
+ * handler + CLI can exhaustiveness-check the union on parse.
+ *
+ * - `this_call`          — one-shot. Does NOT grow the allowlist.
+ * - `tool_type_session`  — allow any further invocation of the same tool name
+ *                          for the rest of the session.
+ * - `tool_group_session` — allow any tool in the matching tool group
+ *                          (currently `file_write` → Write/Edit).
+ * - `bash_pattern:...`   — allow Bash commands matching the pattern (fnmatch).
+ * - `write_path:...`     — allow Write/Edit against paths matching the pattern.
+ * - `rule:<rule_id>`     — allow soft-deny hits whose rule_id matches.
+ * - `all_session`        — allow anything for the rest of the session. Gated
+ *                          by blueprint `maxPreApprovalScope` (§7.5).
+ *
+ * Keep in sync with ``cli/src/types.ts``.
+ */
+export type ApprovalScope =
+  | 'this_call'
+  | 'tool_type_session'
+  | 'tool_group_session'
+  | 'all_session'
+  | `tool_type:${string}`
+  | `tool_group:${string}`
+  | `bash_pattern:${string}`
+  | `write_path:${string}`
+  | `rule:${string}`;
+
+/**
+ * Approval row status values. PENDING is the only non-terminal state —
+ * every other transition is final, which matches the
+ * `ConditionExpression: status = :pending` guard on every mutator.
+ */
+export type ApprovalStatus =
+  | 'PENDING'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'TIMED_OUT'
+  | 'STRANDED';
+
+/**
+ * Full approval row as stored in `TaskApprovalsTable` (design §10.1).
+ *
+ * PK = `task_id`, SK = `request_id` (ULID minted by the agent). GSI
+ * `user_id-status-index` powers `GET /v1/pending` without a Scan.
+ *
+ * `matching_rule_ids` is a List, not a StringSet — DDB string sets
+ * cannot be empty and pathological no-match soft-deny hits would fail
+ * to persist (§10.1).
+ */
+export interface ApprovalRecord {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly tool_name: string;
+  readonly tool_input_preview: string;
+  readonly tool_input_sha256: string;
+  readonly reason: string;
+  readonly severity: 'low' | 'medium' | 'high';
+  readonly matching_rule_ids: readonly string[];
+  readonly status: ApprovalStatus;
+  readonly created_at: string;
+  readonly decided_at?: string;
+  readonly scope?: ApprovalScope;
+  readonly deny_reason?: string;
+  readonly timeout_s: number;
+  readonly ttl: number;
+  readonly user_id: string;
+  readonly repo: string;
+}
+
+/**
+ * Pending approval summary returned by `GET /v1/pending` (§7.7).
+ * Derived from the GSI projection attributes only — keeps the list
+ * response cheap and avoids leaking `deny_reason` / `tool_input_sha256`
+ * on PENDING rows.
+ */
+export interface PendingApprovalSummary {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly tool_name: string;
+  readonly tool_input_preview: string;
+  readonly severity: 'low' | 'medium' | 'high';
+  readonly reason: string;
+  readonly created_at: string;
+  readonly timeout_s: number;
+  /** Derived: `created_at + timeout_s` in ISO 8601 UTC. */
+  readonly expires_at: string;
+}
+
+/**
+ * `POST /v1/tasks/{task_id}/approve` request body (§7.1).
+ *
+ * `scope` is optional — defaults to `this_call` when omitted.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
+ */
+export interface ApprovalRequest {
+  readonly request_id: string;
+  readonly decision: 'approve';
+  readonly scope?: ApprovalScope;
+}
+
+/**
+ * `POST /v1/tasks/{task_id}/approve` response body.
+ */
+export interface ApprovalResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: 'APPROVED';
+  readonly scope: ApprovalScope;
+  readonly decided_at: string;
+}
+
+/**
+ * `POST /v1/tasks/{task_id}/deny` request body (§7.2).
+ *
+ * `reason` is passed through `output_scanner.scanDenyReason` before
+ * persistence — user-facing secrets (AWS keys, GitHub PATs, API tokens)
+ * are redacted with `[REDACTED-...]` markers. Truncated to
+ * `DENY_REASON_MAX_LENGTH` chars AFTER scanning.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
+ */
+export interface DenyRequest {
+  readonly request_id: string;
+  readonly decision: 'deny';
+  readonly reason?: string;
+}
+
+/**
+ * `POST /v1/tasks/{task_id}/deny` response body.
+ */
+export interface DenyResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: 'DENIED';
+  readonly decided_at: string;
+}
+
+/**
+ * Maximum length of a sanitized deny reason after `output_scanner`
+ * redaction (§7.2 step 3). Matches the Phase 2 nudge limit for
+ * consistency.
+ */
+export const DENY_REASON_MAX_LENGTH = 2000;
+
+/**
+ * Rule metadata returned by `GET /v1/repos/{repo}/policies` (§7.6).
+ * `approval_timeout_s` and `severity` are absent for hard-deny rules.
+ */
+export interface PolicyRuleSummary {
+  readonly rule_id: string;
+  readonly category?: string;
+  readonly severity?: 'low' | 'medium' | 'high';
+  readonly approval_timeout_s?: number;
+  readonly summary: string;
+}
+
+/**
+ * `GET /v1/repos/{repo_id}/policies` response body.
+ */
+export interface GetPoliciesResponse {
+  readonly repo_id: string;
+  readonly policies: {
+    readonly hard: readonly PolicyRuleSummary[];
+    readonly soft: readonly PolicyRuleSummary[];
+  };
+}
+
+/**
+ * `GET /v1/pending` response body (§7.7).
+ */
+export interface GetPendingResponse {
+  readonly pending: readonly PendingApprovalSummary[];
+}
+
+/**
+ * `POST /v1/notifications/slack/link` request body (§11.2).
+ *
+ * Writes a row on `SlackUserMappingTable` with
+ * `attribute_not_exists(slack_user_id)` so an existing mapping cannot
+ * be overwritten.
+ */
+export interface LinkSlackUserRequest {
+  readonly slack_user_id: string;
+  readonly slack_link_token: string;
+}
+
+/**
+ * `POST /v1/notifications/slack/link` response body.
+ */
+export interface LinkSlackUserResponse {
+  readonly slack_user_id: string;
+  readonly created_at: string;
+}
+
+/**
+ * SlackUserMappingTable row (§11.2).
+ */
+export interface SlackUserMappingRecord {
+  readonly slack_user_id: string;
+  readonly cognito_sub: string;
+  readonly created_at: string;
+}
+
+/**
+ * Lambda-written audit event type for an approve/deny decision
+ * (IMPL-6). Emitted to TaskEventsTable so the 90-day audit trail does
+ * not depend on the agent's best-effort milestone.
+ */
+export interface ApprovalDecisionRecordedEvent {
+  readonly request_id: string;
+  readonly status: 'APPROVED' | 'DENIED';
+  readonly scope?: ApprovalScope;
+  readonly reason?: string;
+  readonly decided_at: string;
+  readonly caller_user_id: string;
+}
+
+/**
+ * `CreateTaskRequest` extensions for HITL pre-approvals (§7.3).
+ *
+ * Old callers continue to work — every field is optional. New callers
+ * can pre-approve common scopes (`tool_type:Read`, `bash_pattern:git
+ * status*`) to avoid hitting gates for trusted operations, and can
+ * raise the per-task default approval timeout above the 300s default
+ * within the `[30, min(3600, maxLifetime - 300)]` bound.
+ *
+ * Keep in sync with ``cli/src/types.ts``.
+ */
+export interface CreateTaskApprovalExtensions {
+  readonly approval_timeout_s?: number;
+  readonly initial_approvals?: readonly ApprovalScope[];
+}
+
+/** Maximum `initial_approvals` entries per §7.3. */
+export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
+
+/** Maximum per-entry length for an `initial_approvals` scope string. */
+export const INITIAL_APPROVALS_MAX_ENTRY_LENGTH = 128;
+
+/** Floor for `approval_timeout_s` (§6 decision #6). */
+export const APPROVAL_TIMEOUT_S_MIN = 30;
+
+/** Absolute ceiling for `approval_timeout_s` before the
+ *  `maxLifetime - 300` clip is applied (§7.3). */
+export const APPROVAL_TIMEOUT_S_MAX = 3600;
+
+/** Default `approval_timeout_s` when the submit payload omits it. */
+export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
