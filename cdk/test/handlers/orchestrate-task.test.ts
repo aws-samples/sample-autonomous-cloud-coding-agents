@@ -372,6 +372,82 @@ describe('hydrateAndTransition — Cedar HITL payload threading', () => {
     const payload = await hydrateAndTransition(corruptTask as any);
     expect(payload).not.toHaveProperty('initial_approval_gate_count');
   });
+
+  test('Chunk 7b §4 step 5: threads approval_gate_cap into payload when present', async () => {
+    // TaskRecord carries the cap that was resolved and persisted at
+    // submit-time. The orchestrator must forward it unconditionally
+    // (unlike the counter, which only threads when non-zero) so the
+    // agent adopts the blueprint-configured cap rather than its
+    // compile-time fallback.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithCap = { ...baseTask, approval_gate_cap: 200 };
+    const payload = await hydrateAndTransition(taskWithCap as any);
+    expect(payload.approval_gate_cap).toBe(200);
+  });
+
+  test('Chunk 7b: threads default-50 cap into payload', async () => {
+    // Fresh task from Chunk 7b deploys carries approval_gate_cap=50
+    // (the platform default frozen at submit-time). Must be threaded
+    // even though 50 happens to equal the agent's compile-time
+    // DEFAULT_APPROVAL_GATE_CAP — the semantic distinction is that
+    // "50 from TaskRecord" means "submit-time decision" and behaves
+    // correctly under mid-task blueprint edits.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithDefault = { ...baseTask, approval_gate_cap: 50 };
+    const payload = await hydrateAndTransition(taskWithDefault as any);
+    expect(payload.approval_gate_cap).toBe(50);
+  });
+
+  test('Chunk 7b: omits approval_gate_cap when task record predates Chunk 7b', async () => {
+    // Legacy tasks submitted before Chunk 7b landed don't have the
+    // attribute. Orchestrator must omit it so the agent falls back to
+    // its own DEFAULT_APPROVAL_GATE_CAP and behavior matches the
+    // pre-Chunk-7b deploy.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload).not.toHaveProperty('approval_gate_cap');
+  });
+
+  test('Chunk 7b: ignores non-numeric approval_gate_cap defensively', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const corruptTask = { ...baseTask, approval_gate_cap: 'not-a-number' };
+    const payload = await hydrateAndTransition(corruptTask as any);
+    expect(payload).not.toHaveProperty('approval_gate_cap');
+  });
+
+  test.each([
+    ['NaN', NaN],
+    ['negative', -1],
+    ['zero', 0],
+    ['above max', 501],
+    ['non-integer', 3.14],
+    ['Infinity', Infinity],
+  ])('Chunk 7b: rejects corrupted approval_gate_cap value (%s) and omits from payload', async (_label, badValue) => {
+    // Submit-path bounds-checks the blueprint value before persisting,
+    // so these branches only fire on schema drift / hand-edited rows.
+    // Omitting keeps the container starting (agent falls back to
+    // engine default-50) instead of crashing PolicyEngine.__init__.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const corruptTask = { ...baseTask, approval_gate_cap: badValue };
+    const payload = await hydrateAndTransition(corruptTask as any);
+    expect(payload).not.toHaveProperty('approval_gate_cap');
+  });
+
+  test.each([
+    ['min (1)', 1],
+    ['max (500)', 500],
+  ])('Chunk 7b: accepts boundary approval_gate_cap %s', async (_label, goodValue) => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const task = { ...baseTask, approval_gate_cap: goodValue };
+    const payload = await hydrateAndTransition(task as any);
+    expect(payload.approval_gate_cap).toBe(goodValue);
+  });
 });
 
 describe('pollTaskStatus', () => {

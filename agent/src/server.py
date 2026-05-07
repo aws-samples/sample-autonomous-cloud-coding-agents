@@ -257,6 +257,7 @@ def _run_task_background(
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
+    approval_gate_cap: int | None = None,
     trace: bool = False,
     user_id: str = "",
 ) -> None:
@@ -307,6 +308,7 @@ def _run_task_background(
             approval_timeout_s=approval_timeout_s,
             initial_approvals=initial_approvals,
             initial_approval_gate_count=initial_approval_gate_count,
+            approval_gate_cap=approval_gate_cap,
             trace=trace,
             user_id=user_id,
         )
@@ -375,6 +377,25 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
             flush=True,
         )
         initial_approval_gate_count = 0
+    # Chunk 7b (§4 step 5, decision #13): per-task cap resolved by the
+    # submit path and persisted on the TaskRecord. Threaded so a
+    # blueprint-configured cap (or the default-50 frozen at submit) wins
+    # over the PolicyEngine's compile-time fallback on restarts. A
+    # malformed payload coerces to ``None`` so the engine can still
+    # construct; its own bounds check would reject anything out-of-range.
+    raw_approval_gate_cap = inp.get("approval_gate_cap")
+    approval_gate_cap: int | None = None
+    if raw_approval_gate_cap is not None:
+        try:
+            approval_gate_cap = int(raw_approval_gate_cap)
+        except (TypeError, ValueError):
+            print(
+                "[server/warn] approval_gate_cap payload field is not an int "
+                f"(type={type(raw_approval_gate_cap).__name__}, value={raw_approval_gate_cap!r}); "
+                f"falling back to engine default. task_id={inp.get('task_id', '')!r}",
+                flush=True,
+            )
+            approval_gate_cap = None
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -434,6 +455,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "approval_timeout_s": approval_timeout_s,
         "initial_approvals": initial_approvals,
         "initial_approval_gate_count": initial_approval_gate_count,
+        "approval_gate_cap": approval_gate_cap,
         "trace": trace,
         "user_id": user_id,
     }

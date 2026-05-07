@@ -214,6 +214,13 @@ def _initialize_policy_engine_and_hooks(
     # the terminal bound across restarts.
     if config.initial_approval_gate_count:
         engine_kwargs["initial_approval_gate_count"] = config.initial_approval_gate_count
+    # Chunk 7b (§4 step 5, decision #13): adopt the per-task cap
+    # resolved at submit-time (blueprint override or platform default,
+    # frozen on the TaskRecord). When absent (legacy task predating
+    # Chunk 7b), ``PolicyEngine`` falls back to DEFAULT_APPROVAL_GATE_CAP
+    # so the behavior matches pre-Chunk-7b deploys.
+    if config.approval_gate_cap is not None:
+        engine_kwargs["approval_gate_cap"] = config.approval_gate_cap
     policy_engine = PolicyEngine(
         task_type=config.task_type,
         repo=config.repo_url,

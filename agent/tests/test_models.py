@@ -334,6 +334,25 @@ class TestTaskConfig:
         )
         assert config.initial_approval_gate_count == 12
 
+    def test_approval_gate_cap_default_is_none(self):
+        # Chunk 7b: None preserves the existing PolicyEngine default-50
+        # path for any caller that doesn't thread the submit-time cap.
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config.approval_gate_cap is None
+
+    def test_approval_gate_cap_accepts_explicit_value(self):
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            approval_gate_cap=100,
+        )
+        assert config.approval_gate_cap == 100
+
 
 class TestRepoSetup:
     def test_construction(self):

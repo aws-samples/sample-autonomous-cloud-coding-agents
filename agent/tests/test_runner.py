@@ -130,3 +130,35 @@ class TestInitializePolicyEngineAndHooks:
 
         assert engine is engine_instance
         assert hooks is hooks_instance
+
+    # --- Chunk 7b: approval_gate_cap fanout to PolicyEngine -----------------
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_approval_gate_cap_threaded_to_engine_when_set(
+        self, mock_policy_engine, _mock_build_hooks
+    ):
+        # Chunk 7b: submit-time-resolved cap on TaskConfig must reach
+        # PolicyEngine so blueprint overrides (or the default-50 frozen
+        # at submit) apply on every container, including restarts.
+        config = _config(approval_gate_cap=200)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        kwargs = mock_policy_engine.call_args.kwargs
+        assert kwargs["approval_gate_cap"] == 200
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_approval_gate_cap_omitted_when_none(self, mock_policy_engine, _mock_build_hooks):
+        # Legacy tasks (pre-Chunk-7b) don't carry approval_gate_cap.
+        # Helper must NOT thread None — the engine's default-50
+        # fallback is what makes the legacy behavior preserved.
+        config = _config(approval_gate_cap=None)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        kwargs = mock_policy_engine.call_args.kwargs
+        assert "approval_gate_cap" not in kwargs
