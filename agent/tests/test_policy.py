@@ -195,10 +195,17 @@ class TestExtraPolicies:
 
 class TestFailClosed:
     def test_invalid_policy_syntax_fails_closed(self):
-        """Invalid Cedar policy syntax should fail closed (deny the call)."""
+        """Invalid Cedar policy syntax should fail closed (deny the call).
+
+        Phase 1 patched ``engine._policies`` after construction; the Cedar
+        HITL rewrite validates policy text at ``PolicyEngine.__init__`` so
+        the Phase 1 back-door attribute no longer exists. Patching
+        ``_hard_policies`` to invalid text reproduces the same hazard path:
+        the next ``evaluate_tool_use`` raises inside cedarpy and the engine
+        returns DENY with ``fail-closed: <ExceptionType>``.
+        """
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Override with invalid policies
-        engine._policies = "THIS IS NOT VALID CEDAR"
+        engine._hard_policies = "THIS IS NOT VALID CEDAR"
         result = engine.evaluate_tool_use("Write", {"file_path": "test.py"})
         assert result.allowed is False
         assert "fail-closed" in result.reason or "NoDecision" in result.reason
