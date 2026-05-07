@@ -408,3 +408,394 @@ def get_task(task_id: str) -> dict | None:
         print(f"[task_state] get_task failed: {type(e).__name__}: {e}")
         raise TaskFetchError(f"{type(e).__name__}: {e}") from e
     return resp.get("Item")
+
+
+# ---------------------------------------------------------------------------
+# Cedar HITL approval primitives (§6.5, §9.1, IMPL-24)
+# ---------------------------------------------------------------------------
+#
+# ``TaskApprovalsTable`` and the AWAITING_APPROVAL status transitions land
+# physically in Chunk 4 (CDK). The agent-side helpers below are written to
+# that contract and exposed so Chunk 3's ``pre_tool_use_hook`` can be
+# implemented + unit-tested now (via mocked boto3 clients); Chunk 4 sets
+# ``TASK_APPROVALS_TABLE_NAME`` + grants IAM and the same helpers start
+# making real DDB calls with no further code change on the agent side.
+#
+# Primitives exposed:
+#   - ``transact_write_approval_request`` — atomic Put(TaskApprovals) +
+#     Update(TaskTable: RUNNING → AWAITING_APPROVAL). Raises
+#     ``ApprovalWriteError`` on ``TransactionCanceledException`` so the
+#     hook can return DENY + ``approval_write_failed`` (§13.1).
+#   - ``transact_resume_from_approval`` — atomic Update(TaskTable:
+#     AWAITING_APPROVAL → RUNNING) gated on
+#     ``awaiting_approval_request_id = request_id``. Raises
+#     ``ApprovalResumeError`` on cancellation (§13.9).
+#   - ``best_effort_update_approval_status`` — conditional Update on the
+#     approval row (``status = :pending`` guard). Returns ``False`` on
+#     ``ConditionCheckFailed`` so IMPL-24's re-read re-read path fires.
+#   - ``get_approval_row`` — strongly-consistent GetItem; default
+#     ``consistent_read=True`` because IMPL-24's race fix relies on it.
+#
+# Errors beyond the structural conditions (unreachable DDB, IAM drift,
+# missing env var) raise ``ApprovalTablesUnavailable`` so the hook can
+# fail CLOSED without guessing. The hook maps that to DENY so a
+# pre-Chunk-4 deploy cannot silently bypass gates.
+
+TASK_APPROVALS_TABLE_ENV = "TASK_APPROVALS_TABLE_NAME"
+TASK_TABLE_ENV = "TASK_TABLE_NAME"
+
+# TaskTable status values referenced by the approval primitives. Kept as
+# constants so a rename in CDK cannot silently diverge the Python path.
+_STATUS_RUNNING = "RUNNING"
+_STATUS_AWAITING_APPROVAL = "AWAITING_APPROVAL"
+
+
+class ApprovalTablesUnavailable(RuntimeError):
+    """Either ``TASK_APPROVALS_TABLE_NAME`` or ``TASK_TABLE_NAME`` is unset.
+
+    Hook maps to DENY (fail-closed); see §13.15. Distinct from
+    ``TaskFetchError`` so callers do not collapse a config problem with a
+    transient read failure.
+    """
+
+
+class ApprovalWriteError(RuntimeError):
+    """``transact_write_approval_request`` TransactionCanceledException.
+
+    Fired when the cross-table atomic write is cancelled — either the
+    TaskTable precondition fails (task already cancelled / advanced past
+    RUNNING) or the approval row already exists. Hook maps to DENY +
+    ``approval_write_failed`` (§13.1). The underlying cancellation reasons
+    are stashed on ``.cancellation_reasons`` for triage.
+    """
+
+    def __init__(self, message: str, cancellation_reasons: list | None = None) -> None:
+        super().__init__(message)
+        self.cancellation_reasons = cancellation_reasons or []
+
+
+class ApprovalResumeError(RuntimeError):
+    """``transact_resume_from_approval`` TransactionCanceledException.
+
+    Fired when the resume transition fails — typically because the user
+    cancelled the task mid-approval (§13.9). Hook maps to DENY +
+    ``approval_resume_failed``.
+    """
+
+    def __init__(self, message: str, cancellation_reasons: list | None = None) -> None:
+        super().__init__(message)
+        self.cancellation_reasons = cancellation_reasons or []
+
+
+def _get_ddb_client(*, client=None):
+    """Return a boto3 DDB low-level client, or the injected ``client`` for tests.
+
+    Tests inject a mock client rather than relying on moto because the
+    primitives here touch ``transact_write_items`` with cross-table
+    conditions, which moto's older versions do not fully emulate.
+    """
+    if client is not None:
+        return client
+    import boto3
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    return boto3.client("dynamodb", region_name=region)
+
+
+def _require_tables() -> tuple[str, str]:
+    """Return ``(task_table, approvals_table)`` or raise.
+
+    Kept as a single guard so every caller surfaces the same error class.
+    """
+    task_table = os.environ.get(TASK_TABLE_ENV)
+    approvals_table = os.environ.get(TASK_APPROVALS_TABLE_ENV)
+    if not task_table or not approvals_table:
+        raise ApprovalTablesUnavailable(
+            f"{TASK_TABLE_ENV}/{TASK_APPROVALS_TABLE_ENV} unset; approval gates cannot be recorded"
+        )
+    return task_table, approvals_table
+
+
+def _py_to_ddb_attr(value):
+    """Translate a Python value into the DDB low-level attribute shape.
+
+    Handles the subset we actually write: ``str``, ``int``, ``bool``,
+    ``None``, lists-of-str. More exotic types would need marshalling
+    support; ``approval_row`` values are constrained to the §10.1 schema
+    which falls entirely inside this subset.
+    """
+    if value is None:
+        return {"NULL": True}
+    if isinstance(value, bool):
+        return {"BOOL": value}
+    if isinstance(value, int):
+        return {"N": str(value)}
+    if isinstance(value, str):
+        return {"S": value}
+    if isinstance(value, list):
+        # Lists of strings (matching_rule_ids); other shapes are rejected
+        # loudly so a future schema drift surfaces in tests rather than
+        # silently writing an empty list.
+        if all(isinstance(v, str) for v in value):
+            return {"L": [{"S": v} for v in value]}
+        raise TypeError(f"unsupported list element types in approval row: {value!r}")
+    raise TypeError(f"unsupported approval-row attribute type: {type(value).__name__}")
+
+
+def _ddb_attr_to_py(attr):
+    """Inverse of ``_py_to_ddb_attr`` — enough to rehydrate an approval row."""
+    if attr is None:
+        return None
+    if "NULL" in attr:
+        return None
+    if "BOOL" in attr:
+        return attr["BOOL"]
+    if "N" in attr:
+        raw = attr["N"]
+        # Keep integers integer-shaped for downstream arithmetic (ttl,
+        # timeout_s). ``decided_at`` is a string so no floats to worry
+        # about.
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
+    if "S" in attr:
+        return attr["S"]
+    if "L" in attr:
+        return [_ddb_attr_to_py(item) for item in attr["L"]]
+    # Unsupported shape; return raw to aid debugging rather than losing data.
+    return attr
+
+
+def transact_write_approval_request(
+    task_id: str,
+    request_id: str,
+    approval_row: dict,
+    *,
+    client=None,
+) -> None:
+    """Atomically record a pending approval + transition the task to AWAITING_APPROVAL.
+
+    Two items:
+      1. Put on ``TaskApprovalsTable`` with ``ConditionExpression:
+         attribute_not_exists(request_id)`` — guards against ULID collisions
+         and duplicate writes on retry.
+      2. Update on ``TaskTable`` with ``ConditionExpression: status =
+         :running`` — fails if the task has already been cancelled, failed,
+         or is still pre-RUNNING. On success sets
+         ``status = AWAITING_APPROVAL`` and
+         ``awaiting_approval_request_id = <request_id>`` so the resume
+         transition can verify it's resuming the right approval.
+
+    Raises ``ApprovalTablesUnavailable`` if either env var is unset;
+    ``ApprovalWriteError`` on ``TransactionCanceledException``; other
+    DDB-layer exceptions propagate so the hook's outer try/except can
+    fail-closed with a specific reason.
+    """
+    task_table, approvals_table = _require_tables()
+    ddb = _get_ddb_client(client=client)
+
+    approval_item = {k: _py_to_ddb_attr(v) for k, v in approval_row.items()}
+    # Belt-and-braces: ensure the keys we rely on downstream are present.
+    approval_item.setdefault("task_id", {"S": task_id})
+    approval_item.setdefault("request_id", {"S": request_id})
+    approval_item.setdefault("status", {"S": "PENDING"})
+
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": approvals_table,
+                        "Item": approval_item,
+                        "ConditionExpression": "attribute_not_exists(request_id)",
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": task_table,
+                        "Key": {"task_id": {"S": task_id}},
+                        "UpdateExpression": (
+                            "SET #s = :awaiting, awaiting_approval_request_id = :rid"
+                        ),
+                        "ConditionExpression": "#s = :running",
+                        "ExpressionAttributeNames": {"#s": "status"},
+                        "ExpressionAttributeValues": {
+                            ":awaiting": {"S": _STATUS_AWAITING_APPROVAL},
+                            ":running": {"S": _STATUS_RUNNING},
+                            ":rid": {"S": request_id},
+                        },
+                    }
+                },
+            ]
+        )
+    except Exception as exc:
+        # TransactionCanceledException carries per-item reasons. Keep the
+        # detection structural (duck-typed on ``response``) so we do not
+        # need botocore at import time.
+        reasons = _extract_cancellation_reasons(exc)
+        code = _extract_error_code(exc)
+        if code == "TransactionCanceledException":
+            raise ApprovalWriteError(
+                f"approval write cancelled: reasons={reasons}",
+                cancellation_reasons=reasons,
+            ) from exc
+        # Otherwise propagate so outer handler classifies it fail-closed.
+        raise
+
+
+def transact_resume_from_approval(
+    task_id: str,
+    request_id: str,
+    *,
+    client=None,
+) -> None:
+    """Atomically resume RUNNING from AWAITING_APPROVAL for ``request_id``.
+
+    The condition ``status = AWAITING_APPROVAL AND
+    awaiting_approval_request_id = :rid`` prevents:
+      - resuming a task that's been cancelled mid-approval (§13.9);
+      - resuming with a stale request_id after a race with the
+        reconciler / a concurrent approval.
+
+    Raises ``ApprovalResumeError`` on ``TransactionCanceledException`` so
+    the hook can emit ``approval_resume_failed`` + DENY.
+    """
+    task_table, _ = _require_tables()
+    ddb = _get_ddb_client(client=client)
+
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": task_table,
+                        "Key": {"task_id": {"S": task_id}},
+                        "UpdateExpression": (
+                            "SET #s = :running REMOVE awaiting_approval_request_id"
+                        ),
+                        "ConditionExpression": (
+                            "#s = :awaiting AND awaiting_approval_request_id = :rid"
+                        ),
+                        "ExpressionAttributeNames": {"#s": "status"},
+                        "ExpressionAttributeValues": {
+                            ":running": {"S": _STATUS_RUNNING},
+                            ":awaiting": {"S": _STATUS_AWAITING_APPROVAL},
+                            ":rid": {"S": request_id},
+                        },
+                    }
+                }
+            ]
+        )
+    except Exception as exc:
+        reasons = _extract_cancellation_reasons(exc)
+        code = _extract_error_code(exc)
+        if code == "TransactionCanceledException":
+            raise ApprovalResumeError(
+                f"approval resume cancelled: reasons={reasons}",
+                cancellation_reasons=reasons,
+            ) from exc
+        raise
+
+
+def best_effort_update_approval_status(
+    task_id: str,
+    request_id: str,
+    new_status: str,
+    *,
+    reason: str | None = None,
+    client=None,
+) -> bool:
+    """Conditionally flip ``status`` on an approval row.
+
+    The condition ``status = :pending`` is the design-doc guard from §6.5.
+    Used on the TIMED_OUT write path: if the row has already transitioned
+    to APPROVED or DENIED, the update fails and the caller (the hook) must
+    re-read the row with ConsistentRead (IMPL-24).
+
+    Returns ``True`` on successful write, ``False`` on
+    ``ConditionalCheckFailedException``. All other errors propagate.
+    """
+    _, approvals_table = _require_tables()
+    ddb = _get_ddb_client(client=client)
+
+    update_expr_parts = ["#s = :new"]
+    expr_values = {
+        ":new": {"S": new_status},
+        ":pending": {"S": "PENDING"},
+    }
+    if reason is not None:
+        update_expr_parts.append("deny_reason = :reason")
+        expr_values[":reason"] = {"S": reason}
+
+    try:
+        ddb.update_item(
+            TableName=approvals_table,
+            Key={"task_id": {"S": task_id}, "request_id": {"S": request_id}},
+            UpdateExpression="SET " + ", ".join(update_expr_parts),
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues=expr_values,
+        )
+        return True
+    except Exception as exc:
+        code = _extract_error_code(exc)
+        if code == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def get_approval_row(
+    task_id: str,
+    request_id: str,
+    *,
+    consistent_read: bool = True,
+    client=None,
+) -> dict | None:
+    """Fetch an approval row. Defaults to strongly-consistent read (IMPL-24).
+
+    Returns a Python dict with unmarshalled attribute values, or ``None`` if
+    the row does not exist (TTL reaped, wrong IDs, etc.). Callers use the
+    ``None`` return to detect the row-gone branch in §13.12.
+    """
+    _, approvals_table = _require_tables()
+    ddb = _get_ddb_client(client=client)
+    resp = ddb.get_item(
+        TableName=approvals_table,
+        Key={"task_id": {"S": task_id}, "request_id": {"S": request_id}},
+        ConsistentRead=consistent_read,
+    )
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: _ddb_attr_to_py(v) for k, v in item.items()}
+
+
+# ---- Exception-introspection helpers ------------------------------------
+
+
+def _extract_error_code(exc: BaseException) -> str | None:
+    """Pull the AWS error code off a ``ClientError``-shaped exception.
+
+    Duck-typed so tests (and environments without botocore at import time)
+    stay decoupled from the concrete exception type.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return None
+    error_block = response.get("Error") or {}
+    if not isinstance(error_block, dict):
+        return None
+    code = error_block.get("Code")
+    return code if isinstance(code, str) else None
+
+
+def _extract_cancellation_reasons(exc: BaseException) -> list:
+    """Pull CancellationReasons (best-effort) off a TransactionCanceledException."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return []
+    reasons = response.get("CancellationReasons")
+    if isinstance(reasons, list):
+        return reasons
+    return []
