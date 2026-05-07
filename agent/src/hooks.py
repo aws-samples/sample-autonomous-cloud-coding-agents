@@ -184,6 +184,19 @@ async def pre_tool_use_hook(
         return _allow_response(decision.reason or "permitted")
 
     if decision.outcome == Outcome.DENY:
+        # IMPL-23: when the DENY arrived from the recent-decision cache
+        # (evaluate_tool_use Step 2.5), emit a ``policy_decision``
+        # milestone with ``decision_source="recent_decision_cache"`` to
+        # TaskEventsTable so cache-driven denies are visible in the live
+        # stream + 90d audit record (§12.8). No new approval row is
+        # written and the gate counter is NOT bumped — the original
+        # gate already accounted for the decision.
+        if progress is not None and decision.cache_hit_metadata is not None:
+            _try_progress(
+                progress,
+                "write_policy_decision_cached",
+                **decision.cache_hit_metadata,
+            )
         log("POLICY", f"DENIED: {tool_name} — {decision.reason}")
         return _deny_response(decision.reason)
 
@@ -321,10 +334,22 @@ async def _handle_require_approval(
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on
     # subsequent gates reflect the attempt even if the DDB write itself
-    # fails. The counter survives within the task; the failure path
-    # below emits ``approval_write_failed`` so the lost row is visible.
+    # fails. The session counter survives within the task; the failure
+    # path below emits ``approval_write_failed`` so the lost row is
+    # visible.
     engine.increment_approval_gate_count()
     engine.record_approval_gate_timestamp()
+
+    # Chunk 7 (§13.6): best-effort atomic increment of the persisted
+    # ``approval_gate_count`` on TaskTable. The session counter
+    # enforces the cap within THIS container; the persisted counter
+    # exists so a restarted container re-seeds from a non-zero value
+    # instead of re-exposing the user to another ``approval_gate_cap``
+    # worth of gates. Failure is best-effort per §13.6 — "counter is
+    # a safety bound, not a correctness bound" — so we keep going on
+    # error and accept the (bounded) restart-retry amplification.
+    if task_id:
+        await asyncio.to_thread(ts.increment_approval_gate_count_in_ddb, task_id)
 
     # Step 7 — cross-table atomic transition.
     try:
@@ -462,11 +487,18 @@ async def _handle_require_approval(
 
     # DENIED or TIMED_OUT — cache + queue injection.
     cache_decision = "DENIED" if status == "DENIED" else "TIMED_OUT"
+    # IMPL-23: thread the user's ``decided_at`` into the cache entry so
+    # subsequent cache-hit events surface the ORIGINAL decision timestamp,
+    # not the wall-clock time the cache was populated (which is ~the same
+    # but technically wrong). ``decided_at`` for TIMED_OUT is the
+    # agent-side clock moment the timeout fired; for DENIED it's the
+    # user's deny timestamp from the Lambda audit row.
     engine.recent_decisions.record(
         tool_name,
         tool_input_sha256,
         decision=cache_decision,
         reason=outcome.get("reason", ""),
+        original_decision_ts=outcome.get("decided_at"),
     )
 
     if status == "DENIED":

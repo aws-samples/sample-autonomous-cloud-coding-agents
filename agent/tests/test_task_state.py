@@ -784,6 +784,62 @@ class TestGetApprovalRow:
         }
 
 
+class TestIncrementApprovalGateCountInDdb:
+    """Chunk 7: best-effort persistence of ``approval_gate_count`` so a
+    container restart (§13.6) resumes the cumulative gate budget instead
+    of resetting to 0.
+    """
+
+    def test_happy_path_returns_true_and_issues_add(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.return_value = {}
+
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
+
+        assert ok is True
+        call = client.update_item.call_args
+        # Writes to TaskTable (not approvals-table) — survival of the
+        # TASK-owned counter, not of the approval row.
+        assert call.kwargs["TableName"] == "task-table"
+        assert call.kwargs["Key"] == {"task_id": {"S": "01KTASK"}}
+        # Atomic ADD (not SET) so concurrent hooks never clobber the counter
+        # and the CreateTaskFn seed of ``approval_gate_count: 0`` (which
+        # initializes the attribute) is still respected.
+        assert call.kwargs["UpdateExpression"] == "ADD approval_gate_count :one"
+        assert call.kwargs["ExpressionAttributeValues"] == {":one": {"N": "1"}}
+        # No ConditionExpression — the counter is monotonic; we never gate
+        # the bump on any read-modify-write state.
+        assert "ConditionExpression" not in call.kwargs
+
+    def test_env_missing_returns_false_best_effort(self, monkeypatch):
+        # §13.6: counter persistence is a safety bound, not a correctness
+        # bound. A missing TASK_TABLE_NAME must not block the gate.
+        monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
+        monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
+
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=MagicMock())
+
+        assert ok is False
+
+    def test_ddb_client_error_returns_false_not_raises(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.side_effect = _FakeClientError("ProvisionedThroughputExceededException")
+
+        # Best-effort: swallow the error so the hook proceeds with the
+        # session-scoped counter as authoritative within the container.
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
+
+        assert ok is False
+
+    def test_ddb_unknown_exception_returns_false_not_raises(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.side_effect = RuntimeError("AWS SDK internal error")
+
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
+
+        assert ok is False
+
+
 class TestCancellationHelpers:
     def test_extract_error_code_none_on_missing_response(self):
         assert task_state._extract_error_code(RuntimeError("boom")) is None

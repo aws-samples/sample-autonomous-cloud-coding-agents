@@ -771,6 +771,67 @@ def get_approval_row(
     return {k: _ddb_attr_to_py(v) for k, v in item.items()}
 
 
+def increment_approval_gate_count_in_ddb(
+    task_id: str,
+    *,
+    client=None,
+) -> bool:
+    """Best-effort atomic increment of ``approval_gate_count`` on TaskTable.
+
+    Chunk 7 persistence layer for decision #13's per-task gate counter. The
+    session counter (``PolicyEngine._approval_gate_count``) stays
+    authoritative WITHIN a container — this write exists so that a container
+    restart (§13.6) can seed the new container's counter from the persisted
+    value instead of resetting to 0 and re-exposing the user to another
+    ``approval_gate_cap`` worth of gates.
+
+    **Best-effort semantics (§13.6):** the counter is a safety bound, not a
+    correctness bound. A DDB write failure here MUST NOT block the gate —
+    the session counter still enforces the cap within this container, and
+    the §13.6 analysis accepts at most one lost increment per restart as
+    acceptable damage. Returns ``True`` on success, ``False`` on any
+    failure (config missing, IAM drift, throttling). Never raises.
+
+    Uses a pure ADD UpdateExpression without a ConditionExpression — the
+    counter is monotonic and concurrent writes from different hooks on the
+    same task are not expected (gates are serialized by the PreToolUse
+    lifecycle). If the attribute is missing, DDB initializes it to 0 before
+    applying the ADD, matching the CreateTaskFn seed of
+    ``approval_gate_count: 0`` (see cdk/src/handlers/shared/create-task-core.ts).
+
+    Deliberately kept separate from the resume TransactWriteItems (§6.5): the
+    joint-update invariant on ``status`` + ``awaiting_approval_request_id``
+    (§10.2) must not be burdened with a non-safety-critical counter bump.
+    """
+    try:
+        task_table, _ = _require_tables()
+    except ApprovalTablesUnavailable as exc:
+        print(
+            f"[task_state] increment_approval_gate_count_in_ddb: tables unavailable, "
+            f"skipping counter persistence: {exc}"
+        )
+        return False
+
+    try:
+        ddb = _get_ddb_client(client=client)
+        ddb.update_item(
+            TableName=task_table,
+            Key={"task_id": {"S": task_id}},
+            UpdateExpression="ADD approval_gate_count :one",
+            ExpressionAttributeValues={":one": {"N": "1"}},
+        )
+    except Exception as exc:
+        # Best-effort: do not raise. Log at WARN with the error code so
+        # operators can spot IAM drift / throttle / misconfigured tables.
+        code = _extract_error_code(exc) or type(exc).__name__
+        print(
+            f"[task_state] increment_approval_gate_count_in_ddb failed for task_id={task_id}: "
+            f"{code}: {exc}"
+        )
+        return False
+    return True
+
+
 # ---- Exception-introspection helpers ------------------------------------
 
 

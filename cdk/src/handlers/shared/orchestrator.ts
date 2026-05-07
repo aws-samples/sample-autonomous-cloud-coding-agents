@@ -359,6 +359,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     // task_default_timeout_s without a second DDB round-trip.
     ...(task.approval_timeout_s !== undefined && { approval_timeout_s: task.approval_timeout_s }),
     ...(task.initial_approvals && task.initial_approvals.length > 0 && { initial_approvals: task.initial_approvals }),
+    // Cedar HITL Chunk 7 (§13.6): seed the engine's per-task gate
+    // counter from the TaskTable-persisted value so a container
+    // restart mid-task resumes the cumulative gate budget instead of
+    // resetting to 0. Only forwarded when non-zero so the agent's
+    // default (0) path remains unchanged for fresh tasks; the
+    // TaskRecord is already loaded above, so no extra DDB read.
+    ...(typeof task.approval_gate_count === 'number' && task.approval_gate_count > 0 && {
+      initial_approval_gate_count: task.approval_gate_count,
+    }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,

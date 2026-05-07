@@ -314,6 +314,26 @@ class TestTaskConfig:
         assert config.trace is False
         assert config.user_id == ""
 
+    def test_initial_approval_gate_count_default_is_zero(self):
+        # Chunk 7 (§13.6): zero default preserves the existing fresh-task
+        # path; a non-zero value only arrives when the orchestrator threads
+        # the TaskTable-persisted counter on container restart.
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config.initial_approval_gate_count == 0
+
+    def test_initial_approval_gate_count_accepts_positive_value(self):
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            initial_approval_gate_count=12,
+        )
+        assert config.initial_approval_gate_count == 12
+
 
 class TestRepoSetup:
     def test_construction(self):

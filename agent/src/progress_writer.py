@@ -810,3 +810,38 @@ class _ProgressWriter:
                 "reason": self._preview(reason),
             },
         )
+
+    def write_policy_decision_cached(
+        self,
+        *,
+        tool_name: str,
+        tool_input_sha256: str,
+        cached_decision: str,
+        cached_reason: str,
+        original_decision_ts: str,
+    ) -> None:
+        """Emit ``policy_decision`` for a recent-decision-cache hit (IMPL-23).
+
+        Event name is ``policy_decision`` (not ``approval_*``) because a
+        cache hit intentionally avoids creating a new approval row — the
+        original decision already produced the audit trail. The
+        ``decision_source`` field distinguishes cache-driven denies from
+        fresh policy evaluations so operators can correlate retry patterns
+        with container restarts (§12.8, §13.6).
+
+        Reuses ``_put_approval_milestone`` for the ``agent_milestone``
+        event shape; the ``milestone`` key is ``policy_decision`` here
+        instead of an ``approval_*`` name. No new approval row, no
+        counter increment — purely observability (§12.8 caveat).
+        """
+        self._put_approval_milestone(
+            "policy_decision",
+            {
+                "decision_source": "recent_decision_cache",
+                "tool_name": tool_name,
+                "tool_input_sha256": tool_input_sha256,
+                "cached_decision": cached_decision,
+                "cached_reason": self._preview(cached_reason),
+                "original_decision_ts": original_decision_ts,
+            },
+        )

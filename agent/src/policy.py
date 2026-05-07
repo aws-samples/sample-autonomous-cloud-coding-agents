@@ -60,6 +60,7 @@ import json
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from fnmatch import fnmatch
 from pathlib import Path
@@ -136,6 +137,7 @@ class PolicyDecision:
     """
 
     __slots__ = (
+        "cache_hit_metadata",
         "duration_ms",
         "matching_rule_ids",
         "outcome",
@@ -154,6 +156,7 @@ class PolicyDecision:
         severity: str | None = None,
         matching_rule_ids: tuple[str, ...] = (),
         duration_ms: float = 0.0,
+        cache_hit_metadata: dict | None = None,
     ) -> None:
         if outcome is None and allowed is None:
             raise TypeError("PolicyDecision requires either outcome= or allowed=")
@@ -167,6 +170,14 @@ class PolicyDecision:
         self.severity = severity
         self.matching_rule_ids = matching_rule_ids
         self.duration_ms = duration_ms
+        # IMPL-23: populated only when Step 2.5 of evaluate_tool_use returns
+        # a cache-hit DENY. Contains the payload for the `policy_decision`
+        # milestone with `decision_source="recent_decision_cache"`; the hook
+        # forwards it to progress_writer.write_policy_decision_cached().
+        # Observability-only — NOT part of __eq__/__hash__: two cache-hit
+        # decisions with different original_decision_ts values still
+        # represent the same deny outcome.
+        self.cache_hit_metadata = cache_hit_metadata
 
     @property
     def allowed(self) -> bool:
@@ -248,11 +259,19 @@ class PolicyDecision:
 
 @dataclass
 class _CachedDecision:
-    """In-process recent-decision cache entry."""
+    """In-process recent-decision cache entry.
+
+    ``inserted_at`` is a monotonic timestamp used for TTL/LRU; it is NOT
+    safe to surface in events (monotonic clocks aren't wall-clock and
+    restart at container boot). ``original_decision_ts`` is the ISO-8601
+    wall-clock string captured at record time so IMPL-23 cache-hit
+    events can report when the original decision landed.
+    """
 
     decision: str  # "DENIED" | "TIMED_OUT"
     reason: str
     inserted_at: float
+    original_decision_ts: str
 
 
 class ApprovalAllowlist:
@@ -379,13 +398,26 @@ class RecentDecisionCache:
         input_sha256: str,
         decision: str,
         reason: str,
+        original_decision_ts: str | None = None,
     ) -> None:
-        """Insert a DENIED/TIMED_OUT entry. Evicts LRU on overflow."""
+        """Insert a DENIED/TIMED_OUT entry. Evicts LRU on overflow.
+
+        ``original_decision_ts`` is the ISO-8601 wall-clock time of the
+        original approval decision that seeded this cache entry. Surfaced
+        on subsequent cache-hit events (IMPL-23) so operators can correlate
+        cache-driven denies back to the originating gate. Falsy values
+        (``None`` or empty string) fall back to "now" at record time, so
+        legacy test callers and corrupted outcome rows keep working.
+        """
         if decision not in ("DENIED", "TIMED_OUT"):
             raise ValueError(f"RecentDecisionCache only accepts DENIED/TIMED_OUT, got {decision!r}")
         key = (tool_name, input_sha256)
         self._entries[key] = _CachedDecision(
-            decision=decision, reason=reason, inserted_at=self._clock()
+            decision=decision,
+            reason=reason,
+            inserted_at=self._clock(),
+            original_decision_ts=original_decision_ts
+            or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         )
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:
@@ -613,6 +645,7 @@ class PolicyEngine:
         blueprint_disable: list[str] | None = None,
         initial_approvals: list[str] | None = None,
         approval_gate_cap: int = DEFAULT_APPROVAL_GATE_CAP,
+        initial_approval_gate_count: int = 0,
         task_default_timeout_s: int = DEFAULT_TASK_TIMEOUT_S,
     ) -> None:
         self._task_type = task_type
@@ -629,12 +662,18 @@ class PolicyEngine:
             )
         self._approval_gate_cap = approval_gate_cap
 
+        # Negative seeds are a caller bug, not a container-restart state.
+        if initial_approval_gate_count < 0:
+            raise ValueError(
+                f"initial_approval_gate_count must be >= 0, got {initial_approval_gate_count}"
+            )
+
         # §12.9 per-task gate counter + per-container sliding-window rate limit.
-        # Both are session-scoped: the counter survives within the same task
-        # but NOT across container restarts (the design carries-forward tracks
-        # DDB persistence for the counter in Chunk 4/5; for now the §13.6
-        # reconciler + approval_gate_cap bound the worst case).
-        self._approval_gate_count: int = 0
+        # The counter is session-scoped within a container but seeded from the
+        # persisted TaskTable value (§13.6) so container restarts resume the
+        # cumulative gate budget instead of resetting to 0. The rate-limit
+        # window stays per-container by design (§13.6 finding #10 scenario).
+        self._approval_gate_count: int = initial_approval_gate_count
         self._approvals_last_minute: deque[float] = deque()
         # §6.5 queue consumed by ``_denial_between_turns_hook``. Each entry
         # is ``{"request_id", "reason", "decided_at"}``; reason is already
@@ -787,7 +826,8 @@ class PolicyEngine:
             f"Cedar policy engine initialized: task_type={task_type}, "
             f"hard_rules={len(self._hard_rules)}, soft_rules={len(self._soft_rules)}, "
             f"pre_approvals={len(initial_approvals) if initial_approvals else 0}, "
-            f"approval_gate_cap={approval_gate_cap}",
+            f"approval_gate_cap={approval_gate_cap}, "
+            f"initial_approval_gate_count={initial_approval_gate_count}",
         )
 
     # ---- Public properties -------------------------------------------------
@@ -1023,9 +1063,20 @@ class PolicyEngine:
             # STEP 2.5 — Recent-decision cache.
             cached = self._cache.get(tool_name, input_sha)
             if cached is not None:
-                return PolicyDecision.deny(
+                # IMPL-23: attach cache-hit metadata so the hook can emit a
+                # `policy_decision` milestone to TaskEventsTable. Keeps the
+                # engine pure — policy.py never calls the progress writer.
+                return PolicyDecision(
+                    outcome=Outcome.DENY,
                     reason=f"Recent {cached.decision} within {int(CACHE_TTL_S)}s: {cached.reason}",
                     duration_ms=(time.monotonic() - start) * 1000,
+                    cache_hit_metadata={
+                        "tool_name": tool_name,
+                        "tool_input_sha256": input_sha,
+                        "cached_decision": cached.decision,
+                        "cached_reason": cached.reason,
+                        "original_decision_ts": cached.original_decision_ts,
+                    },
                 )
 
             # STEP 3 — Soft-deny evaluation.

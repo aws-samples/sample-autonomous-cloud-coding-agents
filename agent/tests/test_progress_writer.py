@@ -937,3 +937,36 @@ class TestApprovalMilestoneHelpers:
         assert metadata["milestone"] == "approval_late_win"
         assert metadata["outcome"] == "APPROVED"
         assert metadata["reason"] == "user decision landed during TIMED_OUT write"
+
+    def test_policy_decision_cached(self, writer):
+        # IMPL-23: cache hits emit a `policy_decision` milestone with
+        # `decision_source="recent_decision_cache"`. Validates the IMPL-23
+        # metadata contract documented in §12.8.
+        writer.write_policy_decision_cached(
+            tool_name="Bash",
+            tool_input_sha256="abcdef123456",
+            cached_decision="DENIED",
+            cached_reason="user said force-push is too risky",
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+        event_type, metadata = self._last_event(writer)
+        assert event_type == "agent_milestone"
+        assert metadata["milestone"] == "policy_decision"
+        assert metadata["decision_source"] == "recent_decision_cache"
+        assert metadata["tool_name"] == "Bash"
+        assert metadata["tool_input_sha256"] == "abcdef123456"
+        assert metadata["cached_decision"] == "DENIED"
+        assert metadata["cached_reason"] == "user said force-push is too risky"
+        assert metadata["original_decision_ts"] == "2026-05-07T12:00:00Z"
+
+    def test_policy_decision_cached_truncates_long_reason(self, writer):
+        writer.write_policy_decision_cached(
+            tool_name="Bash",
+            tool_input_sha256="abc",
+            cached_decision="TIMED_OUT",
+            cached_reason="x" * 5000,
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+        _, metadata = self._last_event(writer)
+        # Default preview cap is 200 chars; preserve DDB budget under adversarial reasons.
+        assert len(metadata["cached_reason"]) <= 210
