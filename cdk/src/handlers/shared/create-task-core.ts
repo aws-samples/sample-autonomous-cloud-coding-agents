@@ -29,9 +29,12 @@ import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
-import { checkRepoOnboarded } from './repo-config';
+import { checkRepoOnboarded, loadRepoConfig } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
 import {
+  APPROVAL_GATE_CAP_DEFAULT,
+  APPROVAL_GATE_CAP_MAX,
+  APPROVAL_GATE_CAP_MIN,
   APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
@@ -90,6 +93,58 @@ export async function createTaskCore(
   const onboardingResult = await checkRepoOnboarded(body.repo);
   if (!onboardingResult.onboarded) {
     return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
+  }
+
+  // 1c. Cedar HITL (§4 step 5, decision #13): load the full RepoConfig so
+  //     we can resolve the blueprint-configured approval-gate cap and
+  //     persist it on the TaskRecord — capturing the cap at submit-time
+  //     means mid-task blueprint edits cannot shift the cap beneath a
+  //     running task. Separate GetItem from ``checkRepoOnboarded`` for
+  //     now; the two calls can be consolidated when the onboarding check
+  //     grows further responsibilities.
+  const repoConfig = await loadRepoConfig(body.repo);
+  const blueprintCap = repoConfig?.approval_gate_cap;
+  let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
+  if (blueprintCap !== undefined) {
+    if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
+      // Blueprint construct's synth-time validation should have caught
+      // this, but a hand-edited RepoConfig row could bypass it. Fail
+      // closed rather than persisting junk onto the TaskRecord.
+      // 503 (not 500) — the condition is permanent until the blueprint
+      // is re-deployed, but from the user's perspective this is "platform
+      // can't accept this right now"; 500 would misleadingly suggest a
+      // transient internal glitch worth retrying.
+      logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
+        repo: body.repo,
+        blueprint_cap: blueprintCap,
+        request_id: requestId,
+      });
+      return errorResponse(
+        503,
+        ErrorCode.SERVICE_UNAVAILABLE,
+        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is not an integer. `
+          + 'Ask the platform admin to re-deploy the blueprint with a valid cap.',
+        requestId,
+      );
+    }
+    if (blueprintCap < APPROVAL_GATE_CAP_MIN || blueprintCap > APPROVAL_GATE_CAP_MAX) {
+      logger.error('Blueprint misconfiguration — approval_gate_cap out of bounds', {
+        repo: body.repo,
+        blueprint_cap: blueprintCap,
+        min: APPROVAL_GATE_CAP_MIN,
+        max: APPROVAL_GATE_CAP_MAX,
+        request_id: requestId,
+      });
+      return errorResponse(
+        503,
+        ErrorCode.SERVICE_UNAVAILABLE,
+        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is `
+          + `${blueprintCap}; must be between ${APPROVAL_GATE_CAP_MIN} and `
+          + `${APPROVAL_GATE_CAP_MAX}. Ask the platform admin to re-deploy the blueprint.`,
+        requestId,
+      );
+    }
+    resolvedApprovalGateCap = blueprintCap;
   }
 
   if (!hasTaskSpec(body)) {
@@ -312,6 +367,11 @@ export async function createTaskCore(
     // Persisted counter the stranded-approval reconciler + agent
     // counter both read (§13.6). Seeded to 0 at task-create time.
     approval_gate_count: 0,
+    // Cedar HITL (§4 step 5, decision #13): per-task cap captured at
+    // submit-time. Blueprint override wins when within bounds; otherwise
+    // platform default of 50. Persisted so a container restart or a
+    // mid-task blueprint edit cannot shift the cap beneath the task.
+    approval_gate_cap: resolvedApprovalGateCap,
   };
 
   // 6. Write task record
@@ -353,6 +413,13 @@ export async function createTaskCore(
     repo: body.repo,
     channel_source: context.channelSource,
     request_id: requestId,
+    // Chunk 7b: surface the resolved cap + its source so operators can
+    // detect a broken blueprint-plumbing deploy (all four fallback
+    // layers in the resolution cascade converge here). ``source`` is
+    // "blueprint" when the blueprint explicitly configured the value,
+    // "platform_default" when it fell through to 50.
+    approval_gate_cap: resolvedApprovalGateCap,
+    approval_gate_cap_source: blueprintCap !== undefined ? 'blueprint' : 'platform_default',
   });
 
   // 8. Async-invoke the orchestrator (fire-and-forget)

@@ -144,6 +144,17 @@ export interface TaskRecord {
    */
   readonly approval_gate_count?: number;
   /**
+   * Cedar HITL: per-task cap on total approval gates (design §4 step 5,
+   * §13.6, decision #13). Resolved at submit-time from
+   * ``Blueprint.security.approvalGateCap ?? 50`` and persisted here so
+   * the cap is captured at submit and NOT re-read from the blueprint
+   * during a container restart (mid-task blueprint edits must not
+   * shift the cap beneath a running task). Bounded to ``[1, 500]``
+   * by create-task validation to match the agent-side
+   * ``APPROVAL_GATE_CAP_MIN / MAX`` constants in ``agent/src/policy.py``.
+   */
+  readonly approval_gate_cap?: number;
+  /**
    * Cedar HITL: when ``status = AWAITING_APPROVAL``, the
    * ``request_id`` of the pending approval row. Cleared
    * atomically on resume (§10.2, §9).
@@ -760,3 +771,15 @@ export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default `approval_timeout_s` when the submit payload omits it. */
 export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+
+/**
+ * Cedar HITL: bounds + platform default for the per-task approval-gate cap
+ * (design decision #13, §4 step 5). Blueprints may override via
+ * ``security.approvalGateCap``; the submit path bounds-checks the
+ * resolved value against these constants so an out-of-bounds blueprint
+ * never persists a bad cap onto a TaskRecord. MUST stay in lock-step
+ * with ``APPROVAL_GATE_CAP_MIN / MAX`` in ``agent/src/policy.py``.
+ */
+export const APPROVAL_GATE_CAP_MIN = 1;
+export const APPROVAL_GATE_CAP_MAX = 500;
+export const APPROVAL_GATE_CAP_DEFAULT = 50;

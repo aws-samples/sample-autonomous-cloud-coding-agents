@@ -561,3 +561,60 @@ class TestExtractInitialApprovalGateCount:
             self._fake_req(),
         )
         assert params["initial_approval_gate_count"] == 0
+
+
+class TestExtractApprovalGateCap:
+    """Chunk 7b (§4 step 5, decision #13): ``approval_gate_cap`` is the
+    TaskTable-persisted per-task cap, resolved from
+    ``Blueprint.security.approvalGateCap`` at submit-time. Threaded as an
+    integer or None; malformed payloads fall back to None so the engine's
+    bounds check runs cleanly."""
+
+    def _base_payload(self, **extra):
+        return {
+            "repo_url": "org/repo",
+            "task_description": "Fix it",
+            "task_id": "t-1",
+            **extra,
+        }
+
+    def _fake_req(self) -> Any:
+        return _FakeRequest()
+
+    def test_absent_defaults_to_none(self):
+        params = server._extract_invocation_params(
+            self._base_payload(),
+            self._fake_req(),
+        )
+        assert params["approval_gate_cap"] is None
+
+    def test_positive_int_extracts_verbatim(self):
+        params = server._extract_invocation_params(
+            self._base_payload(approval_gate_cap=150),
+            self._fake_req(),
+        )
+        assert params["approval_gate_cap"] == 150
+
+    def test_int_like_string_accepted_via_int_coercion(self):
+        params = server._extract_invocation_params(
+            self._base_payload(approval_gate_cap="50"),
+            self._fake_req(),
+        )
+        assert params["approval_gate_cap"] == 50
+
+    def test_non_numeric_string_coerces_to_none_and_warns(self, capsys):
+        params = server._extract_invocation_params(
+            self._base_payload(approval_gate_cap="not-a-number", task_id="t-warn"),
+            self._fake_req(),
+        )
+        assert params["approval_gate_cap"] is None
+        captured = capsys.readouterr()
+        assert "[server/warn]" in captured.out
+        assert "approval_gate_cap payload field is not an int" in captured.out
+
+    def test_none_stays_none(self):
+        params = server._extract_invocation_params(
+            self._base_payload(approval_gate_cap=None),
+            self._fake_req(),
+        )
+        assert params["approval_gate_cap"] is None

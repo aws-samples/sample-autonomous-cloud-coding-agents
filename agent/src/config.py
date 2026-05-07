@@ -57,6 +57,7 @@ def build_config(
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
+    approval_gate_cap: int | None = None,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -112,6 +113,7 @@ def build_config(
         approval_timeout_s=approval_timeout_s,
         initial_approvals=initial_approvals or [],
         initial_approval_gate_count=initial_approval_gate_count,
+        approval_gate_cap=approval_gate_cap,
     )
 
 

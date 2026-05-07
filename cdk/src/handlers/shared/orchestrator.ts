@@ -26,7 +26,7 @@ import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
-import type { TaskRecord } from './types';
+import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
@@ -241,7 +241,27 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
+    approval_gate_cap: repoConfig?.approval_gate_cap,
   };
+}
+
+/**
+ * Cedar HITL Chunk 7b: structural guard on the TaskRecord's persisted
+ * ``approval_gate_cap`` before we thread it into the agent payload. The
+ * submit path bounds-checks the blueprint value before writing it
+ * (``create-task-core.ts``), so under a clean flow this guard is
+ * tautologically satisfied. It exists to catch hand-edited DDB rows /
+ * schema drift — a corrupted value would otherwise crash the agent's
+ * ``PolicyEngine.__init__`` at container start, which is much worse UX
+ * than "silently fall through to the engine default of 50 and warn."
+ */
+function isValidApprovalGateCap(value: unknown): value is number {
+  return (
+    typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= APPROVAL_GATE_CAP_MIN
+    && value <= APPROVAL_GATE_CAP_MAX
+  );
 }
 
 /**
@@ -322,6 +342,25 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   // max_budget_usd uses 2-tier override (no platform default — absent means unlimited).
   const effectiveBudget = task.max_budget_usd ?? blueprintConfig?.max_budget_usd;
 
+  // Chunk 7b: warn if a persisted approval_gate_cap is present but not
+  // a valid integer in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
+  // The payload block below silently omits invalid values (rather than
+  // crashing container start on PolicyEngine.__init__), but the only
+  // way to reach this branch is schema drift or a hand-edited DDB row,
+  // so it's worth an operator-visible signal — otherwise a corrupted
+  // record would quietly revert the task to the engine default-50.
+  if (
+    task.approval_gate_cap !== undefined
+    && !isValidApprovalGateCap(task.approval_gate_cap)
+  ) {
+    logger.warn('TaskRecord.approval_gate_cap is not a valid integer in bounds; omitting from agent payload', {
+      task_id: task.task_id,
+      approval_gate_cap: task.approval_gate_cap,
+      min: APPROVAL_GATE_CAP_MIN,
+      max: APPROVAL_GATE_CAP_MAX,
+    });
+  }
+
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
@@ -368,6 +407,18 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(typeof task.approval_gate_count === 'number' && task.approval_gate_count > 0 && {
       initial_approval_gate_count: task.approval_gate_count,
     }),
+    // Cedar HITL Chunk 7b (§4 step 5, decision #13): thread the
+    // TaskRecord-persisted cap so the agent's PolicyEngine adopts the
+    // blueprint-configured value (or the platform default of 50 frozen
+    // at submit-time) instead of its compile-time fallback. Legacy task
+    // records predating Chunk 7b omit the field — the agent then falls
+    // back to its own default of 50. Extra guards past ``typeof``
+    // because a hand-edited DDB row could carry NaN, Infinity, a float,
+    // or an out-of-bounds value — all would crash PolicyEngine.__init__
+    // downstream; omitting here keeps the container starting cleanly
+    // with the engine default and leaves an operator-visible warning.
+    ...(isValidApprovalGateCap(task.approval_gate_cap)
+      && { approval_gate_cap: task.approval_gate_cap }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,

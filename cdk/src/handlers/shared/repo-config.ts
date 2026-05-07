@@ -42,6 +42,16 @@ export interface RepoConfig {
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
+  /**
+   * Cedar HITL: per-blueprint override for the per-task approval-gate cap
+   * (design decision #13, §4 step 5). Written by the Blueprint construct
+   * when ``security.approvalGateCap`` is supplied. Read by
+   * ``create-task-core`` at submit-time and persisted onto the TaskRecord
+   * so mid-task blueprint edits do not shift the cap beneath a running
+   * task. Absent when the blueprint did not configure it — the submit
+   * path falls back to the platform default of 50.
+   */
+  readonly approval_gate_cap?: number;
 }
 
 /**
@@ -59,6 +69,14 @@ export interface BlueprintConfig {
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
+  /**
+   * Cedar HITL: per-blueprint approval-gate cap override. Surfaced from
+   * RepoConfig so downstream consumers (admission, orchestrator payload)
+   * can reason about cap-aware dispatching without a second RepoTable
+   * GetItem. ``create-task-core`` is the authoritative resolver — this
+   * field is informational for the runtime path.
+   */
+  readonly approval_gate_cap?: number;
 }
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));

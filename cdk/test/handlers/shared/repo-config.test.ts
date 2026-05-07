@@ -140,6 +140,34 @@ describe('loadRepoConfig', () => {
     expect(result?.cedar_policies).toEqual(policies);
   });
 
+  // Chunk 7b — approval_gate_cap is surfaced when present
+  test('returns approval_gate_cap when present in config', async () => {
+    const config = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      approval_gate_cap: 200,
+    };
+    mockSend.mockResolvedValueOnce({ Item: config });
+
+    const result = await loadRepoConfig('org/repo');
+    expect(result?.approval_gate_cap).toBe(200);
+  });
+
+  test('returns undefined approval_gate_cap when absent (legacy blueprint)', async () => {
+    const config = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+    mockSend.mockResolvedValueOnce({ Item: config });
+
+    const result = await loadRepoConfig('org/repo');
+    expect(result?.approval_gate_cap).toBeUndefined();
+  });
+
   test('throws on DynamoDB error', async () => {
     mockSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
     await expect(loadRepoConfig('org/repo')).rejects.toThrow(
