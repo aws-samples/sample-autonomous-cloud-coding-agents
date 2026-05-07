@@ -26,6 +26,7 @@
     "@aws-sdk/lib-dynamodb": "^3.1021.0",
     "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@aws/durable-execution-sdk-js": "^1.1.0",
+    "@cedar-policy/cedar-wasm": "4.10.0",
     "aws-cdk-lib": "^2.238.0",
     "cdk-nag": "^2.37.55",
     "constructs": "^10.3.0",

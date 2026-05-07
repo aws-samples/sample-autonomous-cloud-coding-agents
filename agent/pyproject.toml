@@ -11,7 +11,7 @@ dependencies = [
     "uvicorn==0.42.0",
     "aws-opentelemetry-distro~=0.15.0",
     "mcp==1.23.0",
-    "cedarpy>=4.8.0",
+    "cedarpy==4.8.0",
 ]
 
 [tool.bandit]

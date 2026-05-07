@@ -2055,7 +2055,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 |---|---|---|---|
 | 1 | agent | Spike | Validate cedarpy.policies_to_json_str() returns annotations. Confirm `diagnostics.reasons` shape for multi-match. If API diverges, update §6 before proceeding. |
 | 2 | mise + agent + cdk | `mise.toml`, `agent/pyproject.toml`, `cdk/package.json` | Pin `cedarpy==<version>` (agent) and `@cedar-policy/cedar-wasm==4.10.0` (cdk). Both pinned exactly, not `^` or `~` — decision #23 / finding #1. |
-| 3 | agent + cdk | `tests/fixtures/cedar-parity/*.json` (shared fixture dir) | Golden-file parity fixtures: `(policy_set, input) → {decision, matching_rule_ids}`. Agent side loads via `cedarpy`; Lambda side via `cedar-wasm`. Divergence fails CI. |
+| 3 | agent + cdk | `contracts/cedar-parity/*.json` (shared fixture dir; follows precedent set by `contracts/memory-hash-vectors.json`) | Golden-file parity fixtures: `(policy_set, input) → {decision, matching_rule_ids}`. Agent side loads via `cedarpy`; Lambda side via `cedar-wasm`. Divergence fails CI. |
 | 4 | agent | `src/policy.py` | Extend `PolicyDecision` (outcome/timeout_s/severity/matching_rule_ids/allowed-property). Split `_DEFAULT_POLICIES` into hard + soft. Add annotation parsing. Implement `ApprovalAllowlist` + `RecentDecisionCache` (50-entry LRU cap, independent of `approvalGateCap`). Load-time validation (rule_id uniqueness, tier mismatch, annotation floor, 64 KB cap, disable-list hard-deny rejection, `approvalGateCap` bounds check `1 ≤ N ≤ 500`). `PolicyEngine.__init__` accepts `approval_gate_cap` sourced from blueprint (default 50). |
 | 5 | agent | `policies/hard_deny.cedar` (new) | Migrate current hard-deny rules + add DROP TABLE. Annotations. |
 | 6 | agent | `policies/soft_deny.cedar` (new) | force-push, *.env, infrastructure/**, credentials. Annotations. |
@@ -2204,7 +2204,7 @@ The agent runtime uses Python [`cedarpy`](https://pypi.org/project/cedarpy/); th
 
 **Lambda layer packaging** (finding #5). The cedar-wasm package is 4.1 MB unzipped. Shipping it in the deployment bundle of each of the 4 policy Lambdas would consume ~16 MB of unzipped bundle size — manageable on its own but leaves little room for AWS SDK + other deps as the codebase grows, and threatens the Lambda 250 MB unzipped limit under realistic growth. Solution: package cedar-wasm as a **Lambda layer** (`cedar-wasm-layer.ts`, task #10 in §15.2), attached to each policy Lambda. This reduces each Lambda's deployment bundle to just the handler code + thin wrapper around the layer import. Policy Lambdas are configured with ≥ 512 MB memory to accommodate WASM module instantiation under concurrent invocation (measured under 100-concurrent bursts in §15.3 Lambda memory tests).
 
-**Golden-file parity test.** A shared fixture dir (`tests/fixtures/cedar-parity/`) contains JSON files of the form:
+**Golden-file parity test.** A shared fixture dir (`contracts/cedar-parity/`) contains JSON files of the form. The `contracts/` location follows the precedent set by `contracts/memory-hash-vectors.json` — a neutral directory that neither `agent/` nor `cdk/` owns, so both test suites reach into it symmetrically. The sibling `README.md` under `contracts/cedar-parity/` documents the fixture shape and update workflow.
 
 ```json
 {
@@ -2231,7 +2231,7 @@ Both `tests/test_cedar_parity.py` (agent side, uses `cedarpy`) and `cdk/test/han
 
 ```mermaid
 flowchart LR
-    F[(Golden-file fixtures<br/>tests/fixtures/cedar-parity/*.json)]
+    F[(Golden-file fixtures<br/>contracts/cedar-parity/*.json)]
     F --> PY[agent: test_cedar_parity.py<br/>→ cedarpy.is_authorized]
     F --> TS[cdk: cedar-parity.test.ts<br/>→ cedar-wasm isAuthorized]
     PY --> PYR[decision + rule_ids]
@@ -2384,6 +2384,8 @@ The intent here is to make 50 a **measurable** default, not a frozen one.
 **IMPL-27** (review 2026-05-06 timeout adversarial review, Fix 5): The container's AWS API calls authenticate via IAM role (auto-refreshed by the SDK), not a separate user-presented JWT. No Runtime JWT expiry term is required in the ceiling computation for v1 (verified by `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returning no results; AgentCore Runtime invocation uses sigv4 via `InvokeAgentRuntimeCommand`, also auto-refreshed). If the auth model changes (e.g. a future design introduces a container-held user JWT for end-to-end caller attribution), the ceiling MUST be extended to `min(1h, maxLifetime_remaining - 120s, runtime_jwt_expiry - 120s)`. Review this IMPL whenever the container's auth shape changes. See §13.13.
 
 **IMPL-28** (review 2026-05-06 timeout adversarial review, Fix 6): Add three new CloudWatch metrics to `TaskDashboard` to distinguish between the four failure modes that all surface as "timeout": `ApprovalTimeoutClipRate` (percentage, dimension: `reason`), `ApprovalTimeoutBreakdown` (histogram of `effective_timeout_s` on timed-out approvals, dimension: `rule_id`), and `ApprovalDecisionLatency` (p50/p90/p99, dimension: `outcome ∈ {approved, denied, timed_out}` — split from the previous bundled widget). Dashboard widget layout: the three metrics share a row with clip-rate + breakdown above decision-latency so operators can tell at a glance whether "timeout" is a policy problem, a sizing problem, a UX problem, or a notification problem. See §11.3.
+
+**IMPL-29** (Chunk 1 spike finding, 2026-05-07): The two Cedar engines expose matching policy IDs under asymmetrically-named fields: `cedarpy` uses `result.diagnostics.reasons` (plural list) while `cedar-wasm` uses `result.response.diagnostics.reason` (singular-named list). Both return the same data (a list of positional policy IDs). The shared policy-parsing library (Chunk 5, `cdk/src/handlers/shared/cedar-policy.ts`) and the agent engine (Chunk 2, `agent/src/policy.py`) must each normalize against their own engine's spelling; the parity fixtures under `contracts/cedar-parity/` are the authoritative test for whether the normalization stays correct across engine upgrades. Do not "fix" this asymmetry inside the engines — both names are stable upstream APIs and the normalization is cheap.
 
 ---
 
@@ -2541,4 +2543,4 @@ See §15.2. Net new files: ~15. Net modified files: ~15. Total LOC estimate: ~40
 
 ---
 
-*End of Cedar HITL design doc, rev 4.*
+*End of Cedar HITL design doc, rev 5.*
