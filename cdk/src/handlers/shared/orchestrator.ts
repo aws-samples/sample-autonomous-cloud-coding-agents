@@ -348,6 +348,17 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    // Cedar HITL: the agent's PreToolUse hook uses this to compute
+    // the maxLifetime ceiling on per-gate approval timeouts (§6.5).
+    // Stamped at HYDRATING → RUNNING transition time so the clock
+    // only starts when the container is alive. Format is ISO 8601
+    // UTC to match the rest of the TaskRecord timestamp fields.
+    task_started_at: new Date().toISOString(),
+    // Cedar HITL pre-approval data (§7.3). Threaded so the agent's
+    // PolicyEngine can seed ApprovalAllowlist + set
+    // task_default_timeout_s without a second DDB round-trip.
+    ...(task.approval_timeout_s !== undefined && { approval_timeout_s: task.approval_timeout_s }),
+    ...(task.initial_approvals && task.initial_approvals.length > 0 && { initial_approvals: task.initial_approvals }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,
@@ -563,20 +574,32 @@ export async function finalizeTask(
     return;
   }
 
-  // If still RUNNING after timeout, transition to TIMED_OUT
-  if (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING) {
+  // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
+  // window closes, transition to TIMED_OUT. AWAITING_APPROVAL uses the
+  // same transition — the stranded-approval reconciler (Chunk 5,
+  // §13.6) is a secondary safety net with a longer timeout for tasks
+  // the orchestrator already lost track of.
+  if (
+    currentStatus === TaskStatus.RUNNING
+    || currentStatus === TaskStatus.FINALIZING
+    || currentStatus === TaskStatus.AWAITING_APPROVAL
+  ) {
     const terminalStatus = TaskStatus.TIMED_OUT;
     try {
       await transitionTask(taskId, currentStatus, terminalStatus, {
         completed_at: new Date().toISOString(),
-        error_message: 'Orchestrator poll timeout exceeded',
+        error_message: currentStatus === TaskStatus.AWAITING_APPROVAL
+          ? 'Orchestrator poll timeout exceeded while awaiting approval'
+          : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
       // Task may have transitioned concurrently — re-read and accept
       logger.warn('Finalization transition failed, task may have transitioned concurrently', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
     }
     await emitTaskEvent(taskId, 'task_timed_out', {
-      reason: 'poll_timeout',
+      reason: currentStatus === TaskStatus.AWAITING_APPROVAL
+        ? 'approval_poll_timeout'
+        : 'poll_timeout',
       poll_attempts: pollState.attempts,
     });
     await decrementConcurrency(userId);

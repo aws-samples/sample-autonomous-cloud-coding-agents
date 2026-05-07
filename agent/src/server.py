@@ -254,6 +254,8 @@ def _run_task_background(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
     trace: bool = False,
     user_id: str = "",
 ) -> None:
@@ -301,6 +303,8 @@ def _run_task_background(
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
+            approval_timeout_s=approval_timeout_s,
+            initial_approvals=initial_approvals,
             trace=trace,
             user_id=user_id,
         )
@@ -348,6 +352,11 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
+    # Both are forwarded verbatim to the pipeline; the engine
+    # validates shape at construction time and raises on bad input.
+    approval_timeout_s = inp.get("approval_timeout_s")
+    initial_approvals = inp.get("initial_approvals") or []
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -374,6 +383,17 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
 
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
 
+    # Cedar HITL: stamp TASK_STARTED_AT so the PreToolUse hook's
+    # ``_remaining_maxlifetime_s`` (agent/src/hooks.py §6.5) has the
+    # real per-task clock to compute the maxLifetime ceiling. Without
+    # this the hook's ceiling computation silently falls back to
+    # "unknown, don't clip" (fail-open) and the user may be asked for
+    # approval on a gate whose window will expire before they can
+    # respond.
+    started_at = inp.get("task_started_at", "")
+    if started_at and isinstance(started_at, str):
+        os.environ["TASK_STARTED_AT"] = started_at
+
     return {
         "repo_url": repo_url,
         "task_description": task_description,
@@ -393,6 +413,8 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
+        "approval_timeout_s": approval_timeout_s,
+        "initial_approvals": initial_approvals,
         "trace": trace,
         "user_id": user_id,
     }

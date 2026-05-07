@@ -43,7 +43,7 @@ describe('CedarWasmLayer', () => {
 
   test('layer targets Node.js 20 and 22 compatible runtimes', () => {
     template.hasResourceProperties('AWS::Lambda::LayerVersion', {
-      CompatibleRuntimes: ['nodejs20.x', 'nodejs22.x'],
+      CompatibleRuntimes: ['nodejs20.x', 'nodejs22.x', 'nodejs24.x'],
     });
   });
 

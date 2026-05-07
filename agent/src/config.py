@@ -54,6 +54,8 @@ def build_config(
     pr_number: str = "",
     trace: bool = False,
     user_id: str = "",
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -106,6 +108,8 @@ def build_config(
         task_id=task_id or uuid.uuid4().hex[:12],
         trace=trace,
         user_id=user_id,
+        approval_timeout_s=approval_timeout_s,
+        initial_approvals=initial_approvals or [],
     )
 
 

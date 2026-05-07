@@ -26,11 +26,22 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
 import { checkRepoOnboarded } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
-import { type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
+import {
+  APPROVAL_TIMEOUT_S_DEFAULT,
+  APPROVAL_TIMEOUT_S_MAX,
+  APPROVAL_TIMEOUT_S_MIN,
+  INITIAL_APPROVALS_MAX_ENTRIES,
+  type CreateTaskRequest,
+  isPrTaskType,
+  type TaskRecord,
+  type TaskType,
+  toTaskDetail,
+} from './types';
 import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -131,6 +142,88 @@ export async function createTaskCore(
   }
   const userTrace = body.trace === true;
 
+  // Cedar HITL — validate approval_timeout_s if supplied (§7.3 step 5).
+  // maxLifetime-based ceiling clip is applied at orchestrator
+  // invocation time; at submit time we only enforce the `[floor, cap]`
+  // envelope.
+  let approvalTimeoutS: number | undefined;
+  if (body.approval_timeout_s !== undefined) {
+    if (typeof body.approval_timeout_s !== 'number'
+        || !Number.isInteger(body.approval_timeout_s)) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid approval_timeout_s. Must be an integer.',
+        requestId,
+      );
+    }
+    if (body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN
+        || body.approval_timeout_s > APPROVAL_TIMEOUT_S_MAX) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        `Invalid approval_timeout_s. Must be between ${APPROVAL_TIMEOUT_S_MIN}s `
+          + `and ${APPROVAL_TIMEOUT_S_MAX}s.`,
+        requestId,
+      );
+    }
+    approvalTimeoutS = body.approval_timeout_s;
+  }
+
+  // Cedar HITL — validate initial_approvals if supplied (§7.3 step 4).
+  let initialApprovals: string[] | undefined;
+  if (body.initial_approvals !== undefined) {
+    if (!Array.isArray(body.initial_approvals)) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid initial_approvals. Must be an array of scope strings.',
+        requestId,
+      );
+    }
+    if (body.initial_approvals.length > INITIAL_APPROVALS_MAX_ENTRIES) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        `initial_approvals exceeds ${INITIAL_APPROVALS_MAX_ENTRIES} entries.`,
+        requestId,
+      );
+    }
+    const normalized: string[] = [];
+    for (const entry of body.initial_approvals) {
+      const parseResult = parseApprovalScope(String(entry));
+      if (!parseResult.ok) {
+        return errorResponse(
+          400,
+          ErrorCode.VALIDATION_ERROR,
+          `Invalid initial_approvals entry "${String(entry)}": ${parseResult.message}.`,
+          requestId,
+        );
+      }
+      // Degenerate-pattern guard for bash_pattern:/write_path: scopes
+      // (§7.4). Rejecting at submit is kinder than silently letting a
+      // degenerate pattern through and having it match every tool call.
+      if (
+        parseResult.scope.startsWith('bash_pattern:')
+        || parseResult.scope.startsWith('write_path:')
+      ) {
+        const value = parseResult.scope.split(':', 2)[1] ?? '';
+        if (isDegeneratePattern(value)) {
+          return errorResponse(
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            `Invalid initial_approvals entry "${parseResult.scope}": `
+              + 'pattern is too broad. Use a more specific pattern, or '
+              + '"all_session" if you intend to allow everything.',
+            requestId,
+          );
+        }
+      }
+      normalized.push(parseResult.scope);
+    }
+    initialApprovals = normalized;
+  }
+
   // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
@@ -211,6 +304,14 @@ export async function createTaskCore(
     status_created_at: `${TaskStatus.SUBMITTED}#${now}`,
     created_at: now,
     updated_at: now,
+    // Cedar HITL extensions (§10.2). Only written when the submit
+    // payload supplied them; ``approval_timeout_s`` defaults to the
+    // engine default at agent runtime when absent here.
+    ...(approvalTimeoutS !== undefined && { approval_timeout_s: approvalTimeoutS }),
+    ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
+    // Persisted counter the stranded-approval reconciler + agent
+    // counter both read (§13.6). Seeded to 0 at task-create time.
+    approval_gate_count: 0,
   };
 
   // 6. Write task record

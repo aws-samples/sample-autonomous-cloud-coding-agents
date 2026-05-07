@@ -242,6 +242,8 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
     trace: bool = False,
     user_id: str = "",
 ) -> dict:
@@ -276,6 +278,8 @@ def run_task(
         pr_number=pr_number,
         trace=trace,
         user_id=user_id,
+        approval_timeout_s=approval_timeout_s,
+        initial_approvals=initial_approvals,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
