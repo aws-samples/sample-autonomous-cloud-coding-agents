@@ -149,7 +149,8 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
     'task_stranded',
     'agent_error',
     'pr_created',
-    'approval_required', // Phase 3 forward-compat
+    'approval_requested', // Cedar HITL
+    'approval_stranded', // Cedar HITL
     'status_response', // Phase 2 forward-compat
   ])('%s is fanned out (matches at least one channel default)', (t) => {
     expect(shouldFanOut(make(t))).toBe(true);
@@ -179,11 +180,12 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
 describe('fanout-task-events: per-channel filter contract (design §6.2)', () => {
   // Lock in the exact sets from the design doc so a drift in
   // CHANNEL_DEFAULTS surfaces here instead of in production telemetry.
-  test('Slack subscribes to terminal + PR + error + approval + status_response', () => {
+  test('Slack subscribes to terminal + PR + error + approval milestones + status_response', () => {
     const f = CHANNEL_DEFAULTS.slack;
     expect([...f].sort()).toEqual([
       'agent_error',
-      'approval_required',
+      'approval_requested',
+      'approval_stranded',
       'pr_created',
       'status_response',
       'task_cancelled',
@@ -193,14 +195,14 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     ]);
   });
 
-  test('Email subscribes to task_completed + task_failed + approval_required only (minimal per §6.2)', () => {
+  test('Email subscribes to task_completed + task_failed + approval_requested only (minimal per §6.2)', () => {
     // Design §6.2 explicitly limits Email to these three types.
     // task_cancelled and task_stranded are NOT delivered via email —
     // the user already knows they cancelled; strands are an operator
     // signal handled via Slack / dashboards.
     const f = CHANNEL_DEFAULTS.email;
     expect([...f].sort()).toEqual([
-      'approval_required',
+      'approval_requested',
       'task_completed',
       'task_failed',
     ]);

@@ -121,6 +121,34 @@ export interface TaskRecord {
    * dispatch fires successfully.
    */
   readonly github_comment_id?: number;
+  /**
+   * Cedar HITL: per-task default approval timeout (design §10.2).
+   * Default 300s when absent. The engine clamps to
+   * ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]`` at task
+   * start; min-wins against per-rule ``@approval_timeout_s`` at
+   * gate-firing time.
+   */
+  readonly approval_timeout_s?: number;
+  /**
+   * Cedar HITL: pre-approval allowlist scopes from submit time
+   * (design §10.2, §7.3 step 4). The engine seeds
+   * ``ApprovalAllowlist`` from this list at container start so
+   * gates matching any scope here never fire.
+   */
+  readonly initial_approvals?: readonly string[];
+  /**
+   * Cedar HITL: running counter of approval gates fired on this
+   * task (design §10.2, §13.6). Enforced against
+   * ``approvalGateCap`` (decision #13); survives container restart
+   * so cumulative damage is bounded across restarts.
+   */
+  readonly approval_gate_count?: number;
+  /**
+   * Cedar HITL: when ``status = AWAITING_APPROVAL``, the
+   * ``request_id`` of the pending approval row. Cleared
+   * atomically on resume (§10.2, §9).
+   */
+  readonly awaiting_approval_request_id?: string;
 }
 
 /** Per-channel override for one notification channel. See
@@ -272,6 +300,11 @@ export interface CreateTaskRequest {
   readonly attachments?: Attachment[];
   /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
   readonly trace?: boolean;
+  /** Cedar HITL: per-task approval timeout (§7.3). Bounded by
+   *  ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
+  readonly approval_timeout_s?: number;
+  /** Cedar HITL: pre-approved scopes that skip the gate (§7.3 step 4). */
+  readonly initial_approvals?: readonly string[];
 }
 
 /**

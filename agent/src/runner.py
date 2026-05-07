@@ -249,10 +249,19 @@ async def run_agent(
     task_type = config.task_type
     repo_url = config.repo_url
     cedar_policies = config.cedar_policies
+    # Cedar HITL (§7.3, §10.2) — per-task approval defaults threaded
+    # from the orchestrator payload. Engine clamps invalid values
+    # at construction.
+    engine_kwargs: dict = {}
+    if config.initial_approvals:
+        engine_kwargs["initial_approvals"] = list(config.initial_approvals)
+    if config.approval_timeout_s is not None:
+        engine_kwargs["task_default_timeout_s"] = config.approval_timeout_s
     policy_engine = PolicyEngine(
         task_type=task_type,
         repo=repo_url,
         extra_policies=cedar_policies if cedar_policies else None,
+        **engine_kwargs,
     )
     log(
         "AGENT",

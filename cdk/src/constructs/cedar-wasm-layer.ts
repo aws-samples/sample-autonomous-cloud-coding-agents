@@ -147,7 +147,11 @@ export class CedarWasmLayer extends Construct {
           },
         },
       }),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_20_X, lambda.Runtime.NODEJS_22_X],
+      compatibleRuntimes: [
+        lambda.Runtime.NODEJS_20_X,
+        lambda.Runtime.NODEJS_22_X,
+        lambda.Runtime.NODEJS_24_X,
+      ],
       description:
         props.description
         ?? `@cedar-policy/cedar-wasm@${CEDAR_WASM_VERSION} for Cedar HITL policy Lambdas (§15.2 task 10)`,

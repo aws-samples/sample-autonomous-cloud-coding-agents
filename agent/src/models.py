@@ -124,6 +124,12 @@ class TaskConfig(BaseModel):
     trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
+    # Cedar HITL (§7.3, §10.2). Per-task approval defaults threaded
+    # from the orchestrator payload; consumed by PolicyEngine at
+    # construction so the engine seeds ApprovalAllowlist and adopts
+    # the per-task timeout default.
+    approval_timeout_s: int | None = None
+    initial_approvals: list[str] = []
     issue: GitHubIssue | None = None
     base_branch: str | None = None
 

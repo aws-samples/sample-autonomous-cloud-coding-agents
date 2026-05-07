@@ -75,12 +75,13 @@ describe('reconcile-stranded-tasks', () => {
     primeResponses([
       { Items: [] }, // Query SUBMITTED
       { Items: [] }, // Query HYDRATING
+      { Items: [] }, // Query AWAITING_APPROVAL (Cedar HITL, §13.6)
     ]);
 
     await handler();
 
-    // Exactly 2 queries, no updates.
-    expect(mockDdbSend).toHaveBeenCalledTimes(2);
+    // Exactly 3 queries (SUBMITTED / HYDRATING / AWAITING_APPROVAL), no updates.
+    expect(mockDdbSend).toHaveBeenCalledTimes(3);
   });
 
   test('task older than 1200s → fails + emits events + decrements concurrency', async () => {
@@ -99,6 +100,7 @@ describe('reconcile-stranded-tasks', () => {
       {}, // PutItem task_failed event
       {}, // UpdateItem decrement concurrency
       { Items: [] }, // Query HYDRATING
+      { Items: [] }, // Query AWAITING_APPROVAL
     ]);
 
     await handler();
@@ -146,6 +148,7 @@ describe('reconcile-stranded-tasks', () => {
       },
       conditionalErr, // UpdateItem transition rejected (task already advanced)
       { Items: [] }, // HYDRATING query
+      { Items: [] }, // AWAITING_APPROVAL query
     ]);
 
     // Must NOT throw; no events written, no concurrency decrement.
@@ -157,22 +160,25 @@ describe('reconcile-stranded-tasks', () => {
     expect(writes).toBe(0);
   });
 
-  test('HYDRATING status also scanned (both SUBMITTED + HYDRATING queries run)', async () => {
+  test('SUBMITTED + HYDRATING + AWAITING_APPROVAL queries all run', async () => {
     primeResponses([
       { Items: [] }, // SUBMITTED
       { Items: [] }, // HYDRATING
+      { Items: [] }, // AWAITING_APPROVAL
     ]);
 
     await handler();
 
     const queryCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .filter(([c]) => c._type === 'Query');
-    expect(queryCalls).toHaveLength(2);
+    expect(queryCalls).toHaveLength(3);
     const statusValues = queryCalls.map(([c]) => {
       const values = (c.input as { ExpressionAttributeValues: Record<string, { S: string }> }).ExpressionAttributeValues;
       return values[':status'].S;
     });
-    expect(statusValues).toEqual(expect.arrayContaining(['SUBMITTED', 'HYDRATING']));
+    expect(statusValues).toEqual(
+      expect.arrayContaining(['SUBMITTED', 'HYDRATING', 'AWAITING_APPROVAL']),
+    );
   });
 
   describe('final log severity escalation', () => {
@@ -237,6 +243,7 @@ describe('reconcile-stranded-tasks', () => {
         ddbErr, // UpdateItem for t-fail-1 → throws
         ddbErr, // UpdateItem for t-fail-2 → throws
         { Items: [] }, // HYDRATING query
+        { Items: [] }, // AWAITING_APPROVAL query
       ]);
 
       await handler();
@@ -267,6 +274,7 @@ describe('reconcile-stranded-tasks', () => {
         {}, // UpdateItem decrement concurrency
         ddbErr, // UpdateItem t-fail (transition) → throws
         { Items: [] }, // HYDRATING query
+        { Items: [] }, // AWAITING_APPROVAL query
       ]);
 
       await handler();
@@ -292,6 +300,7 @@ describe('reconcile-stranded-tasks', () => {
         {}, {}, {}, {}, // t-1: transition + 2 events + decrement
         {}, {}, {}, {}, // t-2: transition + 2 events + decrement
         { Items: [] }, // HYDRATING
+        { Items: [] }, // AWAITING_APPROVAL
       ]);
 
       await handler();
@@ -309,6 +318,7 @@ describe('reconcile-stranded-tasks', () => {
       primeResponses([
         { Items: [] }, // SUBMITTED
         { Items: [] }, // HYDRATING
+        { Items: [] }, // AWAITING_APPROVAL
       ]);
 
       await handler();
@@ -350,6 +360,8 @@ describe('reconcile-stranded-tasks', () => {
       {}, {}, {}, {},
       {}, {}, {}, {},
       // HYDRATING
+      { Items: [] },
+      // AWAITING_APPROVAL
       { Items: [] },
     ]);
 

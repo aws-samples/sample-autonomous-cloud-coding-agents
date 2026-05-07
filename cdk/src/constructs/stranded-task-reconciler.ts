@@ -58,6 +58,17 @@ export interface StrandedTaskReconcilerProps {
    */
   readonly strandedTimeoutSeconds?: number;
 
+  /**
+   * Cedar HITL approval-stranded timeout (seconds). Tasks in
+   * AWAITING_APPROVAL older than this are transitioned to FAILED.
+   * Longer than the stranded-timeout because approvals legitimately
+   * sit for up to an hour (§7.3). Set via
+   * ``APPROVAL_STRANDED_TIMEOUT_SECONDS``.
+   *
+   * @default 7200 (2 hours — double §7.3's 1-hour ceiling + an hour grace)
+   */
+  readonly approvalStrandedTimeoutSeconds?: number;
+
   /** Forwarded to the handler for event TTL. @default 90 */
   readonly taskRetentionDays?: number;
 }
@@ -83,6 +94,7 @@ export class StrandedTaskReconciler extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
 
     const strandedTimeout = props.strandedTimeoutSeconds ?? 1200;
+    const approvalStrandedTimeout = props.approvalStrandedTimeoutSeconds ?? 7200;
     const retentionDays = props.taskRetentionDays ?? 90;
 
     this.fn = new lambda.NodejsFunction(this, 'ReconcilerFn', {
@@ -97,6 +109,7 @@ export class StrandedTaskReconciler extends Construct {
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         STRANDED_TIMEOUT_SECONDS: String(strandedTimeout),
+        APPROVAL_STRANDED_TIMEOUT_SECONDS: String(approvalStrandedTimeout),
         TASK_RETENTION_DAYS: String(retentionDays),
       },
       bundling: {
