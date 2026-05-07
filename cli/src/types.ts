@@ -267,3 +267,115 @@ export interface Credentials {
 
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+// ---------------------------------------------------------------------------
+// Cedar HITL approval types — mirrored from
+// ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+// ---------------------------------------------------------------------------
+
+/** Approval scope — matches the `ApprovalScope` discriminated-union on
+ *  the server side. Narrowed so `bgagent approve --scope ...` gets
+ *  exhaustive type-checking on the CLI side. */
+export type ApprovalScope =
+  | 'this_call'
+  | 'tool_type_session'
+  | 'tool_group_session'
+  | 'all_session'
+  | `tool_type:${string}`
+  | `tool_group:${string}`
+  | `bash_pattern:${string}`
+  | `write_path:${string}`
+  | `rule:${string}`;
+
+/** Approval row terminal / pending status. */
+export type ApprovalStatus =
+  | 'PENDING'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'TIMED_OUT'
+  | 'STRANDED';
+
+/** POST /v1/tasks/{task_id}/approve request body. */
+export interface ApprovalRequest {
+  readonly request_id: string;
+  readonly decision: 'approve';
+  readonly scope?: ApprovalScope;
+}
+
+/** POST /v1/tasks/{task_id}/approve response body. */
+export interface ApprovalResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: 'APPROVED';
+  readonly scope: ApprovalScope;
+  readonly decided_at: string;
+}
+
+/** POST /v1/tasks/{task_id}/deny request body. */
+export interface DenyRequest {
+  readonly request_id: string;
+  readonly decision: 'deny';
+  readonly reason?: string;
+}
+
+/** POST /v1/tasks/{task_id}/deny response body. */
+export interface DenyResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: 'DENIED';
+  readonly decided_at: string;
+}
+
+/** Pending approval summary returned by `GET /v1/pending`. */
+export interface PendingApprovalSummary {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly tool_name: string;
+  readonly tool_input_preview: string;
+  readonly severity: 'low' | 'medium' | 'high';
+  readonly reason: string;
+  readonly created_at: string;
+  readonly timeout_s: number;
+  readonly expires_at: string;
+}
+
+/** GET /v1/pending response body. */
+export interface GetPendingResponse {
+  readonly pending: readonly PendingApprovalSummary[];
+}
+
+/** Rule metadata returned by `GET /v1/repos/{repo_id}/policies`. */
+export interface PolicyRuleSummary {
+  readonly rule_id: string;
+  readonly category?: string;
+  readonly severity?: 'low' | 'medium' | 'high';
+  readonly approval_timeout_s?: number;
+  readonly summary: string;
+}
+
+/** GET /v1/repos/{repo_id}/policies response body. */
+export interface GetPoliciesResponse {
+  readonly repo_id: string;
+  readonly policies: {
+    readonly hard: readonly PolicyRuleSummary[];
+    readonly soft: readonly PolicyRuleSummary[];
+  };
+}
+
+/** Maximum deny reason length after server-side sanitization. */
+export const DENY_REASON_MAX_LENGTH = 2000;
+
+/** Maximum initial_approvals entries on POST /v1/tasks. */
+export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
+
+/** Maximum per-entry length for an initial_approvals scope string. */
+export const INITIAL_APPROVALS_MAX_ENTRY_LENGTH = 128;
+
+/** Lower bound on approval_timeout_s submission. */
+export const APPROVAL_TIMEOUT_S_MIN = 30;
+
+/** Upper bound on approval_timeout_s submission (before maxLifetime clip). */
+export const APPROVAL_TIMEOUT_S_MAX = 3600;
+
+/** Default approval_timeout_s when the submit payload omits it. */
+export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
