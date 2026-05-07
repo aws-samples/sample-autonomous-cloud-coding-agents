@@ -20,6 +20,7 @@ Use this routing before editing so the right package and tests get updated:
 | Shared API request/response shapes | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** (must stay in sync) |
 | `bgagent` CLI commands and HTTP client | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API types change |
 | Agent runtime (clone, tools, prompts, container) | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `policy.py`, `prompts/`, Dockerfile, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
+| Agent progress events (written to `TaskEventsTable` from the MicroVM; read by `bgagent watch`) | `agent/src/progress_writer.py`, `agent/src/pipeline.py` and `agent/src/runner.py` (integration points) | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` for the consumer side |
 | User-facing or design prose | `docs/guides/`, `docs/design/` | Run **`mise //docs:sync`** or **`mise //docs:build`** (do not edit `docs/src/content/docs/` by hand) |
 | Monorepo tasks, CI glue | Root `mise.toml`, `scripts/`, `.github/workflows/` | — |
 
@@ -38,6 +39,7 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 ### Common mistakes
 
 - Editing **`docs/src/content/docs/`** instead of **`docs/guides/`** or **`docs/design/`** — content is generated; sync from sources.
+- Adding or editing files in **`docs/design/`** or **`docs/guides/`** without running **`cd docs && node scripts/sync-starlight.mjs`** — CI will reject ("Fail build on mutation") because the Starlight mirror files in `docs/src/content/docs/` are stale. Always commit the regenerated mirrors alongside source changes.
 - Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.
 - Running raw **`jest`/`tsc`/`cdk`** from muscle memory — prefer **`mise //cdk:test`**, **`mise //cdk:compile`**, **`mise //cdk:synth`** (see [Commands you can use](#commands-you-can-use)).
 - **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
@@ -120,7 +122,7 @@ To build or test only the CLI subproject:
 
 ## Boundaries
 
-- **Generated docs** — If you change docs sources (`docs/guides/`, `docs/design/`, `CONTRIBUTING.md`), run `mise //docs:sync` or `mise //docs:build`.
+- **Generated docs (CI will reject if stale)** — Editing files in `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md` requires regenerating Starlight mirrors under `docs/src/content/docs/`. Run **`cd docs && node scripts/sync-starlight.mjs`** (fast, <1 s) or **`mise //docs:sync`**, then commit the updated mirrors alongside your source changes. The pre-commit hook `docs-sync` does this automatically when prek hooks are installed, but if you bypass hooks (e.g. `--no-verify`), CI's "Fail build on mutation" step will catch it.
 - **Dependencies** — Add dependencies to the owning package `package.json` (`cdk/`, `cli/`, or `docs/`), then install via workspace/root install.
-- **Build before commit** — Run a full build (`mise run build`) when done so tests/synth/docs/security checks stay in sync.
+- **Build before commit** — Run a full build (`mise run build`) when done so tests/synth/docs/security checks stay in sync. This is especially critical for docs changes — the build includes `//docs:sync` which regenerates Starlight mirrors, and CI will fail if the committed mirrors don't match what the build produces.
 - **Major changes** — Before modifying existing files in a major way (large refactors, new stacks, changing the agent contract), ask first.

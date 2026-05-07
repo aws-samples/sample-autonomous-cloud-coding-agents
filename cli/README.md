@@ -175,6 +175,18 @@ bgagent webhook revoke <webhook-id> \
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)
 - `webhook revoke` shows the revoked webhook details
 
+For failed tasks, the error display is structured when a classification is available:
+
+```
+Error:       [CONCURRENCY] Concurrency limit reached
+             The maximum number of concurrent tasks for this user has been reached.
+  Remedy:    Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.
+  Retryable: yes
+  Detail:    User concurrency limit reached
+```
+
+The classifier covers 9 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, and `unknown`. When no classification is available, the raw error message is shown.
+
 **JSON mode** (`--output json`) prints the raw API response as pretty-printed JSON, suitable for piping to `jq` or other tools.
 
 ## Configuration

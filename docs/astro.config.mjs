@@ -40,7 +40,10 @@ export default defineConfig({
         { label: 'Introduction', slug: 'index' },
         {
           label: 'Getting Started',
-          items: [{ label: 'Quick Start', slug: 'getting-started/quick-start' }],
+          items: [
+            { label: 'Quick Start', slug: 'getting-started/quick-start' },
+            { label: 'Deployment Guide', slug: 'getting-started/deployment-guide' },
+          ],
         },
         {
           label: 'Using the Platform',
@@ -51,6 +54,8 @@ export default defineConfig({
             { slug: 'using/using-the-rest-api' },
             { slug: 'using/using-the-cli' },
             { slug: 'using/webhook-integration' },
+            { slug: 'using/slack-setup-guide' },
+            { slug: 'using/linear-setup-guide' },
             { slug: 'using/task-lifecycle' },
             { slug: 'using/what-the-agent-does' },
             { slug: 'using/tips-for-being-a-good-citizen' },
@@ -81,6 +86,7 @@ export default defineConfig({
             { slug: 'architecture/architecture' },
             { slug: 'architecture/orchestrator' },
             { slug: 'architecture/security' },
+            { slug: 'architecture/deployment-roles' },
             { slug: 'architecture/memory' },
             { slug: 'architecture/api-contract' },
             { slug: 'architecture/compute' },

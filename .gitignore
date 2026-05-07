@@ -91,10 +91,21 @@ agent/gitleaks-report.json
 .claude/settings.local.json
 
 # ──────────────────────────────────────────────
+# Claude Code plugins
+# ──────────────────────────────────────────────
+.mcp.json
+.remember/
+
+# ──────────────────────────────────────────────
 # Misc
 # ──────────────────────────────────────────────
 *.bkp
 Plans/
+
+# draw.io editor artifacts + any rendered screenshots kept locally for review
+.$*.drawio.bkp
+docs/diagrams/*.png
+docs/diagrams/screenshots/
 
 # ──────────────────────────────────────────────
 # Explicit keeps (override ignores above)

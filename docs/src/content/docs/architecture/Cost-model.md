@@ -15,12 +15,19 @@ These costs are incurred regardless of task volume:
 | Component | Estimated cost | Notes |
 |---|---|---|
 | NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/architecture/compute)). |
-| VPC Interface Endpoints (7×) | ~$50/month | $0.01/hr per endpoint per AZ. |
+| VPC Interface Endpoints (7×, 2 AZs) | ~$102/month | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
-| DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; no cost when idle. |
+| DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 6 tables (Tasks, Events, Nudges, UserConcurrency, Webhooks, Repo). No cost when idle. |
+| S3 Trace Artifacts bucket (idle) | ~$0/month | 7-day lifecycle auto-expires objects; no cost when no traces are stored. |
+| EventBridge reconciler rule | <$0.01/month | Invokes Lambda every 5 min (288/day). Rule itself is free; Lambda invocation is the cost (see below). |
+| Stranded task reconciler Lambda (idle) | <$0.01/month | 288 invocations/day × 256 MB × ~100 ms avg (early exit when no stranded tasks). ~$0.005/month total (requests + duration). |
 | CloudWatch Logs retention | ~$1–5/month | Depends on log volume. 90-day retention. |
 | API Gateway (idle) | ~$0/month | Pay-per-request. |
-| **Total baseline** | **~$85–90/month** | |
+| **Total baseline** | **~$140–150/month** | Reconciler adds negligible cost; VPC networking remains dominant. |
+
+### Scale-to-zero characteristics
+
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 6 tables), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -35,10 +42,14 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 | **Bedrock tokens (dominant)** | $2–15 | Varies widely by model, task complexity, and turn count. Claude Sonnet: ~$3/M input tokens, ~$15/M output tokens. A 50-turn task with 100K input + 20K output per turn ≈ 5M input + 1M output ≈ $15 + $15 = $30 at list price. Prompt caching reduces this significantly (up to 90% for cache hits). Typical range: $2–15 after caching. |
 | AgentCore Runtime compute | $0.10–0.50 | 2 vCPU / 8 GB for 1–2 hours. Pricing model is per-session based on vCPU-hours and GB-hours. |
 | Lambda orchestrator | <$0.01 | ~10 invocations per task (admission, hydration, polling, finalization). Negligible. |
-| DynamoDB reads/writes | <$0.01 | ~20–50 operations per task (task CRUD, events, counter updates). Negligible. |
+| Lambda fanout consumer | <$0.01 | Triggered per batch of task events (batch size 100, 5 s window). Typically 5–20 invocations per task at 256 MB. Negligible. |
+| Lambda nudge / trace / events | <$0.01 | On-demand per user request. Negligible unless heavily polled. |
+| DynamoDB reads/writes | <$0.01 | ~30–80 operations per task (task CRUD, events, nudges, counter updates). Negligible. |
+| DynamoDB Streams (fanout) | <$0.01 | Stream reads charged per 25 KB. Typical task: ~20–50 event records. Negligible. |
+| S3 trace upload (if `--trace`) | <$0.01 | One PUT per task + storage (gzipped NDJSON, typically 50–500 KB, auto-expires in 7 days). |
 | NAT Gateway data | <$0.01 | GitHub API traffic: clone + push. Small repos: <10 MB. |
 | Custom step Lambdas | $0–0.05 | Only if configured. Per-invocation: ~$0.01 per step. |
-| **Total per task** | **$2–15** | Bedrock tokens dominate (>90% of per-task cost). |
+| **Total per task** | **$2–15** | Bedrock tokens dominate (>90% of per-task cost). New interactive features add <$0.01 per task. |
 
 ### Cost sensitivity analysis
 
@@ -47,7 +58,7 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 | Model choice | 5–10× between Haiku and Opus | Default to Claude Sonnet; allow per-repo override. |
 | Turn count | Linear with turns | `max_turns` cap (default 100, configurable 1–500). |
 | Cost budget | Hard stop at budget | `max_budget_usd` cap (configurable $0.01–$100). Agent stops when budget is reached regardless of remaining turns. |
-| Task duration | Sub-linear (compute is cheap; tokens dominate) | 8-hour max session timeout. |
+| Task duration | Sub-linear (compute is cheap; tokens dominate) | AgentCore: 8-hour service limit; orchestrator: 9-hour `executionTimeout`. |
 | Prompt caching | 50–90% token cost reduction | Enable by default; cache system prompts and repo context. |
 | Concurrency | Linear with parallel tasks | Per-user and system-wide concurrency limits. |
 
@@ -55,8 +66,8 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 
 | Scale | Tasks/month | Estimated monthly cost (infra + tasks) |
 |---|---|---|
-| Low (1 developer) | 30–60 | $150–500 |
-| Medium (small team) | 200–500 | $500–3,000 |
+| Low (1 developer) | 30–60 | $200–550 |
+| Medium (small team) | 200–500 | $550–3,000 |
 | High (org-wide) | 2,000–5,000 | $5,000–30,000 |
 
 These estimates assume Claude Sonnet with prompt caching enabled and average task complexity.
@@ -76,8 +87,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 |---|---|---|
 | Turn limit | `max_turns` per task | 100 |
 | Cost budget | `max_budget_usd` per task | None (unlimited) |
-| Session timeout | Orchestrator timeout | 8 hours |
-| Concurrency limit | Per-user atomic counter | 2 concurrent tasks |
+| Session timeout | Orchestrator timeout | 9 hours |
+| Concurrency limit | Per-user atomic counter | 3 concurrent tasks |
 | System concurrency | System-wide counter | Account-level AgentCore quota |
 
 ## Additional guardrails
@@ -89,7 +100,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [COMPUTE.md  - Network architecture](/architecture/compute)  - VPC infrastructure cost breakdown.
-- [ORCHESTRATOR.md](/architecture/orchestrator)  - Polling cost analysis.
-- [COMPUTE.md](/architecture/compute)  - Compute option billing models.
-- [OBSERVABILITY.md](/architecture/observability)  - Cost-related metrics (`agent.cost_usd`, token usage).
+- [COMPUTE.md](/architecture/compute) -- Compute option billing models and network architecture.
+- [ORCHESTRATOR.md](/architecture/orchestrator) -- Polling cost analysis.
+- [OBSERVABILITY.md](/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
+- [Deployment guide](/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.

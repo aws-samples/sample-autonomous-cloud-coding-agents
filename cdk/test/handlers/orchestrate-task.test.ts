@@ -177,6 +177,56 @@ describe('hydrateAndTransition', () => {
     expect(payload.max_turns).toBe(100);
   });
 
+  test('threads trace: true into the agent payload when set on the task record', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithTrace = { ...baseTask, trace: true };
+    const payload = await hydrateAndTransition(taskWithTrace as any);
+    expect(payload.trace).toBe(true);
+  });
+
+  test('omits trace from payload when task record has no trace flag (slim wire)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload).not.toHaveProperty('trace');
+  });
+
+  test('threads user_id into the agent payload (design §10.1 — required for trace S3 key)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    // user_id is threaded unconditionally (not just when trace=true)
+    // so that a future feature needing it does not have to re-plumb.
+    // The agent only USES it when trace=true.
+    expect(payload.user_id).toBe('user-123');
+  });
+
+  test('threads user_id even when trace flag is absent', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskNoTrace = { ...baseTask, trace: undefined };
+    const payload = await hydrateAndTransition(taskNoTrace as any);
+    expect(payload.user_id).toBe('user-123');
+    expect(payload).not.toHaveProperty('trace');
+  });
+
+  test('payload.user_id is undefined when the task record lacks user_id (defensive)', async () => {
+    // Defends the Stage 3 ↔ Stage 4 contract: a legacy / corrupted
+    // record without ``user_id`` should surface as ``undefined`` in
+    // the payload (which JSON.stringify drops entirely), not get
+    // silently coerced to an empty string that would then combine
+    // with ``trace=true`` to produce an unreachable ``traces//...``
+    // S3 key. Admission-control should catch this upstream; test
+    // pins the downstream behavior regardless.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskNoUser = { ...baseTask };
+    delete (taskNoUser as { user_id?: string }).user_id;
+    const payload = await hydrateAndTransition(taskNoUser as any);
+    expect(payload.user_id).toBeUndefined();
+  });
+
   test('throws when guardrail_blocked is set on hydrated context', async () => {
     mockDdbSend.mockResolvedValue({});
     mockHydrateContext.mockResolvedValueOnce({
@@ -241,7 +291,7 @@ describe('hydrateAndTransition', () => {
 describe('pollTaskStatus', () => {
   test('increments attempt count and reads status', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
-    const result = await pollTaskStatus('TASK001', { attempts: 5 });
+    const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'agentcore');
     expect(result.attempts).toBe(6);
     expect(result.lastStatus).toBe('RUNNING');
     expect(result.sessionUnhealthy).toBe(false);
@@ -249,7 +299,7 @@ describe('pollTaskStatus', () => {
 
   test('handles missing item gracefully', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: undefined });
-    const result = await pollTaskStatus('TASK001', { attempts: 0 });
+    const result = await pollTaskStatus('TASK001', { attempts: 0 }, 'agentcore');
     expect(result.attempts).toBe(1);
     expect(result.lastStatus).toBeUndefined();
   });
@@ -264,7 +314,7 @@ describe('pollTaskStatus', () => {
         agent_heartbeat_at: old,
       },
     });
-    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
     expect(result.sessionUnhealthy).toBe(true);
   });
 
@@ -279,7 +329,7 @@ describe('pollTaskStatus', () => {
         agent_heartbeat_at: hb,
       },
     });
-    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
     expect(result.sessionUnhealthy).toBe(false);
   });
 
@@ -291,7 +341,7 @@ describe('pollTaskStatus', () => {
         started_at: new Date(Date.now() - 60_000).toISOString(),
       },
     });
-    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
     expect(result.sessionUnhealthy).toBe(false);
   });
 
@@ -303,7 +353,47 @@ describe('pollTaskStatus', () => {
         started_at: new Date(Date.now() - 400_000).toISOString(),
       },
     });
-    const result = await pollTaskStatus('TASK001', { attempts: 1 });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('does not set sessionUnhealthy for ECS when agent_heartbeat_at is absent and old', async () => {
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: new Date(Date.now() - 400_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'ecs');
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('does not set sessionUnhealthy for ECS even when agent_heartbeat_at is present and stale', async () => {
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'ecs');
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('keeps AgentCore stale-heartbeat behavior when compute type is agentcore', async () => {
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
     expect(result.sessionUnhealthy).toBe(true);
   });
 });

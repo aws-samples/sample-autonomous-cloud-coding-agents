@@ -1,6 +1,9 @@
 """Unit tests for pure functions in task_state.py."""
 
-from task_state import _build_logs_url, _now_iso
+import pytest
+
+import task_state
+from task_state import TaskFetchError, _build_logs_url, _now_iso
 
 
 class TestNowIso:
@@ -49,3 +52,471 @@ class TestBuildLogsUrl:
         url = _build_logs_url("t1")
         assert url is not None
         assert "eu-west-1" in url
+
+
+class TestGetTask:
+    """Verify the NotFound vs FetchFailed distinction.
+
+    Callers must be able to tell "record doesn't exist" (``None``) from
+    "couldn't read it" (``TaskFetchError``). Collapsing the two to ``None``
+    would let a transient DDB blip look like a legitimate absence.
+    """
+
+    def test_returns_none_when_no_table(self, monkeypatch):
+        monkeypatch.setattr(task_state, "_get_table", lambda: None)
+        assert task_state.get_task("t-any") is None
+
+    def test_returns_item_when_found(self, monkeypatch):
+        class _FakeTable:
+            def get_item(self, Key):
+                assert Key == {"task_id": "t-present"}
+                return {"Item": {"task_id": "t-present", "status": "RUNNING"}}
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        item = task_state.get_task("t-present")
+        assert item == {"task_id": "t-present", "status": "RUNNING"}
+
+    def test_returns_none_when_item_absent(self, monkeypatch):
+        class _FakeTable:
+            def get_item(self, Key):
+                return {}  # DDB returns no "Item" key when not found.
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        assert task_state.get_task("t-missing") is None
+
+    def test_raises_TaskFetchError_on_ddb_failure(self, monkeypatch):
+        class _FakeTable:
+            def get_item(self, Key):
+                raise RuntimeError("ProvisionedThroughputExceededException")
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        with pytest.raises(TaskFetchError) as exc_info:
+            task_state.get_task("t-throttled")
+        assert "ProvisionedThroughputExceededException" in str(exc_info.value)
+
+
+class TestWriteSessionInfo:
+    """Rev-5 OBS-4: interactive path writes session_id + agent_runtime_arn."""
+
+    def test_writes_session_id_and_arn(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        task_state.write_session_info(
+            "t-interactive",
+            "sess-abc123",
+            "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz",
+        )
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["Key"] == {"task_id": "t-interactive"}
+        assert "session_id = :sid" in call["UpdateExpression"]
+        assert "agent_runtime_arn = :arn" in call["UpdateExpression"]
+        assert "compute_type = :ct" in call["UpdateExpression"]
+        assert "compute_metadata = :cm" in call["UpdateExpression"]
+        values = call["ExpressionAttributeValues"]
+        assert values[":sid"] == "sess-abc123"
+        assert values[":arn"] == "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
+        assert values[":ct"] == "agentcore"
+        assert values[":cm"] == {
+            "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
+        }
+
+    def test_noop_when_both_empty(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        task_state.write_session_info("t-empty", "", "")
+        assert calls == []
+
+    def test_skips_silently_when_task_already_advanced(self, monkeypatch):
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        # Must NOT raise — the conditional failure is expected when the
+        # task has already transitioned past SUBMITTED/HYDRATING.
+        task_state.write_session_info("t-raced", "sess-x", "arn:x")
+
+    def test_writes_only_session_when_arn_missing(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+        task_state.write_session_info("t-partial", "sess-only", "")
+        assert len(calls) == 1
+        assert "session_id = :sid" in calls[0]["UpdateExpression"]
+        assert "agent_runtime_arn" not in calls[0]["UpdateExpression"]
+
+
+class TestWriteRunningMaintainsStatusCreatedAt:
+    """Regression guard: ``write_running`` must rewrite ``status_created_at``
+    so the ``UserStatusIndex`` GSI sort key reflects the current status.
+    Without this, ``bga list`` sorts by the stale SUBMITTED prefix and newly
+    running / completed / cancelled tasks appear after stale SUBMITTED rows.
+    """
+
+    def test_writes_status_created_at_with_running_prefix(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_running("t-run")
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert "status_created_at = :sca" in call["UpdateExpression"]
+        sca = call["ExpressionAttributeValues"][":sca"]
+        assert sca.startswith("RUNNING#")
+        # The timestamp after the '#' matches _now_iso()'s ISO-Z format.
+        ts = sca.split("#", 1)[1]
+        assert ts.endswith("Z")
+        assert len(ts) == 20
+
+
+class TestWriteTerminalMaintainsStatusCreatedAt:
+    def test_completed_rewrites_sca_with_completed_prefix(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-done", "COMPLETED")
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert "status_created_at = :sca" in call["UpdateExpression"]
+        sca = call["ExpressionAttributeValues"][":sca"]
+        assert sca.startswith("COMPLETED#")
+
+    def test_failed_rewrites_sca_with_failed_prefix(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-fail", "FAILED", {"error": "boom"})
+
+        assert len(calls) == 1
+        sca = calls[0]["ExpressionAttributeValues"][":sca"]
+        assert sca.startswith("FAILED#")
+
+    def test_sca_and_completed_at_share_timestamp(self, monkeypatch):
+        """The SCA timestamp and completed_at should match so operators can
+        cross-reference the GSI row against the base table without wondering
+        which write happened first."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-sync", "COMPLETED")
+
+        values = calls[0]["ExpressionAttributeValues"]
+        sca_ts = values[":sca"].split("#", 1)[1]
+        completed_at = values[":t"]
+        assert sca_ts == completed_at
+
+
+class TestWriteTerminalTraceS3Uri:
+    """K2 Stage 4 — ``write_terminal`` persists ``trace_s3_uri`` from
+    the result dict so the ``get-trace-url`` handler (which reads the
+    field off the TaskRecord) sees a consistent view the moment the
+    task reaches terminal."""
+
+    def test_trace_s3_uri_written_when_present_in_result(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-trace",
+            "COMPLETED",
+            {"trace_s3_uri": "s3://bucket/traces/u-1/t-trace.jsonl.gz"},
+        )
+        assert len(calls) == 1
+        update_expr = calls[0]["UpdateExpression"]
+        assert "trace_s3_uri = :ts3" in update_expr
+        values = calls[0]["ExpressionAttributeValues"]
+        assert values[":ts3"] == "s3://bucket/traces/u-1/t-trace.jsonl.gz"
+
+    def test_trace_s3_uri_omitted_when_result_has_no_uri(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-plain",
+            "COMPLETED",
+            {"pr_url": "https://github.com/o/r/pull/1"},
+        )
+        assert len(calls) == 1
+        update_expr = calls[0]["UpdateExpression"]
+        assert "trace_s3_uri" not in update_expr
+        values = calls[0]["ExpressionAttributeValues"]
+        assert ":ts3" not in values
+
+    def test_trace_s3_uri_none_omitted(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-null",
+            "COMPLETED",
+            {"trace_s3_uri": None},
+        )
+        update_expr = calls[0]["UpdateExpression"]
+        assert "trace_s3_uri" not in update_expr
+
+    def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        """K2 final review SIG-1: when ``write_terminal``'s precondition
+        fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
+        already uploaded, the orphaned S3 object needs a dedicated log
+        line — otherwise the generic ``skipped: precondition not met``
+        message hides silently-lost trace URIs.
+
+        L4 extension: after the orphan log prints, the self-heal
+        ``write_trace_uri_conditional`` fires; when the second
+        UpdateItem succeeds, the self-heal log also prints."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def __init__(self):
+                self.calls = 0
+
+            def update_item(self, **_kwargs):
+                self.calls += 1
+                # First call (write_terminal) raises CCF.
+                # Second call (self-heal) succeeds.
+                if self.calls == 1:
+                    raise ClientError(
+                        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                        "UpdateItem",
+                    )
+                return {}
+
+        fake = _FakeTable()
+        monkeypatch.setattr(task_state, "_get_table", lambda: fake)
+        task_state.write_terminal(
+            "t-orphan",
+            "COMPLETED",
+            {"trace_s3_uri": "s3://bucket/traces/u-1/t-orphan.jsonl.gz"},
+        )
+        out = capsys.readouterr().out
+        # Generic skip message still prints (benign-case compatibility).
+        assert "write_terminal skipped" in out
+        # And the specific orphan log calls out the URI + actionable
+        # detail (7-day lifecycle) so operators can reason about cost.
+        assert "orphaned by ConditionalCheckFailed" in out
+        assert "s3://bucket/traces/u-1/t-orphan.jsonl.gz" in out
+        assert "7-day lifecycle" in out
+        # L4: self-heal fired (second update_item call) and logged success.
+        assert fake.calls == 2
+        assert "self-healed" in out
+
+    def test_conditional_check_failed_without_trace_uri_skips_orphan_log(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        """The orphan diagnostic must NOT fire on the common
+        benign-cancel case (where no S3 write happened) — otherwise
+        operators get log noise that blunts the signal of a real
+        orphan."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-benign", "COMPLETED", {"pr_url": "https://pr"})
+        out = capsys.readouterr().out
+        assert "write_terminal skipped" in out
+        assert "orphaned" not in out
+
+
+class TestWriteTraceUriConditional:
+    """L4 item 1a — ``write_trace_uri_conditional`` persists
+    ``trace_s3_uri`` on an already-terminal record as a self-heal
+    after ``write_terminal`` loses a race with cancel / reconciler.
+
+    The helper is scoped to ``attribute_not_exists(trace_s3_uri) AND
+    status IN (CANCELLED, COMPLETED, FAILED, TIMED_OUT)`` so it cannot
+    clobber an existing URI or write on a non-terminal record."""
+
+    def test_happy_path_writes_uri_and_returns_true(self, monkeypatch):
+        """Status=COMPLETED, no existing trace_s3_uri → write succeeds."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+                return {}
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-heal", "s3://bucket/traces/u-1/t-heal.jsonl.gz"
+        )
+        assert healed is True
+        assert len(calls) == 1
+        kwargs = calls[0]
+        assert kwargs["Key"] == {"task_id": "t-heal"}
+        assert kwargs["UpdateExpression"] == "SET trace_s3_uri = :ts3"
+        # ConditionExpression must be scoped to both "URI not set" and
+        # "status terminal" — either one alone would be unsafe.
+        cond = kwargs["ConditionExpression"]
+        assert "attribute_not_exists(trace_s3_uri)" in cond
+        assert "#s IN" in cond
+        assert kwargs["ExpressionAttributeNames"] == {"#s": "status"}
+        values = kwargs["ExpressionAttributeValues"]
+        assert values[":ts3"] == "s3://bucket/traces/u-1/t-heal.jsonl.gz"
+        # All four terminal-status literals must appear in the IN-list
+        # (the helper's contract is terminal-agnostic).
+        assert values[":cancelled"] == "CANCELLED"
+        assert values[":completed"] == "COMPLETED"
+        assert values[":failed"] == "FAILED"
+        assert values[":timed_out"] == "TIMED_OUT"
+
+    def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capsys):
+        """``ConditionalCheckFailedException`` → returns False, INFO log (benign)."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-already", "s3://bucket/traces/u/t-already.jsonl.gz"
+        )
+        assert healed is False
+        out = capsys.readouterr().out
+        assert "write_trace_uri_conditional skipped" in out
+        assert "t-already" in out
+
+    def test_non_terminal_status_returns_false(self, monkeypatch):
+        """Non-terminal status raises CCF (status IN clause rejects) → False."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-running", "s3://b/traces/u/t-running.jsonl.gz"
+        )
+        assert healed is False
+
+    def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capsys):
+        """A non-CCF ClientError (e.g., throttling) → returns False, WARN log."""
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ProvisionedThroughputExceededException",
+                            "Message": "!",
+                        }
+                    },
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional(
+            "t-throttle", "s3://b/traces/u/t-throttle.jsonl.gz"
+        )
+        assert healed is False
+        out = capsys.readouterr().out
+        assert "write_trace_uri_conditional failed" in out
+        # Log surfaces the exception type name to aid triage.
+        assert "ClientError" in out
+
+    def test_empty_uri_is_a_noop(self, monkeypatch):
+        """Guard: empty URI → no DDB call, returns False."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional("t-x", "")
+        assert healed is False
+        assert calls == []
+
+    def test_empty_task_id_is_a_noop(self, monkeypatch):
+        """Guard: empty task_id → no DDB call, returns False."""
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        healed = task_state.write_trace_uri_conditional("", "s3://b/x.gz")
+        assert healed is False
+        assert calls == []
+
+    def test_no_table_returns_false(self, monkeypatch):
+        """When ``_get_table`` returns None (TASK_TABLE_NAME unset) → False."""
+        monkeypatch.setattr(task_state, "_get_table", lambda: None)
+        healed = task_state.write_trace_uri_conditional("t-x", "s3://b/x.gz")
+        assert healed is False

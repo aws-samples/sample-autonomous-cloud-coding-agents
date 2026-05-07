@@ -114,7 +114,7 @@ describe('TaskOrchestrator construct', () => {
           TASK_EVENTS_TABLE_NAME: Match.anyValue(),
           USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
           RUNTIME_ARN: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-runtime',
-          MAX_CONCURRENT_TASKS_PER_USER: '3',
+          MAX_CONCURRENT_TASKS_PER_USER: '10',
           TASK_RETENTION_DAYS: '90',
         }),
       },

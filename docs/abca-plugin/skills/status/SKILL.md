@@ -50,3 +50,5 @@ Build:    [PASS | FAIL with error summary]
 ```
 
 If the CLI isn't configured, note this and suggest running the `setup` skill.
+
+**Tip:** For real-time streaming of a specific task's progress, suggest `bgagent watch <TASK_ID>` instead of polling status.
