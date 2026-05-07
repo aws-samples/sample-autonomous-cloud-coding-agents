@@ -136,13 +136,23 @@ export function parseRules(policiesText: string): ParsedRule[] {
     }
     const annotations = parsed.json.annotations ?? {};
     const tier = annotations.tier;
+    const rule_id = annotations.rule_id;
+
+    // `base_permit` is an intentional unannotated catch-all on both
+    // tiers (see agent/policies/*.cedar comments). cedar engines need
+    // it to return ALLOW for non-matching requests rather than
+    // default-deny. We skip it from ParsedRule[] so callers only see
+    // user-facing rule entries.
+    if (rule_id === 'base_permit' && tier === undefined) {
+      return;
+    }
+
     if (tier !== 'hard' && tier !== 'soft') {
       throw new CedarPolicyParseError(
         `policy ${index} is missing @tier("hard") or @tier("soft")`,
         [],
       );
     }
-    const rule_id = annotations.rule_id;
     if (!rule_id) {
       throw new CedarPolicyParseError(
         `policy ${index} is missing @rule_id`,
