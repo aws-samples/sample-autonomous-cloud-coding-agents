@@ -21,13 +21,17 @@
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
 /**
- * Provenance of a task's submission. ``api`` covers CLI / Cognito-authenticated
- * submissions; ``webhook`` covers HMAC-signed inbound webhook submissions.
+ * Provenance of a task's submission. Shared across inbound adapters:
+ * - ``api``: CLI / Cognito-authenticated submissions
+ * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
+ * - ``slack``: Slack @mention / slash-command submissions
+ * - ``linear``: Linear label-triggered submissions
+ *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
 
 /** Error categories produced by the runtime error classifier. */
 export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
@@ -243,6 +247,20 @@ export interface CreateWebhookResponse {
   readonly name: string;
   readonly secret: string;
   readonly created_at: string;
+}
+
+/** Slack link response from POST /v1/slack/link. */
+export interface SlackLinkResponse {
+  readonly slack_team_id: string;
+  readonly slack_user_id: string;
+  readonly linked_at: string;
+}
+
+/** Linear link response from POST /v1/linear/link. */
+export interface LinearLinkResponse {
+  readonly linear_workspace_id: string;
+  readonly linear_user_id: string;
+  readonly linked_at: string;
 }
 
 /** CLI config stored in ~/.bgagent/config.json. */

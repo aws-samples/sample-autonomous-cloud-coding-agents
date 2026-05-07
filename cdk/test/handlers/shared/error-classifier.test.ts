@@ -497,11 +497,15 @@ describe('classifyError', () => {
     test('channel_source narrows to the literal union', () => {
       const apiRecord: TaskRecord = { ...baseRecord, channel_source: 'api' };
       const webhookRecord: TaskRecord = { ...baseRecord, channel_source: 'webhook' };
+      const slackRecord: TaskRecord = { ...baseRecord, channel_source: 'slack' };
+      const linearRecord: TaskRecord = { ...baseRecord, channel_source: 'linear' };
       expect(toTaskDetail(apiRecord).channel_source).toBe('api');
       expect(toTaskDetail(webhookRecord).channel_source).toBe('webhook');
+      expect(toTaskDetail(slackRecord).channel_source).toBe('slack');
+      expect(toTaskDetail(linearRecord).channel_source).toBe('linear');
 
-      // @ts-expect-error — 'slack' is not a valid ChannelSource
-      const invalid: TaskRecord = { ...baseRecord, channel_source: 'slack' };
+      // @ts-expect-error — 'email' is not a valid ChannelSource
+      const invalid: TaskRecord = { ...baseRecord, channel_source: 'email' };
       // Keep ``invalid`` used so the block doesn't get DCE'd and the
       // ``@ts-expect-error`` above remains anchored to a real assignment.
       expect(invalid.channel_source).toBeDefined();

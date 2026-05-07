@@ -351,6 +351,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,
+    channel_source: task.channel_source,
+    ...(task.channel_metadata && Object.keys(task.channel_metadata).length > 0 && { channel_metadata: task.channel_metadata }),
   };
 
   if (hydratedContext.fallback_error) {

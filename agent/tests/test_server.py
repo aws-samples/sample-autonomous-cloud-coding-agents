@@ -56,12 +56,22 @@ def test_background_thread_failure_503_and_backup_terminal_write(client, monkeyp
         },
     )
 
+    # Wait for the background thread to actually finish before asserting.
+    # The previous pattern polled /ping for the failure flag, but the flag
+    # flips *before* the backup write_terminal runs in the same thread —
+    # producing a race where /ping returns 503 but mock_write.assert_called()
+    # fires before the call happens. Joining the thread eliminates the race.
     deadline = time.time() + 5.0
     while time.time() < deadline:
-        r = client.get("/ping")
-        if r.status_code == 503:
+        with server._threads_lock:
+            live = [t for t in server._active_threads if t.is_alive()]
+        if not live:
             break
-        time.sleep(0.05)
+        time.sleep(0.02)
+    else:
+        pytest.fail("Background thread did not exit within 5s")
+
+    r = client.get("/ping")
     assert r.status_code == 503
     body = r.json()
     assert body["status"] == "unhealthy"

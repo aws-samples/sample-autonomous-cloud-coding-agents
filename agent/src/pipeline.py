@@ -13,8 +13,10 @@ from pydantic import ValidationError
 
 import memory as agent_memory
 import task_state
-from config import AGENT_WORKSPACE, build_config, get_config
+from channel_mcp import configure_channel_mcp
+from config import AGENT_WORKSPACE, build_config, get_config, resolve_linear_api_token
 from context import assemble_prompt, fetch_github_issue
+from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import task_span
 from post_hooks import (
@@ -242,6 +244,8 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    channel_source: str = "",
+    channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
 ) -> dict:
@@ -274,6 +278,8 @@ def run_task(
         task_type=task_type,
         branch_name=branch_name,
         pr_number=pr_number,
+        channel_source=channel_source,
+        channel_metadata=channel_metadata,
         trace=trace,
         user_id=user_id,
     )
@@ -402,6 +408,24 @@ def run_task(
             )
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
+
+            # Channel-specific MCP wiring (Linear only, for v1). Must happen
+            # before discover_project_config so the scan picks up the file we
+            # just wrote. Resolve the API token from Secrets Manager *before*
+            # writing .mcp.json so the child SDK process inherits the env var
+            # that the MCP server entry references via ${LINEAR_API_TOKEN}.
+            if config.channel_source == "linear":
+                resolve_linear_api_token()
+            configure_channel_mcp(setup.repo_dir, config.channel_source)
+
+            # 👀 on the Linear issue — acknowledges the task is picked up.
+            # No-op for non-Linear tasks. Best-effort; failures are logged
+            # but do not block the pipeline. Capture the reaction id so we
+            # can delete it at terminal status (👀 → ✅/❌).
+            linear_eyes_reaction_id = react_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
 
             # Log discovered repo-level project configuration
             # (all files loaded by setting_sources=["project"])
@@ -565,6 +589,15 @@ def run_task(
                 pr_url=pr_url,
             )
 
+            # ✅/❌ on the Linear issue (removes the 👀 first so the final
+            # status stands alone). No-op for non-Linear tasks.
+            react_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=(overall_status == "success"),
+                started_reaction_id=linear_eyes_reaction_id,
+            )
+
             # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
             # ``trace_s3_uri`` can be persisted atomically with the
@@ -675,6 +708,16 @@ def run_task(
                 trace_s3_uri=crash_trace_s3_uri,
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
+            # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
+            # No-op for non-Linear tasks; network/GraphQL failures are swallowed.
+            # `linear_eyes_reaction_id` may be unbound if we crashed before the
+            # start-reaction call — guarded with locals() to stay safe.
+            react_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=False,
+                started_reaction_id=locals().get("linear_eyes_reaction_id"),
+            )
             raise
 
 

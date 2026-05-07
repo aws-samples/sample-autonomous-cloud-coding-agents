@@ -27,15 +27,18 @@ import type { TaskStatusType } from '../../constructs/task-status';
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
 /**
- * Provenance of a task's submission. ``api`` covers CLI / Cognito-authenticated
- * submissions; ``webhook`` covers HMAC-signed inbound webhook submissions.
+ * Provenance of a task's submission. Shared across inbound adapters:
+ * - ``api``: CLI / Cognito-authenticated submissions
+ * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
+ * - ``slack``: Slack @mention / slash-command submissions (see SlackIntegration)
+ * - ``linear``: Linear label-triggered submissions (see LinearIntegration)
  *
  * Narrowed from ``string`` so switches and predicates that read
  * ``channel_source`` get exhaustiveness checking at compile time; matches the
  * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
  * Keep in sync with ``cli/src/types.ts::ChannelSource``.
  */
-export type ChannelSource = 'api' | 'webhook';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
 
 /** Task types that operate on an existing pull request. */
 export function isPrTaskType(taskType: TaskType): boolean {

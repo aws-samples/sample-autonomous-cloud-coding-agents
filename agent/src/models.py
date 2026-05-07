@@ -108,6 +108,11 @@ class TaskConfig(BaseModel):
     branch_name: str = ""
     pr_number: str = ""
     task_id: str = ""
+    # Inbound channel the task was submitted from (mirrors ChannelSource in
+    # cdk/src/handlers/shared/types.ts). Gates channel-specific MCP wiring and
+    # prompt additions. Empty string means "no channel context" (legacy / local).
+    channel_source: str = ""
+    channel_metadata: dict[str, str] = Field(default_factory=dict)
     # Platform user_id (Cognito ``sub``) threaded from the orchestrator
     # payload. Required ONLY when ``trace`` is true — the agent writes
     # the trajectory dump to ``traces/<user_id>/<task_id>.jsonl.gz``

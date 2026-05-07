@@ -30,8 +30,8 @@ import { generateBranchName } from './gateway';
 import { logger } from './logger';
 import { checkRepoOnboarded } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
-import { type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
-import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { type ChannelSource, type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
+import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -39,7 +39,7 @@ import { TaskStatus } from '../../constructs/task-status';
  */
 export interface TaskCreationContext {
   readonly userId: string;
-  readonly channelSource: 'api' | 'webhook';
+  readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
 }

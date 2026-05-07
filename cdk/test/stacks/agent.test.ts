@@ -36,8 +36,11 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 6 DynamoDB tables (including TaskNudgesTable for Phase 2)', () => {
-    template.resourceCountIs('AWS::DynamoDB::Table', 6);
+  test('creates exactly 11 DynamoDB tables', () => {
+    // task, task-events, repo, user-concurrency, webhook, task-nudges,
+    // slack-installation, slack-user-mapping,
+    // linear-project-mapping, linear-user-mapping, linear-webhook-dedup
+    template.resourceCountIs('AWS::DynamoDB::Table', 11);
   });
 
   test('outputs TaskNudgesTableName', () => {

@@ -27,8 +27,10 @@ import {
   CreateWebhookRequest,
   CreateWebhookResponse,
   ErrorResponse,
+  LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
+  SlackLinkResponse,
   PaginatedResponse,
   SuccessResponse,
   TaskDetail,
@@ -325,6 +327,18 @@ export class ApiClient {
   /** DELETE /webhooks/{webhook_id} — revoke a webhook. */
   async revokeWebhook(webhookId: string): Promise<WebhookDetail> {
     const res = await this.request<SuccessResponse<WebhookDetail>>('DELETE', `/webhooks/${encodeURIComponent(webhookId)}`);
+    return res.data;
+  }
+
+  /** POST /slack/link — link a Slack account using a verification code. */
+  async slackLink(code: string): Promise<SlackLinkResponse> {
+    const res = await this.request<SuccessResponse<SlackLinkResponse>>('POST', '/slack/link', { code });
+    return res.data;
+  }
+
+  /** POST /linear/link — link a Linear account using a verification code. */
+  async linearLink(code: string): Promise<LinearLinkResponse> {
+    const res = await this.request<SuccessResponse<LinearLinkResponse>>('POST', '/linear/link', { code });
     return res.data;
   }
 }
