@@ -20,12 +20,16 @@
  */
 
 import { Command } from 'commander';
+import { makeApproveCommand } from '../commands/approve';
 import { makeCancelCommand } from '../commands/cancel';
 import { makeConfigureCommand } from '../commands/configure';
+import { makeDenyCommand } from '../commands/deny';
 import { makeEventsCommand } from '../commands/events';
 import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
 import { makeNudgeCommand } from '../commands/nudge';
+import { makePendingCommand } from '../commands/pending';
+import { makePoliciesCommand } from '../commands/policies';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
 import { makeTraceCommand } from '../commands/trace';
@@ -56,6 +60,10 @@ program.addCommand(makeListCommand());
 program.addCommand(makeStatusCommand());
 program.addCommand(makeCancelCommand());
 program.addCommand(makeNudgeCommand());
+program.addCommand(makeApproveCommand());
+program.addCommand(makeDenyCommand());
+program.addCommand(makePendingCommand());
+program.addCommand(makePoliciesCommand());
 program.addCommand(makeEventsCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
