@@ -58,7 +58,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from enum import StrEnum
 from fnmatch import fnmatch
@@ -83,6 +83,8 @@ APPROVAL_GATE_CAP_MAX: int = 500
 CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
 CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
 POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB
+APPROVAL_RATE_LIMIT: int = 20  # §12.9 per-container per-minute approval writes
+APPROVAL_RATE_WINDOW_S: float = 60.0  # sliding window paired with APPROVAL_RATE_LIMIT
 
 _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 _DEFAULT_SEVERITY = "medium"
@@ -627,6 +629,20 @@ class PolicyEngine:
             )
         self._approval_gate_cap = approval_gate_cap
 
+        # §12.9 per-task gate counter + per-container sliding-window rate limit.
+        # Both are session-scoped: the counter survives within the same task
+        # but NOT across container restarts (the design carries-forward tracks
+        # DDB persistence for the counter in Chunk 4/5; for now the §13.6
+        # reconciler + approval_gate_cap bound the worst case).
+        self._approval_gate_count: int = 0
+        self._approvals_last_minute: deque[float] = deque()
+        # §6.5 queue consumed by ``_denial_between_turns_hook``. Each entry
+        # is ``{"request_id", "reason", "decided_at"}``; reason is already
+        # sanitized by DenyTaskFn (§12.6).
+        self._denial_injection_queue: list[dict] = []
+        # IMPL-26: ``approval_ceiling_shrinking`` is emit-once per task.
+        self._emitted_ceiling_shrinking: bool = False
+
         # Validate task_type (non-fatal WARN to match Phase 1 behavior).
         from models import TaskType
 
@@ -799,6 +815,67 @@ class PolicyEngine:
     @property
     def recent_decisions(self) -> RecentDecisionCache:
         return self._cache
+
+    # ---- Approval-gate counters + denial queue (§6.5, §12.9) --------------
+
+    @property
+    def approval_gate_count(self) -> int:
+        """Session-scoped count of REQUIRE_APPROVAL gates emitted this task."""
+        return self._approval_gate_count
+
+    def increment_approval_gate_count(self) -> None:
+        """Bump the per-task gate counter (called at row-write time)."""
+        self._approval_gate_count += 1
+
+    def record_approval_gate_timestamp(self, now: float | None = None) -> None:
+        """Record a new approval-gate timestamp for the sliding rate-limit window."""
+        ts = time.monotonic() if now is None else now
+        self._approvals_last_minute.append(ts)
+        self._prune_rate_window(ts)
+
+    def _prune_rate_window(self, now: float) -> None:
+        """Drop timestamps older than ``APPROVAL_RATE_WINDOW_S``."""
+        cutoff = now - APPROVAL_RATE_WINDOW_S
+        while self._approvals_last_minute and self._approvals_last_minute[0] < cutoff:
+            self._approvals_last_minute.popleft()
+
+    @property
+    def approvals_in_last_minute(self) -> int:
+        """Count of approval-gate writes in the last ``APPROVAL_RATE_WINDOW_S``.
+
+        Prunes the window before returning so callers see the current count.
+        """
+        self._prune_rate_window(time.monotonic())
+        return len(self._approvals_last_minute)
+
+    def queue_denial_injection(
+        self, *, request_id: str, reason: str, decided_at: str | None
+    ) -> None:
+        """Append a denial-injection payload for ``_denial_between_turns_hook``.
+
+        Reason is expected to be pre-sanitized upstream (by ``DenyTaskFn``,
+        §12.6). The hook is responsible for XML-escaping at injection time.
+        """
+        self._denial_injection_queue.append(
+            {"request_id": request_id, "reason": reason, "decided_at": decided_at}
+        )
+
+    def drain_denial_injections(self) -> list[dict]:
+        """Pop and return the queued denial-injection payloads."""
+        out = list(self._denial_injection_queue)
+        self._denial_injection_queue.clear()
+        return out
+
+    def mark_ceiling_shrinking_emitted(self) -> bool:
+        """Idempotency latch for ``approval_ceiling_shrinking`` (IMPL-26).
+
+        Returns ``True`` the first time it is called (caller should emit the
+        milestone) and ``False`` on every subsequent call.
+        """
+        if self._emitted_ceiling_shrinking:
+            return False
+        self._emitted_ceiling_shrinking = True
+        return True
 
     # ---- Probes + low-level evaluation ------------------------------------
 

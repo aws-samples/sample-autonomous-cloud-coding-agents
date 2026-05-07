@@ -611,3 +611,99 @@ class TestReviewRegressions:
                 repo="owner/repo",
                 blueprint_soft_policies=bad,
             )
+
+
+# ---------------------------------------------------------------------------
+# Chunk 3: approval-gate counters + denial queue (§6.5, §12.9)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalGateCounter:
+    """Lock the per-task gate counter surface the hook depends on (§6.5)."""
+
+    def _engine(self) -> PolicyEngine:
+        return PolicyEngine(task_type="new_task", repo="owner/repo")
+
+    def test_initial_count_is_zero(self):
+        assert self._engine().approval_gate_count == 0
+
+    def test_increment_advances(self):
+        e = self._engine()
+        e.increment_approval_gate_count()
+        e.increment_approval_gate_count()
+        assert e.approval_gate_count == 2
+
+    def test_counter_survives_many_increments(self):
+        e = self._engine()
+        for _ in range(75):
+            e.increment_approval_gate_count()
+        # Counter itself is unbounded — the cap check is enforced in the hook.
+        assert e.approval_gate_count == 75
+
+
+class TestApprovalRateWindow:
+    """Sliding-window per-container rate limit (§12.9)."""
+
+    def test_empty_window(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        assert e.approvals_in_last_minute == 0
+
+    def test_record_within_window_counts(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        e.record_approval_gate_timestamp(now=1000.0)
+        e.record_approval_gate_timestamp(now=1010.0)
+        # Prune window pins at current monotonic time; inject deque directly
+        # to assert the count before pruning.
+        assert len(e._approvals_last_minute) == 2
+
+    def test_old_entries_pruned(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        # Seed with an entry older than the 60s window relative to a
+        # synthetic "now".
+        e.record_approval_gate_timestamp(now=100.0)
+        e.record_approval_gate_timestamp(now=105.0)
+        # Force prune at 200s: both old entries should drop out.
+        e._prune_rate_window(200.0)
+        assert len(e._approvals_last_minute) == 0
+
+    def test_mixed_window_keeps_recent(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        e.record_approval_gate_timestamp(now=100.0)  # old
+        e.record_approval_gate_timestamp(now=155.0)  # within 60s of 200s
+        e.record_approval_gate_timestamp(now=199.0)  # within 60s of 200s
+        e._prune_rate_window(200.0)
+        assert list(e._approvals_last_minute) == [155.0, 199.0]
+
+
+class TestDenialInjectionQueue:
+    """Queue consumed by ``_denial_between_turns_hook`` (§6.5)."""
+
+    def test_queue_starts_empty(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        assert e.drain_denial_injections() == []
+
+    def test_queue_then_drain_preserves_order(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        e.queue_denial_injection(
+            request_id="01K1", reason="do it after tests pass", decided_at="t1"
+        )
+        e.queue_denial_injection(request_id="01K2", reason="not on Fridays", decided_at="t2")
+        drained = e.drain_denial_injections()
+        assert [p["request_id"] for p in drained] == ["01K1", "01K2"]
+        assert drained[0]["reason"] == "do it after tests pass"
+        # Drain clears the queue.
+        assert e.drain_denial_injections() == []
+
+
+class TestCeilingShrinkingLatch:
+    """IMPL-26: ``approval_ceiling_shrinking`` is emit-once per task."""
+
+    def test_first_call_returns_true(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        assert e.mark_ceiling_shrinking_emitted() is True
+
+    def test_subsequent_calls_return_false(self):
+        e = PolicyEngine(task_type="new_task", repo="owner/repo")
+        e.mark_ceiling_shrinking_emitted()
+        assert e.mark_ceiling_shrinking_emitted() is False
+        assert e.mark_ceiling_shrinking_emitted() is False
