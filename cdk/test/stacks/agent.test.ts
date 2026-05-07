@@ -36,8 +36,80 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 6 DynamoDB tables (including TaskNudgesTable for Phase 2)', () => {
-    template.resourceCountIs('AWS::DynamoDB::Table', 6);
+  test('creates exactly 8 DynamoDB tables', () => {
+    // Six pre-existing + TaskApprovalsTable + SlackUserMappingTable
+    // (Cedar HITL gates, Chunk 4).
+    template.resourceCountIs('AWS::DynamoDB::Table', 8);
+  });
+
+  test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
+    const tables = template.findResources('AWS::DynamoDB::Table');
+    const approvalTables = Object.values(tables).filter((t) => {
+      const ks = (t as { Properties?: { KeySchema?: Array<{ AttributeName: string }> } })
+        .Properties?.KeySchema ?? [];
+      return (
+        ks.length === 2 && ks[0]!.AttributeName === 'task_id' && ks[1]!.AttributeName === 'request_id'
+      );
+    });
+    expect(approvalTables).toHaveLength(1);
+    const gsis = ((approvalTables[0] as { Properties?: { GlobalSecondaryIndexes?: Array<{ IndexName: string }> } })
+      .Properties?.GlobalSecondaryIndexes ?? []) as Array<{ IndexName: string }>;
+    expect(gsis.map((g) => g.IndexName)).toContain('user_id-status-index');
+  });
+
+  test('creates SlackUserMappingTable with slack_user_id PK only', () => {
+    const tables = template.findResources('AWS::DynamoDB::Table');
+    const slackMappingTables = Object.values(tables).filter((t) => {
+      const ks = (t as { Properties?: { KeySchema?: Array<{ AttributeName: string }> } })
+        .Properties?.KeySchema ?? [];
+      return ks.length === 1 && ks[0]!.AttributeName === 'slack_user_id';
+    });
+    expect(slackMappingTables).toHaveLength(1);
+  });
+
+  test('outputs TaskApprovalsTableName', () => {
+    template.hasOutput('TaskApprovalsTableName', {
+      Description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
+    });
+  });
+
+  test('outputs SlackUserMappingTableName', () => {
+    template.hasOutput('SlackUserMappingTableName', {});
+  });
+
+  test('outputs CedarWasmLayerArn', () => {
+    template.hasOutput('CedarWasmLayerArn', {});
+  });
+
+  test('creates the Cedar-wasm Lambda layer', () => {
+    template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
+    template.hasResourceProperties('AWS::Lambda::LayerVersion', {
+      CompatibleRuntimes: ['nodejs20.x', 'nodejs22.x'],
+    });
+  });
+
+  test('runtime receives TASK_APPROVALS_TABLE_NAME env var', () => {
+    // Hook contract: absent → task_state raises ApprovalTablesUnavailable
+    // → hook fails closed. Test pins the env var is wired so the
+    // deploy activates the approval path.
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const runtimeList = Object.values(runtimes);
+    expect(runtimeList).toHaveLength(1);
+    const envVars = (runtimeList[0] as {
+      Properties?: { EnvironmentVariables?: Record<string, unknown> };
+    }).Properties?.EnvironmentVariables ?? {};
+    expect(envVars).toHaveProperty('TASK_APPROVALS_TABLE_NAME');
+  });
+
+  test('runtime receives AGENTCORE_MAX_LIFETIME_S matching the lifecycle config', () => {
+    // Drift guard: hook's _remaining_maxlifetime_s reads this env var;
+    // if it falls out of sync with `lifecycleConfiguration.maxLifetime`
+    // the hook's clipping logic becomes wrong (too tight or too loose).
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const envVars = (Object.values(runtimes)[0] as {
+      Properties?: { EnvironmentVariables?: Record<string, unknown> };
+    }).Properties?.EnvironmentVariables ?? {};
+    expect(envVars.AGENTCORE_MAX_LIFETIME_S).toBe('28800');
   });
 
   test('outputs TaskNudgesTableName', () => {

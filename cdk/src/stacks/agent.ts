@@ -34,13 +34,16 @@ import { Construct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { Blueprint } from '../constructs/blueprint';
+import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { RepoTable } from '../constructs/repo-table';
+import { SlackUserMappingTable } from '../constructs/slack-user-mapping-table';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { TaskApi } from '../constructs/task-api';
+import { TaskApprovalsTable } from '../constructs/task-approvals-table';
 import { TaskDashboard } from '../constructs/task-dashboard';
 import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
@@ -62,9 +65,22 @@ export class AgentStack extends Stack {
     const taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
+    // Cedar HITL approval-gate state (design §10.1). Agent writes PENDING
+    // rows + GSI query powers `bgagent pending`; Chunk 5 wires the
+    // Approve/Deny Lambdas + fan-out consumer.
+    const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTable');
+    // Cedar HITL Slack → Cognito mapping (§11.2). Written only via the
+    // user-initiated OAuth link handler (Chunk 5).
+    const slackUserMappingTable = new SlackUserMappingTable(this, 'SlackUserMappingTable');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
+
+    // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
+    // asset is in the synthed template; Chunk 5 handlers (Approve,
+    // Deny, GetPolicies, CreateTask) attach the layer via
+    // ``fn.addLayers(cedarWasmLayer.layer)``.
+    const cedarWasmLayer = new CedarWasmLayer(this, 'CedarWasmLayer');
 
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
@@ -239,6 +255,15 @@ export class AgentStack extends Stack {
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
+      // Cedar HITL approval gates (§6.5). Agent's task_state primitives
+      // use this to write PENDING rows + transition tasks to
+      // AWAITING_APPROVAL; absent → hook fails closed with
+      // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
+      TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
+      // Hint for the hook's remaining-maxLifetime calculation (§6.5
+      // pseudocode line 793). Kept in sync with the AgentCore
+      // lifecycle configuration below so drift is visible. 8 hours.
+      AGENTCORE_MAX_LIFETIME_S: '28800',
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
       // --trace artifact store (§10.1). The agent writes the JSONL
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
@@ -307,6 +332,12 @@ export class AgentStack extends Stack {
     taskTable.table.grantReadWriteData(runtime);
     taskEventsTable.table.grantReadWriteData(runtime);
     taskNudgesTable.table.grantReadWriteData(runtime);
+    // Cedar HITL: the agent writes PENDING rows via TransactWriteItems
+    // (cross-table with TaskTable), reads them with ConsistentRead during
+    // the poll loop, and flips status to TIMED_OUT on deadline. The
+    // grant must be RW because approve/deny Lambdas (Chunk 5) also
+    // need RW; granting twice is idempotent.
+    taskApprovalsTable.table.grantReadWriteData(runtime);
     userConcurrencyTable.table.grantReadWriteData(runtime);
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
@@ -395,6 +426,21 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskNudgesTableName', {
       value: taskNudgesTable.table.tableName,
       description: 'Name of the DynamoDB task nudges table (Phase 2)',
+    });
+
+    new CfnOutput(this, 'TaskApprovalsTableName', {
+      value: taskApprovalsTable.table.tableName,
+      description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
+    });
+
+    new CfnOutput(this, 'SlackUserMappingTableName', {
+      value: slackUserMappingTable.table.tableName,
+      description: 'Name of the DynamoDB slack_user_id → cognito_sub mapping table',
+    });
+
+    new CfnOutput(this, 'CedarWasmLayerArn', {
+      value: cedarWasmLayer.layer.layerVersionArn,
+      description: 'ARN of the Cedar-wasm Lambda layer (consumed by Chunk 5 REST handlers)',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {
