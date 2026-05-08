@@ -57,6 +57,17 @@ export const APPROVAL_METRIC_MILESTONES = new Set<string>([
   'approval_denied',
   'approval_timed_out',
   'approval_timeout_capped',
+  // Chunk 10 (full-branch review M1 + B2): safety-critical milestones
+  // added to the metric allowlist after deploy-gate review revealed
+  // they produced zero dashboard signal. ``approval_cap_exceeded`` +
+  // ``approval_rate_limit_exceeded`` fire on the §12.9 caps the
+  // system exists to enforce; ``approval_stranded`` is the reconciler
+  // signal that an AWAITING_APPROVAL task was evicted before decision.
+  // Without these, the most operationally-interesting failure modes
+  // were invisible to §11.3 widgets.
+  'approval_cap_exceeded',
+  'approval_rate_limit_exceeded',
+  'approval_stranded',
 ]);
 
 /**
@@ -263,6 +274,53 @@ export function classifyApprovalEvent(ev: ParsedApprovalEvent): ClassificationRe
       }
       break;
     }
+
+    case 'approval_cap_exceeded':
+      // §12.9 per-task cap hit — emit a simple counter so operators
+      // can alarm on sustained cap pressure (suspicious retry loop
+      // or mis-sized ``approval_gate_cap``). No dimensions: the cap
+      // value is task-scoped and varies per blueprint; a dimension
+      // on ``cap`` would shred cardinality without analytical value
+      // (the dashboard question is "how often does any task hit?",
+      // not "which cap value is hit most").
+      specs.push({
+        name: 'ApprovalCapExceededCount',
+        unit: 'Count',
+        value: 1,
+        dimensions: {},
+      });
+      break;
+
+    case 'approval_rate_limit_exceeded':
+      // §12.9 per-user per-minute rate limit hit. Separate metric
+      // from cap-exceeded so operators can tell "one user spamming"
+      // from "task sized too small for approval load." No
+      // dimensions for the same cardinality reason — the
+      // ``request_id`` in the event carries the per-user
+      // correlation for ad-hoc log-insights investigation.
+      specs.push({
+        name: 'ApprovalRateLimitExceededCount',
+        unit: 'Count',
+        value: 1,
+        dimensions: {},
+      });
+      break;
+
+    case 'approval_stranded':
+      // Reconciler-emitted signal that an AWAITING_APPROVAL task
+      // was evicted before the user decided. High operational
+      // interest: a 100 % eviction spike under container churn
+      // would otherwise look identical to "no approval traffic"
+      // on the dashboard (B2 full-branch finding). Counter only —
+      // the event metadata carries ``age_s`` + ``reason`` for
+      // post-hoc log-insights analysis.
+      specs.push({
+        name: 'ApprovalStrandedCount',
+        unit: 'Count',
+        value: 1,
+        dimensions: {},
+      });
+      break;
 
     case 'approval_timed_out': {
       // Latency uses created_at + the event's own timestamp as the
