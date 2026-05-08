@@ -160,6 +160,81 @@ describe('reconcile-stranded-tasks', () => {
     expect(writes).toBe(0);
   });
 
+  test('AWAITING_APPROVAL stranded task additionally emits approval_stranded milestone', async () => {
+    // Chunk 10 (full-branch review B2): an AWAITING_APPROVAL task
+    // evicted before the user decides must produce a dashboard
+    // signal via the approval-metrics publisher. The publisher's
+    // event-source filter keys on ``event_type == 'agent_milestone'``
+    // only, so the existing ``task_stranded`` / ``task_failed`` events
+    // (``event_type`` == their own names) never reach it. This test
+    // pins the extra ``agent_milestone`` / ``approval_stranded`` emit
+    // that makes the stranded case visible on §11.3 widgets.
+    const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    primeResponses([
+      { Items: [] }, // SUBMITTED
+      { Items: [] }, // HYDRATING
+      // AWAITING_APPROVAL query returns one stranded candidate.
+      { Items: [mockTaskRow({ task_id: 't-await', user_id: 'u-1', created_at: ancient })] },
+      {}, // conditional UpdateItem → FAILED
+      {}, // PutItem task_stranded event
+      {}, // PutItem task_failed event
+      {}, // PutItem approval_stranded milestone (Chunk 10 new)
+      {}, // UpdateItem decrement concurrency
+    ]);
+
+    await handler();
+
+    const putCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
+      .filter(([c]) => c._type === 'PutItem');
+    // task_stranded + task_failed + approval_stranded milestone
+    expect(putCalls).toHaveLength(3);
+
+    const milestonePut = putCalls.find(([c]) => {
+      const item = (c.input as { Item: Record<string, { S?: string; M?: Record<string, { S?: string }> }> }).Item;
+      return item.event_type?.S === 'agent_milestone';
+    });
+    expect(milestonePut).toBeDefined();
+    const item = (milestonePut![0].input as {
+      Item: {
+        event_type: { S: string };
+        metadata: { M: Record<string, { S?: string; N?: string }> };
+      };
+    }).Item;
+    expect(item.event_type.S).toBe('agent_milestone');
+    expect(item.metadata.M.milestone.S).toBe('approval_stranded');
+    expect(item.metadata.M.reason.S).toBe('STRANDED_NO_HEARTBEAT');
+    expect(item.metadata.M.age_s.N).toBeDefined();
+  });
+
+  test('SUBMITTED stranded task does NOT emit approval_stranded milestone (only AWAITING_APPROVAL does)', async () => {
+    // Guard: non-AWAITING_APPROVAL stranded tasks must keep the
+    // existing 2-event emission (task_stranded + task_failed)
+    // without the new approval_stranded milestone — otherwise the
+    // dashboard would double-count normal stranded events.
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    primeResponses([
+      { Items: [mockTaskRow({ task_id: 't-sub', user_id: 'u-1', created_at: ancient })] }, // SUBMITTED
+      {}, // conditional UpdateItem → FAILED
+      {}, // PutItem task_stranded
+      {}, // PutItem task_failed
+      {}, // UpdateItem concurrency
+      { Items: [] }, // HYDRATING
+      { Items: [] }, // AWAITING_APPROVAL
+    ]);
+
+    await handler();
+
+    const putCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
+      .filter(([c]) => c._type === 'PutItem');
+    // No approval_stranded milestone.
+    expect(putCalls).toHaveLength(2);
+    const anyMilestone = putCalls.some(([c]) => {
+      const item = (c.input as { Item: Record<string, { S?: string }> }).Item;
+      return item.event_type?.S === 'agent_milestone';
+    });
+    expect(anyMilestone).toBe(false);
+  });
+
   test('SUBMITTED + HYDRATING + AWAITING_APPROVAL queries all run', async () => {
     primeResponses([
       { Items: [] }, // SUBMITTED

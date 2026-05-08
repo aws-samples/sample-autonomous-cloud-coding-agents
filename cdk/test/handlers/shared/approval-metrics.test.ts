@@ -88,15 +88,22 @@ describe('approval-metrics: outcomeFromMilestone', () => {
 });
 
 describe('approval-metrics: APPROVAL_METRIC_MILESTONES allowlist', () => {
-  test('contains all 5 supported milestones', () => {
+  test('contains all 8 supported milestones', () => {
     // Guard against accidental renames that would silently remove a
-    // milestone from the dashboard.
+    // milestone from the dashboard. Chunk 10 full-branch review
+    // expanded this allowlist with 3 safety-critical milestones
+    // (cap / rate-limit / stranded) that had been producing zero
+    // dashboard signal — keep the size assertion strict so a
+    // future refactor dropping one is caught.
     expect(APPROVAL_METRIC_MILESTONES.has('approval_requested')).toBe(true);
     expect(APPROVAL_METRIC_MILESTONES.has('approval_granted')).toBe(true);
     expect(APPROVAL_METRIC_MILESTONES.has('approval_denied')).toBe(true);
     expect(APPROVAL_METRIC_MILESTONES.has('approval_timed_out')).toBe(true);
     expect(APPROVAL_METRIC_MILESTONES.has('approval_timeout_capped')).toBe(true);
-    expect(APPROVAL_METRIC_MILESTONES.size).toBe(5);
+    expect(APPROVAL_METRIC_MILESTONES.has('approval_cap_exceeded')).toBe(true);
+    expect(APPROVAL_METRIC_MILESTONES.has('approval_rate_limit_exceeded')).toBe(true);
+    expect(APPROVAL_METRIC_MILESTONES.has('approval_stranded')).toBe(true);
+    expect(APPROVAL_METRIC_MILESTONES.size).toBe(8);
   });
 });
 
@@ -364,13 +371,53 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   test('unknown milestone → empty result (classification miss)', () => {
     // Handler upstream filters to APPROVAL_METRIC_MILESTONES, but
     // the classifier must still cope with an unexpected milestone
-    // without throwing.
+    // without throwing. ``approval_late_win`` is not in the
+    // allowlist (future work per full-branch review) so it reaches
+    // the default branch even if handed to the classifier directly.
     const result = classifyApprovalEvent({
-      milestone: 'approval_stranded',
+      milestone: 'approval_late_win',
       eventTimestampIso: DECIDED_AT,
       metadata: {},
     });
     expect(result.specs).toEqual([]);
     expect(result.skipped).toEqual([]);
+  });
+
+  // --- Chunk 10: safety-critical milestones added after full-branch review
+
+  test('approval_cap_exceeded → ApprovalCapExceededCount (no dims)', () => {
+    const result = classifyApprovalEvent({
+      milestone: 'approval_cap_exceeded',
+      eventTimestampIso: CREATED_AT,
+      metadata: { request_id: 'r-1', count: 51, cap: 50 },
+    });
+    expect(result.skipped).toEqual([]);
+    expect(result.specs).toHaveLength(1);
+    expect(result.specs[0].name).toBe('ApprovalCapExceededCount');
+    expect(result.specs[0].value).toBe(1);
+    expect(result.specs[0].dimensions).toEqual({});
+  });
+
+  test('approval_rate_limit_exceeded → ApprovalRateLimitExceededCount (no dims)', () => {
+    const result = classifyApprovalEvent({
+      milestone: 'approval_rate_limit_exceeded',
+      eventTimestampIso: CREATED_AT,
+      metadata: { request_id: 'r-1', rate: 11, limit: 10 },
+    });
+    expect(result.specs[0].name).toBe('ApprovalRateLimitExceededCount');
+    expect(result.specs[0].value).toBe(1);
+  });
+
+  test('approval_stranded → ApprovalStrandedCount (no dims)', () => {
+    // Reconciler-emitted: an AWAITING_APPROVAL task was evicted
+    // before the user decided. Critical dashboard signal that was
+    // invisible pre-Chunk-10 (B2 full-branch finding).
+    const result = classifyApprovalEvent({
+      milestone: 'approval_stranded',
+      eventTimestampIso: CREATED_AT,
+      metadata: { age_s: 7300, reason: 'STRANDED_NO_HEARTBEAT' },
+    });
+    expect(result.specs[0].name).toBe('ApprovalStrandedCount');
+    expect(result.specs[0].value).toBe(1);
   });
 });

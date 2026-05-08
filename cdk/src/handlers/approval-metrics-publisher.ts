@@ -39,10 +39,18 @@
  *     cheapest path to that posture without a custom metric-put API.
  *
  * Observability-of-observability (Chunk 8 silent-failure adversarial):
- *   - Every successful batch emits ``MetricsPublisherHeartbeat`` = 1.
- *     A widget gap on this metric means the pipeline itself is broken
- *     (IAM drift, filter-pattern typo, log throttle) rather than a
- *     genuine absence of approval traffic.
+ *   - Every invocation that passes the event-source-mapping filter
+ *     emits ``MetricsPublisherHeartbeat`` = 1 before returning.
+ *     **Semantics** (full-branch review B1): the heartbeat is
+ *     "present when active," not "pipeline alive always" — the ESM
+ *     filter blocks invocation when no ``agent_milestone`` records
+ *     are in the poll window, so a quiet period produces the same
+ *     widget gap as a broken pipeline. Operators should alarm on
+ *     the COMBINATION: heartbeat-absent AND recent agent_milestone
+ *     writes in TaskEventsTable (or alternatively run a scheduled
+ *     canary that emits a synthetic approval record — deferred
+ *     §11.5 work). A dedicated heartbeat-is-alive signal needs a
+ *     scheduled EventBridge rule, not a record-driven counter.
  *   - On a schema-mismatch (outcome event missing ``created_at`` / old
  *     container still running post-Chunk-8a deploy), the handler emits
  *     ``MetricEmitSkipped`` with a ``reason`` dimension + structured
@@ -132,7 +140,7 @@ export type ParseSkipReason =
   | 'expected_non_insert_modify'
   | 'expected_missing_new_image'
   | 'expected_non_milestone_event_type'
-  | 'expected_non_approval_milestone'
+  | 'expected_milestone_not_tracked'
   | 'anomaly_missing_required_keys'
   | 'anomaly_missing_metadata_map'
   | 'anomaly_missing_milestone_name';
@@ -155,7 +163,15 @@ export function parseApprovalRecord(record: DynamoDBRecord): StreamEventView | n
  * the happy-path view (tests + any future caller).
  */
 export function parseApprovalRecordWithReason(record: DynamoDBRecord): ParseOutcome {
-  if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') {
+  // INSERT-only per the event-source-mapping filter (see
+  // ``approval-metrics-publisher-consumer.ts``). Keeping the handler
+  // strictly aligned with the filter avoids the full-branch H2
+  // finding: if a future chunk starts MODIFY-ing TaskEventsTable
+  // items, the publisher will silently stop seeing them (filter
+  // drops) and the mismatch will be detectable only by staring at
+  // stream stats — hard to diagnose. A single source of truth on
+  // ``eventName == INSERT`` keeps the layers honest.
+  if (record.eventName !== 'INSERT') {
     return { kind: 'skip', reason: 'expected_non_insert_modify' };
   }
   const img = record.dynamodb?.NewImage;
@@ -202,7 +218,7 @@ export function parseApprovalRecordWithReason(record: DynamoDBRecord): ParseOutc
   if (!APPROVAL_METRIC_MILESTONES.has(milestoneRaw)) {
     return {
       kind: 'skip',
-      reason: 'expected_non_approval_milestone',
+      reason: 'expected_milestone_not_tracked',
       taskId,
       eventId,
     };
@@ -277,11 +293,15 @@ function emitEmf(spec: MetricSpec, timestampMs: number): void {
 }
 
 /**
- * Emit the per-batch heartbeat metric. Firing this on every
- * successful invocation means the dashboard has a positive signal
- * whenever the pipeline is live — an operator looking at a gap can
- * distinguish "no approval traffic" (heartbeat continues) from
- * "pipeline is broken" (heartbeat flat-lines too).
+ * Emit the per-batch heartbeat metric. Fires on every invocation
+ * that passes the event-source-mapping filter. **Important caveat
+ * (B1)**: the filter blocks invocation when no ``agent_milestone``
+ * records exist in the poll window, so a widget gap can mean either
+ * "no approval traffic this period" OR "pipeline broken." This
+ * metric alone cannot distinguish the two; operators should alarm
+ * on the combination (heartbeat-absent + recent TaskEventsTable
+ * activity) or wire a scheduled canary. See the module docstring
+ * for the full semantics rationale.
  */
 function emitHeartbeat(): void {
   emitEmf(

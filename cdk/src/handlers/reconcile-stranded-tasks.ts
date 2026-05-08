@@ -235,6 +235,42 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     });
   }
 
+  // Chunk 10 (full-branch review B2): when the stranded task was
+  // AWAITING_APPROVAL, also emit an ``agent_milestone`` with
+  // ``milestone: "approval_stranded"`` so the ApprovalMetricsPublisher
+  // Lambda picks it up (the publisher's event-source filter is keyed
+  // on ``event_type: agent_milestone`` — ``task_stranded`` events
+  // never reach it). Without this branch, a 100 %-eviction scenario
+  // looks identical to "no approval traffic" on the dashboard —
+  // invisible failure mode. Design §11.1 labels ``approval_stranded``
+  // as Reconciler-sourced, this wiring fulfills that.
+  if (task.status === 'AWAITING_APPROVAL') {
+    try {
+      await ddb.send(new PutItemCommand({
+        TableName: EVENTS_TABLE,
+        Item: {
+          task_id: { S: task.task_id },
+          event_id: { S: ulid() },
+          event_type: { S: 'agent_milestone' },
+          timestamp: { S: now },
+          ttl: { N: String(ttl) },
+          metadata: {
+            M: {
+              milestone: { S: 'approval_stranded' },
+              age_s: { N: String(task.age_seconds) },
+              reason: { S: 'STRANDED_NO_HEARTBEAT' },
+            },
+          },
+        },
+      }));
+    } catch (eventErr) {
+      logger.warn('Failed to write approval_stranded milestone (best-effort)', {
+        task_id: task.task_id,
+        error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+      });
+    }
+  }
+
   // 3. Release the concurrency slot. Best-effort; drift is later corrected
   //    by the concurrency reconciler.
   try {
