@@ -33,6 +33,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -548,6 +549,17 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
+    });
+
+    // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
+    // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
+    // Reads agent_milestone records for approval events and emits
+    // CloudWatch EMF for the dashboard widgets below. See the
+    // 2-consumer architectural note in `task-events-table.ts` —
+    // adding a third consumer here requires the Kinesis Data Streams
+    // for DynamoDB migration.
+    new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
+      taskEventsTable: taskEventsTable.table,
     });
 
     // --- Operator dashboard ---
