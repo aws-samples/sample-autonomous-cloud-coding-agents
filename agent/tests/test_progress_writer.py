@@ -845,6 +845,102 @@ class TestApprovalMilestoneHelpers:
         assert metadata["request_id"] == "01KREQ"
         assert metadata["timeout_s"] == 300
 
+    # --- Chunk 8a: outcome-event schema superset for ApprovalMetricsPublisher
+
+    def test_approval_granted_includes_created_at_when_supplied(self, writer):
+        # ApprovalMetricsPublisher needs ``created_at`` to compute
+        # ``ApprovalDecisionLatencyMs`` on the APPROVED branch. The agent
+        # caller (hooks.py) propagates it from the approval row; the
+        # writer must surface it on the emitted event metadata.
+        writer.write_approval_granted(
+            request_id="01KREQ",
+            scope="tool_type:Read",
+            decided_at="2026-05-07T00:00:05Z",
+            created_at="2026-05-07T00:00:00Z",
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_granted"
+        assert metadata["created_at"] == "2026-05-07T00:00:00Z"
+        assert metadata["decided_at"] == "2026-05-07T00:00:05Z"
+
+    def test_approval_granted_omits_created_at_when_absent(self, writer):
+        # Backward-compat — a caller that hasn't been updated (or the
+        # deploy-window old container) must still produce a valid event.
+        # The publisher Lambda's schema-mismatch branch handles these
+        # by skipping the latency emit + firing METRIC_EMIT_SKIPPED.
+        writer.write_approval_granted(
+            request_id="01KREQ",
+            scope="tool_type:Read",
+            decided_at="2026-05-07T00:00:05Z",
+        )
+        _, metadata = self._last_event(writer)
+        assert "created_at" not in metadata
+
+    def test_approval_denied_includes_created_at_when_supplied(self, writer):
+        writer.write_approval_denied(
+            request_id="01KREQ",
+            reason="build the Makefile target first",
+            decided_at="2026-05-07T00:00:05Z",
+            created_at="2026-05-07T00:00:00Z",
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_denied"
+        assert metadata["created_at"] == "2026-05-07T00:00:00Z"
+
+    def test_approval_denied_omits_created_at_when_absent(self, writer):
+        writer.write_approval_denied(
+            request_id="01KREQ",
+            reason="build the Makefile target first",
+            decided_at=None,
+        )
+        _, metadata = self._last_event(writer)
+        assert "created_at" not in metadata
+
+    def test_approval_timed_out_includes_8a_fields_when_supplied(self, writer):
+        # ApprovalMetricsPublisher needs all three for its TIMED_OUT
+        # branch: ``created_at`` for latency, ``effective_timeout_s``
+        # for the breakdown histogram, ``matching_rule_ids`` for the
+        # rule_id dimension. Emitting all three lets the publisher
+        # drop only the specific metric branch whose input is missing
+        # rather than the whole event.
+        writer.write_approval_timed_out(
+            request_id="01KREQ",
+            timeout_s=300,
+            created_at="2026-05-07T00:00:00Z",
+            effective_timeout_s=120,
+            matching_rule_ids=["deny-force-push", "escalate-credentials"],
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_timed_out"
+        assert metadata["timeout_s"] == 300
+        assert metadata["created_at"] == "2026-05-07T00:00:00Z"
+        assert metadata["effective_timeout_s"] == 120
+        assert metadata["matching_rule_ids"] == [
+            "deny-force-push",
+            "escalate-credentials",
+        ]
+
+    def test_approval_timed_out_omits_8a_fields_when_absent(self, writer):
+        # Backward-compat — legacy caller shape keeps working.
+        writer.write_approval_timed_out(request_id="01KREQ", timeout_s=300)
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_timed_out"
+        assert "created_at" not in metadata
+        assert "effective_timeout_s" not in metadata
+        assert "matching_rule_ids" not in metadata
+
+    def test_approval_timed_out_matching_rule_ids_list_copy(self, writer):
+        # Defensive copy — mutating the caller's list post-call must not
+        # corrupt the emitted metadata. Mirrors the pattern used for
+        # ``initial_approvals`` / other list payloads in this module.
+        rule_ids = ["a", "b"]
+        writer.write_approval_timed_out(
+            request_id="01KREQ", timeout_s=300, matching_rule_ids=rule_ids
+        )
+        rule_ids.append("c")
+        _, metadata = self._last_event(writer)
+        assert metadata["matching_rule_ids"] == ["a", "b"]
+
     def test_approval_stranded(self, writer):
         writer.write_approval_stranded(request_id="01KREQ", age_s=600, reason="container evicted")
         _, metadata = self._last_event(writer)

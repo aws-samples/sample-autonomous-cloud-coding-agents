@@ -674,12 +674,32 @@ class _ProgressWriter:
         request_id: str,
         scope: str,
         decided_at: str | None,
+        created_at: str | None = None,
     ) -> None:
-        """Emit ``approval_granted`` (user APPROVED, §11.1)."""
-        self._put_approval_milestone(
-            "approval_granted",
-            {"request_id": request_id, "scope": scope, "decided_at": decided_at},
-        )
+        """Emit ``approval_granted`` (user APPROVED, §11.1).
+
+        Chunk 8a: ``created_at`` propagated from the approval row so the
+        ApprovalMetricsPublisher Lambda can compute ``decided_at -
+        created_at`` latency without a round-trip GetItem. Optional with
+        default ``None`` so any legacy caller path still constructs a
+        valid event — the publisher skips the latency emit + logs a
+        ``METRICS_SCHEMA_MISMATCH`` if the field is absent, rather than
+        emitting ``latency=0`` which would poison percentile widgets.
+
+        Field is omitted (not present as ``None``) from the emitted
+        event metadata when ``created_at`` is ``None``. This keeps the
+        event stream free of ``None`` values that consumers would have
+        to re-check, and makes "absent" vs "present but null" a
+        single well-defined case downstream.
+        """
+        payload: dict = {
+            "request_id": request_id,
+            "scope": scope,
+            "decided_at": decided_at,
+        }
+        if created_at is not None:
+            payload["created_at"] = created_at
+        self._put_approval_milestone("approval_granted", payload)
 
     def write_approval_denied(
         self,
@@ -687,23 +707,65 @@ class _ProgressWriter:
         request_id: str,
         reason: str,
         decided_at: str | None,
+        created_at: str | None = None,
     ) -> None:
-        """Emit ``approval_denied`` (user DENIED, §11.1)."""
-        self._put_approval_milestone(
-            "approval_denied",
-            {
-                "request_id": request_id,
-                "reason": self._preview(reason),
-                "decided_at": decided_at,
-            },
-        )
+        """Emit ``approval_denied`` (user DENIED, §11.1).
 
-    def write_approval_timed_out(self, *, request_id: str, timeout_s: int) -> None:
-        """Emit ``approval_timed_out`` (timer expired, §11.1)."""
-        self._put_approval_milestone(
-            "approval_timed_out",
-            {"request_id": request_id, "timeout_s": timeout_s},
-        )
+        Chunk 8a: see ``write_approval_granted`` for the ``created_at``
+        rationale (field omitted from metadata when ``None``).
+        """
+        payload: dict = {
+            "request_id": request_id,
+            "reason": self._preview(reason),
+            "decided_at": decided_at,
+        }
+        if created_at is not None:
+            payload["created_at"] = created_at
+        self._put_approval_milestone("approval_denied", payload)
+
+    def write_approval_timed_out(
+        self,
+        *,
+        request_id: str,
+        timeout_s: int,
+        created_at: str | None = None,
+        effective_timeout_s: int | None = None,
+        matching_rule_ids: list[str] | None = None,
+    ) -> None:
+        """Emit ``approval_timed_out`` (timer expired, §11.1).
+
+        Chunk 8a additions to support the ApprovalMetricsPublisher
+        dashboard widgets (IMPL-28):
+
+        - ``created_at`` — propagated from the approval row so the
+          publisher Lambda can compute decision latency at
+          ``outcome=timed_out`` the same way it does for granted/denied.
+        - ``effective_timeout_s`` — the clipped timeout actually applied
+          (from the approval row's ``timeout_s`` field, which is the
+          post-clip value). Required by the ``ApprovalTimeoutBreakdown``
+          histogram. When absent (legacy caller), the metric emit is
+          skipped + a ``METRICS_SCHEMA_MISMATCH`` counter fires, rather
+          than polluting percentile widgets with zero-valued samples.
+        - ``matching_rule_ids`` — rule ids that matched at gate-fire
+          time, propagated from the approval row's
+          ``matching_rule_ids``. Used by the publisher Lambda to emit
+          ``TimedOutEffectiveTimeout`` with a ``rule_id`` dimension
+          (normalized against an allowlist so unknown rules collapse
+          to ``other`` — cardinality cap, H4 adversarial finding).
+
+        ``timeout_s`` is retained for backward-compat — pre-Chunk-8a
+        events and consumers that only want the raw timer value see
+        the original field. ``effective_timeout_s`` is a separate field
+        (not a rename) to keep the event schema a pure superset.
+        """
+        payload: dict = {"request_id": request_id, "timeout_s": timeout_s}
+        if created_at is not None:
+            payload["created_at"] = created_at
+        if effective_timeout_s is not None:
+            payload["effective_timeout_s"] = effective_timeout_s
+        if matching_rule_ids is not None:
+            payload["matching_rule_ids"] = list(matching_rule_ids)
+        self._put_approval_milestone("approval_timed_out", payload)
 
     def write_approval_stranded(
         self,

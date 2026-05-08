@@ -482,6 +482,9 @@ async def _handle_require_approval(
                 request_id=request_id,
                 scope=scope,
                 decided_at=outcome.get("decided_at"),
+                # Chunk 8a: propagate the row's ``created_at`` so the
+                # ApprovalMetricsPublisher can compute decision latency.
+                created_at=row.get("created_at"),
             )
         return _allow_response(f"User approved ({scope})")
 
@@ -514,6 +517,9 @@ async def _handle_require_approval(
                 request_id=request_id,
                 reason=outcome.get("reason", ""),
                 decided_at=outcome.get("decided_at"),
+                # Chunk 8a: propagate the row's ``created_at`` so the
+                # ApprovalMetricsPublisher can compute decision latency.
+                created_at=row.get("created_at"),
             )
     elif progress is not None:
         _try_progress(
@@ -521,6 +527,14 @@ async def _handle_require_approval(
             "write_approval_timed_out",
             request_id=request_id,
             timeout_s=effective_timeout,
+            # Chunk 8a: propagate the row's ``created_at`` +
+            # ``matching_rule_ids`` + the post-clip effective timeout
+            # so the ApprovalMetricsPublisher can emit the decision
+            # latency + the ``ApprovalTimeoutBreakdown`` histogram
+            # with a normalized ``rule_id`` dimension.
+            created_at=row.get("created_at"),
+            effective_timeout_s=effective_timeout,
+            matching_rule_ids=list(decision.matching_rule_ids),
         )
 
     # Guaranteed surface (§6.5): truncated reason even when denial
