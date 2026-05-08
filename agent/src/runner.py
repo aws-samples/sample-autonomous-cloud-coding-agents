@@ -227,10 +227,30 @@ def _initialize_policy_engine_and_hooks(
         extra_policies=cedar_policies if cedar_policies else None,
         **engine_kwargs,
     )
+    # Chunk 7c: surface the resolved cap + its source so operators can
+    # distinguish a blueprint-threaded value from the engine's compile-time
+    # default on a container restart. Mirrors the ``approval_gate_cap_source``
+    # field on the handler's "Task created" log so both ends of the cascade
+    # carry the same key name — CloudWatch Insights queries can
+    # filter/group by ``approval_gate_cap_source`` across handler +
+    # agent events. Value domains differ intentionally: the handler
+    # distinguishes ``blueprint`` vs ``platform_default``, but the
+    # agent only sees the threaded number (blueprint-set or default-50
+    # frozen on the TaskRecord both look the same from here), so it
+    # emits ``threaded`` vs ``engine_default`` (the latter only fires
+    # for legacy tasks that predate Chunk 7b and have no cap on the
+    # TaskRecord at all). Cross-reference handler log at
+    # ``create-task-core.ts::logger.info('Task created', ...)`` for the
+    # ground-truth blueprint-vs-default distinction.
+    if config.approval_gate_cap is not None:
+        cap_log = f" approval_gate_cap={config.approval_gate_cap} approval_gate_cap_source=threaded"
+    else:
+        cap_log = " approval_gate_cap=unset approval_gate_cap_source=engine_default"
     log(
         "AGENT",
         f"Cedar policy engine initialized for task_type={config.task_type}"
-        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else ""),
+        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else "")
+        + cap_log,
     )
 
     # §4 step 7, §11.1: surface the starting pre-approval posture to the

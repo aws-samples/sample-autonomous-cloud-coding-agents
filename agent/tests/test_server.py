@@ -374,6 +374,119 @@ def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch
         assert server._debug_cw_failures == 1
 
 
+# Chunk 7c — _warn_cw parallels _debug_cw so warn-level invocation-payload
+# issues aren't invisible in production (AgentCore doesn't forward
+# container stdout to APPLICATION_LOGS).
+
+
+def test_warn_cw_prints_stamped_line_to_stdout(monkeypatch, capsys):
+    """stdout must still carry the ``[server/warn]`` prefix.
+
+    Local ``docker-compose`` runs rely on stdout; the existing
+    ``capsys``-based tests on ``_extract_invocation_params`` also rely
+    on the prefix so CloudWatch routing must NOT replace the local print.
+    """
+    monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
+    server._warn_cw("something went wrong", task_id="t-1")
+    captured = capsys.readouterr()
+    assert "[server/warn] something went wrong" in captured.out
+
+
+def test_warn_cw_no_log_group_is_noop(monkeypatch):
+    """_warn_cw skips the CloudWatch thread when LOG_GROUP_NAME is unset.
+
+    Local dev has no log group — the function must not attempt a
+    thread spawn. stdout line still fires (asserted separately above).
+
+    The assertion on ``threading.Thread`` being uncalled is load-bearing:
+    without it, a future refactor that spawned the thread before the
+    env check would pass this test silently. Explicitly patching the
+    env out also defends against a prior test leaking ``LOG_GROUP_NAME``
+    into ``os.environ``.
+    """
+    monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
+
+    thread_calls: list[tuple] = []
+
+    class _RecordingThread:
+        def __init__(self, *args, **kwargs):
+            thread_calls.append((args, kwargs))
+
+        def start(self) -> None:
+            thread_calls.append(("start",))
+
+    monkeypatch.setattr("server.threading.Thread", _RecordingThread)
+
+    server._warn_cw("hello", task_id="t-1")
+
+    assert thread_calls == [], (
+        f"_warn_cw must not spawn a thread when LOG_GROUP_NAME is unset, "
+        f"got calls: {thread_calls!r}"
+    )
+
+
+def test_warn_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch):
+    """Warn-path boto errors bump the same failure counter as debug.
+
+    A single alarm surface is intentional (§server.py comment on
+    ``_debug_cw_failures``). If the counter ever stops bumping on a
+    warn write failure the blind-warn alarm breaks silently.
+    """
+    with server._debug_cw_failures_lock:
+        server._debug_cw_failures = 0
+
+    class _BrokenBoto3:
+        @staticmethod
+        def client(*args, **kwargs):
+            raise RuntimeError("simulated boto failure")
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", _BrokenBoto3)
+
+    server._warn_cw_write_blocking(
+        log_group="/some/log-group",
+        task_id="t-1",
+        stamped="[server/warn] malformed payload",
+    )
+
+    with server._debug_cw_failures_lock:
+        assert server._debug_cw_failures == 1
+
+
+def test_warn_cw_write_blocking_uses_server_warn_stream(monkeypatch):
+    """Warn writes land in ``server_warn/<task_id>``, not the debug stream.
+
+    A separate stream lets operators alarm on warn traffic independently
+    of the (much noisier) ``server_debug`` breadcrumbs.
+    """
+    captured_streams: list[str] = []
+
+    class _FakeLogs:
+        class exceptions:
+            class ResourceAlreadyExistsException(Exception):
+                pass
+
+        def create_log_stream(self, *, logGroupName, logStreamName):
+            captured_streams.append(logStreamName)
+
+        def put_log_events(self, *, logGroupName, logStreamName, logEvents):
+            captured_streams.append(logStreamName)
+
+    class _FakeBoto3:
+        @staticmethod
+        def client(*args, **kwargs):
+            return _FakeLogs()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3)
+
+    server._warn_cw_write_blocking(
+        log_group="/some/log-group",
+        task_id="t-abc",
+        stamped="[server/warn] hi",
+    )
+
+    assert captured_streams == ["server_warn/t-abc", "server_warn/t-abc"]
+
+
 # ---------------------------------------------------------------------------
 # Chunk K: trace flag extraction (design §10.1)
 # ---------------------------------------------------------------------------

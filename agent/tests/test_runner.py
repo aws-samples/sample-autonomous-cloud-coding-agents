@@ -162,3 +162,44 @@ class TestInitializePolicyEngineAndHooks:
 
         kwargs = mock_policy_engine.call_args.kwargs
         assert "approval_gate_cap" not in kwargs
+
+    # --- Chunk 7c: cap + source surfaced in the init log line ---------------
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_init_log_includes_cap_and_threaded_source(
+        self, _mock_policy_engine, _mock_build_hooks, capsys
+    ):
+        # Non-None cap came from the orchestrator payload (blueprint value
+        # or the platform-default-50 frozen on the TaskRecord at submit).
+        # Log must surface the value + ``approval_gate_cap_source=threaded``
+        # using the same key name as ``create-task-core.ts`` so
+        # CloudWatch Insights queries can join / filter across both ends
+        # of the cascade without a field-name translation.
+        config = _config(approval_gate_cap=200)
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
+
+        captured = capsys.readouterr()
+        assert "Cedar policy engine initialized" in captured.out
+        assert "approval_gate_cap=200" in captured.out
+        assert "approval_gate_cap_source=threaded" in captured.out
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_init_log_marks_engine_default_when_cap_none(
+        self, _mock_policy_engine, _mock_build_hooks, capsys
+    ):
+        # Legacy task — cap falls through to ``PolicyEngine``'s own
+        # default. Operator signal is ``approval_gate_cap_source=engine_default``
+        # so a deploy with broken cap-plumbing (e.g. payload field
+        # dropped) is visible in logs as every task reporting
+        # engine_default instead of the expected threaded blueprint
+        # values. ``unset`` (not ``<engine_default>``) for the numeric
+        # value to avoid angle-bracket escaping in log-aggregation
+        # tooling.
+        config = _config(approval_gate_cap=None)
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
+
+        captured = capsys.readouterr()
+        assert "approval_gate_cap_source=engine_default" in captured.out
+        assert "approval_gate_cap=unset" in captured.out

@@ -18,7 +18,7 @@
  */
 
 import { App, Stack } from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
+import { Annotations, Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Blueprint, type BlueprintProps } from '../../src/constructs/blueprint';
 
@@ -440,6 +440,48 @@ describe('Blueprint construct', () => {
       security: { approvalGateCap: 500 },
     });
     expect(() => Template.fromStack(stackMax)).not.toThrow();
+  });
+
+  // --- Chunk 7c: synth-time info annotation when cap is omitted ----------
+
+  test('emits info annotation when approvalGateCap is not configured', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+    });
+
+    const annotations = Annotations.fromStack(stack);
+    annotations.hasInfo(
+      '/TestStack/Blueprint',
+      Match.stringLikeRegexp("security.approvalGateCap not configured for 'org/my-repo'"),
+    );
+  });
+
+  test('does NOT emit info annotation when approvalGateCap is configured', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      security: { approvalGateCap: 75 },
+    });
+
+    const annotations = Annotations.fromStack(stack);
+    const infos = annotations.findInfo(
+      '/TestStack/Blueprint',
+      Match.stringLikeRegexp('approvalGateCap not configured'),
+    );
+    expect(infos).toHaveLength(0);
   });
 
   test('onUpdate uses DynamoDB updateItem to preserve onboarded_at', () => {
