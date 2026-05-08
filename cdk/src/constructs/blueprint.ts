@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { Annotations } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
@@ -179,6 +180,19 @@ export class Blueprint extends Construct {
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
+
+    // Chunk 7c: emit a synth-time info annotation when the blueprint did
+    // not configure an override so operators see a signal that this repo
+    // will rely on the platform-default cap (50). Without this, the only
+    // way to notice the default was in effect was to inspect the TaskRecord
+    // at runtime — the default is a silent fallback at the handler layer.
+    if (this.approvalGateCap === undefined) {
+      Annotations.of(this).addInfo(
+        `security.approvalGateCap not configured for '${props.repo}'; `
+        + 'submit-time resolution will fall back to the platform default of 50. '
+        + 'Set security.approvalGateCap on the Blueprint to override.',
+      );
+    }
 
     // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));

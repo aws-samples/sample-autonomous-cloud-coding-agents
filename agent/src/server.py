@@ -29,6 +29,19 @@ from models import TaskResult
 from observability import set_session_id
 from pipeline import run_task
 
+# --- _debug_cw / _warn_cw failure counter -------------------------------
+# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
+# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
+# is invisible except for this metric. Single counter = single alarm
+# surface — the trade-off is that the alarm can't distinguish which writer
+# is broken (see Chunk 7c review notes). Defined BEFORE any function that
+# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
+# import-time safe: a daemon thread spawned from a write-blocking function
+# can never race with module-level globals still being assigned.
+_debug_cw_failures = 0
+_debug_cw_failures_lock = threading.Lock()
+_DEBUG_CW_FAILURE_EMIT_EVERY = 5
+
 
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """Write a debug line to a CloudWatch stream in a background thread.
@@ -72,13 +85,71 @@ def _debug_cw_exc(
     _debug_cw(f"{message} [{type(exc).__name__}: {exc}]\n{tb}", task_id=task_id)
 
 
-# --- _debug_cw failure counter -------------------------------------------
-# Counts write failures from the daemon thread. AgentCore doesn't forward
-# container stdout to APPLICATION_LOGS, so a broken _debug_cw is invisible
-# except for this metric.
-_debug_cw_failures = 0
-_debug_cw_failures_lock = threading.Lock()
-_DEBUG_CW_FAILURE_EMIT_EVERY = 5
+def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
+    """Emit a server-level warning to stdout AND CloudWatch.
+
+    Chunk 7c — AgentCore doesn't forward container stdout to
+    APPLICATION_LOGS (see the ``_debug_cw`` comment block above), so
+    warning ``print`` calls about malformed invocation payloads are
+    effectively invisible in production. Route them through the same
+    daemon-thread CloudWatch writer used by ``_debug_cw`` (writing to
+    the ``server_warn/<task_id>`` stream so operators can alarm on
+    warn traffic separately from debug noise).
+
+    The stdout ``print`` is preserved so local ``docker-compose`` runs
+    and the existing ``capsys``-based unit tests still observe the
+    line. CloudWatch delivery is fire-and-forget — failures bump the
+    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
+    so a silently broken writer still surfaces via that single metric.
+    """
+    stamped = f"[server/warn] {msg}"
+    print(stamped, flush=True)
+
+    log_group = os.environ.get("LOG_GROUP_NAME")
+    if not log_group:
+        return
+
+    _t = threading.Thread(
+        target=_warn_cw_write_blocking,
+        args=(log_group, task_id, stamped),
+        name="warn-cw-write",
+        daemon=True,
+    )
+    _t.start()
+
+
+def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
+    """Blocking CloudWatch write for ``_warn_cw`` — only called from a background thread.
+
+    Mirrors ``_debug_cw_write_blocking`` but writes to the
+    ``server_warn/<task_id>`` stream so warn-level traffic is easy to
+    alarm on independently of debug breadcrumbs. Failures bump the
+    shared ``_debug_cw_failures`` counter — a single alarm surface
+    covers both writers.
+    """
+    try:
+        import boto3
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("logs", region_name=region)
+
+        stream = f"server_warn/{task_id or 'server'}"
+        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream,
+            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
+        )
+    except Exception as _exc:
+        global _debug_cw_failures
+        with _debug_cw_failures_lock:
+            _debug_cw_failures += 1
+        print(
+            f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
 
 
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
@@ -370,11 +441,11 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     try:
         initial_approval_gate_count = int(raw_gate_count)
     except (TypeError, ValueError):
-        print(
-            "[server/warn] initial_approval_gate_count payload field is not an int "
+        _warn_cw(
+            "initial_approval_gate_count payload field is not an int "
             f"(type={type(raw_gate_count).__name__}, value={raw_gate_count!r}); "
             f"coerced to 0. task_id={inp.get('task_id', '')!r}",
-            flush=True,
+            task_id=inp.get("task_id"),
         )
         initial_approval_gate_count = 0
     # Chunk 7b (§4 step 5, decision #13): per-task cap resolved by the
@@ -389,11 +460,11 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         try:
             approval_gate_cap = int(raw_approval_gate_cap)
         except (TypeError, ValueError):
-            print(
-                "[server/warn] approval_gate_cap payload field is not an int "
+            _warn_cw(
+                "approval_gate_cap payload field is not an int "
                 f"(type={type(raw_approval_gate_cap).__name__}, value={raw_approval_gate_cap!r}); "
                 f"falling back to engine default. task_id={inp.get('task_id', '')!r}",
-                flush=True,
+                task_id=inp.get("task_id"),
             )
             approval_gate_cap = None
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
@@ -412,11 +483,11 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     if isinstance(raw_user_id, str):
         user_id = raw_user_id
     else:
-        print(
-            "[server/warn] user_id payload field is not a string "
+        _warn_cw(
+            "user_id payload field is not a string "
             f"(type={type(raw_user_id).__name__}); coerced to empty. "
             f"task_id={inp.get('task_id', '')!r}",
-            flush=True,
+            task_id=inp.get("task_id"),
         )
         user_id = ""
 
