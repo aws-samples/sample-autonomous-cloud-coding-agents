@@ -841,6 +841,106 @@ class TestTimedOutPath:
         assert "write_approval_timed_out" in progress.milestones()
 
 
+class TestChunk8aOutcomeEventSchema:
+    """Chunk 8a: outcome events must carry the fields the
+    ApprovalMetricsPublisher Lambda needs for its CloudWatch metrics:
+    ``created_at`` (decision-latency computation),
+    ``effective_timeout_s`` (timeout-breakdown histogram),
+    ``matching_rule_ids`` (rule_id dimension). Hooks.py propagates these
+    from the approval row ``row["created_at"]`` / ``row["timeout_s"]`` /
+    ``decision.matching_rule_ids`` — the assertions below keep the wiring
+    honest so a future refactor that drops one of the kwargs is caught
+    before the dashboard silently shows NaN.
+    """
+
+    def _last_call(self, progress: _RecordingProgress, name: str) -> dict:
+        for recorded_name, kwargs in reversed(progress.calls):
+            if recorded_name == name:
+                return kwargs
+        raise AssertionError(f"{name!r} was never called; got {progress.milestones()!r}")
+
+    def test_approved_propagates_created_at(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "APPROVED", "scope": "tool_type:Bash", "decided_at": "t1"},
+        )
+        _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+        kwargs = self._last_call(progress, "write_approval_granted")
+        # row["created_at"] is an ISO-8601 timestamp generated at hook
+        # entry; we don't care about its exact value, only that it
+        # propagates through to the writer call. A None here would
+        # mean hooks.py dropped the kwarg — regression.
+        assert kwargs.get("created_at") is not None
+
+    def test_denied_propagates_created_at(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "DENIED", "deny_reason": "nope", "decided_at": "t1"},
+        )
+        _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+        kwargs = self._last_call(progress, "write_approval_denied")
+        assert kwargs.get("created_at") is not None
+
+    def test_timed_out_propagates_schema_superset(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        fake_task_state.get_row_script.extend([{"status": "PENDING"}] * 5)
+        fake_task_state.best_effort_return = True
+        engine_with_soft_gate._task_default_timeout_s = 30
+
+        _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+        kwargs = self._last_call(progress, "write_approval_timed_out")
+        # All three Chunk 8a fields must propagate.
+        assert kwargs.get("created_at") is not None
+        assert kwargs.get("effective_timeout_s") == 30
+        # ``matching_rule_ids`` is a list copied from decision — shape-check only.
+        rule_ids = kwargs.get("matching_rule_ids")
+        assert isinstance(rule_ids, list)
+        # engine_with_soft_gate fixture uses a single blueprint rule
+        # with @rule_id("test_bash_foo") — should be present.
+        assert "test_bash_foo" in rule_ids
+
+
 # --- IMPL-24: VM-throttle + late-approval race ---------------------------
 
 
