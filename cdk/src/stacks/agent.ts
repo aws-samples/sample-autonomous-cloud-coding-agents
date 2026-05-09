@@ -164,7 +164,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: `${this.stackName}-guardrail`.slice(0, 50),
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
