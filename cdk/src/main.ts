@@ -33,10 +33,6 @@ Aspects.of(app).add(new AwsSolutionsChecks());
 
 const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
 
-if (stackName.length > 40) {
-  throw new Error(`stackName must be at most 40 characters (got ${stackName.length}). This limit ensures derived resource names (e.g. AgentCore runtime) stay within AWS service limits.`);
-}
-
 new AgentStack(
   app,
   stackName,
