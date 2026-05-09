@@ -119,7 +119,7 @@ export class AgentStack extends Stack {
       },
     ]);
 
-    const runtimeName = 'jean_cloude';
+    const runtimeName = this.stackName.replace(/-/g, '_');
 
     // Log groups (created before runtime so we can reference the name in env vars)
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
@@ -618,7 +618,7 @@ export class AgentStack extends Stack {
 
     // --- Bedrock model invocation logging (account-level) ---
     const invocationLogGroup = new logs.LogGroup(this, 'ModelInvocationLogGroup', {
-      logGroupName: '/aws/bedrock/model-invocation-logs',
+      logGroupName: `/aws/bedrock/model-invocation-logs/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });

@@ -296,7 +296,7 @@ describe('AgentStack', () => {
 
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
-      LogGroupName: '/aws/bedrock/model-invocation-logs',
+      LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',
       RetentionInDays: 90,
     });
   });
