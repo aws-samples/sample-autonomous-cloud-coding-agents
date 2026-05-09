@@ -45,7 +45,7 @@ describe('AgentMemory construct', () => {
   test('uses default memory name derived from stack name', () => {
     const { template } = createStack();
     template.hasResourceProperties('AWS::BedrockAgentCore::Memory', {
-      Name: 'mem_TestStack',
+      Name: 'bgagent_memory_TestStack',
     });
   });
 
