@@ -194,7 +194,6 @@ export class Blueprint extends Construct {
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
-      installLatestAwsSdk: false,
       timeout: Duration.minutes(5),
       onCreate: {
         service: 'DynamoDB',
