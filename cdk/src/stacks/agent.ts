@@ -119,7 +119,7 @@ export class AgentStack extends Stack {
       },
     ]);
 
-    const runtimeName = this.stackName.replace(/[^a-zA-Z0-9]/g, '_').replace(/^[^a-zA-Z]/, 'r').slice(0, 48);
+    const runtimeName = `jean_cloude_${this.stackName}`.replace(/[^a-zA-Z0-9]/g, '_').replace(/^[^a-zA-Z]/, 'r').slice(0, 48);
 
     // Log groups (created before runtime so we can reference the name in env vars)
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
