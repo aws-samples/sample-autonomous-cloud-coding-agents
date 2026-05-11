@@ -180,6 +180,12 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Automated re-onboarding** | Event-driven refresh of blueprint-related artifacts when the default branch changes materially (GitHub webhook); optional EventBridge schedule for periodic drift checks. Distinct from **Scheduled triggers** (task creation). |
 | **Dynamic onboarding artifacts** | When repo hygiene is weak, generate attachments for the agent context: codebase summaries, dependency graphs, suggested rules from layout (`REPO_ONBOARDING.md`). |
 
+### Documentation and specifications
+
+| Capability | Description |
+|------------|-------------|
+| **Exposed project specifications** | Publish and surface human- and machine-readable specs—for example OpenAPI or JSON Schema generated from the REST API, explicit extension-point and integration indexes, and stable links into architecture contracts—so operators and contributors can modify, extend, or fork the solution without reverse-engineering the codebase. Complements the design-doc links at the end of this page. |
+
 ### Cost governance
 
 | Capability | Description |
