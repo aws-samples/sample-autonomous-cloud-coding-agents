@@ -69,9 +69,11 @@ description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock"
 
 [tasks."security:grype"]
-description = "Run Grype"
+description = "Run Grype on source files; generated/vendor dirs are excluded because lockfile, Retire, and image scans cover dependencies and runtime artifacts"
 run = [
-  "grype . --fail-on high"
+  # Dependency locks, node packages, and the built image have dedicated scans.
+  # Keep this filesystem scan focused on source files, not generated/vendor output.
+  "grype . --fail-on high --exclude './cdk/cdk.out/**' --exclude './node_modules/**' --exclude './**/node_modules/**' --exclude './**/.venv/**' --exclude './docs/dist/**'"
 ]
 
 [tasks."security:retire"]
@@ -93,6 +95,7 @@ run = [
     { task = "security:retire" },
     { task = "security:gh-actions" },
     "MISE_EXPERIMENTAL=1 mise //agent:security",
+    "echo All good!"
 ]
 
 ##################
