@@ -28,7 +28,7 @@ import {
 import { CedarPolicyParseError, concatPolicies, parseRules } from './shared/cedar-policy';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { loadRepoConfig } from './shared/repo-config';
+import { checkRepoOnboarded, loadRepoConfig } from './shared/repo-config';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPoliciesResponse, PolicyRuleSummary } from './shared/types';
 
@@ -112,8 +112,32 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
     }
 
+    // Onboarding gate — same shape as ``POST /tasks`` (see
+    // ``create-task-core.ts::checkRepoOnboarded``). Originally this
+    // endpoint was lenient (loaded RepoConfig best-effort, fell
+    // through to built-ins on miss) on the theory that the built-in
+    // policy set is public and there was no info-leak concern. E2E
+    // testing surfaced the UX cost: users typo-ing a repo name get a
+    // 200 response with full built-ins and mistake it for proof the
+    // repo is onboarded. Behavior now matches the task-submit path —
+    // 422 REPO_NOT_ONBOARDED for any repo without an active
+    // RepoConfig row. The built-in set is still discoverable via any
+    // onboarded repo (e.g. ``scoropeza/agent-plugins``).
+    const onboardingResult = await checkRepoOnboarded(repoId);
+    if (!onboardingResult.onboarded) {
+      return errorResponse(
+        422,
+        ErrorCode.REPO_NOT_ONBOARDED,
+        `Repository '${repoId}' is not onboarded. Register it with a Blueprint before querying policies.`,
+        requestId,
+      );
+    }
+
     // Cache check. Per-repo TTL of 5 min (IMPL-note — does not include
-    // user_id because the policy set is not user-specific).
+    // user_id because the policy set is not user-specific). Cache
+    // lookup happens AFTER the onboarding gate so a miss on
+    // ``does-not-exist/foo`` doesn't pollute the cache with a
+    // lookalike-to-a-real-repo response.
     const cached = cache.get(repoId);
     if (cached && cached.expiresAt > Date.now()) {
       return successResponse(200, cached.response, requestId);

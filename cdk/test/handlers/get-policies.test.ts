@@ -21,6 +21,7 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 const mockSend = jest.fn();
 const mockLoadRepoConfig = jest.fn();
+const mockCheckRepoOnboarded = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({})),
@@ -32,6 +33,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 }));
 jest.mock('../../src/handlers/shared/repo-config', () => ({
   loadRepoConfig: (...args: unknown[]) => mockLoadRepoConfig(...args),
+  checkRepoOnboarded: (...args: unknown[]) => mockCheckRepoOnboarded(...args),
 }));
 
 let ulidCounter = 0;
@@ -76,6 +78,12 @@ function makeEvent(repoId = 'owner%2Frepo'): APIGatewayProxyEvent {
 beforeEach(() => {
   mockSend.mockReset();
   mockLoadRepoConfig.mockReset();
+  mockCheckRepoOnboarded.mockReset();
+  // Default: assume repos are onboarded so existing tests that
+  // predate the Chunk 10 onboarding gate continue to exercise the
+  // happy path. The new T1.4-regression test explicitly overrides
+  // this to simulate a non-onboarded repo.
+  mockCheckRepoOnboarded.mockResolvedValue({ onboarded: true });
   ulidCounter = 0;
   _resetCacheForTests();
 });
@@ -93,6 +101,42 @@ describe('get-policies', () => {
     (event.pathParameters as { repo_id?: string }) = {};
     const res = await handler(event);
     expect(res.statusCode).toBe(400);
+  });
+
+  // Chunk 10 E2E T1.4: ``GET /repos/{repo}/policies`` must gate on
+  // onboarding the same way ``POST /tasks`` does. Previously the
+  // handler was lenient — a typo'd repo name returned 200 with the
+  // built-in policies, leading users to mistake the response for proof
+  // the repo was onboarded.
+
+  test('422 REPO_NOT_ONBOARDED when repo is not in RepoTable', async () => {
+    mockSend.mockResolvedValue({}); // rate-limit update succeeds
+    mockCheckRepoOnboarded.mockResolvedValue({ onboarded: false });
+
+    const res = await handler(makeEvent('typo%2Frepo'));
+    expect(res.statusCode).toBe(422);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe('REPO_NOT_ONBOARDED');
+    expect(body.error.message).toContain('typo/repo');
+    // loadRepoConfig must NOT have been called — the gate short-circuits.
+    expect(mockLoadRepoConfig).not.toHaveBeenCalled();
+  });
+
+  test('422 gate runs after rate-limit (rate-limited caller gets 429, not 422)', async () => {
+    // Rate-limit writes fail with ConditionalCheckFailed BEFORE the
+    // onboarding check. A user hammering the endpoint must see the
+    // 429 (their own fault) rather than leaking which repos are
+    // onboarded via a 422-vs-200 timing oracle.
+    mockSend.mockRejectedValue(
+      Object.assign(new Error('rate limit exceeded'), {
+        name: 'ConditionalCheckFailedException',
+      }),
+    );
+    mockCheckRepoOnboarded.mockResolvedValue({ onboarded: false });
+
+    const res = await handler(makeEvent('typo%2Frepo'));
+    expect(res.statusCode).toBe(429);
+    expect(mockCheckRepoOnboarded).not.toHaveBeenCalled();
   });
 
   test('200 with built-in hard + soft rule summaries when repo has no custom policies', async () => {

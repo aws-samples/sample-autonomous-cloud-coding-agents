@@ -51,6 +51,13 @@ RUN uv sync --frozen --no-dev --directory /app
 # Copy agent code (ARG busts cache so file edits are always picked up)
 ARG CACHE_BUST=0
 COPY src/ /app/src/
+# Cedar HITL built-in policy files (hard_deny.cedar + soft_deny.cedar).
+# ``agent/src/policy.py::_POLICIES_DIR`` resolves to ``/app/policies``
+# at import time; without these files the PolicyEngine init raises
+# ``missing built-in hard-deny policies`` and every task fails at 0
+# turns before the agent even connects to the CLI. Discovered during
+# Chunk 10 E2E T2.2 — the Dockerfile previously only copied ``src/``.
+COPY policies/ /app/policies/
 COPY prepare-commit-msg.sh /app/
 COPY test_sdk_smoke.py test_subprocess_threading.py /app/
 
