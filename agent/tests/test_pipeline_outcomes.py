@@ -42,6 +42,20 @@ class TestResolveOverallTaskStatus:
         assert err is not None
         assert "agent_status='error'" in err
 
+    def test_error_status_preserves_bedrock_entitlement_message(self):
+        """Runner maps ResultMessage.is_error to agent_status=error; pipeline must fail."""
+        ar = AgentResult(
+            status="error",
+            error=(
+                "The model us.anthropic.claude-sonnet-4-6 is not available "
+                "on your bedrock deployment."
+            ),
+        )
+        overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert overall == "error"
+        assert err is not None
+        assert "not available" in err
+
 
 class TestChainPriorAgentError:
     def test_no_agent_result(self):

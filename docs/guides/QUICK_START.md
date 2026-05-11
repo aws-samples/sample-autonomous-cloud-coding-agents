@@ -7,6 +7,7 @@ Go from zero to your first agent-created pull request in about 30 minutes. This 
 Install these before you begin:
 
 - **AWS account** with credentials configured (`aws configure`). If you use named profiles, set `AWS_PROFILE` before running any commands in this guide.
+- **Amazon Bedrock** — The agent invokes Claude through Bedrock. IAM `grantInvoke` in the CDK stack is required but **not sufficient**: your account must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for the model you use (including Anthropic first-time use where applicable, Marketplace subscription flow on first serverless use, and a valid payment method for Marketplace-backed models). See **Amazon Bedrock before your first task** after Step 3.
 - **Docker** - for building the agent container image
 - **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
 - **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
@@ -60,17 +61,25 @@ Keep the token value - you will store it in AWS Secrets Manager after deploying.
 
 Every repository the agent can work on must be **onboarded** as a `Blueprint` construct in the CDK stack. The Blueprint writes a configuration record to DynamoDB; the orchestrator checks this before accepting tasks.
 
-Open `cdk/src/stacks/agent.ts`, find the `Blueprint` block, and set `repo` to your fork:
+For the sample **AgentPlugins** blueprint, `cdk/src/stacks/agent.ts` resolves the GitHub `owner/repo` in this order: the **`BLUEPRINT_REPO`** environment variable, then CDK context **`blueprintRepo`**, then the default `awslabs/agent-plugins`:
 
 ```typescript
-new Blueprint(this, 'AgentPluginsBlueprint', {
-  repo: 'your-username/agent-plugins',  // your fork
+const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
+const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
+  repo: blueprintRepo,
   repoTable: repoTable.table,
-  // ... other props stay the same
 });
 ```
 
-The `repo` value must match **exactly** what you will pass to the CLI later (`owner/repo` format).
+You can point that blueprint at your fork **without editing the stack** by setting one of the following before `mise run build` or `mise run //cdk:deploy` (same shell session):
+
+```bash
+export BLUEPRINT_REPO=your-username/agent-plugins
+```
+
+Alternatively, set CDK context (for example in `cdk/cdk.json` under `"context"`, or for a single deploy: `cdk deploy -c blueprintRepo=your-username/agent-plugins`). Environment variable wins over context when both are set.
+
+The resolved `repo` value must match **exactly** what you pass to the CLI later (`owner/repo` format). To onboard **additional** repositories, add more `Blueprint` constructs in `agent.ts` and redeploy (see [Onboard your own repositories](#onboard-your-own-repositories) below).
 
 ## Step 3 - Deploy
 
@@ -93,6 +102,19 @@ mise run //cdk:deploy
 ```
 
 The X-Ray commands are a one-time per-account setup. On a fresh account the `put-resource-policy` call is required first — without it, the `update-trace-segment-destination` command fails with an `AccessDeniedException` because X-Ray cannot write to the `aws/spans` log group. CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes - most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
+
+### Amazon Bedrock before your first task
+
+The stack grants the AgentCore runtime `bedrock:InvokeModel*` on the foundation models and **cross-Region inference profiles** declared in `cdk/src/stacks/agent.ts` (`grantInvoke`). That covers **IAM only**.
+
+You must also be able to **invoke the model in Bedrock** from your account (and Region):
+
+1. **Access and subscription** — Bedrock serverless foundation models are used with the right IAM and, for third-party models, AWS Marketplace permissions; first-time subscription can take up to several minutes. Missing prerequisites often surface as `AccessDeniedException`. See [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) in the Bedrock User Guide.
+2. **Anthropic first-time use** — For Anthropic models, submit use-case details once per account (console model catalog or `PutUseCaseForModelAccess`) before invocation, as described in the same guide (unless you use the documented `bedrock-mantle` exception).
+3. **Inference profile as `modelId`** — For `InvokeModel` / streaming, pass the **inference profile** ID or ARN where Bedrock requires it (for example `us.anthropic.claude-sonnet-4-6` for US cross-Region Sonnet 4.6). See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
+4. **Cross-Region routing** — System-defined inference profiles can route across Regions within a geography. IAM (and any SCPs) must allow the profile and underlying model in **all relevant Regions**; see [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
+
+If a task fails immediately with text like the model is **not available on your Bedrock deployment**, open the Bedrock console model catalog for your deployment Region, complete access steps for that model family, align the repo `model_id` (DynamoDB / Blueprint) and runtime IAM with an **enabled** inference profile, then redeploy and retry.
 
 ## Step 4 - Store the GitHub token
 
@@ -207,7 +229,8 @@ Here is what the platform did after you ran `bgagent submit`:
 | `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |
 | CDK deploy prompts for approval and hangs | Non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` to `cdk deploy` or use an interactive terminal |
 | `put-secret-value` returns double-dot endpoint | `REGION` variable is empty | Set `REGION=us-east-1` (or your actual region) before running the command |
-| `REPO_NOT_ONBOARDED` on task submit | Blueprint `repo` does not match what you passed to the CLI | Check `cdk/src/stacks/agent.ts` - the `repo` value must be exactly `owner/repo` matching your fork |
+| Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above; confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID such as `us.anthropic.claude-sonnet-4-6` where required; keep `grantInvoke` in `agent.ts` aligned with that model |
+| `REPO_NOT_ONBOARDED` on task submit | Blueprint `repo` does not match what you passed to the CLI | Confirm `BLUEPRINT_REPO`, CDK context `blueprintRepo`, or the `repo` prop on the `Blueprint` in `cdk/src/stacks/agent.ts` resolves to exactly the same `owner/repo` you pass to the CLI |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | PAT is missing required permissions or is scoped to the wrong repo | Regenerate the PAT with Contents (read/write) and Pull requests (read/write) scoped to your fork, then update Secrets Manager |
 | Task stuck in `SUBMITTED` | Orchestrator Lambda may not have been invoked | Check CloudWatch logs for the orchestrator Lambda; verify the stack deployed successfully |
 | `node: command not found` in `cli/` | mise shell activation missing | Run `eval "$(mise activate zsh)"` and confirm `node --version` shows v22.x |
@@ -236,7 +259,7 @@ new Blueprint(this, 'CustomBlueprint', {
   repo: 'my-org/my-service',
   repoTable: repoTable.table,
   agent: {
-    modelId: 'anthropic.claude-sonnet-4-6',
+    modelId: 'us.anthropic.claude-sonnet-4-6',
     maxTurns: 50,
     systemPromptOverrides: 'Always write tests. Use conventional commits.',
   },

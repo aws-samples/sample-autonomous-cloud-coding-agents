@@ -93,12 +93,14 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `AWS_SECRET_ACCESS_KEY` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
 | `AWS_SESSION_TOKEN` | No | | For temporary credentials |
 | `AWS_PROFILE` | No | | Profile for `aws configure export-credentials` in `run.sh`, or default profile when using the `~/.aws` mount fallback |
-| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-sonnet-4-6` | Bedrock model ID |
+| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-sonnet-4-6` | Bedrock **inference profile** or model ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
 | `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model ID for the pre-flight safety check (see below) |
 | `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
+
+**Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Use an inference profile ID such as `us.anthropic.claude-sonnet-4-6` when Bedrock requires it. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 
 **Pre-flight check model**: Claude Code runs a quick safety verification using a small Haiku model before executing each tool command. On Bedrock, the default Haiku model ID may not be enabled in your account, causing the check to time out with *"Pre-flight check is taking longer than expected"* warnings. The agent sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a known-available Bedrock Haiku model ID to avoid this. If you see pre-flight timeout warnings, verify that this model is enabled in your Bedrock model access settings.
 

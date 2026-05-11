@@ -283,6 +283,18 @@ const PATTERNS: readonly ErrorPattern[] = [
 
   // --- Config ---
   {
+    pattern: /not available on your bedrock|not available.*bedrock deployment/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Bedrock model not available in this account or Region',
+      description:
+        'The requested model or inference profile cannot be invoked. This is distinct from IAM deny errors: the account may still need Marketplace subscription flow for the model, Anthropic first-time use (use case) submission, or the model may not be supported in this Region.',
+      remedy:
+        'Complete model access prerequisites in Amazon Bedrock (Anthropic first-time use via the console model catalog or PutUseCaseForModelAccess; AWS Marketplace Subscribe/ViewSubscriptions for first-time serverless model enablement where required; valid payment method for Marketplace-backed models). Grant bedrock:InvokeModel* on the inference profile and foundation model. For InvokeModel, use a supported inference profile ID in modelId where on-demand requires it. See https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html and https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html',
+      retryable: false,
+    },
+  },
+  {
     pattern: /Blueprint config load failed/i,
     classification: {
       category: ErrorCategory.CONFIG,
