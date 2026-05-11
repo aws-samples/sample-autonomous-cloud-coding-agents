@@ -14,3 +14,7 @@ paths = [
 [[allowlists]]
 description = "Mock workload access token in CDK handler tests (not a real credential)."
 stopwords = ["wat-opaque-123"]
+
+[[allowlists]]
+description = "Test fixture signing secret in Slack verification unit test (not a real credential)."
+stopwords = ["test-signing-secret-abc123"]
