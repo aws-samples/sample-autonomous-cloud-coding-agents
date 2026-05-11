@@ -7,7 +7,7 @@ FROM --platform=$TARGETPLATFORM python:3.13-slim
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
 
-# Install system dependencies in a single layer:
+# Install system dependencies in multiple layers:
 #   - Node.js 20 (required by Claude Code CLI)
 #   - git (repo operations)
 #   - gh (GitHub CLI for PR creation)
@@ -20,19 +20,26 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         gnupg && \
-    # Node.js 20
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    # Cleanup early to keep peak disk usage low during builds.
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
-    # GitHub CLI
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# GitHub CLI (gh)
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends gh && \
-    # Cleanup
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
