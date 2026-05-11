@@ -119,17 +119,15 @@ export class AgentStack extends Stack {
       },
     ]);
 
-    const runtimeName = 'jean_cloude';
-
     // Log groups (created before runtime so we can reference the name in env vars)
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${runtimeName}`,
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
     const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${runtimeName}`,
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
@@ -164,7 +162,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: 'task-input-guardrail',
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
@@ -284,7 +282,6 @@ export class AgentStack extends Stack {
     // AgentCore's account-level runtimeName uniqueness and triggering an
     // UPDATE_ROLLBACK.
     const runtime = new agentcore.Runtime(this, 'Runtime', {
-      runtimeName,
       agentRuntimeArtifact: artifact,
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
@@ -618,7 +615,7 @@ export class AgentStack extends Stack {
 
     // --- Bedrock model invocation logging (account-level) ---
     const invocationLogGroup = new logs.LogGroup(this, 'ModelInvocationLogGroup', {
-      logGroupName: '/aws/bedrock/model-invocation-logs',
+      logGroupName: `/aws/bedrock/model-invocation-logs/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
@@ -671,12 +668,8 @@ export class AgentStack extends Stack {
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
         ignoreErrorCodesMatching: '.*',
       },
-      onDelete: {
-        service: 'Bedrock',
-        action: 'deleteModelInvocationLoggingConfiguration',
-        parameters: {},
-        ignoreErrorCodesMatching: '.*',
-      },
+      // onDelete intentionally omitted — model invocation logging is account-level;
+      // deleting one stack should not disable logging that another stack relies on.
       policy: cr.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: [

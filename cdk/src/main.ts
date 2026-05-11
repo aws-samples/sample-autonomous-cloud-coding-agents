@@ -31,9 +31,11 @@ const app = new App();
 
 Aspects.of(app).add(new AwsSolutionsChecks());
 
+const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
+
 new AgentStack(
   app,
-  'backgroundagent-dev',
+  stackName,
   {
     env: devEnv,
     description: 'ABCA Development Stack',
