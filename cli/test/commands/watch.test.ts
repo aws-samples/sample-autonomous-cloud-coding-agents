@@ -877,7 +877,12 @@ describe('formatTerminalMessage', () => {
     })).toBe('Task 01KQ...XXX completed.');
   });
 
-  test('FAILED with structured classification renders category + title', () => {
+  test('FAILED with structured classification renders category + title + raw first line', () => {
+    // Chunk 10 E2E T2.2 follow-up: the classification alone is
+    // a human-readable summary but the raw error_message carries
+    // load-bearing context (file paths, IDs, remediation hints) that
+    // users need inline. Append the first line so multi-line stack
+    // traces don't spill into the terminal render.
     expect(formatTerminalMessage({
       task_id: 'T1',
       status: 'FAILED',
@@ -889,7 +894,66 @@ describe('formatTerminalMessage', () => {
         retryable: false,
       },
       error_message: 'Guardrail blocked: PR context blocked by content policy: CONTENT/PROMPT_ATTACK (LOW)',
-    })).toBe('Task T1 failed. guardrail: PR context blocked');
+    })).toBe(
+      'Task T1 failed. guardrail: PR context blocked — Guardrail blocked: PR context blocked by content policy: CONTENT/PROMPT_ATTACK (LOW)',
+    );
+  });
+
+  test('FAILED with known classification but no error_message keeps the classification-only path', () => {
+    // When the server classified but dropped the raw message, the
+    // category+title is all we have — don't append a dangling em-dash.
+    expect(formatTerminalMessage({
+      task_id: 'T1b',
+      status: 'FAILED',
+      error_classification: {
+        category: 'guardrail',
+        title: 'PR context blocked',
+        description: '',
+        remedy: '',
+        retryable: false,
+      },
+      error_message: null,
+    })).toBe('Task T1b failed. guardrail: PR context blocked');
+  });
+
+  test('FAILED with UNKNOWN classification prefers raw error_message over the bland title', () => {
+    // Chunk 10 E2E T2.2 key fix: the classifier's catch-all branch
+    // previously turned ``missing built-in hard-deny policies: ...``
+    // (a concrete, actionable error) into the useless string
+    // ``unknown: Unexpected error`` on the user's terminal. The real
+    // signal was in ``error_message`` all along — show it.
+    expect(formatTerminalMessage({
+      task_id: 'T1c',
+      status: 'FAILED',
+      error_classification: {
+        category: 'unknown',
+        title: 'Unexpected error',
+        description: 'An unrecognized error occurred during task execution.',
+        remedy: 'Check the full error message and agent logs for details.',
+        retryable: false,
+      },
+      error_message: 'missing built-in hard-deny policies: /app/policies/hard_deny.cedar',
+    })).toBe(
+      'Task T1c failed. missing built-in hard-deny policies: /app/policies/hard_deny.cedar',
+    );
+  });
+
+  test('FAILED with UNKNOWN classification and no error_message falls back to the bland title', () => {
+    // Edge case: UNKNOWN + null message should still render SOMETHING
+    // rather than a bare prefix, so the user at least knows it wasn't
+    // a success.
+    expect(formatTerminalMessage({
+      task_id: 'T1d',
+      status: 'FAILED',
+      error_classification: {
+        category: 'unknown',
+        title: 'Unexpected error',
+        description: '',
+        remedy: '',
+        retryable: false,
+      },
+      error_message: null,
+    })).toBe('Task T1d failed. unknown: Unexpected error');
   });
 
   test('FAILED without classification falls back to error_message', () => {
@@ -914,20 +978,25 @@ describe('formatTerminalMessage', () => {
     })).toBe('Task T3 failed.');
   });
 
-  test('CANCELLED / TIMED_OUT non-COMPLETED terminals also include classification when present', () => {
+  test('CANCELLED with non-unknown classification still renders category + title + first line', () => {
     // Regression guard: the ``status === 'COMPLETED'`` check must be
     // exact so CANCELLED / TIMED_OUT still render the classification.
+    // Note: cancellation currently classifies as ``unknown: User
+    // cancelled``, which falls through to the raw-message path —
+    // test the NON-unknown branch with a synthesized classification.
     expect(formatTerminalMessage({
       task_id: 'T4',
       status: 'CANCELLED',
       error_classification: {
-        category: 'unknown',
-        title: 'User cancelled',
-        description: 'Task cancelled by user',
+        category: 'guardrail',
+        title: 'PR context blocked',
+        description: '',
         remedy: '',
-        retryable: true,
+        retryable: false,
       },
-      error_message: null,
-    })).toBe('Task T4 cancelled. unknown: User cancelled');
+      error_message: 'Guardrail blocked: PR context',
+    })).toBe(
+      'Task T4 cancelled. guardrail: PR context blocked — Guardrail blocked: PR context',
+    );
   });
 });
