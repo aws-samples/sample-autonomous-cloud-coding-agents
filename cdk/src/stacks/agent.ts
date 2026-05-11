@@ -119,17 +119,15 @@ export class AgentStack extends Stack {
       },
     ]);
 
-    const runtimeName = `jean_cloude_${this.stackName}`.replace(/[^a-zA-Z0-9]/g, '_').replace(/^[^a-zA-Z]/, 'r').slice(0, 48);
-
     // Log groups (created before runtime so we can reference the name in env vars)
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${runtimeName}`,
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
     const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${runtimeName}`,
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
@@ -284,7 +282,6 @@ export class AgentStack extends Stack {
     // AgentCore's account-level runtimeName uniqueness and triggering an
     // UPDATE_ROLLBACK.
     const runtime = new agentcore.Runtime(this, 'Runtime', {
-      runtimeName,
       agentRuntimeArtifact: artifact,
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,

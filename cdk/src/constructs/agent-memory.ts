@@ -18,7 +18,7 @@
  */
 
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
-import { Duration, Stack } from 'aws-cdk-lib';
+import { Duration } from 'aws-cdk-lib';
 import type * as iam from 'aws-cdk-lib/aws-iam';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -70,7 +70,7 @@ export class AgentMemory extends Construct {
     super(scope, id);
 
     this.memory = new agentcore.Memory(this, 'Memory', {
-      memoryName: props?.memoryName ?? `bgagent_memory_${Stack.of(this).stackName.replace(/[^a-zA-Z0-9]/g, '_')}`.slice(0, 48),
+      memoryName: props?.memoryName,
       description: 'Cross-task interaction memory for background coding agents',
       expirationDuration: props?.expirationDuration ?? Duration.days(365),
       memoryStrategies: [
