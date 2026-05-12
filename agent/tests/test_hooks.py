@@ -1313,7 +1313,11 @@ class TestPermissionDecisionReasonSanitization:
 
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         assert "\x1b" not in reason
-        assert reason.startswith("forbidden")
+        # Deny reason is wrapped in authoritative stop-language (see
+        # _apply_user_decision in hooks.py) — the raw reason text is
+        # still embedded verbatim after the AUTHORITATIVE DENY prefix.
+        assert reason.startswith("AUTHORITATIVE DENY from human reviewer:")
+        assert "forbidden" in reason
 
     def test_long_reason_truncated_to_500(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch

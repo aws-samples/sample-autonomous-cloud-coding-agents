@@ -29,7 +29,7 @@ import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
-import { checkRepoOnboarded, loadRepoConfig } from './repo-config';
+import { lookupRepo } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
 import {
   APPROVAL_GATE_CAP_DEFAULT,
@@ -89,20 +89,16 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
   }
 
-  // 1b. Check repo is onboarded (conditional — skipped when REPO_TABLE_NAME is not set)
-  const onboardingResult = await checkRepoOnboarded(body.repo);
-  if (!onboardingResult.onboarded) {
+  // 1b. Single RepoTable GetItem covers BOTH the onboarding gate AND
+  //     the Cedar HITL blueprint-cap resolution (§4 step 5, decision
+  //     #13). Capturing the cap at submit-time means mid-task blueprint
+  //     edits cannot shift the cap beneath a running task. Previously
+  //     this path issued two back-to-back GetItems for the same key;
+  //     ``lookupRepo`` consolidates them.
+  const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
+  if (!onboarded) {
     return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
   }
-
-  // 1c. Cedar HITL (§4 step 5, decision #13): load the full RepoConfig so
-  //     we can resolve the blueprint-configured approval-gate cap and
-  //     persist it on the TaskRecord — capturing the cap at submit-time
-  //     means mid-task blueprint edits cannot shift the cap beneath a
-  //     running task. Separate GetItem from ``checkRepoOnboarded`` for
-  //     now; the two calls can be consolidated when the onboarding check
-  //     grows further responsibilities.
-  const repoConfig = await loadRepoConfig(body.repo);
   const blueprintCap = repoConfig?.approval_gate_cap;
   let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
   if (blueprintCap !== undefined) {

@@ -504,6 +504,22 @@ async def _handle_require_approval(
         original_decision_ts=outcome.get("decided_at"),
     )
 
+    # Rule-level cache (§12.8 extension): on DENIED, record an entry
+    # per matching_rule_id so semantic retries — same rule, different
+    # input — get fast-denied without a new approval round-trip. Only
+    # populate on DENIED because TIMED_OUT is ambiguous (user was
+    # away, not actively refusing); TIMED_OUT cache entries stay
+    # input-hash-scoped.
+    if status == "DENIED":
+        for rule_id in decision.matching_rule_ids:
+            engine.recent_decisions.record_rule_decision(
+                tool_name,
+                rule_id,
+                decision="DENIED",
+                reason=outcome.get("reason", ""),
+                original_decision_ts=outcome.get("decided_at"),
+            )
+
     if status == "DENIED":
         engine.queue_denial_injection(
             request_id=request_id,
@@ -538,8 +554,30 @@ async def _handle_require_approval(
         )
 
     # Guaranteed surface (§6.5): truncated reason even when denial
-    # injection is pre-empted by a concurrent cancel.
-    reason_text = outcome.get("reason") or f"User {status.lower() if status else 'denied'}"
+    # injection is pre-empted by a concurrent cancel. Wrap the user's
+    # reason in authoritative stop-language — E2E Phase 4 observed
+    # the agent treating bare "User denied" as "try a different
+    # approach" and burning through max_turns retrying the same rule
+    # with trivial variations. The explicit AUTHORITATIVE-prefixed
+    # wording, combined with the rule-level recent-deny cache (§12.8),
+    # makes retries fail fast with clear feedback.
+    raw_reason = outcome.get("reason") or f"User {status.lower() if status else 'denied'}"
+    if status == "DENIED":
+        rule_hint = (
+            f" (matching rule{'s' if len(decision.matching_rule_ids) != 1 else ''}: "
+            f"{', '.join(decision.matching_rule_ids)})"
+            if decision.matching_rule_ids
+            else ""
+        )
+        reason_text = (
+            f"AUTHORITATIVE DENY from human reviewer: {raw_reason}{rule_hint}. "
+            "Do NOT retry this class of action with trivial variations; "
+            "the same rule will fast-deny subsequent attempts. Find an "
+            "alternative task strategy or report back to the user explaining "
+            "why progress is blocked."
+        )
+    else:
+        reason_text = raw_reason
     return _deny_response(reason_text)
 
 

@@ -18,11 +18,12 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sm from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
@@ -105,6 +106,16 @@ export class FanOutConsumer extends Construct {
       enforceSSL: true,
     });
 
+    // Explicit log group: without this Lambda auto-creates the group
+    // at first invocation with no retention cap. Declaring it here
+    // locks retention, makes the IAM grant graph discoverable by
+    // cdk-nag, and matches the pattern used in
+    // ``ApprovalMetricsPublisherConsumer`` and ``ecs-agent-cluster``.
+    const logGroup = new logs.LogGroup(this, 'FanOutFnLogs', {
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     this.fn = new lambda.NodejsFunction(this, 'FanOutFn', {
       entry: path.join(handlersDir, 'fanout-task-events.ts'),
       handler: 'handler',
@@ -112,6 +123,7 @@ export class FanOutConsumer extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(1),
       memorySize: 256,
+      logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],
       },

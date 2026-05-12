@@ -121,7 +121,7 @@ Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGI
 
 ## Step 5 - Create a Cognito user
 
-The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so you create a user via the AWS CLI. The password must be at least 12 characters with uppercase, lowercase, digits, and symbols.
+The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so you create a user via the AWS CLI. The pool requires the username to be a valid email address, a password of at least 12 characters mixing uppercase, lowercase, digits, and symbols, and the user's email to be pre-verified.
 
 ```bash
 USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
@@ -132,7 +132,9 @@ aws cognito-idp admin-create-user \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username you@example.com \
-  --temporary-password 'TempPass123!@'
+  --user-attributes Name=email,Value=you@example.com Name=email_verified,Value=true \
+  --temporary-password 'TempPass123!@' \
+  --message-action SUPPRESS
 
 aws cognito-idp admin-set-user-password \
   --region "$REGION" \
@@ -142,7 +144,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-The first command creates the user with a temporary password. The second sets a permanent password so you do not have to go through a password change flow on first login.
+The first command creates the user with a temporary password, pre-verifies the email (required or login fails with `User is not confirmed`), and suppresses Cognito's welcome email (which otherwise errors on accounts without SES configured). The second sets a permanent password so you do not have to go through a password change flow on first login.
 
 ## Step 6 - Configure the CLI and submit a task
 
