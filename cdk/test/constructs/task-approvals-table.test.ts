@@ -101,6 +101,12 @@ describe('TaskApprovalsTable', () => {
               'reason',
               'created_at',
               'timeout_s',
+              // Cedar HITL: surfaced by ``bgagent pending`` so users
+              // can see which rule(s) fired on each gate. Projection
+              // change after creation is destructive (see construct
+              // comment) — locking this into the test prevents a
+              // silent regression.
+              'matching_rule_ids',
             ]),
           },
         }),

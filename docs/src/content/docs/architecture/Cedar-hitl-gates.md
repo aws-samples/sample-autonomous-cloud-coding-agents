@@ -1371,9 +1371,24 @@ table.addGlobalSecondaryIndex({
   nonKeyAttributes: [
     'task_id', 'request_id', 'tool_name', 'tool_input_preview',
     'severity', 'reason', 'created_at', 'timeout_s',
+    'matching_rule_ids',
   ],
 });
 ```
+
+**Projection is fixed at design time.** DynamoDB rejects in-place
+updates to a GSI's `nonKeyAttributes` (the CloudFormation error
+string is "Cannot update GSI's properties other than Provisioned
+Throughput and Contributor Insights Specification"). Adding a new
+attribute to the pending-view projection post-ship requires either
+(a) dropping and recreating the table — destructive, invalidates
+every in-flight approval row, acceptable only in dev, or (b)
+creating a parallel GSI under a new name and cutting traffic
+over — operationally heavy. Any future chunk that extends
+TaskApprovalsTable with a field that needs to appear on
+`GET /v1/pending` MUST add it to this list BEFORE ship. The list is
+locked in by `cdk/test/constructs/task-approvals-table.test.ts` so a
+silent regression fails the test run.
 
 Attributes:
 

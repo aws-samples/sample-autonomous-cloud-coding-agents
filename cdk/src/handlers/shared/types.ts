@@ -234,6 +234,20 @@ export interface TaskDetail {
    *  the field being present; CLI download resolves this via the
    *  ``get-trace-url`` handler rather than hitting S3 directly. */
   readonly trace_s3_uri: string | null;
+  /** Cedar HITL: running counter of approval gates fired on this
+   *  task (TaskRecord §10.2, §13.6). Surfaced so CLI / dashboard
+   *  consumers can report how many gates a task used without re-
+   *  reading the internal TaskRecord. Null when the task predates
+   *  the counter or the agent never wrote one. */
+  readonly approval_gate_count: number | null;
+  /** Cedar HITL: per-task cap on total approval gates (TaskRecord
+   *  §4 step 5, §13.6). Captured at submit time from
+   *  ``Blueprint.security.approvalGateCap ?? 50``. Null only on
+   *  pre-Chunk-7b records. */
+  readonly approval_gate_cap: number | null;
+  /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
+   *  ``request_id`` of the pending approval row. Null otherwise. */
+  readonly awaiting_approval_request_id: string | null;
 }
 
 /**
@@ -374,6 +388,17 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,
+    approval_gate_count: coerceNumericOrNull(
+      record.approval_gate_count,
+      { ...ctx, field: 'approval_gate_count' },
+      logger,
+    ),
+    approval_gate_cap: coerceNumericOrNull(
+      record.approval_gate_cap,
+      { ...ctx, field: 'approval_gate_cap' },
+      logger,
+    ),
+    awaiting_approval_request_id: record.awaiting_approval_request_id ?? null,
   };
 }
 
@@ -608,6 +633,10 @@ export interface PendingApprovalSummary {
   readonly timeout_s: number;
   /** Derived: `created_at + timeout_s` in ISO 8601 UTC. */
   readonly expires_at: string;
+  /** Cedar rule ids that matched this request (design §10.1). Surfaced
+   *  so `bgagent pending` can show _why_ a gate fired without the user
+   *  spelunking TaskEventsTable. Empty array on pre-Cedar-HITL rows. */
+  readonly matching_rule_ids: readonly string[];
 }
 
 /**

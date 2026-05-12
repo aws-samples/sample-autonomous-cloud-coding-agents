@@ -140,6 +140,20 @@ export class TaskApprovalsTable extends Construct {
         'reason',
         'created_at',
         'timeout_s',
+        // Cedar HITL: surface which rule(s) fired on the gate in the
+        // pending-list response so `bgagent pending` can show _why_
+        // without a second read against the base table. Projected
+        // because the handler reads rows through this GSI.
+        //
+        // ARCHITECTURAL NOTE: DynamoDB rejects in-place updates to
+        // ``nonKeyAttributes`` on an existing GSI. Any future field
+        // that needs to appear on the pending view must be decided
+        // here at design time — adding one post-hoc requires a
+        // destructive migration (delete + recreate the table, or
+        // create a parallel GSI under a new name with shadow
+        // backfill). Chunks that extend TaskApprovalsTable should
+        // audit this list before shipping.
+        'matching_rule_ids',
       ],
     });
   }

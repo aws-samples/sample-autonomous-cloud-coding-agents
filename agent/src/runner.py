@@ -268,6 +268,7 @@ def _initialize_policy_engine_and_hooks(
         trajectory=trajectory,
         task_id=config.task_id or "",
         progress=progress,
+        user_id=config.user_id or "",
     )
     return policy_engine, hooks
 

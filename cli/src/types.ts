@@ -92,6 +92,16 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  /** Cedar HITL: running counter of approval gates fired on this
+   *  task. Null only on pre-Cedar-HITL records. */
+  readonly approval_gate_count: number | null;
+  /** Cedar HITL: per-task cap on total approval gates, captured at
+   *  submit time from the blueprint (default 50). Null only on
+   *  pre-Cedar-HITL records. */
+  readonly approval_gate_cap: number | null;
+  /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
+   *  ``request_id`` of the pending approval row. Null otherwise. */
+  readonly awaiting_approval_request_id: string | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
@@ -161,6 +171,12 @@ export interface CreateTaskRequest {
    * ``bgagent watch`` / notifications.
    */
   readonly trace?: boolean;
+  /** Cedar HITL per-task default approval timeout (design §7.3 step 5).
+   *  Valid range ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
+  readonly approval_timeout_s?: number;
+  /** Cedar HITL pre-approval allowlist seeded at task start (§7.3 step 4).
+   *  Each entry must be a valid ``ApprovalScope``. */
+  readonly initial_approvals?: readonly ApprovalScope[];
 }
 
 /**
@@ -337,6 +353,10 @@ export interface PendingApprovalSummary {
   readonly created_at: string;
   readonly timeout_s: number;
   readonly expires_at: string;
+  /** Cedar rule ids that matched this request — shown by
+   *  ``bgagent pending`` so users can see which rule fired without
+   *  spelunking TaskEventsTable. */
+  readonly matching_rule_ids: readonly string[];
 }
 
 /** GET /v1/pending response body. */

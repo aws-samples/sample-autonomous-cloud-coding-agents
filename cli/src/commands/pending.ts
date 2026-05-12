@@ -60,6 +60,9 @@ function renderText(pending: readonly PendingApprovalSummary[]): void {
     console.log(`  request_id: ${p.request_id}`);
     console.log(`  tool:       ${p.tool_name}    severity: ${p.severity}`);
     console.log(`  reason:     ${p.reason}`);
+    if (p.matching_rule_ids !== undefined && p.matching_rule_ids.length > 0) {
+      console.log(`  rules:      ${p.matching_rule_ids.join(', ')}`);
+    }
     console.log(`  preview:    ${p.tool_input_preview}`);
     console.log(`  created:    ${p.created_at}`);
     console.log(`  expires:    ${p.expires_at} (timeout_s=${p.timeout_s})`);
