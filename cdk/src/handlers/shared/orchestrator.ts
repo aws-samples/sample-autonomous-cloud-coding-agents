@@ -23,9 +23,10 @@ import { ulid } from 'ulid';
 import { hydrateContext } from './context-hydration';
 import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
+import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
-import type { TaskRecord } from './types';
+import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
@@ -240,7 +241,27 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
+    approval_gate_cap: repoConfig?.approval_gate_cap,
   };
+}
+
+/**
+ * Cedar HITL Chunk 7b: structural guard on the TaskRecord's persisted
+ * ``approval_gate_cap`` before we thread it into the agent payload. The
+ * submit path bounds-checks the blueprint value before writing it
+ * (``create-task-core.ts``), so under a clean flow this guard is
+ * tautologically satisfied. It exists to catch hand-edited DDB rows /
+ * schema drift — a corrupted value would otherwise crash the agent's
+ * ``PolicyEngine.__init__`` at container start, which is much worse UX
+ * than "silently fall through to the engine default of 50 and warn."
+ */
+function isValidApprovalGateCap(value: unknown): value is number {
+  return (
+    typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= APPROVAL_GATE_CAP_MIN
+    && value <= APPROVAL_GATE_CAP_MAX
+  );
 }
 
 /**
@@ -321,9 +342,36 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   // max_budget_usd uses 2-tier override (no platform default — absent means unlimited).
   const effectiveBudget = task.max_budget_usd ?? blueprintConfig?.max_budget_usd;
 
+  // Chunk 7b: warn if a persisted approval_gate_cap is present but not
+  // a valid integer in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
+  // The payload block below silently omits invalid values (rather than
+  // crashing container start on PolicyEngine.__init__), but the only
+  // way to reach this branch is schema drift or a hand-edited DDB row,
+  // so it's worth an operator-visible signal — otherwise a corrupted
+  // record would quietly revert the task to the engine default-50.
+  if (
+    task.approval_gate_cap !== undefined
+    && !isValidApprovalGateCap(task.approval_gate_cap)
+  ) {
+    logger.warn('TaskRecord.approval_gate_cap is not a valid integer in bounds; omitting from agent payload', {
+      task_id: task.task_id,
+      approval_gate_cap: task.approval_gate_cap,
+      min: APPROVAL_GATE_CAP_MIN,
+      max: APPROVAL_GATE_CAP_MAX,
+    });
+  }
+
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
+    // user_id is required by the agent ONLY when ``trace`` is true —
+    // the agent writes the trajectory to
+    // ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1) and the
+    // handler's per-caller-prefix guard relies on the agent landing
+    // under the submitter's prefix. Threaded unconditionally so
+    // scripts that inspect the payload can always see it; costs one
+    // Cognito-sub-sized string in the JSON.
+    user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
     task_type: task.task_type ?? 'new_task',
@@ -332,9 +380,45 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
+    // Only include when true so the agent's ``inp.get("trace", False)``
+    // default semantics remain the no-op path. Keeps the wire payload
+    // slim for the common non-trace case.
+    ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    // Cedar HITL: the agent's PreToolUse hook uses this to compute
+    // the maxLifetime ceiling on per-gate approval timeouts (§6.5).
+    // Stamped at HYDRATING → RUNNING transition time so the clock
+    // only starts when the container is alive. Format is ISO 8601
+    // UTC to match the rest of the TaskRecord timestamp fields.
+    task_started_at: new Date().toISOString(),
+    // Cedar HITL pre-approval data (§7.3). Threaded so the agent's
+    // PolicyEngine can seed ApprovalAllowlist + set
+    // task_default_timeout_s without a second DDB round-trip.
+    ...(task.approval_timeout_s !== undefined && { approval_timeout_s: task.approval_timeout_s }),
+    ...(task.initial_approvals && task.initial_approvals.length > 0 && { initial_approvals: task.initial_approvals }),
+    // Cedar HITL Chunk 7 (§13.6): seed the engine's per-task gate
+    // counter from the TaskTable-persisted value so a container
+    // restart mid-task resumes the cumulative gate budget instead of
+    // resetting to 0. Only forwarded when non-zero so the agent's
+    // default (0) path remains unchanged for fresh tasks; the
+    // TaskRecord is already loaded above, so no extra DDB read.
+    ...(typeof task.approval_gate_count === 'number' && task.approval_gate_count > 0 && {
+      initial_approval_gate_count: task.approval_gate_count,
+    }),
+    // Cedar HITL Chunk 7b (§4 step 5, decision #13): thread the
+    // TaskRecord-persisted cap so the agent's PolicyEngine adopts the
+    // blueprint-configured value (or the platform default of 50 frozen
+    // at submit-time) instead of its compile-time fallback. Legacy task
+    // records predating Chunk 7b omit the field — the agent then falls
+    // back to its own default of 50. Extra guards past ``typeof``
+    // because a hand-edited DDB row could carry NaN, Infinity, a float,
+    // or an out-of-bounds value — all would crash PolicyEngine.__init__
+    // downstream; omitting here keeps the container starting cleanly
+    // with the engine default and leaves an operator-visible warning.
+    ...(isValidApprovalGateCap(task.approval_gate_cap)
+      && { approval_gate_cap: task.approval_gate_cap }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,
@@ -507,13 +591,29 @@ export async function finalizeTask(
     if (MEMORY_ID && !task.memory_written) {
       logger.info('Agent did not write memory — writing fallback episode', { task_id: taskId });
       try {
+        // Coerce at the shared helper rather than ``Number(...)`` so a
+        // corrupt string ``cost_usd`` from the DDB Document client
+        // collapses to ``undefined`` (and logs a warn) rather than
+        // rendering ``Cost: $NaN.`` into the episode text — see
+        // ``memory.ts::writeMinimalEpisode`` line 325 which calls
+        // ``.toFixed(4)`` on the value.
+        const durationS = coerceNumericOrNull(
+          task.duration_s,
+          { field: 'duration_s', task_id: taskId },
+          logger,
+        );
+        const costUsd = coerceNumericOrNull(
+          task.cost_usd,
+          { field: 'cost_usd', task_id: taskId },
+          logger,
+        );
         const written = await writeMinimalEpisode(
           MEMORY_ID,
           task.repo,
           taskId,
           currentStatus,
-          task.duration_s !== undefined ? Number(task.duration_s) : undefined,
-          task.cost_usd !== undefined ? Number(task.cost_usd) : undefined,
+          durationS ?? undefined,
+          costUsd ?? undefined,
         );
         if (!written) {
           logger.warn('Fallback episode write returned false', { task_id: taskId });
@@ -534,20 +634,32 @@ export async function finalizeTask(
     return;
   }
 
-  // If still RUNNING after timeout, transition to TIMED_OUT
-  if (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING) {
+  // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
+  // window closes, transition to TIMED_OUT. AWAITING_APPROVAL uses the
+  // same transition — the stranded-approval reconciler (Chunk 5,
+  // §13.6) is a secondary safety net with a longer timeout for tasks
+  // the orchestrator already lost track of.
+  if (
+    currentStatus === TaskStatus.RUNNING
+    || currentStatus === TaskStatus.FINALIZING
+    || currentStatus === TaskStatus.AWAITING_APPROVAL
+  ) {
     const terminalStatus = TaskStatus.TIMED_OUT;
     try {
       await transitionTask(taskId, currentStatus, terminalStatus, {
         completed_at: new Date().toISOString(),
-        error_message: 'Orchestrator poll timeout exceeded',
+        error_message: currentStatus === TaskStatus.AWAITING_APPROVAL
+          ? 'Orchestrator poll timeout exceeded while awaiting approval'
+          : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
       // Task may have transitioned concurrently — re-read and accept
       logger.warn('Finalization transition failed, task may have transitioned concurrently', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
     }
     await emitTaskEvent(taskId, 'task_timed_out', {
-      reason: 'poll_timeout',
+      reason: currentStatus === TaskStatus.AWAITING_APPROVAL
+        ? 'approval_poll_timeout'
+        : 'poll_timeout',
       poll_attempts: pollState.attempts,
     });
     await decrementConcurrency(userId);

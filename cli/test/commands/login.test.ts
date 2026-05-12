@@ -57,6 +57,7 @@ describe('login command', () => {
     mockSend.mockResolvedValue({
       AuthenticationResult: {
         IdToken: 'id-tok',
+        AccessToken: 'access-tok',
         RefreshToken: 'ref-tok',
         ExpiresIn: 3600,
       },
@@ -73,6 +74,7 @@ describe('login command', () => {
       fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'),
     );
     expect(creds.id_token).toBe('id-tok');
+    expect(creds.access_token).toBeUndefined();
     expect(consoleSpy).toHaveBeenCalledWith('Login successful. Credentials saved.');
   });
 });

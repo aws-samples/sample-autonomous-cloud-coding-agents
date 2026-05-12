@@ -1,4 +1,27 @@
-"""Agent invocation: environment setup and Claude Agent SDK execution."""
+"""Agent invocation: environment setup and Claude Agent SDK execution.
+
+Between-turns injection seam (Phase 2 Nudges)
+---------------------------------------------
+User nudges and other synthetic mid-task steering messages are injected via
+the Claude Agent SDK's ``Stop`` hook (registered in ``hooks.build_hook_matchers``),
+NOT the message-receive loop below.
+
+Rationale for the Stop hook seam:
+  * The SDK's ``ClaudeSDKClient.receive_response()`` generator is
+    single-producer; calling ``client.query()`` mid-stream races with the
+    CLI subprocess's stdin and is not reliable.
+  * The Stop hook fires at a well-defined point — after the agent finishes a
+    turn and before it decides to stop.  Returning
+    ``{"decision": "block", "reason": "<text>"}`` causes the SDK to continue
+    the conversation with ``<text>`` as the next user message, which is
+    exactly the semantics we need for nudge injection.
+  * A module-level registry ``hooks.between_turns_hooks`` lets Phase 3
+    approval gates add additional hooks without touching this file.
+
+Turn counting (``result.turns``) is incremented on ``AssistantMessage`` only
+and is NOT affected by the Stop hook's block/continue decision — nudge
+injection does not double-count turns.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +32,7 @@ from urllib.parse import quote
 
 from config import AGENT_WORKSPACE
 from models import AgentResult, TaskConfig, TokenUsage
+from progress_writer import _ProgressWriter
 from shell import log, truncate
 from telemetry import _TrajectoryWriter
 
@@ -151,8 +175,110 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     return otlp_endpoint, otlp_protocol
 
 
+def _initialize_policy_engine_and_hooks(
+    *,
+    config: TaskConfig,
+    trajectory: _TrajectoryWriter | None,
+    progress: _ProgressWriter,
+) -> tuple[Any, dict]:
+    """Construct the per-task ``PolicyEngine`` and wire its hook matchers.
+
+    Extracted from ``run_agent`` so the policy-engine bootstrap path is
+    directly unit-testable without spinning up the full SDK / agent loop.
+    Handles:
+
+    * Threading per-task approval params (``initial_approvals``,
+      ``approval_timeout_s``, and Chunk 7's ``initial_approval_gate_count``)
+      through to ``PolicyEngine.__init__``.
+    * Emitting the ``pre_approvals_loaded`` milestone (§4 step 7, §11.1)
+      unconditionally so "no pre-approvals seeded" is explicit rather than
+      inferred from silence.
+    * Building the SDK hook matchers that route PreToolUse / PostToolUse /
+      Stop invocations through the engine.
+    """
+    from hooks import build_hook_matchers
+    from policy import PolicyEngine
+
+    cedar_policies = config.cedar_policies
+    # Cedar HITL (§7.3, §10.2) — per-task approval defaults threaded
+    # from the orchestrator payload. Engine clamps invalid values
+    # at construction.
+    engine_kwargs: dict = {}
+    if config.initial_approvals:
+        engine_kwargs["initial_approvals"] = list(config.initial_approvals)
+    if config.approval_timeout_s is not None:
+        engine_kwargs["task_default_timeout_s"] = config.approval_timeout_s
+    # Chunk 7 (§13.6): seed the session counter from the TaskTable
+    # persisted value so a container restart mid-task resumes the
+    # cumulative gate budget and the ``approval_gate_cap`` remains
+    # the terminal bound across restarts.
+    if config.initial_approval_gate_count:
+        engine_kwargs["initial_approval_gate_count"] = config.initial_approval_gate_count
+    # Chunk 7b (§4 step 5, decision #13): adopt the per-task cap
+    # resolved at submit-time (blueprint override or platform default,
+    # frozen on the TaskRecord). When absent (legacy task predating
+    # Chunk 7b), ``PolicyEngine`` falls back to DEFAULT_APPROVAL_GATE_CAP
+    # so the behavior matches pre-Chunk-7b deploys.
+    if config.approval_gate_cap is not None:
+        engine_kwargs["approval_gate_cap"] = config.approval_gate_cap
+    policy_engine = PolicyEngine(
+        task_type=config.task_type,
+        repo=config.repo_url,
+        extra_policies=cedar_policies if cedar_policies else None,
+        **engine_kwargs,
+    )
+    # Chunk 7c: surface the resolved cap + its source so operators can
+    # distinguish a blueprint-threaded value from the engine's compile-time
+    # default on a container restart. Mirrors the ``approval_gate_cap_source``
+    # field on the handler's "Task created" log so both ends of the cascade
+    # carry the same key name — CloudWatch Insights queries can
+    # filter/group by ``approval_gate_cap_source`` across handler +
+    # agent events. Value domains differ intentionally: the handler
+    # distinguishes ``blueprint`` vs ``platform_default``, but the
+    # agent only sees the threaded number (blueprint-set or default-50
+    # frozen on the TaskRecord both look the same from here), so it
+    # emits ``threaded`` vs ``engine_default`` (the latter only fires
+    # for legacy tasks that predate Chunk 7b and have no cap on the
+    # TaskRecord at all). Cross-reference handler log at
+    # ``create-task-core.ts::logger.info('Task created', ...)`` for the
+    # ground-truth blueprint-vs-default distinction.
+    if config.approval_gate_cap is not None:
+        cap_log = f" approval_gate_cap={config.approval_gate_cap} approval_gate_cap_source=threaded"
+    else:
+        cap_log = " approval_gate_cap=unset approval_gate_cap_source=engine_default"
+    log(
+        "AGENT",
+        f"Cedar policy engine initialized for task_type={config.task_type}"
+        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else "")
+        + cap_log,
+    )
+
+    # §4 step 7, §11.1: surface the starting pre-approval posture to the
+    # live SSE stream + 90d DDB record so operators can see exactly which
+    # scopes were seeded at task start. Emit unconditionally (count=0,
+    # scopes=[]) so "no pre-approvals seeded" is explicit rather than
+    # inferred from silence.
+    progress.write_approval_pre_approvals_loaded(
+        count=len(config.initial_approvals),
+        scopes=list(config.initial_approvals),
+    )
+
+    hooks = build_hook_matchers(
+        engine=policy_engine,
+        trajectory=trajectory,
+        task_id=config.task_id or "",
+        progress=progress,
+        user_id=config.user_id or "",
+    )
+    return policy_engine, hooks
+
+
 async def run_agent(
-    prompt: str, system_prompt: str, config: TaskConfig, cwd: str = AGENT_WORKSPACE
+    prompt: str,
+    system_prompt: str,
+    config: TaskConfig,
+    cwd: str = AGENT_WORKSPACE,
+    trajectory: _TrajectoryWriter | None = None,
 ) -> AgentResult:
     """Invoke the Claude Agent SDK and stream output."""
     from claude_agent_sdk import (
@@ -195,27 +321,33 @@ async def run_agent(
     # per-task-type restrictions via PreToolUse hooks.
     allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
 
-    # Create trajectory writer and Cedar policy engine with hook matchers
-    trajectory = _TrajectoryWriter(config.task_id or "unknown")
+    # Create trajectory writer and Cedar policy engine with hook matchers.
+    # ``trace=config.trace`` is load-bearing: this writer emits the turn /
+    # tool_call / tool_result / error previews that the --trace flag is
+    # meant to raise to 4 KB. The pipeline.py milestone writer is a
+    # separate instance; dropping trace here silently no-ops the feature
+    # for every preview field that matters.
+    #
+    # When the caller (pipeline.py) injects a pre-built ``trajectory`` we
+    # use it as-is so the pipeline can retain access to the accumulator
+    # after ``run_agent`` returns (the --trace S3 upload runs in
+    # pipeline.py on terminal state — see design §10.1). For standalone
+    # invocations we fall back to a fresh writer with no accumulator.
+    if trajectory is None:
+        trajectory = _TrajectoryWriter(config.task_id or "unknown")
+    progress = _ProgressWriter(config.task_id or "unknown", trace=config.trace)
 
-    from hooks import build_hook_matchers
-    from policy import PolicyEngine
+    # Map tool_use_id → tool_name so we can label ToolResultBlocks that arrive
+    # in UserMessages (ToolResultBlock carries only the id, not the name).
+    tool_use_id_to_name: dict[str, str] = {}
 
-    task_type = config.task_type
-    repo_url = config.repo_url
-    cedar_policies = config.cedar_policies
-    policy_engine = PolicyEngine(
-        task_type=task_type,
-        repo=repo_url,
-        extra_policies=cedar_policies if cedar_policies else None,
+    # Engine is consumed by ``build_hook_matchers`` inside the helper; the
+    # caller only needs the hook matchers for ``ClaudeAgentOptions``.
+    _policy_engine, hooks = _initialize_policy_engine_and_hooks(
+        config=config,
+        trajectory=trajectory,
+        progress=progress,
     )
-    log(
-        "AGENT",
-        f"Cedar policy engine initialized for task_type={task_type}"
-        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else ""),
-    )
-
-    hooks = build_hook_matchers(engine=policy_engine, trajectory=trajectory)
 
     options = ClaudeAgentOptions(
         model=config.anthropic_model,
@@ -283,6 +415,10 @@ async def run_agent(
                         else:
                             log("TOOL", f"{block.name}: {truncate(str(tool_input))}")
                         turn_tool_calls.append({"name": block.name, "input": tool_input})
+                        # Track for later correlation with ToolResultBlocks in UserMessages
+                        tool_use_id = getattr(block, "id", "") or getattr(block, "tool_use_id", "")
+                        if tool_use_id:
+                            tool_use_id_to_name[tool_use_id] = block.name
                     elif isinstance(block, ToolResultBlock):
                         status, content = _format_tool_result(block)
                         log("RESULT", f"[{status}] {truncate(content)}")
@@ -303,6 +439,24 @@ async def run_agent(
                     tool_calls=turn_tool_calls,
                     tool_results=turn_tool_results,
                 )
+
+                # Write progress events for this turn
+                progress.write_agent_turn(
+                    turn=result.turns,
+                    model=message.model,
+                    thinking=turn_thinking.strip(),
+                    text=turn_text.strip(),
+                    tool_calls_count=len(turn_tool_calls),
+                )
+                for tc in turn_tool_calls:
+                    progress.write_agent_tool_call(
+                        tool_name=tc["name"],
+                        tool_input=str(tc.get("input", "")),
+                        turn=result.turns,
+                    )
+                # Tool result events are written from the UserMessage branch
+                # (ToolResultBlocks arrive as UserMessage content, not in
+                # AssistantMessage content).
 
             elif isinstance(message, ResultMessage):
                 message_counts["result"] += 1
@@ -355,6 +509,16 @@ async def run_agent(
                     usage=usage,
                 )
 
+                # Write progress cost update event
+                input_toks = usage.input_tokens if usage else 0
+                output_toks = usage.output_tokens if usage else 0
+                progress.write_agent_cost_update(
+                    cost_usd=getattr(message, "total_cost_usd", None),
+                    input_tokens=input_toks,
+                    output_tokens=output_toks,
+                    turn=getattr(message, "num_turns", 0),
+                )
+
             elif isinstance(message, UserMessage):
                 message_counts["other"] += 1
                 # UserMessage carries tool results fed back to the model.
@@ -365,6 +529,15 @@ async def run_agent(
                         if isinstance(block, ToolResultBlock):
                             status, content = _format_tool_result(block)
                             log("RESULT", f"[{status}] {truncate(content)}")
+                            tool_name = tool_use_id_to_name.get(
+                                getattr(block, "tool_use_id", ""), ""
+                            )
+                            progress.write_agent_tool_result(
+                                tool_name=tool_name,
+                                is_error=bool(block.is_error),
+                                content=content,
+                                turn=result.turns,
+                            )
                 elif isinstance(message.content, str):
                     log("USER", truncate(message.content))
 
@@ -378,6 +551,7 @@ async def run_agent(
 
     except Exception as e:
         log("ERROR", f"Exception during receive_response(): {type(e).__name__}: {e}")
+        progress.write_agent_error(error_type=type(e).__name__, message=str(e))
         if result.status == "unknown":
             result.status = "error"
             result.error = f"receive_response() failed: {e}"

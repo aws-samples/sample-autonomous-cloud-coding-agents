@@ -8,11 +8,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ---------------------------------------------------------------------------
 usage() {
     cat <<'EOF'
-Usage: ./agent/run.sh [--server] <owner/repo> [args...]
+Usage: ./agent/run.sh [--server] [--local-events] <owner/repo> [args...]
 
 Modes:
   (default)   Local batch mode — runs the agent, then exits
   --server    Server mode — starts FastAPI on port 8080 (/invocations + /ping)
+
+Flags:
+  --local-events  Connect to DynamoDB Local (port 8000) for progress events.
+                  Requires: docker compose up -d && ./agent/scripts/create-local-tables.sh
 
 The second argument (after flags) is auto-detected:
   - If numeric, treated as a GitHub issue number
@@ -47,6 +51,9 @@ Examples:
   # Local mode — dry run (print prompt, don't invoke agent)
   DRY_RUN=1 ./agent/run.sh "myorg/myrepo" 42
 
+  # Local mode with progress events to DynamoDB Local
+  ./agent/run.sh --local-events "myorg/myrepo" 42
+
   # Server mode — start FastAPI, then invoke via curl
   ./agent/run.sh --server "myorg/myrepo"
   curl http://localhost:8080/ping
@@ -61,11 +68,16 @@ EOF
 # Parse flags
 # ---------------------------------------------------------------------------
 MODE="local"
+LOCAL_EVENTS=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --server)
             MODE="server"
+            shift
+            ;;
+        --local-events)
+            LOCAL_EVENTS=true
             shift
             ;;
         --help|-h)
@@ -206,6 +218,24 @@ DOCKER_ARGS=(
 [[ -n "${MAX_TURNS:-}" ]] && DOCKER_ARGS+=(-e "MAX_TURNS=${MAX_TURNS}")
 [[ -n "${MAX_BUDGET_USD:-}" ]] && DOCKER_ARGS+=(-e "MAX_BUDGET_USD=${MAX_BUDGET_USD}")
 
+# Local events mode: connect to DynamoDB Local via the agent-local network
+if [[ "$LOCAL_EVENTS" == true ]]; then
+    # Verify DynamoDB Local is running
+    if ! docker inspect dynamodb-local >/dev/null 2>&1; then
+        echo "ERROR: DynamoDB Local is not running." >&2
+        echo "  Start it with: cd agent && docker compose up -d" >&2
+        echo "  Create tables: ./agent/scripts/create-local-tables.sh" >&2
+        exit 1
+    fi
+    DOCKER_ARGS+=(
+        --network agent-local
+        -e "TASK_EVENTS_TABLE_NAME=TaskEventsTable"
+        -e "TASK_TABLE_NAME=TaskTable"
+        -e "AWS_ENDPOINT_URL_DYNAMODB=http://dynamodb-local:8000"
+    )
+    echo "  Events:    DynamoDB Local (http://localhost:8000)"
+fi
+
 # Server mode: expose port 8080
 if [[ "$MODE" == "server" ]]; then
     DOCKER_ARGS+=(-p 8080:8080)
@@ -236,6 +266,9 @@ echo "Monitor in another terminal:"
 echo "  docker logs -f ${CONTAINER_NAME}        # live output"
 echo "  docker stats ${CONTAINER_NAME}          # CPU, memory, disk I/O"
 echo "  docker exec ${CONTAINER_NAME} du -sh /workspace  # disk usage"
+if [[ "$LOCAL_EVENTS" == true ]]; then
+echo "  mise run local:events                   # query progress events"
+fi
 echo ""
 
 if [[ "$MODE" == "server" ]]; then

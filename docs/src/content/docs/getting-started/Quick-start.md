@@ -178,6 +178,18 @@ node lib/bin/bgagent.js submit \
 
 The `--wait` flag polls until the task reaches a terminal state. A typical simple task takes 2-5 minutes. When it completes, you will see a PR URL in your terminal - open it in your browser to review the agent's work.
 
+Alternatively, use `watch` to stream progress events in real time:
+
+```bash
+node lib/bin/bgagent.js watch <TASK_ID>
+```
+
+While a task is running, you can steer the agent with a nudge:
+
+```bash
+node lib/bin/bgagent.js nudge <TASK_ID> "Also add a test for the edge case"
+```
+
 ## What happened behind the scenes
 
 Here is what the platform did after you ran `bgagent submit`:
@@ -248,4 +260,8 @@ Webhooks let external systems (GitHub Actions, CI pipelines) create tasks withou
 - **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
 - **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
 - **Review a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --review-pr 1`
+- **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` — stream progress events
+- **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` — mid-run guidance
+- **Enable tracing**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace` then `node lib/bin/bgagent.js trace download <TASK_ID>`
+- **Manage webhooks**: `node lib/bin/bgagent.js webhook create --name "My CI"` — automate task submission from external systems
 - **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](/developer-guide/introduction)

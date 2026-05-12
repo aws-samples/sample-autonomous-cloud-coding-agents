@@ -40,8 +40,10 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
 }));
 
 const mockCheckRepoOnboarded = jest.fn();
+const mockLoadRepoConfig = jest.fn();
 jest.mock('../../../src/handlers/shared/repo-config', () => ({
   checkRepoOnboarded: mockCheckRepoOnboarded,
+  loadRepoConfig: mockLoadRepoConfig,
 }));
 
 let ulidCounter = 0;
@@ -73,6 +75,8 @@ beforeEach(() => {
   mockLambdaSend.mockResolvedValue({});
   mockBedrockSend.mockResolvedValue({ action: 'NONE' });
   mockCheckRepoOnboarded.mockResolvedValue({ onboarded: true });
+  // Chunk 7b default: no blueprint cap override → submit path resolves to 50.
+  mockLoadRepoConfig.mockResolvedValue(null);
 });
 
 describe('createTaskCore', () => {
@@ -363,5 +367,206 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(400);
     expect(result.body).toContain('pr_number is only allowed');
+  });
+
+  // -- trace flag (design §10.1) --------------------------------------
+
+  test('trace: true persists on the task record and surfaces in the response', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'deep debug', trace: true },
+      makeContext(),
+      'req-trace-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.trace).toBe(true);
+
+    // Verify the PutCommand carried trace on the record.
+    const putCall = mockSend.mock.calls.find(
+      c => (c[0] as { _type?: string; input?: { Item?: { trace?: unknown } } })._type === 'Put'
+        && (c[0] as { input?: { Item?: unknown } }).input?.Item !== undefined,
+    );
+    expect(putCall).toBeDefined();
+    const item = (putCall![0] as { input: { Item: Record<string, unknown> } }).input.Item;
+    expect(item.trace).toBe(true);
+  });
+
+  test('trace omitted or false does NOT persist a trace field (slim wire payload)', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'normal' },
+      makeContext(),
+      'req-trace-2',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.trace).toBe(false);
+
+    const putCall = mockSend.mock.calls.find(
+      c => (c[0] as { _type?: string })._type === 'Put'
+        && (c[0] as { input?: { Item?: unknown } }).input?.Item !== undefined,
+    );
+    const item = (putCall![0] as { input: { Item: Record<string, unknown> } }).input.Item;
+    expect(item).not.toHaveProperty('trace');
+  });
+
+  test('trace with non-boolean type returns 400 (strict boolean validation)', async () => {
+    // Prevents a misbehaving client from accidentally enabling trace
+    // with ``"trace": "false"`` (truthy string).
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x', trace: 'true' } as any,
+      makeContext(),
+      'req-trace-3',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('trace');
+  });
+
+  test.each([
+    ['"false"', 'false'],
+    ['numeric 0', 0],
+    ['numeric 1', 1],
+    ['null', null],
+    ['empty object', {}],
+  ])('trace as %s is rejected with 400', async (_label, value) => {
+    // Adversarial inputs: the strict ``typeof === 'boolean'`` check
+    // must reject every non-boolean shape, not just the obvious string
+    // case. A future refactor that switches to a truthy test would
+    // pass the single "'true'" test above but break on these.
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x', trace: value } as any,
+      makeContext(),
+      `req-trace-adv-${String(value)}`,
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('trace');
+  });
+
+  // --- Chunk 7b: approval_gate_cap resolution (§4 step 5, decision #13) ---
+
+  function getPersistedTaskRecord() {
+    const putCall = mockSend.mock.calls.find(
+      (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === 'Tasks',
+    );
+    return putCall?.[0]?.input?.Item;
+  }
+
+  test('persists default approval_gate_cap of 50 when blueprint omits the override', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce(null);
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-default',
+    );
+    expect(result.statusCode).toBe(201);
+    const record = getPersistedTaskRecord();
+    expect(record.approval_gate_cap).toBe(50);
+  });
+
+  test('persists default-50 when RepoConfig exists but lacks approval_gate_cap', async () => {
+    // Legacy blueprint predating Chunk 7b: cedar_policies set, cap unset.
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      cedar_policies: ['permit (principal, action, resource);'],
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-legacy',
+    );
+    expect(result.statusCode).toBe(201);
+    const record = getPersistedTaskRecord();
+    expect(record.approval_gate_cap).toBe(50);
+  });
+
+  test('persists blueprint-configured approval_gate_cap when within bounds', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      approval_gate_cap: 150,
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-override',
+    );
+    expect(result.statusCode).toBe(201);
+    const record = getPersistedTaskRecord();
+    expect(record.approval_gate_cap).toBe(150);
+  });
+
+  test.each([
+    ['min (1)', 1],
+    ['max (500)', 500],
+  ])('accepts blueprint approval_gate_cap at boundary %s', async (_label, cap) => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      approval_gate_cap: cap,
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      `req-cap-boundary-${cap}`,
+    );
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord().approval_gate_cap).toBe(cap);
+  });
+
+  test.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['exceeds max', 501],
+    ['exceeds max big', 10000],
+  ])('returns 503 when blueprint approval_gate_cap is %s (out-of-bounds)', async (_label, cap) => {
+    // Blueprint synth validation should catch these, but a hand-edited
+    // RepoConfig row could bypass it. Fail closed so we never persist
+    // a bad cap onto a TaskRecord. 503 SERVICE_UNAVAILABLE (not 500)
+    // because the condition is permanent platform misconfiguration,
+    // not a transient internal error — 500 would misleadingly suggest
+    // retry-will-fix.
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      approval_gate_cap: cap,
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      `req-cap-bad-${cap}`,
+    );
+    expect(result.statusCode).toBe(503);
+    expect(JSON.parse(result.body).error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(JSON.parse(result.body).error.message).toContain('approval_gate_cap');
+  });
+
+  test.each([
+    ['string', '50'],
+    ['float', 3.14],
+    ['object', {}],
+  ])('returns 503 when blueprint approval_gate_cap is non-integer (%s)', async (_label, cap) => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      approval_gate_cap: cap as any,
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-non-int',
+    );
+    expect(result.statusCode).toBe(503);
+    expect(JSON.parse(result.body).error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(JSON.parse(result.body).error.message).toContain('not an integer');
   });
 });

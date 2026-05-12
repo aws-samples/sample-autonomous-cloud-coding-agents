@@ -3,15 +3,17 @@
 Exposes /invocations (POST) and /ping (GET) on port 8080,
 matching the AgentCore Runtime container contract.
 
-The /invocations handler accepts the task, spawns a background thread
-to run the agent pipeline, and returns immediately with an acceptance
-response. Task progress is tracked in DynamoDB (see task_state.py).
+The /invocations handler accepts the task, spawns a background thread to run
+the pipeline, and returns a small JSON acceptance immediately. Task progress
+is tracked in DynamoDB via ``task_state`` + ``ProgressWriter``.
 """
 
 import asyncio
+import contextlib as _ctx_for_debug
 import logging
 import os
 import threading
+import time as _time_for_debug
 import traceback
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -27,11 +29,167 @@ from models import TaskResult
 from observability import set_session_id
 from pipeline import run_task
 
-# Log the active event loop policy at import time so operators can diagnose
-# uvloop-related subprocess conflicts (see: uvloop SIGCHLD bug).
+# --- _debug_cw / _warn_cw failure counter -------------------------------
+# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
+# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
+# is invisible except for this metric. Single counter = single alarm
+# surface — the trade-off is that the alarm can't distinguish which writer
+# is broken (see Chunk 7c review notes). Defined BEFORE any function that
+# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
+# import-time safe: a daemon thread spawned from a write-blocking function
+# can never race with module-level globals still being assigned.
+_debug_cw_failures = 0
+_debug_cw_failures_lock = threading.Lock()
+_DEBUG_CW_FAILURE_EMIT_EVERY = 5
+
+
+def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
+    """Write a debug line to a CloudWatch stream in a background thread.
+
+    Mirrors the ``_emit_metrics_to_cloudwatch`` pattern in ``telemetry.py``
+    but runs the boto3 work in a daemon thread so the caller is never
+    blocked — AgentCore's health check hits the container within ~1 s of
+    boot, and synchronous boto3 calls during module import would starve
+    uvicorn of the CPU time it needs to bind port 8080 and answer
+    ``GET /ping``.
+
+    Always prints to stdout so local docker-compose runs see the line
+    immediately. CloudWatch writes are best-effort fire-and-forget.
+    """
+    stamped = f"[server/debug] {msg}"
+    # Always visible on local stdout.
+    print(stamped, flush=True)
+
+    log_group = os.environ.get("LOG_GROUP_NAME")
+    if not log_group:
+        return
+
+    # Fire-and-forget to avoid blocking the request / event loop.
+    _t = threading.Thread(
+        target=_debug_cw_write_blocking,
+        args=(log_group, task_id, stamped),
+        name="debug-cw-write",
+        daemon=True,
+    )
+    _t.start()
+
+
+def _debug_cw_exc(
+    message: str,
+    exc: BaseException,
+    *,
+    task_id: str | None = None,
+) -> None:
+    """Like ``_debug_cw`` but also captures the full traceback."""
+    tb = traceback.format_exc()
+    _debug_cw(f"{message} [{type(exc).__name__}: {exc}]\n{tb}", task_id=task_id)
+
+
+def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
+    """Emit a server-level warning to stdout AND CloudWatch.
+
+    Chunk 7c — AgentCore doesn't forward container stdout to
+    APPLICATION_LOGS (see the ``_debug_cw`` comment block above), so
+    warning ``print`` calls about malformed invocation payloads are
+    effectively invisible in production. Route them through the same
+    daemon-thread CloudWatch writer used by ``_debug_cw`` (writing to
+    the ``server_warn/<task_id>`` stream so operators can alarm on
+    warn traffic separately from debug noise).
+
+    The stdout ``print`` is preserved so local ``docker-compose`` runs
+    and the existing ``capsys``-based unit tests still observe the
+    line. CloudWatch delivery is fire-and-forget — failures bump the
+    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
+    so a silently broken writer still surfaces via that single metric.
+    """
+    stamped = f"[server/warn] {msg}"
+    print(stamped, flush=True)
+
+    log_group = os.environ.get("LOG_GROUP_NAME")
+    if not log_group:
+        return
+
+    _t = threading.Thread(
+        target=_warn_cw_write_blocking,
+        args=(log_group, task_id, stamped),
+        name="warn-cw-write",
+        daemon=True,
+    )
+    _t.start()
+
+
+def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
+    """Blocking CloudWatch write for ``_warn_cw`` — only called from a background thread.
+
+    Mirrors ``_debug_cw_write_blocking`` but writes to the
+    ``server_warn/<task_id>`` stream so warn-level traffic is easy to
+    alarm on independently of debug breadcrumbs. Failures bump the
+    shared ``_debug_cw_failures`` counter — a single alarm surface
+    covers both writers.
+    """
+    try:
+        import boto3
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("logs", region_name=region)
+
+        stream = f"server_warn/{task_id or 'server'}"
+        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream,
+            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
+        )
+    except Exception as _exc:
+        global _debug_cw_failures
+        with _debug_cw_failures_lock:
+            _debug_cw_failures += 1
+        print(
+            f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+
+
+def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
+    """Blocking CloudWatch write — only called from a background thread."""
+    try:
+        import boto3
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("logs", region_name=region)
+
+        stream = f"server_debug/{task_id or 'server'}"
+        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream,
+            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
+        )
+    except Exception as _exc:
+        # Never let debug logging break the request path. Bump the failure
+        # counter so operators can alarm on a blind debug path.
+        global _debug_cw_failures
+        with _debug_cw_failures_lock:
+            _debug_cw_failures += 1
+        print(
+            f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+
+
+# Log the active event loop policy at import time.
+# CRITICAL: use plain ``print`` here, NOT ``_debug_cw``, to avoid spawning a
+# daemon thread during module import. In-container, that thread's first
+# boto3 call contends with uvicorn's startup for the single scarce CPU
+# slot and can make ``GET /ping`` return slow enough for AgentCore's
+# health-check to fail.
 _policy = asyncio.get_event_loop_policy()
 print(
-    f"[server] Event loop policy: {type(_policy).__module__}.{type(_policy).__name__}",
+    f"[server/debug] boot: event_loop_policy={type(_policy).__module__}.{type(_policy).__name__}",
     flush=True,
 )
 
@@ -48,13 +206,23 @@ logging.getLogger("uvicorn.access").addFilter(_PingFilter())
 _active_threads: list[threading.Thread] = []
 _threads_lock = threading.Lock()
 
+
 # Set when the pipeline thread raises after /invocations accepted (Dynamo backup + ping signal).
-_background_pipeline_failed = False
+_background_pipeline_failed: bool = False
+
+# Track last reported /ping status so we only emit a CW debug line on
+# transitions (avoids flooding logs with per-health-check entries).
+_last_ping_status: str = ""
+
+# Heartbeat cadence for the TaskTable ``agent_heartbeat_at`` writer thread.
+# Each live pipeline bumps the heartbeat every N seconds so operators can
+# distinguish a stuck pipeline from a healthy long-running one.
+_HEARTBEAT_INTERVAL_SECONDS = 45
 
 
 def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
     """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
-    while not stop.wait(timeout=45):
+    while not stop.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
         try:
             task_state.write_heartbeat(task_id)
         except Exception as e:
@@ -103,16 +271,39 @@ class InvocationResponse(BaseModel):
 
 @app.get("/ping")
 async def ping():
-    """Health check endpoint. Returns 503 if the last background pipeline thread crashed."""
+    """Health check endpoint.
+
+    Return shape per AgentCore Runtime Service Contract
+    (https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-long-run.html):
+
+    * ``{"status": "healthy"}``      — no work in progress; idle timer counts.
+    * ``{"status": "HealthyBusy"}``  — pipeline thread is alive, agent is processing;
+      AgentCore treats this as "do not idle-evict me even if no new invocations
+      arrive". Load-bearing for long-running tasks.
+    * HTTP 503 + ``{"status": "unhealthy", ...}`` — the background pipeline
+      thread crashed; the orchestrator's reconciler takes over to transition
+      the task to FAILED.
+    """
+    global _last_ping_status
+
     if _background_pipeline_failed:
+        status = "unhealthy"
+        if status != _last_ping_status:
+            _debug_cw(f"/ping transition: {_last_ping_status or '<init>'} -> {status}")
+            _last_ping_status = status
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "unhealthy",
-                "reason": "background_pipeline_failed",
-            },
+            content={"status": status, "reason": "background_pipeline_failed"},
         )
-    return {"status": "healthy"}
+
+    with _threads_lock:
+        any_alive = any(t.is_alive() for t in _active_threads)
+
+    status = "HealthyBusy" if any_alive else "healthy"
+    if status != _last_ping_status:
+        _debug_cw(f"/ping transition: {_last_ping_status or '<init>'} -> {status}")
+        _last_ping_status = status
+    return {"status": status}
 
 
 def _run_task_background(
@@ -134,9 +325,21 @@ def _run_task_background(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
+    initial_approval_gate_count: int = 0,
+    approval_gate_cap: int | None = None,
+    trace: bool = False,
+    user_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
+
+    _debug_cw(
+        f"_run_task_background ENTERED task_id={task_id!r} "
+        f"thread={threading.current_thread().name!r}",
+        task_id=task_id,
+    )
 
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
@@ -173,6 +376,12 @@ def _run_task_background(
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
+            approval_timeout_s=approval_timeout_s,
+            initial_approvals=initial_approvals,
+            initial_approval_gate_count=initial_approval_gate_count,
+            approval_gate_cap=approval_gate_cap,
+            trace=trace,
+            user_id=user_id,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -192,16 +401,8 @@ def _run_task_background(
             hb_thread.join(timeout=3)
 
 
-@app.post("/invocations", response_model=InvocationResponse)
-def invoke_agent(request: Request, body: InvocationRequest):
-    """Accept a task and run the agent pipeline in a background thread.
-
-    Returns immediately with an acceptance response containing the task_id.
-    Task progress is tracked in DynamoDB via task_state.
-    """
-    inp = body.input
-
-    # Extract params — payload overrides env vars
+def _extract_invocation_params(inp: dict, request: Request) -> dict:
+    """Normalise ``input`` payload into keyword args for ``_run_task_background``."""
     repo_url = inp.get("repo_url") or os.environ.get("REPO_URL", "")
     github_token = inp.get("github_token") or resolve_github_token()
     issue_number = str(inp.get("issue_number", "")) or os.environ.get("ISSUE_NUMBER", "")
@@ -226,51 +427,223 @@ def invoke_agent(request: Request, body: InvocationRequest):
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
+    # Both are forwarded verbatim to the pipeline; the engine
+    # validates shape at construction time and raises on bad input.
+    approval_timeout_s = inp.get("approval_timeout_s")
+    initial_approvals = inp.get("initial_approvals") or []
+    # Chunk 7: TaskTable-persisted ``approval_gate_count`` threaded by
+    # the orchestrator so a container restart (§13.6) resumes the
+    # cumulative gate budget instead of resetting to 0. Non-int payloads
+    # coerce to 0 to keep the invocation path fail-open on a malformed
+    # field; the downstream PolicyEngine rejects negatives loudly.
+    raw_gate_count = inp.get("initial_approval_gate_count", 0)
+    try:
+        initial_approval_gate_count = int(raw_gate_count)
+    except (TypeError, ValueError):
+        _warn_cw(
+            "initial_approval_gate_count payload field is not an int "
+            f"(type={type(raw_gate_count).__name__}, value={raw_gate_count!r}); "
+            f"coerced to 0. task_id={inp.get('task_id', '')!r}",
+            task_id=inp.get("task_id"),
+        )
+        initial_approval_gate_count = 0
+    # Chunk 7b (§4 step 5, decision #13): per-task cap resolved by the
+    # submit path and persisted on the TaskRecord. Threaded so a
+    # blueprint-configured cap (or the default-50 frozen at submit) wins
+    # over the PolicyEngine's compile-time fallback on restarts. A
+    # malformed payload coerces to ``None`` so the engine can still
+    # construct; its own bounds check would reject anything out-of-range.
+    raw_approval_gate_cap = inp.get("approval_gate_cap")
+    approval_gate_cap: int | None = None
+    if raw_approval_gate_cap is not None:
+        try:
+            approval_gate_cap = int(raw_approval_gate_cap)
+        except (TypeError, ValueError):
+            _warn_cw(
+                "approval_gate_cap payload field is not an int "
+                f"(type={type(raw_approval_gate_cap).__name__}, value={raw_approval_gate_cap!r}); "
+                f"falling back to engine default. task_id={inp.get('task_id', '')!r}",
+                task_id=inp.get("task_id"),
+            )
+            approval_gate_cap = None
+    # ``trace`` is strictly opt-in (design §10.1). Accept only real
+    # booleans from the orchestrator — a string "false" would otherwise
+    # flip the flag on.
+    trace = inp.get("trace") is True
+    # Platform user_id (Cognito ``sub``). Only consumed when ``trace``
+    # is true (see ``TaskConfig.user_id``). String check defends against
+    # a non-string payload — the agent writes this into an S3 key, so a
+    # surprise ``None`` or int would blow up later at upload time.
+    # When coercion fires, WARN loudly: a silent empty string combined
+    # with ``trace=True`` would make Stage 4's upload path skip the S3
+    # write with zero observability, and a user-reported "my trace
+    # vanished" investigation would find nothing.
+    raw_user_id = inp.get("user_id", "")
+    if isinstance(raw_user_id, str):
+        user_id = raw_user_id
+    else:
+        _warn_cw(
+            "user_id payload field is not a string "
+            f"(type={type(raw_user_id).__name__}); coerced to empty. "
+            f"task_id={inp.get('task_id', '')!r}",
+            task_id=inp.get("task_id"),
+        )
+        user_id = ""
 
-    # Extract AgentCore session ID from request headers for OTEL correlation
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
 
-    thread = threading.Thread(
-        target=_run_task_background,
-        args=(
-            repo_url,
-            task_description,
-            issue_number,
-            github_token,
-            anthropic_model,
-            max_turns,
-            max_budget_usd,
-            aws_region,
-            task_id,
-            session_id,
-            hydrated_context,
-            system_prompt_overrides,
-            prompt_version,
-            memory_id,
-            task_type,
-            branch_name,
-            pr_number,
-            cedar_policies,
-        ),
-    )
-    # Track the thread for graceful shutdown BEFORE starting it so
-    # _drain_threads cannot miss a very-short-lived thread.
+    # Cedar HITL: stamp TASK_STARTED_AT so the PreToolUse hook's
+    # ``_remaining_maxlifetime_s`` (agent/src/hooks.py §6.5) has the
+    # real per-task clock to compute the maxLifetime ceiling. Without
+    # this the hook's ceiling computation silently falls back to
+    # "unknown, don't clip" (fail-open) and the user may be asked for
+    # approval on a gate whose window will expire before they can
+    # respond.
+    started_at = inp.get("task_started_at", "")
+    if started_at and isinstance(started_at, str):
+        os.environ["TASK_STARTED_AT"] = started_at
+
+    return {
+        "repo_url": repo_url,
+        "task_description": task_description,
+        "issue_number": issue_number,
+        "github_token": github_token,
+        "anthropic_model": anthropic_model,
+        "max_turns": max_turns,
+        "max_budget_usd": max_budget_usd,
+        "aws_region": aws_region,
+        "task_id": task_id,
+        "session_id": session_id,
+        "hydrated_context": hydrated_context,
+        "system_prompt_overrides": system_prompt_overrides,
+        "prompt_version": prompt_version,
+        "memory_id": memory_id,
+        "task_type": task_type,
+        "branch_name": branch_name,
+        "pr_number": pr_number,
+        "cedar_policies": cedar_policies,
+        "approval_timeout_s": approval_timeout_s,
+        "initial_approvals": initial_approvals,
+        "initial_approval_gate_count": initial_approval_gate_count,
+        "approval_gate_cap": approval_gate_cap,
+        "trace": trace,
+        "user_id": user_id,
+    }
+
+
+def _validate_required_params(params: dict) -> list[str]:
+    """Check the minimum viable param set for the pipeline.
+
+    Returns the list of missing field names (empty list = valid). The
+    pipeline requires at minimum a ``repo_url`` and either an
+    ``issue_number`` or ``task_description``; ``pr_iteration`` and
+    ``pr_review`` task_types additionally require ``pr_number``.
+    """
+    missing: list[str] = []
+    if not params.get("repo_url"):
+        missing.append("repo_url")
+    task_type = params.get("task_type") or "new_task"
+    if task_type in ("pr_iteration", "pr_review"):
+        if not params.get("pr_number"):
+            missing.append("pr_number")
+    else:
+        # new_task: need EITHER issue_number or task_description.
+        has_issue = bool(params.get("issue_number"))
+        has_desc = bool(params.get("task_description"))
+        if not (has_issue or has_desc):
+            missing.append("issue_number_or_task_description")
+    return missing
+
+
+def _spawn_background(params: dict) -> threading.Thread:
+    """Register and start a background pipeline thread."""
     global _background_pipeline_failed
 
+    kwargs = dict(params)
+
+    thread_name = f"pipeline-{params.get('task_id') or 'anon'}"
+    _debug_cw(
+        f"_spawn_background: thread_name={thread_name!r}",
+        task_id=params.get("task_id"),
+    )
+    thread = threading.Thread(
+        target=_run_task_background,
+        kwargs=kwargs,
+        name=thread_name,
+    )
     with _threads_lock:
         _active_threads[:] = [t for t in _active_threads if t.is_alive()]
         if not _active_threads:
             _background_pipeline_failed = False
         _active_threads.append(thread)
     thread.start()
+    _debug_cw(
+        f"_spawn_background: thread started name={thread_name!r}",
+        task_id=params.get("task_id"),
+    )
+    return thread
 
-    return InvocationResponse(
-        output={
-            "message": {
-                "role": "assistant",
-                "content": [{"text": f"Task accepted: {task_id}"}],
+
+@app.post("/invocations")
+async def invoke_agent(request: Request, body: InvocationRequest):
+    """Accept a task. Spawns a background pipeline and returns a JSON acceptance.
+
+    Any ``Accept: text/event-stream`` header is ignored — this runtime no
+    longer supports live SSE streaming. Progress is observable via the
+    durable DynamoDB records written by ``ProgressWriter``.
+    """
+    accept_header = request.headers.get("accept", "") or ""
+    session_hdr = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "") or ""
+    _debug_cw(
+        f"/invocations received: accept={accept_header!r} "
+        f"session={session_hdr[:20]!r} body_input_keys={list(body.input.keys())}"
+    )
+
+    try:
+        inp = body.input
+        params = _extract_invocation_params(inp, request)
+        _debug_cw(
+            f"params extracted: task_id={params.get('task_id')!r} "
+            f"repo_url={params.get('repo_url')!r} session_id={params.get('session_id', '')[:20]!r}",
+            task_id=params.get("task_id"),
+        )
+    except Exception as exc:
+        _debug_cw_exc("_extract_invocation_params FAILED", exc)
+        raise
+
+    # Pre-flight validation: bail out with a structured 400 before spawning a
+    # background thread that would crash deep inside setup_repo / hydration.
+    missing = _validate_required_params(params)
+    if missing:
+        _debug_cw(
+            f"/invocations rejected: missing required params {missing!r}",
+            task_id=params.get("task_id"),
+        )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "TASK_RECORD_INCOMPLETE",
+                "message": (
+                    "Task record is missing required fields. The orchestrator "
+                    "should have populated these before invoking the runtime."
+                ),
+                "missing": missing,
             },
-            "result": {"status": "accepted", "task_id": task_id},
-            "timestamp": datetime.now(UTC).isoformat(),
+        )
+
+    _debug_cw("routing to sync path", task_id=params.get("task_id"))
+    _spawn_background(params)
+    task_id = params["task_id"]
+    return JSONResponse(
+        content={
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": f"Task accepted: {task_id}"}],
+                },
+                "result": {"status": "accepted", "task_id": task_id},
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
         }
     )

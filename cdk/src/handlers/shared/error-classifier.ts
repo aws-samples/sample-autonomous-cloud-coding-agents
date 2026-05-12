@@ -201,6 +201,43 @@ const PATTERNS: readonly ErrorPattern[] = [
       retryable: true,
     },
   },
+  // Specific agent_status classifiers — ordered BEFORE the generic
+  // ``Task did not succeed.*agent_status=`` catch-all so the concrete
+  // cap / runtime-error signals surface to users rather than the
+  // opaque "Agent task did not succeed" title. Each matches the
+  // ``agent_status`` literals emitted by ``agent/src/pipeline.py``
+  // (see ``_resolve_overall_task_status``) and
+  // ``agent/src/runner.py``.
+  {
+    pattern: /agent_status=['"]?error_max_turns['"]?/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Exceeded max turns',
+      description: 'The agent reached the configured ``max_turns`` limit before completing.',
+      remedy: 'Raise ``--max-turns`` on the submit call, simplify the task, or break it into smaller sub-tasks.',
+      retryable: true,
+    },
+  },
+  {
+    pattern: /agent_status=['"]?error_max_budget_usd['"]?/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Exceeded max budget',
+      description: 'The agent reached the configured ``max_budget_usd`` limit before completing.',
+      remedy: 'Raise ``--max-budget`` on the submit call, simplify the task, or break it into smaller sub-tasks.',
+      retryable: true,
+    },
+  },
+  {
+    pattern: /agent_status=['"]?error_during_execution['"]?/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'Agent errored during execution',
+      description: 'The agent raised an uncaught error mid-turn. The Claude Agent SDK reported the task as failed before a clean terminal.',
+      remedy: 'Retry the task. If persistent, check the agent container logs and the PR branch for partial state.',
+      retryable: true,
+    },
+  },
   {
     pattern: /Task did not succeed.*agent_status=/i,
     classification: {

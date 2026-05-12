@@ -280,6 +280,79 @@ class TestTaskConfig:
         config.max_turns = 50
         assert config.max_turns == 50
 
+    def test_trace_true_with_empty_user_id_raises_at_construction(self):
+        """trace=True + user_id='' must fail at construction, not at S3 upload."""
+        with pytest.raises(ValidationError, match="trace=True requires a non-empty user_id"):
+            TaskConfig(
+                repo_url="owner/repo",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                trace=True,
+                # user_id omitted — defaults to ""
+            )
+
+    def test_trace_true_with_valid_user_id_constructs_cleanly(self):
+        """Happy path: trace=True with a non-empty user_id is accepted."""
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            trace=True,
+            user_id="cognito-sub-abc-123",
+        )
+        assert config.trace is True
+        assert config.user_id == "cognito-sub-abc-123"
+
+    def test_trace_false_allows_empty_user_id(self):
+        """Negative control: local batch runs (trace=False, user_id='') still work."""
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            # trace defaults to False; user_id defaults to ""
+        )
+        assert config.trace is False
+        assert config.user_id == ""
+
+    def test_initial_approval_gate_count_default_is_zero(self):
+        # Chunk 7 (§13.6): zero default preserves the existing fresh-task
+        # path; a non-zero value only arrives when the orchestrator threads
+        # the TaskTable-persisted counter on container restart.
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config.initial_approval_gate_count == 0
+
+    def test_initial_approval_gate_count_accepts_positive_value(self):
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            initial_approval_gate_count=12,
+        )
+        assert config.initial_approval_gate_count == 12
+
+    def test_approval_gate_cap_default_is_none(self):
+        # Chunk 7b: None preserves the existing PolicyEngine default-50
+        # path for any caller that doesn't thread the submit-time cap.
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config.approval_gate_cap is None
+
+    def test_approval_gate_cap_accepts_explicit_value(self):
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            approval_gate_cap=100,
+        )
+        assert config.approval_gate_cap == 100
+
 
 class TestRepoSetup:
     def test_construction(self):

@@ -103,6 +103,7 @@ node cli/lib/bin/bgagent.js submit \
 - `--max-turns N` — Turn limit (1-500)
 - `--max-budget N` — USD cost limit ($0.01-$100)
 - `--idempotency-key KEY` — Deduplication key for safe retries
+- `--trace` — Enable detailed tracing (4 KB preview cap + full NDJSON trajectory upload to S3)
 - `--wait` — Poll until terminal status
 - `--output json|text` — Output format
 
@@ -122,12 +123,26 @@ curl -X POST "$API_URL/tasks" \
   }'
 ```
 
-## Step 6: Monitor
+## Step 6: Monitor and Interact
 
-After submission, show how to check status:
+After submission, show how to monitor and steer the task:
 ```bash
+# Watch progress in real time (adaptive polling, auto-exits on terminal state)
+node cli/lib/bin/bgagent.js watch <TASK_ID>
+
+# Check status snapshot
 node cli/lib/bin/bgagent.js status <TASK_ID>
+
+# Steer the agent mid-run (combined-turn acknowledgement)
+node cli/lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
+
+# View event log
 node cli/lib/bin/bgagent.js events <TASK_ID>
+
+# Download execution trace (requires --trace on submit)
+node cli/lib/bin/bgagent.js trace download <TASK_ID>
+
+# List running tasks
 node cli/lib/bin/bgagent.js list --status RUNNING
 ```
 

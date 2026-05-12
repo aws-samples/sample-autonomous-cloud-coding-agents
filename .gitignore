@@ -102,6 +102,11 @@ agent/gitleaks-report.json
 *.bkp
 Plans/
 
+# draw.io editor artifacts + any rendered screenshots kept locally for review
+.$*.drawio.bkp
+docs/diagrams/*.png
+docs/diagrams/screenshots/
+
 # ──────────────────────────────────────────────
 # Explicit keeps (override ignores above)
 # ──────────────────────────────────────────────

@@ -113,6 +113,36 @@ describe('ApiClient', () => {
     });
   });
 
+  describe('getTraceUrl', () => {
+    test('sends GET to /tasks/{id}/trace and returns the presigned URL envelope', async () => {
+      const payload = {
+        url: 'https://s3.example/trace?sig=abc',
+        expires_at: '2026-04-30T20:15:00Z',
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: payload }),
+      });
+
+      const result = await client.getTraceUrl('abc');
+      expect(result).toEqual(payload);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks/abc/trace',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    test('URL-encodes task_id', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: { url: 'x', expires_at: 'y' } }),
+      });
+      await client.getTraceUrl('weird/id with space');
+      const calledUrl = (mockFetch.mock.calls[0] as [string, unknown])[0];
+      expect(calledUrl).toContain(encodeURIComponent('weird/id with space'));
+    });
+  });
+
   describe('cancelTask', () => {
     test('sends DELETE', async () => {
       const cancelResponse = { task_id: 'abc', status: 'CANCELLED', cancelled_at: '2026-01-01T00:00:00Z' };
@@ -144,6 +174,283 @@ describe('ApiClient', () => {
         expect.stringContaining('/tasks/abc/events'),
         expect.anything(),
       );
+    });
+
+    test('passes ?after= when provided', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      const ulid = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+      await client.getTaskEvents('abc', { after: ulid });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('/tasks/abc/events');
+      expect(url).toContain(`after=${ulid}`);
+      // Must not silently send next_token when only after was provided.
+      expect(url).not.toContain('next_token=');
+    });
+
+    test('existing next_token path is preserved', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', { nextToken: 'opaque-token', limit: 25 });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('next_token=opaque-token');
+      expect(url).toContain('limit=25');
+      expect(url).not.toContain('after=');
+    });
+
+    test('passes ?desc=1 when desc=true is provided', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', { limit: 20, desc: true });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('desc=1');
+      expect(url).toContain('limit=20');
+      // ``desc: false`` MUST NOT leak as ``desc=0`` or ``desc=false`` —
+      // the server treats anything truthy-looking as opt-in.
+    });
+
+    test('omits desc when desc is falsy or absent', async () => {
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', { limit: 5, desc: false });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).not.toContain('desc=');
+    });
+
+    test('both after and nextToken are sent verbatim to the server', async () => {
+      // The client does not arbitrate — the server prefers ``after`` and logs
+      // a warning. This test just locks in the transport behaviour.
+      const response = { data: [], pagination: { next_token: null, has_more: false } };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => response,
+      });
+
+      await client.getTaskEvents('abc', {
+        after: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        nextToken: 'opaque',
+      });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(url).toContain('next_token=opaque');
+    });
+  });
+
+  describe('catchUpEvents', () => {
+    test('returns first page when server says no more', async () => {
+      const events = [
+        { event_id: '01ARZ3NDEKTSV4RRFFQ69G5FB0', event_type: 'agent_turn', timestamp: 't1', metadata: {} },
+        { event_id: '01ARZ3NDEKTSV4RRFFQ69G5FB1', event_type: 'agent_turn', timestamp: 't2', metadata: {} },
+      ];
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: events,
+          pagination: { next_token: null, has_more: false },
+        }),
+      });
+
+      const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(result).toEqual(events);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
+    });
+
+    test('paginates internally across multiple next_token hops', async () => {
+      const pageA = [
+        { event_id: 'E1', event_type: 'agent_turn', timestamp: 't1', metadata: {} },
+      ];
+      const pageB = [
+        { event_id: 'E2', event_type: 'agent_turn', timestamp: 't2', metadata: {} },
+      ];
+      const pageC = [
+        { event_id: 'E3', event_type: 'agent_turn', timestamp: 't3', metadata: {} },
+      ];
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: pageA, pagination: { next_token: 'tok-1', has_more: true } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: pageB, pagination: { next_token: 'tok-2', has_more: true } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: pageC, pagination: { next_token: null, has_more: false } }),
+        });
+
+      const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(result.map(e => e.event_id)).toEqual(['E1', 'E2', 'E3']);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+
+      // First call: uses after
+      const url1 = mockFetch.mock.calls[0][0] as string;
+      expect(url1).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      // Second and third: use next_token (no after)
+      const url2 = mockFetch.mock.calls[1][0] as string;
+      expect(url2).toContain('next_token=tok-1');
+      expect(url2).not.toContain('after=');
+      const url3 = mockFetch.mock.calls[2][0] as string;
+      expect(url3).toContain('next_token=tok-2');
+      expect(url3).not.toContain('after=');
+    });
+
+    test('returns empty array when server reports no events after cursor', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [],
+          pagination: { next_token: null, has_more: false },
+        }),
+      });
+
+      const result = await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+      expect(result).toEqual([]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('AbortSignal propagation', () => {
+    test('threads signal through request() into fetch()', async () => {
+      // Regression guard: if a refactor ever drops ``signal`` from the
+      // fetch options, ``bgagent watch`` Ctrl+C becomes unresponsive
+      // because in-flight requests would have to time out before the
+      // loop could exit. This test proves the plumbing end-to-end at
+      // the HTTP boundary.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: { task_id: 'abc' } }),
+      });
+
+      const controller = new AbortController();
+      await client.getTask('abc', { signal: controller.signal });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ signal: controller.signal }),
+      );
+    });
+
+    test('threads signal through getTaskEvents() and catchUpEvents() into fetch()', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+      });
+
+      const controller = new AbortController();
+      await client.getTaskEvents('abc', { signal: controller.signal });
+      await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 100, { signal: controller.signal });
+
+      // Every fetch the client issued must carry the same signal.
+      const calls = mockFetch.mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      for (const [, init] of calls) {
+        expect((init as RequestInit).signal).toBe(controller.signal);
+      }
+    });
+
+    test('throws ApiError (not CliError) for non-JSON 4xx body so callers can classify', async () => {
+      // Regression guard for Chunk H: WAF / CloudFront HTML error pages
+      // used to come back as CliError without a status, defeating the
+      // watch retry loop's 4xx-vs-5xx classification. Non-JSON HTTP
+      // errors must still be ApiError so ``isTransientError`` can see
+      // the 4xx status and NOT retry.
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        json: async () => { throw new SyntaxError('Unexpected token <'); },
+      });
+
+      try {
+        await client.getTask('abc');
+        fail('expected an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).statusCode).toBe(403);
+      }
+    });
+  });
+
+  describe('getStatusSnapshot', () => {
+    test('runs getTask and getTaskEvents(desc=1) in parallel and returns both', async () => {
+      const taskDetail = { task_id: 'abc', status: 'RUNNING' };
+      const events = [
+        { event_id: 'E2', event_type: 'agent_tool_call', timestamp: 't2', metadata: { tool_name: 'Bash' } },
+        { event_id: 'E1', event_type: 'agent_turn', timestamp: 't1', metadata: { turn: 3 } },
+      ];
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: taskDetail }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: events, pagination: { next_token: null, has_more: false } }),
+        });
+
+      const result = await client.getStatusSnapshot('abc');
+
+      expect(result.task).toEqual(taskDetail);
+      expect(result.recentEvents).toEqual(events);
+
+      // Two HTTP calls; the events call must carry ``desc=1`` and a bounded limit.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const urls = mockFetch.mock.calls.map(c => c[0] as string);
+      expect(urls.some(u => u === 'https://api.example.com/tasks/abc')).toBe(true);
+      const eventsUrl = urls.find(u => u.includes('/events'));
+      expect(eventsUrl).toBeDefined();
+      expect(eventsUrl).toContain('desc=1');
+      expect(eventsUrl).toContain('limit=20');
+    });
+
+    test('surfaces a getTask failure from the parallel pair', async () => {
+      // Regression guard against a future refactor to ``Promise.allSettled``
+      // that would silently render a broken snapshot. The current contract
+      // is fail-fast: if either leg errors, the CLI surfaces the error.
+      mockFetch
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+        });
+
+      await expect(client.getStatusSnapshot('abc')).rejects.toThrow('network down');
+    });
+
+    test('honors a custom recentEventLimit', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { task_id: 'abc' } }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+        });
+
+      await client.getStatusSnapshot('abc', 5);
+
+      const eventsUrl = mockFetch.mock.calls.map(c => c[0] as string).find(u => u.includes('/events'));
+      expect(eventsUrl).toContain('limit=5');
     });
   });
 
@@ -250,7 +557,10 @@ describe('ApiClient', () => {
       await expect(client.getTask('abc')).rejects.toThrow('bgagent login');
     });
 
-    test('throws CliError on non-JSON response', async () => {
+    test('throws ApiError with HTTP status for non-JSON error response', async () => {
+      // A non-JSON body on an HTTP error (WAF HTML page, edge proxy,
+      // 5xx with a plaintext reason) must still carry the status as an
+      // ``ApiError`` so the watch retry loop can classify 4xx vs 5xx.
       mockFetch.mockResolvedValue({
         ok: false,
         status: 502,
@@ -259,6 +569,14 @@ describe('ApiClient', () => {
       });
 
       await expect(client.getTask('abc')).rejects.toThrow('non-JSON response');
+      // ApiError (not CliError) so isTransientError can see the 502.
+      try {
+        await client.getTask('abc');
+        fail('expected throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).statusCode).toBe(502);
+      }
     });
   });
 });
