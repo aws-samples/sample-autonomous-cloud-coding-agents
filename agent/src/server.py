@@ -12,6 +12,7 @@ import asyncio
 import contextlib as _ctx_for_debug
 import logging
 import os
+import re
 import threading
 import time as _time_for_debug
 import traceback
@@ -31,12 +32,27 @@ from pipeline import run_task
 
 
 def _redact_cached_credentials(text: str) -> str:
-    """Remove cached env secrets from debug text before stdout / CloudWatch."""
+    """Remove sensitive material from debug text before stdout / CloudWatch."""
     out = text
+
+    # 1) Redact exact cached secret values when present.
     for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN"):
         secret = os.environ.get(env_key) or ""
         if len(secret) >= 12:
             out = out.replace(secret, f"<{env_key}_REDACTED>")
+
+    # 2) Redact common secret-bearing key/value patterns.
+    secret_patterns = (
+        r"(?i)\b(github_token|linear_api_token|token|secret|api[_-]?key|password)\b\s*[:=]\s*([^\s,;]+)",
+        r"(?i)\b(authorization)\b\s*[:=]\s*(bearer\s+)?([^\s,;]+)",
+    )
+    for pattern in secret_patterns:
+        out = re.sub(
+            pattern,
+            lambda m: f"{m.group(1)}=<REDACTED>",
+            out,
+        )
+
     return out
 
 
