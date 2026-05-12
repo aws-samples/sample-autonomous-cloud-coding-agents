@@ -291,6 +291,77 @@ class TestRecentDecisionCache:
         # behavior — either way starts with the year.
         assert entry.original_decision_ts[:4].isdigit()
 
+    # --- Rule-level cache extension (B1, 2026-05-12) ---------------------
+
+    def test_record_rule_decision_and_lookup(self):
+        # Rule-level cache catches semantic retries (same rule, different
+        # input) the input-hash cache misses. Seeded on DENIED only.
+        cache = RecentDecisionCache()
+        cache.record_rule_decision(
+            "Bash",
+            "force_push_any",
+            "DENIED",
+            "no prod pushes",
+            original_decision_ts="2026-05-12T19:00:00Z",
+        )
+        hit = cache.get_rule_decision("Bash", ["force_push_any"])
+        assert hit is not None
+        rule_id, entry = hit
+        assert rule_id == "force_push_any"
+        assert entry.decision == "DENIED"
+        assert entry.reason == "no prod pushes"
+        assert entry.original_decision_ts == "2026-05-12T19:00:00Z"
+
+    def test_rule_cache_returns_first_of_multiple_matching(self):
+        cache = RecentDecisionCache()
+        cache.record_rule_decision("Bash", "rule_b", "DENIED", "b")
+        cache.record_rule_decision("Bash", "rule_c", "DENIED", "c")
+        # ``get_rule_decision`` iterates in caller-order and returns the
+        # first hit. ``rule_a`` isn't cached → scan moves on to ``rule_b``.
+        hit = cache.get_rule_decision("Bash", ["rule_a", "rule_b", "rule_c"])
+        assert hit is not None
+        assert hit[0] == "rule_b"
+
+    def test_rule_cache_miss_returns_none(self):
+        cache = RecentDecisionCache()
+        cache.record_rule_decision("Bash", "force_push_any", "DENIED", "x")
+        # Different tool — rule cache is keyed on ``(tool, rule_id)``.
+        assert cache.get_rule_decision("Write", ["force_push_any"]) is None
+        # Different rule on the same tool.
+        assert cache.get_rule_decision("Bash", ["other_rule"]) is None
+        # Empty rule_ids list.
+        assert cache.get_rule_decision("Bash", []) is None
+
+    def test_rule_cache_timed_out_rejected(self):
+        # TIMED_OUT is ambiguous (user was away, not actively refusing),
+        # so it stays input-hash-scoped only. Rule-level cache rejects
+        # TIMED_OUT / APPROVED to keep the semantics clean.
+        cache = RecentDecisionCache()
+        with pytest.raises(ValueError, match="only accepts DENIED"):
+            cache.record_rule_decision("Bash", "force_push_any", "TIMED_OUT", "x")
+        with pytest.raises(ValueError, match="only accepts DENIED"):
+            cache.record_rule_decision("Bash", "force_push_any", "APPROVED", "x")
+
+    def test_rule_cache_ttl_expiry(self):
+        now = [0.0]
+
+        def fake_clock() -> float:
+            return now[0]
+
+        cache = RecentDecisionCache(clock=fake_clock)
+        cache.record_rule_decision("Bash", "force_push_any", "DENIED", "x")
+        assert cache.get_rule_decision("Bash", ["force_push_any"]) is not None
+        now[0] += CACHE_TTL_S + 0.1
+        assert cache.get_rule_decision("Bash", ["force_push_any"]) is None
+
+    def test_rule_cache_lru_eviction(self):
+        cache = RecentDecisionCache(max_entries=2)
+        cache.record_rule_decision("Bash", "rule_a", "DENIED", "1")
+        cache.record_rule_decision("Bash", "rule_b", "DENIED", "2")
+        cache.record_rule_decision("Bash", "rule_c", "DENIED", "3")  # evicts rule_a
+        assert cache.get_rule_decision("Bash", ["rule_a"]) is None
+        assert cache.get_rule_decision("Bash", ["rule_c"]) is not None
+
 
 # ---------------------------------------------------------------------------
 # PolicyEngine: three-outcome pipeline
@@ -453,6 +524,59 @@ class TestRecentDecisionCacheIntegration:
             "cached_reason": "user said force-push is too risky",
             "original_decision_ts": "2026-05-07T12:00:00Z",
         }
+
+    # --- Rule-level cache integration (B1, 2026-05-12) ---------------------
+
+    def test_semantic_retry_hits_rule_cache(self):
+        # Once the user has denied ``git push --force origin feature``
+        # and the hook seeded the rule cache with ``force_push_any``,
+        # the agent's retry on a DIFFERENT branch name should fast-deny
+        # instead of opening a fresh approval gate. Regression guard
+        # for the E2E Phase 4 finding: max_turns burn due to semantic
+        # retries not hitting the input-hash cache.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine.recent_decisions.record_rule_decision(
+            "Bash",
+            "force_push_any",
+            "DENIED",
+            "no force pushes",
+            original_decision_ts="2026-05-12T19:00:00Z",
+        )
+        # Different branch name → different input hash; input-hash cache
+        # would miss. Rule cache catches it because the Cedar eval still
+        # returns ``force_push_any`` as a matching rule.
+        d = engine.evaluate_tool_use(
+            "Bash", {"command": "git push --force origin some-other-branch"}
+        )
+        assert d.outcome == Outcome.DENY
+        assert "Recent DENIED on rule 'force_push_any'" in d.reason
+        assert d.cache_hit_metadata is not None
+        assert d.cache_hit_metadata["matched_rule_id"] == "force_push_any"
+        assert d.cache_hit_metadata["cached_decision"] == "DENIED"
+        assert d.cache_hit_metadata["original_decision_ts"] == "2026-05-12T19:00:00Z"
+
+    def test_rule_cache_does_not_shadow_hard_deny(self):
+        # Hard-deny (step 1) still precedes rule-cache (step 3.5),
+        # mirroring the invariant for the input-hash cache.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine.recent_decisions.record_rule_decision("Bash", "rm_slash", "DENIED", "not allowed")
+        d = engine.evaluate_tool_use("Bash", {"command": "rm -rf /"})
+        assert d.outcome == Outcome.DENY
+        assert "Hard-deny" in d.reason
+        assert "Recent" not in d.reason
+
+    def test_rule_cache_does_not_shadow_allowlist(self):
+        # Step 2 allowlist (tool-scope) wins over rule cache just like it
+        # wins over the input-hash cache. Pre-approval via allowlist is
+        # the user's explicit override.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine.allowlist.add("rule:force_push_any")
+        engine.recent_decisions.record_rule_decision(
+            "Bash", "force_push_any", "DENIED", "stale rejection"
+        )
+        d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin feature"})
+        assert d.outcome == Outcome.ALLOW
+        assert "Allowlist" in d.reason
 
     def test_non_cache_decisions_have_no_cache_hit_metadata(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")

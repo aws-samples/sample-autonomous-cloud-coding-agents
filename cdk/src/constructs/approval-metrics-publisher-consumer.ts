@@ -18,11 +18,12 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { FilterCriteria, FilterRule, StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -100,6 +101,17 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       enforceSSL: true,
     });
 
+    // Explicit log group: without this declaration Lambda auto-creates
+    // the group on first invocation at the default retention (never
+    // expires) and the CDK IAM grant path is implicit. Declaring it
+    // here locks the retention window and keeps the grant graph
+    // discoverable by cdk-nag. Pattern mirrors
+    // ``ecs-agent-cluster.ts::TaskLogGroup``.
+    const logGroup = new logs.LogGroup(this, 'ApprovalMetricsPublisherLogs', {
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     this.fn = new lambda.NodejsFunction(this, 'ApprovalMetricsPublisherFn', {
       entry: path.join(handlersDir, 'approval-metrics-publisher.ts'),
       handler: 'handler',
@@ -110,6 +122,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       // match fanout; actual invocations should finish in tens of ms.
       timeout: Duration.minutes(1),
       memorySize: 256,
+      logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],
       },

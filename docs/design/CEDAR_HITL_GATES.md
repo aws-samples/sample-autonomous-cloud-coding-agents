@@ -1128,6 +1128,8 @@ Loaded by the Lambda on demand from the target repo's blueprint + built-in polic
 
 Rate-limited 30/min/user; cached 5min per repo in-Lambda.
 
+**Onboarding gate (symmetric with `POST /v1/tasks`).** If the target repo is not onboarded in `RepoTable`, this endpoint returns **422 `REPO_NOT_ONBOARDED`** — the same response `POST /v1/tasks` would return on a task-submit attempt. The gate runs AFTER rate-limit so the 429 response doesn't leak onboarding-status via a 422-vs-200 timing oracle. Rationale: a user who discovers rules for a repo they can't actually submit tasks against has received misleading information; the 422 tells them the real blocker (onboard the repo first) rather than listing policies that will never fire. Decision documented and added 2026-05-11 as part of the E2E deploy-readiness hotfix.
+
 ### 7.7 `GET /v1/pending` — list pending approvals across user's active tasks
 
 Returns all approvals with `status=PENDING` owned by the caller. Backing index: `user_id-status-index` GSI on `TaskApprovalsTable` (see §10.1).

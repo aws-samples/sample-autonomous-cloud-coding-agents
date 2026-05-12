@@ -33,7 +33,7 @@ from urllib.parse import quote
 from config import AGENT_WORKSPACE
 from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
-from shell import log, truncate
+from shell import log, log_error_cw, truncate
 from telemetry import _TrajectoryWriter
 
 
@@ -496,7 +496,11 @@ async def run_agent(
                     f"duration={message.duration_ms / 1000:.1f}s",
                 )
                 if message.is_error and message.result:
-                    log("ERROR", message.result)
+                    # Mirror SDK-level result errors to APPLICATION_LOGS
+                    # so the dashboard + ``bgagent status`` see them
+                    # (stdout-only logs route to runtime-DEFAULT, not
+                    # the group TaskDashboard reads).
+                    log_error_cw(str(message.result), task_id=config.task_id or None)
 
                 # Write trajectory result summary
                 trajectory.write_result(
@@ -550,7 +554,13 @@ async def run_agent(
                 )
 
     except Exception as e:
-        log("ERROR", f"Exception during receive_response(): {type(e).__name__}: {e}")
+        # Mirror the SDK-loop crash to APPLICATION_LOGS so operators
+        # see it on the dashboard widget + ``bgagent status`` and not
+        # just on the runtime-DEFAULT stream.
+        log_error_cw(
+            f"Exception during receive_response(): {type(e).__name__}: {e}",
+            task_id=config.task_id or None,
+        )
         progress.write_agent_error(error_type=type(e).__name__, message=str(e))
         if result.status == "unknown":
             result.status = "error"

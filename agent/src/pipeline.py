@@ -27,7 +27,7 @@ from post_hooks import (
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
 from runner import run_agent
-from shell import log
+from shell import log, log_error_cw
 from system_prompt import SYSTEM_PROMPT
 from telemetry import (
     _TrajectoryWriter,
@@ -448,7 +448,13 @@ def run_task(
                         )
                     )
                 except Exception as e:
-                    log("ERROR", f"Agent failed: {e}")
+                    # Fatal agent error: mirror to APPLICATION_LOGS so
+                    # TaskDashboard widgets + ``bgagent status`` can see
+                    # the real failure text instead of stopping at
+                    # ``error_classification.UNKNOWN``. Local stdout
+                    # path is preserved for docker-compose / unit-test
+                    # capture.
+                    log_error_cw(f"Agent failed: {e}", task_id=config.task_id or None)
                     agent_span.set_status(StatusCode.ERROR, str(e))
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))

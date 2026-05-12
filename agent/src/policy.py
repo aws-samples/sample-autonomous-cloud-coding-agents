@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING
 from shell import log
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 # ---------------------------------------------------------------------------
 # Constants (§3, §5.2, §12.9)
@@ -388,6 +388,17 @@ class RecentDecisionCache:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._entries: OrderedDict[tuple[str, str], _CachedDecision] = OrderedDict()
+        # Rule-level cache: keyed by ``(tool_name, rule_id)``, populated
+        # alongside the input-hash cache whenever a DENIED outcome
+        # carries ``matching_rule_ids``. The input-hash cache catches
+        # literal retries of the same command; the rule cache catches
+        # *semantic* retries — e.g. a user denied ``git push --force
+        # origin branch-a`` should also fast-deny ``git push --force
+        # origin branch-b`` because both resolve to the same
+        # ``force_push_any`` rule. Without this the agent can burn
+        # through its max_turns budget hammering on variations the
+        # user has already said no to (observed in E2E Phase 4).
+        self._rule_entries: OrderedDict[tuple[str, str], _CachedDecision] = OrderedDict()
         self._max_entries = max_entries
         self._ttl_s = ttl_s
         self._clock = clock
@@ -423,6 +434,40 @@ class RecentDecisionCache:
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
 
+    def record_rule_decision(
+        self,
+        tool_name: str,
+        rule_id: str,
+        decision: str,
+        reason: str,
+        original_decision_ts: str | None = None,
+    ) -> None:
+        """Insert a rule-level DENIED/TIMED_OUT entry.
+
+        Called once per ``matching_rule_ids`` entry on a DENIED outcome
+        so subsequent tool calls that hit the same rule are
+        auto-denied without a fresh approval round-trip. Only ``DENIED``
+        is recorded here — ``TIMED_OUT`` is more ambiguous (user was
+        away, not actively refusing) so the existing input-hash cache
+        is the safer bound for it.
+        """
+        if decision != "DENIED":
+            raise ValueError(
+                f"record_rule_decision only accepts DENIED, got {decision!r} "
+                "(TIMED_OUT is handled by the input-hash cache only)"
+            )
+        key = (tool_name, rule_id)
+        self._rule_entries[key] = _CachedDecision(
+            decision=decision,
+            reason=reason,
+            inserted_at=self._clock(),
+            original_decision_ts=original_decision_ts
+            or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
+        self._rule_entries.move_to_end(key)
+        while len(self._rule_entries) > self._max_entries:
+            self._rule_entries.popitem(last=False)
+
     def get(self, tool_name: str, input_sha256: str) -> _CachedDecision | None:
         """Return a non-expired cached entry or None."""
         key = (tool_name, input_sha256)
@@ -436,6 +481,26 @@ class RecentDecisionCache:
         # LRU-touch so an active retry pattern stays in the window.
         self._entries.move_to_end(key)
         return entry
+
+    def get_rule_decision(
+        self, tool_name: str, rule_ids: Iterable[str]
+    ) -> tuple[str, _CachedDecision] | None:
+        """Return ``(rule_id, entry)`` for the first non-expired rule hit, or None.
+
+        Returns the matched rule_id separately from the entry so the
+        caller can surface it on the cache-hit metadata for operators.
+        """
+        for rule_id in rule_ids:
+            key = (tool_name, rule_id)
+            entry = self._rule_entries.get(key)
+            if entry is None:
+                continue
+            if self._clock() - entry.inserted_at > self._ttl_s:
+                del self._rule_entries[key]
+                continue
+            self._rule_entries.move_to_end(key)
+            return rule_id, entry
+        return None
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -1108,6 +1173,31 @@ class PolicyEngine:
                     return PolicyDecision.allow(
                         reason=f"Allowlist rule: {', '.join(active_ids)}",
                         duration_ms=(time.monotonic() - start) * 1000,
+                    )
+
+                # Rule-level recent-deny cache (§12.8 extension).
+                # If the user recently denied any of these rule_ids on
+                # this tool, fast-deny without a new approval gate.
+                # Catches semantic retries the input-hash cache misses
+                # (e.g. force-push to a different branch name).
+                rule_hit = self._cache.get_rule_decision(tool_name, active_ids)
+                if rule_hit is not None:
+                    matched_rule_id, cached = rule_hit
+                    return PolicyDecision(
+                        outcome=Outcome.DENY,
+                        reason=(
+                            f"Recent {cached.decision} on rule {matched_rule_id!r} "
+                            f"within {int(CACHE_TTL_S)}s: {cached.reason}"
+                        ),
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        cache_hit_metadata={
+                            "tool_name": tool_name,
+                            "tool_input_sha256": input_sha,
+                            "matched_rule_id": matched_rule_id,
+                            "cached_decision": cached.decision,
+                            "cached_reason": cached.reason,
+                            "original_decision_ts": cached.original_decision_ts,
+                        },
                     )
                 # Rebuild the policy-id list for annotation merging, keeping
                 # only the policy IDs whose rule_id survived the disable filter.
