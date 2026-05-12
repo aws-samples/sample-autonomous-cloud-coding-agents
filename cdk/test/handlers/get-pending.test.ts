@@ -75,6 +75,21 @@ beforeEach(() => {
   ulidCounter = 0;
 });
 
+/**
+ * Two-mock chain used by every test that returns a non-empty pending
+ * list: (1) rate-limit Update passes, (2) GSI Query returns ``items``.
+ *
+ * ``matching_rule_ids`` is projected onto the ``user_id-status-index``
+ * GSI directly (see the construct), so the handler maps each field
+ * from the Query result without a second read — keeping the mock
+ * chain short.
+ */
+function setupPendingMocks(items: ReadonlyArray<Record<string, unknown>>): void {
+  mockSend
+    .mockResolvedValueOnce({}) // rate-limit
+    .mockResolvedValueOnce({ Items: items });
+}
+
 describe('get-pending', () => {
   test('401 when no Cognito claims', async () => {
     const event = makeEvent();
@@ -118,22 +133,18 @@ describe('get-pending', () => {
   });
 
   test('maps GSI rows into PendingApprovalSummary with derived expires_at', async () => {
-    mockSend
-      .mockResolvedValueOnce({}) // rate-limit
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            task_id: 'task-1',
-            request_id: 'req-1',
-            tool_name: 'Bash',
-            tool_input_preview: 'git push --force',
-            severity: 'medium',
-            reason: 'force_push_any',
-            created_at: '2026-05-07T00:00:00Z',
-            timeout_s: 300,
-          },
-        ],
-      });
+    setupPendingMocks([
+      {
+        task_id: 'task-1',
+        request_id: 'req-1',
+        tool_name: 'Bash',
+        tool_input_preview: 'git push --force',
+        severity: 'medium',
+        reason: 'force_push_any',
+        created_at: '2026-05-07T00:00:00Z',
+        timeout_s: 300,
+      },
+    ]);
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
@@ -146,44 +157,36 @@ describe('get-pending', () => {
   });
 
   test('falls back to medium severity when row has an unexpected value', async () => {
-    mockSend
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            task_id: 't',
-            request_id: 'r',
-            tool_name: 'Read',
-            tool_input_preview: '',
-            severity: 'CRITICAL',
-            reason: '',
-            created_at: '2026-05-07T00:00:00Z',
-            timeout_s: 60,
-          },
-        ],
-      });
+    setupPendingMocks([
+      {
+        task_id: 't',
+        request_id: 'r',
+        tool_name: 'Read',
+        tool_input_preview: '',
+        severity: 'CRITICAL',
+        reason: '',
+        created_at: '2026-05-07T00:00:00Z',
+        timeout_s: 60,
+      },
+    ]);
     const res = await handler(makeEvent());
     const body = JSON.parse(res.body);
     expect(body.data.pending[0].severity).toBe('medium');
   });
 
   test('expires_at falls back to created_at when timeout is missing', async () => {
-    mockSend
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            task_id: 't',
-            request_id: 'r',
-            tool_name: 'Read',
-            tool_input_preview: '',
-            severity: 'low',
-            reason: '',
-            created_at: '2026-05-07T00:00:00Z',
-            timeout_s: 0,
-          },
-        ],
-      });
+    setupPendingMocks([
+      {
+        task_id: 't',
+        request_id: 'r',
+        tool_name: 'Read',
+        tool_input_preview: '',
+        severity: 'low',
+        reason: '',
+        created_at: '2026-05-07T00:00:00Z',
+        timeout_s: 0,
+      },
+    ]);
     const res = await handler(makeEvent());
     const body = JSON.parse(res.body);
     expect(body.data.pending[0].expires_at).toBe('2026-05-07T00:00:00Z');
@@ -195,5 +198,64 @@ describe('get-pending', () => {
       .mockRejectedValueOnce(new Error('Throughput'));
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(500);
+  });
+
+  test('maps matching_rule_ids from the GSI row (Cedar HITL diagnostics)', async () => {
+    // ``matching_rule_ids`` is projected directly onto the
+    // ``user_id-status-index`` GSI (see task-approvals-table.ts),
+    // so the handler reads it from the Query result without a
+    // second round trip. Lets ``bgagent pending`` show WHICH rule
+    // fired without spelunking TaskEventsTable.
+    setupPendingMocks([
+      {
+        task_id: 'task-rule',
+        request_id: 'req-rule',
+        tool_name: 'Bash',
+        tool_input_preview: 'git push --force',
+        severity: 'medium',
+        reason: 'force_push_any',
+        created_at: '2026-05-07T00:00:00Z',
+        timeout_s: 300,
+        matching_rule_ids: ['force_push_any', 'force_push_main'],
+      },
+    ]);
+    const res = await handler(makeEvent());
+    const body = JSON.parse(res.body);
+    expect(body.data.pending[0].matching_rule_ids).toEqual([
+      'force_push_any',
+      'force_push_main',
+    ]);
+  });
+
+  test('defaults matching_rule_ids to [] when the field is absent or malformed', async () => {
+    setupPendingMocks([
+      // row 1: field absent (pre-Chunk-3 approval row — defensive)
+      {
+        task_id: 't1',
+        request_id: 'r1',
+        tool_name: 'Bash',
+        tool_input_preview: '',
+        severity: 'medium',
+        reason: '',
+        created_at: '2026-05-07T00:00:00Z',
+        timeout_s: 60,
+      },
+      // row 2: field present but wrong shape
+      {
+        task_id: 't2',
+        request_id: 'r2',
+        tool_name: 'Bash',
+        tool_input_preview: '',
+        severity: 'medium',
+        reason: '',
+        created_at: '2026-05-07T00:00:00Z',
+        timeout_s: 60,
+        matching_rule_ids: 'not-a-list',
+      },
+    ]);
+    const res = await handler(makeEvent());
+    const body = JSON.parse(res.body);
+    expect(body.data.pending[0].matching_rule_ids).toEqual([]);
+    expect(body.data.pending[1].matching_rule_ids).toEqual([]);
   });
 });

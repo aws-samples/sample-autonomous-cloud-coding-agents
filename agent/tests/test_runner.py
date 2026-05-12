@@ -118,6 +118,23 @@ class TestInitializePolicyEngineAndHooks:
 
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
+    def test_user_id_threaded_to_hook_matchers(self, _mock_policy_engine, mock_build_hooks):
+        # E2E regression: a missing user_id on the approval row lands an
+        # empty string on the TaskApprovalsTable ``user_id-status-index``
+        # GSI key, which DynamoDB rejects with ValidationException, and
+        # every approval-gate request fails silently. The hook writer
+        # needs ``user_id`` from the task payload — runner must thread
+        # ``config.user_id`` into ``build_hook_matchers``.
+        config = _config(user_id="cog-sub-0123")
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        kwargs = mock_build_hooks.call_args.kwargs
+        assert kwargs["user_id"] == "cog-sub-0123"
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
     def test_helper_returns_engine_and_hooks(self, mock_policy_engine, mock_build_hooks):
         engine_instance = MagicMock()
         hooks_instance = [MagicMock()]

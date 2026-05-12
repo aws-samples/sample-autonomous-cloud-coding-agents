@@ -69,7 +69,17 @@ export class AgentStack extends Stack {
     // Cedar HITL approval-gate state (design §10.1). Agent writes PENDING
     // rows + GSI query powers `bgagent pending`; Chunk 5 wires the
     // Approve/Deny Lambdas + fan-out consumer.
-    const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTable');
+    //
+    // Construct id is ``TaskApprovalsTableV2`` — the original
+    // ``TaskApprovalsTable`` logical id was abandoned mid-development
+    // after the first ship of the ``user_id-status-index`` GSI. Adding
+    // ``matching_rule_ids`` to the projection required a destructive
+    // recreate (DDB rejects in-place ``nonKeyAttributes`` edits), so
+    // the construct id changed to force CloudFormation to create the
+    // new table under a fresh logical resource while tearing down the
+    // old one. Acceptable in dev; in a future prod migration the
+    // dual-index pattern is preferred (see §10.1 of the design doc).
+    const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     // Cedar HITL Slack → Cognito mapping (§11.2). Written only via the
     // user-initiated OAuth link handler (Chunk 5).
     const slackUserMappingTable = new SlackUserMappingTable(this, 'SlackUserMappingTable');

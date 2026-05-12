@@ -126,6 +126,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         created_at,
         timeout_s,
         expires_at,
+        matching_rule_ids: coerceStringList(row.matching_rule_ids),
       };
     });
 
@@ -151,6 +152,11 @@ function coerceSeverity(value: unknown): 'low' | 'medium' | 'high' {
     return value;
   }
   return 'medium';
+}
+
+function coerceStringList(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v): v is string => typeof v === 'string');
 }
 
 function computeExpiresAt(createdAt: string, timeoutS: number): string {
