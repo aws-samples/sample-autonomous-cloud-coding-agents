@@ -18,8 +18,9 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { ArnFormat, Duration, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -133,6 +134,23 @@ export class FanOutConsumer extends Construct {
       props.githubTokenSecret.grantRead(this.fn);
       this.fn.addEnvironment('GITHUB_TOKEN_SECRET_ARN', props.githubTokenSecret.secretArn);
     }
+
+    // Slack dispatcher reads per-workspace bot tokens from Secrets
+    // Manager (``bgagent/slack/<team_id>``). Scope the grant to that
+    // prefix so the fan-out Lambda cannot read unrelated platform
+    // secrets — matches the policy the old standalone ``SlackNotifyFn``
+    // held before issue #64. The Slack tables and the secret *writers*
+    // (OAuth callback, events handler) still live inside SlackIntegration.
+    const slackSecretArnPattern = Stack.of(this).formatArn({
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: 'bgagent/slack/*',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
+    this.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [slackSecretArnPattern],
+    }));
 
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,

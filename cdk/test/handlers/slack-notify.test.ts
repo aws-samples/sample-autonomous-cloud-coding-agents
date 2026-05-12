@@ -17,12 +17,15 @@
  *  SOFTWARE.
  */
 
-import type { DynamoDBStreamEvent, DynamoDBRecord } from 'aws-lambda';
+// Issue #64: SlackNotifyFn migrated off the direct DynamoDB Streams
+// event-source mapping onto FanOutConsumer as a per-channel dispatcher.
+// The tests here cover ``dispatchSlackEvent`` directly — the unit of
+// behaviour the fan-out router invokes. End-to-end coverage through the
+// router lives in ``fanout-task-events.test.ts``.
 
 const ddbSend = jest.fn();
-jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+const ddbClient = { send: ddbSend };
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
-  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
@@ -38,31 +41,26 @@ const fetchMock = jest.fn();
 
 process.env.TASK_TABLE_NAME = 'Tasks';
 
-import { handler } from '../../src/handlers/slack-notify';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { dispatchSlackEvent, SlackApiError, type SlackDispatchEvent } from '../../src/handlers/slack-notify';
 
-function makeInsertRecord(
+const ddb = ddbClient as unknown as DynamoDBDocumentClient;
+
+function mkEvent(
   taskId: string,
   eventType: string,
   metadata?: Record<string, unknown>,
-): DynamoDBRecord {
+): SlackDispatchEvent {
   return {
-    eventID: `evt-${Math.random()}`,
-    eventName: 'INSERT',
-    dynamodb: {
-      NewImage: {
-        task_id: { S: taskId },
-        event_type: { S: eventType },
-        ...(metadata && { metadata: { S: JSON.stringify(metadata) } }),
-      },
-    },
+    task_id: taskId,
+    event_id: `evt-${taskId}-${eventType}`,
+    event_type: eventType,
+    timestamp: '2026-05-05T00:00:00Z',
+    metadata,
   };
 }
 
-function withRecords(records: DynamoDBRecord[]): DynamoDBStreamEvent {
-  return { Records: records };
-}
-
-describe('slack-notify handler', () => {
+describe('dispatchSlackEvent', () => {
   beforeEach(() => {
     ddbSend.mockReset();
     smSend.mockReset();
@@ -74,19 +72,23 @@ describe('slack-notify handler', () => {
     });
   });
 
-  test('skips non-slack tasks without touching DDB beyond the task read', async () => {
+  test('skips non-slack tasks without touching Slack', async () => {
+    // A Slack-subscribed event on a non-Slack task must still short-
+    // circuit cheaply — one DDB Get, no dedup write, no API call.
+    // This is the ``channel_source === 'slack'`` gate.
     ddbSend.mockResolvedValueOnce({
       Item: { task_id: 't1', channel_source: 'api', channel_metadata: {} },
     });
 
-    await handler(withRecords([makeInsertRecord('t1', 'task_completed')]));
+    await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-    // Only the initial GetCommand ran — no dedup update, no Slack call.
     expect(ddbSend).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test('dedup write runs only after channel_source is confirmed slack', async () => {
+  test('dedup write only runs after channel_source is confirmed slack', async () => {
+    // Order matters: we must not write the dedup marker on a task we
+    // are about to skip.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -98,9 +100,8 @@ describe('slack-notify handler', () => {
       })
       .mockResolvedValueOnce({}); // UpdateCommand for dedup
 
-    await handler(withRecords([makeInsertRecord('t1', 'task_completed')]));
+    await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-    // GetCommand first, then UpdateCommand (dedup). Order matters (item 17).
     expect(ddbSend.mock.calls[0][0]._type).toBe('Get');
     expect(ddbSend.mock.calls[1][0]._type).toBe('Update');
     expect(fetchMock).toHaveBeenCalled();
@@ -117,13 +118,16 @@ describe('slack-notify handler', () => {
       })
       .mockRejectedValueOnce(Object.assign(new Error('exists'), { name: 'ConditionalCheckFailedException' }));
 
-    await handler(withRecords([makeInsertRecord('t1', 'task_failed')]));
+    await dispatchSlackEvent(mkEvent('t1', 'task_failed'), ddb);
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test('swallows Slack API errors without failing the batch', async () => {
-    ddbSend.mockResolvedValue({
+  test('throws a tagged SlackApiError on a TERMINAL Slack code (router swallows)', async () => {
+    // Slack errors like channel_not_found are terminal — retrying
+    // won't change the outcome. Throw SlackApiError so the router
+    // catches and logs at warn instead of escalating to batch retry.
+    ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
         channel_source: 'slack',
@@ -136,45 +140,71 @@ describe('slack-notify handler', () => {
     });
 
     await expect(
-      handler(withRecords([makeInsertRecord('t1', 'task_created')])),
-    ).resolves.toBeUndefined();
+      dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb),
+    ).rejects.toBeInstanceOf(SlackApiError);
   });
 
-  test('rethrows infra errors so Lambda retries the batch (item 4)', async () => {
-    ddbSend.mockRejectedValueOnce(Object.assign(new Error('throttle'), { name: 'ProvisionedThroughputExceededException' }));
+  test.each([
+    'ratelimited',
+    'service_unavailable',
+    'internal_error',
+    'fatal_error',
+    'request_timeout',
+    'unknown_method', // anything not in TERMINAL_SLACK_API_ERRORS counts as retryable
+  ])('throws a plain Error (NOT SlackApiError) on retryable code %s', async (slackErrorCode) => {
+    // Post-issue-#64-review Cat 3 fix: retryable Slack errors must
+    // propagate as plain Error so the router classifies them as
+    // infra rejections and Lambda replays the record. Without this
+    // split, a transient ratelimited or service_unavailable would
+    // get permanently dropped under the SlackApiError swallow.
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        task_id: 't1',
+        channel_source: 'slack',
+        channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' },
+      },
+    });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ok: false, error: slackErrorCode }),
+    });
+
+    let caught: unknown;
+    try {
+      await dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(SlackApiError);
+    expect((caught as Error).message).toContain(slackErrorCode);
+  });
+
+  test('rethrows infra errors so the router records a dispatcher-rejected warn', async () => {
+    // DDB throttling and Secrets Manager outages must surface to the
+    // router — Promise.allSettled records them as rejections and batch
+    // telemetry reflects that the record didn't dispatch.
+    ddbSend.mockRejectedValueOnce(
+      Object.assign(new Error('throttle'), { name: 'ProvisionedThroughputExceededException' }),
+    );
 
     await expect(
-      handler(withRecords([makeInsertRecord('t1', 'task_completed')])),
+      dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb),
     ).rejects.toThrow('throttle');
   });
 
-  test('ignores non-INSERT stream events', async () => {
-    const modifyRecord: DynamoDBRecord = {
-      eventID: 'evt-modify',
-      eventName: 'MODIFY',
-      dynamodb: { NewImage: { task_id: { S: 't1' }, event_type: { S: 'task_completed' } } },
-    };
-    await handler(withRecords([modifyRecord]));
+  test('ignores event types not in the Slack render set', async () => {
+    // Defence-in-depth: even if the fanout filter drifts and sends us
+    // an event the renderer doesn't know how to format, we must
+    // short-circuit without touching DDB or Slack.
+    await dispatchSlackEvent(mkEvent('t1', 'agent_heartbeat'), ddb);
     expect(ddbSend).not.toHaveBeenCalled();
   });
 
-  test('ignores non-notifiable event types', async () => {
-    await handler(withRecords([makeInsertRecord('t1', 'agent_heartbeat')]));
-    expect(ddbSend).not.toHaveBeenCalled();
-  });
-
-  test('logs and continues when event metadata JSON is malformed (item 20)', async () => {
-    const record: DynamoDBRecord = {
-      eventID: 'evt-bad-meta',
-      eventName: 'INSERT',
-      dynamodb: {
-        NewImage: {
-          task_id: { S: 't1' },
-          event_type: { S: 'task_failed' },
-          metadata: { S: 'not-json{' },
-        },
-      },
-    };
+  test('uses pre-parsed metadata without a JSON re-parse', async () => {
+    // The fan-out router hands us a parsed metadata map — the
+    // dispatcher must not insist on the old ``metadata: { S: ... }``
+    // JSON string shape.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -185,11 +215,13 @@ describe('slack-notify handler', () => {
           error_message: 'agent crashed',
         },
       })
-      .mockResolvedValueOnce({}); // dedup
+      .mockResolvedValueOnce({});
 
-    await handler(withRecords([record]));
+    await dispatchSlackEvent(
+      mkEvent('t1', 'task_failed', { error: 'oom killed' }),
+      ddb,
+    );
 
-    // Still posts to Slack — bad metadata is not fatal.
     expect(fetchMock).toHaveBeenCalled();
     const postBody = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
     expect(postBody.text).toContain('org/repo');
