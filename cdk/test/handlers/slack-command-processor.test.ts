@@ -73,6 +73,15 @@ function slashCommand(overrides: Partial<SlashCommandEvent> = {}): SlashCommandE
   };
 }
 
+function isSlackHooksRequestUrl(url: unknown): boolean {
+  try {
+    const u = new URL(String(url));
+    return u.protocol === 'https:' && u.hostname === 'hooks.slack.com';
+  } catch {
+    return false;
+  }
+}
+
 describe('slack-command-processor handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -103,7 +112,8 @@ describe('slack-command-processor handler', () => {
     await handler(legacy);
     // Posted the default "Use @Shoof" hint back to the response_url
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String(url).startsWith('https://hooks.slack.com') && String((opts as { body: string }).body).includes('Use `@Shoof`'),
+      ([url, opts]) =>
+        isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('Use `@Shoof`'),
     );
     expect(posted).toBeTruthy();
   });

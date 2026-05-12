@@ -83,6 +83,15 @@ function interactionPayload(actionId: string, userId = 'U1', teamId = 'T1'): obj
   };
 }
 
+function isSlackHooksRequestUrl(url: unknown): boolean {
+  try {
+    const u = new URL(String(url));
+    return u.protocol === 'https:' && u.hostname === 'hooks.slack.com';
+  } catch {
+    return false;
+  }
+}
+
 describe('slack-interactions handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -142,7 +151,8 @@ describe('slack-interactions handler', () => {
     expect(updateCall).toBeFalsy();
     // Posted to response_url with "own your own tasks"
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String(url).startsWith('https://hooks.slack.com') && String((opts as { body: string }).body).includes('your own tasks'),
+      ([url, opts]) =>
+        isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('your own tasks'),
     );
     expect(posted).toBeTruthy();
   });
@@ -159,7 +169,8 @@ describe('slack-interactions handler', () => {
     const result = await handler(event);
     expect(result.statusCode).toBe(200);
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String(url).startsWith('https://hooks.slack.com') && String((opts as { body: string }).body).includes('terminal state'),
+      ([url, opts]) =>
+        isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('terminal state'),
     );
     expect(posted).toBeTruthy();
   });
@@ -177,7 +188,8 @@ describe('slack-interactions handler', () => {
     const result = await handler(event);
     expect(result.statusCode).toBe(200);
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String(url).startsWith('https://hooks.slack.com') && String((opts as { body: string }).body).includes('not linked'),
+      ([url, opts]) =>
+        isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('not linked'),
     );
     expect(posted).toBeTruthy();
   });
