@@ -435,11 +435,25 @@ async function addReaction(botToken: string, channel: string, timestamp: string,
     });
     const result = await response.json() as { ok: boolean; error?: string };
     if (!result.ok && result.error !== 'already_reacted') {
-      logger.warn('[fanout/slack] failed to add reaction', { emoji, error: result.error });
+      // API-level rejection: per-message UX problem (channel locked,
+      // emoji unknown). Stays at warn — operators don't page.
+      logger.warn('[fanout/slack] failed to add reaction', {
+        event: 'fanout.slack.reaction_add_api_error',
+        emoji,
+        error: result.error,
+      });
     }
   } catch (err) {
-    logger.warn('[fanout/slack] error adding reaction', {
+    // Network / DNS / TLS / timeout / SyntaxError — infra class.
+    // Promote to error with a dedicated event key so the rate of
+    // network failures has its own alarmable signal, distinct from
+    // API-level rejections (PR #79 review #5). User-visible symptom
+    // when this fires unnoticed: stale ⏳ emoji never swaps to ✅.
+    logger.error('[fanout/slack] network error adding reaction', {
+      event: 'fanout.slack.reaction_add_network_error',
+      error_id: 'FANOUT_SLACK_REACTION_NETWORK',
       emoji,
+      error_name: err instanceof Error ? err.name : undefined,
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -457,11 +471,21 @@ async function removeReaction(botToken: string, channel: string, timestamp: stri
     });
     const result = await response.json() as { ok: boolean; error?: string };
     if (!result.ok && result.error !== 'no_reaction') {
-      logger.warn('[fanout/slack] failed to remove reaction', { emoji, error: result.error });
+      logger.warn('[fanout/slack] failed to remove reaction', {
+        event: 'fanout.slack.reaction_remove_api_error',
+        emoji,
+        error: result.error,
+      });
     }
   } catch (err) {
-    logger.warn('[fanout/slack] error removing reaction', {
+    // See addReaction — network failures get their own ``error_id``
+    // so operators can alarm on stale-emoji rate distinctly from
+    // Slack API rejections.
+    logger.error('[fanout/slack] network error removing reaction', {
+      event: 'fanout.slack.reaction_remove_network_error',
+      error_id: 'FANOUT_SLACK_REACTION_NETWORK',
       emoji,
+      error_name: err instanceof Error ? err.name : undefined,
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -490,10 +514,24 @@ async function deleteMessage(botToken: string, channel: string, messageTs: strin
     });
     const result = await response.json() as { ok: boolean; error?: string };
     if (!result.ok) {
-      logger.warn('[fanout/slack] failed to delete intermediate message', { error: result.error });
+      // ``message_not_found`` is benign (message already gone);
+      // anything else (e.g. ``cant_delete_message``) leaves an
+      // orphan in the thread that operators may want to alarm on.
+      logger.warn('[fanout/slack] failed to delete intermediate message', {
+        event: 'fanout.slack.message_delete_api_error',
+        error: result.error,
+        message_ts: messageTs,
+      });
     }
   } catch (err) {
-    logger.warn('[fanout/slack] error deleting intermediate message', {
+    // Network failure → orphan message stays in the thread silently.
+    // Promote to error so operators can alarm on the orphan rate
+    // (PR #79 review #5).
+    logger.error('[fanout/slack] network error deleting intermediate message', {
+      event: 'fanout.slack.message_delete_network_error',
+      error_id: 'FANOUT_SLACK_DELETE_NETWORK',
+      message_ts: messageTs,
+      error_name: err instanceof Error ? err.name : undefined,
       error: err instanceof Error ? err.message : String(err),
     });
   }
