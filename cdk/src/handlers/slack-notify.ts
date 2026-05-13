@@ -125,22 +125,34 @@ export class SlackApiError extends Error {
  * ``service_unavailable`` doesn't get permanently dropped.
  */
 const TERMINAL_SLACK_API_ERRORS: ReadonlySet<string> = new Set([
+  // Channel-shape failures.
   'channel_not_found',
   'not_in_channel',
   'is_archived',
+  'message_not_found',
+  // Auth failures.
   'not_authed',
   'invalid_auth',
   'token_revoked',
   'token_expired',
   'account_inactive',
+  // Permission / scope failures (PR #79 review #8): each of these
+  // means a configuration fix is required before any retry can
+  // succeed, so swallow them as terminal and let operators alert on
+  // the dedicated ``fanout.slack.api_error`` warn rate.
   'no_permission',
+  'missing_scope',
+  'restricted_action',
+  'ekm_access_denied',
+  'team_access_not_granted',
+  'posting_to_general_channel_denied',
+  'as_user_not_supported',
+  // Payload-shape failures.
   'invalid_blocks',
   'invalid_blocks_format',
+  'invalid_arguments',
   'msg_too_long',
   'too_many_attachments',
-  'restricted_action',
-  'as_user_not_supported',
-  'message_not_found',
 ]);
 
 /** Tag a Slack ``!result.ok`` error as terminal vs retryable so the

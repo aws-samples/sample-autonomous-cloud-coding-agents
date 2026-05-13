@@ -123,10 +123,37 @@ describe('dispatchSlackEvent', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test('throws a tagged SlackApiError on a TERMINAL Slack code (router swallows)', async () => {
-    // Slack errors like channel_not_found are terminal — retrying
-    // won't change the outcome. Throw SlackApiError so the router
-    // catches and logs at warn instead of escalating to batch retry.
+  test.each([
+    // Channel + message shape.
+    'channel_not_found',
+    'not_in_channel',
+    'is_archived',
+    'message_not_found',
+    // Auth.
+    'not_authed',
+    'invalid_auth',
+    'token_revoked',
+    'token_expired',
+    'account_inactive',
+    // Permission / scope (PR #79 review #8).
+    'no_permission',
+    'missing_scope',
+    'restricted_action',
+    'ekm_access_denied',
+    'team_access_not_granted',
+    'posting_to_general_channel_denied',
+    'as_user_not_supported',
+    // Payload shape.
+    'invalid_blocks',
+    'invalid_blocks_format',
+    'invalid_arguments',
+    'msg_too_long',
+    'too_many_attachments',
+  ])('throws a tagged SlackApiError on terminal Slack code %s (router swallows)', async (slackErrorCode) => {
+    // Pre-PR-#79-review the set was narrower; permission/scope
+    // codes (ekm_access_denied, missing_scope, etc.) used to be
+    // classified retryable and would burn 3 retries before DLQ on
+    // a misconfiguration that no retry can fix.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
@@ -136,7 +163,7 @@ describe('dispatchSlackEvent', () => {
     });
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ ok: false, error: 'channel_not_found' }),
+      json: () => Promise.resolve({ ok: false, error: slackErrorCode }),
     });
 
     await expect(
