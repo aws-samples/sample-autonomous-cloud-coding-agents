@@ -273,6 +273,9 @@ def _run_task_background(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    tool_profile: str = "",
+    profile_mcp_servers: list[str] | None = None,
+    profile_skills: list[str] | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
@@ -322,6 +325,9 @@ def _run_task_background(
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
+            tool_profile=tool_profile,
+            profile_mcp_servers=profile_mcp_servers,
+            profile_skills=profile_skills,
             channel_source=channel_source,
             channel_metadata=channel_metadata,
             trace=trace,
@@ -371,6 +377,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    tool_profile = inp.get("tool_profile", "") or ""
+    profile_mcp_servers = inp.get("profile_mcp_servers") or []
+    profile_skills = inp.get("profile_skills") or []
     channel_source = inp.get("channel_source", "") or ""
     channel_metadata = inp.get("channel_metadata") or {}
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
@@ -418,6 +427,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
+        "tool_profile": tool_profile,
+        "profile_mcp_servers": profile_mcp_servers,
+        "profile_skills": profile_skills,
         "channel_source": channel_source,
         "channel_metadata": channel_metadata,
         "trace": trace,

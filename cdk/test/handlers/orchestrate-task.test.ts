@@ -53,6 +53,14 @@ const mockLoadRepoConfig = jest.fn();
 jest.mock('../../src/handlers/shared/repo-config', () => ({
   loadRepoConfig: mockLoadRepoConfig,
   checkRepoOnboarded: jest.fn(),
+  parseToolProfiles: jest.fn((raw: string | undefined) => {
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+      return parsed;
+    } catch { return {}; }
+  }),
 }));
 
 let ulidCounter = 0;
@@ -506,6 +514,30 @@ describe('loadBlueprintConfig', () => {
     const config = await loadBlueprintConfig(baseTask as any);
     expect(config.cedar_policies).toBeUndefined();
   });
+
+  test('parses tool_profiles from repo config JSON string', async () => {
+    const profiles = { frontend: { mcpServers: ['eslint-mcp'], capabilityTier: 'extended' as const } };
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      tool_profiles: JSON.stringify(profiles),
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.tool_profiles).toEqual(profiles);
+  });
+
+  test('returns empty tool_profiles when repo config has none', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.tool_profiles).toEqual({});
+  });
 });
 
 describe('hydrateAndTransition with blueprint config', () => {
@@ -618,6 +650,71 @@ describe('hydrateAndTransition with blueprint config', () => {
       cedar_policies: [],
     });
     expect(payload.cedar_policies).toBeUndefined();
+  });
+
+  test('includes tool_profile and resolved profile fields in payload', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithProfile = { ...baseTask, tool_profile: 'frontend' };
+    const payload = await hydrateAndTransition(taskWithProfile as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      tool_profiles: {
+        frontend: {
+          mcpServers: ['eslint-mcp'],
+          skills: ['react-patterns'],
+          cedarPolicies: ['permit (principal, action, resource);'],
+        },
+      },
+    });
+    expect(payload.tool_profile).toBe('frontend');
+    expect(payload.profile_mcp_servers).toEqual(['eslint-mcp']);
+    expect(payload.profile_skills).toEqual(['react-patterns']);
+    expect(payload.cedar_policies).toEqual(['permit (principal, action, resource);']);
+  });
+
+  test('merges blueprint and profile cedar policies', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithProfile = { ...baseTask, tool_profile: 'backend' };
+    const payload = await hydrateAndTransition(taskWithProfile as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: ['base-policy'],
+      tool_profiles: {
+        backend: { cedarPolicies: ['profile-policy'] },
+      },
+    });
+    expect(payload.cedar_policies).toEqual(['base-policy', 'profile-policy']);
+  });
+
+  test('omits profile fields when no tool_profile on task', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      tool_profiles: {
+        frontend: { mcpServers: ['eslint-mcp'] },
+      },
+    });
+    expect(payload.tool_profile).toBeUndefined();
+    expect(payload.profile_mcp_servers).toBeUndefined();
+    expect(payload.profile_skills).toBeUndefined();
+  });
+
+  test('passes tool_profile name even for unknown profile', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithProfile = { ...baseTask, tool_profile: 'nonexistent' };
+    const payload = await hydrateAndTransition(taskWithProfile as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      tool_profiles: { frontend: { mcpServers: ['eslint-mcp'] } },
+    });
+    expect(payload.tool_profile).toBe('nonexistent');
+    expect(payload.profile_mcp_servers).toBeUndefined();
+    expect(payload.profile_skills).toBeUndefined();
   });
 });
 

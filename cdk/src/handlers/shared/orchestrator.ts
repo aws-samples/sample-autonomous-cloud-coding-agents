@@ -25,7 +25,7 @@ import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
-import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
+import { loadRepoConfig, parseToolProfiles, type BlueprintConfig, type ComputeType } from './repo-config';
 import type { TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
@@ -241,7 +241,68 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
+    tool_profiles: parseToolProfiles(repoConfig?.tool_profiles),
   };
+}
+
+/**
+ * Build the cedar_policies payload field by merging blueprint-level policies
+ * with any profile-specific cedar policies.
+ */
+function buildCedarPoliciesPayload(task: TaskRecord, blueprintConfig?: BlueprintConfig): Record<string, unknown> {
+  const basePolicies = blueprintConfig?.cedar_policies ?? [];
+  const profileName = task.tool_profile;
+  let profilePolicies: readonly string[] = [];
+
+  if (profileName && blueprintConfig?.tool_profiles) {
+    const profile = blueprintConfig.tool_profiles[profileName];
+    if (profile?.cedarPolicies && profile.cedarPolicies.length > 0) {
+      profilePolicies = profile.cedarPolicies;
+    }
+  }
+
+  const merged = [...basePolicies, ...profilePolicies];
+  if (merged.length === 0) return {};
+  return { cedar_policies: merged };
+}
+
+/**
+ * Build the tool profile payload fields (mcp_servers, skills, tool_profile name)
+ * resolved from the task's selected profile.
+ */
+function buildToolProfilePayload(task: TaskRecord, blueprintConfig?: BlueprintConfig): Record<string, unknown> {
+  const profileName = task.tool_profile;
+  if (!profileName) return {};
+
+  const result: Record<string, unknown> = { tool_profile: profileName };
+
+  if (!blueprintConfig?.tool_profiles) return result;
+
+  const profile = blueprintConfig.tool_profiles[profileName];
+  if (!profile) {
+    logger.warn('Task references unknown tool_profile — passing name only', {
+      task_id: task.task_id,
+      tool_profile: profileName,
+    });
+    return result;
+  }
+
+  if (profile.mcpServers && profile.mcpServers.length > 0) {
+    result.profile_mcp_servers = [...profile.mcpServers];
+  }
+  if (profile.skills && profile.skills.length > 0) {
+    result.profile_skills = [...profile.skills];
+  }
+
+  logger.info('Resolved tool profile for payload', {
+    task_id: task.task_id,
+    tool_profile: profileName,
+    mcp_servers_count: profile.mcpServers?.length ?? 0,
+    skills_count: profile.skills?.length ?? 0,
+    cedar_policies_count: profile.cedarPolicies?.length ?? 0,
+  });
+
+  return result;
 }
 
 /**
@@ -347,7 +408,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
-    ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    ...(buildCedarPoliciesPayload(task, blueprintConfig)),
+    ...(buildToolProfilePayload(task, blueprintConfig)),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,

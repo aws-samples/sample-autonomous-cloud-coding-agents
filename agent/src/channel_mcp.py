@@ -110,3 +110,67 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
         f"Linear MCP configured at {mcp_path} (server key: {LINEAR_MCP_SERVER_KEY})",
     )
     return True
+
+
+def configure_profile_mcp(repo_dir: str, mcp_servers: list[str]) -> bool:
+    """Write tool-profile MCP server entries into ``.mcp.json``.
+
+    Each entry in ``mcp_servers`` is a server identifier (e.g. ``"eslint-mcp"``).
+    The server entries are written as Streamable HTTP stubs — the actual URL
+    resolution is expected to be handled by the MCP server registry or
+    environment-based configuration.
+
+    For v1, profile MCP server entries use a convention-based URL pattern:
+    ``MCP_SERVER_<UPPER_NAME>_URL`` env var, falling back to a placeholder.
+    The Claude Agent SDK will attempt to connect; if the URL is invalid or
+    unreachable the server simply won't contribute tools.
+
+    Args:
+      repo_dir: the cloned-repo working directory.
+      mcp_servers: list of MCP server identifiers from the tool profile.
+
+    Returns:
+      True if at least one server entry was written, False otherwise.
+    """
+    if not mcp_servers:
+        return False
+
+    if not repo_dir or not os.path.isdir(repo_dir):
+        log("WARN", f"configure_profile_mcp: repo_dir missing or not a directory: {repo_dir!r}")
+        return False
+
+    mcp_path = os.path.join(repo_dir, ".mcp.json")
+    config = _read_existing_mcp_config(mcp_path)
+
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+
+    for server_name in mcp_servers:
+        # Convention: look for MCP_SERVER_<NAME>_URL env var for the endpoint
+        env_key = f"MCP_SERVER_{server_name.upper().replace('-', '_')}_URL"
+        url = os.environ.get(env_key, "")
+        if not url:
+            log("WARN", f"No URL found for profile MCP server '{server_name}' (checked ${env_key}), skipping")
+            continue
+        servers[server_name] = {
+            "type": "http",
+            "url": url,
+        }
+
+    config["mcpServers"] = servers
+
+    try:
+        with open(mcp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        log("ERROR", f"Failed to write profile MCP config to {mcp_path}: {e}")
+        return False
+
+    written = [s for s in mcp_servers if s in servers]
+    log(
+        "TASK",
+        f"Profile MCP servers configured at {mcp_path}: {written}",
+    )
+    return len(written) > 0

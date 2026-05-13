@@ -10,6 +10,7 @@ from channel_mcp import (
     LINEAR_MCP_SERVER_KEY,
     LINEAR_MCP_URL,
     configure_channel_mcp,
+    configure_profile_mcp,
 )
 
 
@@ -139,3 +140,55 @@ class TestRepoDirGuard:
     def test_empty_repo_dir_string(self):
         wrote = configure_channel_mcp("", "linear")
         assert wrote is False
+
+
+class TestConfigureProfileMcp:
+    """Tests for configure_profile_mcp — writing profile MCP server entries."""
+
+    def test_no_op_for_empty_servers(self, tmp_path):
+        wrote = configure_profile_mcp(str(tmp_path), [])
+        assert wrote is False
+
+    def test_no_op_for_missing_repo_dir(self, tmp_path):
+        wrote = configure_profile_mcp(str(tmp_path / "nope"), ["eslint-mcp"])
+        assert wrote is False
+
+    def test_writes_server_entry_when_env_var_present(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MCP_SERVER_ESLINT_MCP_URL", "https://eslint.example/mcp")
+        wrote = configure_profile_mcp(str(tmp_path), ["eslint-mcp"])
+        assert wrote is True
+        config = _read_mcp(str(tmp_path))
+        assert "eslint-mcp" in config["mcpServers"]
+        assert config["mcpServers"]["eslint-mcp"]["url"] == "https://eslint.example/mcp"
+        assert config["mcpServers"]["eslint-mcp"]["type"] == "http"
+
+    def test_skips_server_without_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_SERVER_MYSERVER_URL", raising=False)
+        wrote = configure_profile_mcp(str(tmp_path), ["myserver"])
+        assert wrote is False
+
+    def test_multiple_servers_partial_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MCP_SERVER_SERVER_A_URL", "https://a.example/mcp")
+        monkeypatch.delenv("MCP_SERVER_SERVER_B_URL", raising=False)
+        wrote = configure_profile_mcp(str(tmp_path), ["server-a", "server-b"])
+        assert wrote is True
+        config = _read_mcp(str(tmp_path))
+        assert "server-a" in config["mcpServers"]
+        assert "server-b" not in config["mcpServers"]
+
+    def test_merges_with_existing_mcp_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MCP_SERVER_NEW_MCP_URL", "https://new.example/mcp")
+        existing = {"mcpServers": {"existing-server": {"type": "http", "url": "https://existing.example"}}}
+        (tmp_path / ".mcp.json").write_text(json.dumps(existing))
+        configure_profile_mcp(str(tmp_path), ["new-mcp"])
+        config = _read_mcp(str(tmp_path))
+        assert "existing-server" in config["mcpServers"]
+        assert "new-mcp" in config["mcpServers"]
+
+    def test_coexists_with_channel_mcp(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MCP_SERVER_ESLINT_MCP_URL", "https://eslint.example/mcp")
+        configure_channel_mcp(str(tmp_path), "linear")
+        configure_profile_mcp(str(tmp_path), ["eslint-mcp"])
+        config = _read_mcp(str(tmp_path))
+        assert LINEAR_MCP_SERVER_KEY in config["mcpServers"]
+        assert "eslint-mcp" in config["mcpServers"]

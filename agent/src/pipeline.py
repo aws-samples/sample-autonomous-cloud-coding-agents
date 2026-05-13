@@ -244,6 +244,9 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    tool_profile: str = "",
+    profile_mcp_servers: list[str] | None = None,
+    profile_skills: list[str] | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
@@ -282,6 +285,7 @@ def run_task(
         channel_metadata=channel_metadata,
         trace=trace,
         user_id=user_id,
+        tool_profile=tool_profile,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
@@ -417,6 +421,15 @@ def run_task(
             if config.channel_source == "linear":
                 resolve_linear_api_token()
             configure_channel_mcp(setup.repo_dir, config.channel_source)
+
+            # Tool-profile MCP wiring. Write profile MCP server entries into
+            # .mcp.json so the SDK picks them up via setting_sources=["project"].
+            if profile_mcp_servers:
+                from channel_mcp import configure_profile_mcp
+
+                configure_profile_mcp(setup.repo_dir, profile_mcp_servers)
+            if profile_skills:
+                log("TASK", f"Tool profile skills: {profile_skills}")
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
             # No-op for non-Linear tasks. Best-effort; failures are logged
