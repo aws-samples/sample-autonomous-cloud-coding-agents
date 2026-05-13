@@ -1,16 +1,22 @@
 ARG TARGETPLATFORM=linux/arm64
+ARG GH_VERSION=2.92.0
 
 FROM --platform=$TARGETPLATFORM jdxcode/mise:latest AS mise
+
+# Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
+FROM --platform=$TARGETPLATFORM golang:1.26.3-bookworm AS gh-builder
+ARG GH_VERSION
+RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
 FROM --platform=$TARGETPLATFORM python:3.13-slim
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
+COPY --from=gh-builder /out/gh /usr/local/bin/gh
 
-# Install system dependencies in a single layer:
+# Install system dependencies in multiple layers:
 #   - Node.js 20 (required by Claude Code CLI)
 #   - git (repo operations)
-#   - gh (GitHub CLI for PR creation)
 #   - build-essential (native compilation for some repos)
 #   - curl (downloads)
 RUN apt-get update && \
@@ -20,24 +26,21 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         gnupg && \
-    # Node.js 20
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    # GitHub CLI
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gh && \
-    # Cleanup
+    # Cleanup early to keep peak disk usage low during builds.
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.87 && \
+    npm install -g @anthropic-ai/claude-code@2.1.139 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
 

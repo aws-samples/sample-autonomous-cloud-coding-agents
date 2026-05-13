@@ -45,33 +45,23 @@ export interface SlackUserMappingTableProps {
 }
 
 /**
- * DynamoDB table mapping Slack user IDs to Cognito subs for
- * Slack-button approvals (design §11.2, finding #4).
+ * DynamoDB table for mapping Slack user identities to platform user IDs.
  *
- * Schema: `slack_user_id` (PK). One row per Slack identity; the sole
- * non-key attribute is `cognito_sub`. No GSI is provided for the
- * reverse direction (Cognito → Slack) because that lookup is not
- * trust-sensitive and can be derived offline if ever needed.
+ * Schema: slack_identity (PK) — composite key `{team_id}#{user_id}`.
+ * Also used for pending link records (with status='pending' and TTL).
  *
- * Writes are gated through the `LinkSlackUserFn` Lambda (Chunk 5)
- * which requires BOTH a valid Cognito ID token AND a Slack OAuth
- * token for the user being mapped. Admins do not have a bulk-write
- * API, and the `ConditionExpression: attribute_not_exists(slack_user_id)`
- * on that Put prevents a subsequent Slack-admin compromise from
- * overwriting an existing mapping.
- *
- * NOT provided as part of this construct:
- *
- * - Stream (no consumer needs row-change events; every write is a
- *   user-initiated link, audit lives on CloudTrail + the handler's
- *   explicit audit event on TaskEventsTable).
- * - Reverse GSI (Cognito → Slack) — would widen the trust surface
- *   without adding capability we need in v1.
+ * GSIs:
+ * - PlatformUserIndex (PK: platform_user_id, SK: linked_at) — list linked Slack accounts for a user
  */
 export class SlackUserMappingTable extends Construct {
   /**
-   * The underlying DynamoDB table. Use this to grant access or read
-   * the table name.
+   * GSI name for querying mappings by platform user.
+   * PK: platform_user_id, SK: linked_at.
+   */
+  public static readonly PLATFORM_USER_INDEX = 'PlatformUserIndex';
+
+  /**
+   * The underlying DynamoDB table.
    */
   public readonly table: dynamodb.Table;
 
@@ -81,14 +71,22 @@ export class SlackUserMappingTable extends Construct {
     this.table = new dynamodb.Table(this, 'Table', {
       tableName: props.tableName,
       partitionKey: {
-        name: 'slack_user_id',
+        name: 'slack_identity',
         type: dynamodb.AttributeType.STRING,
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: 'ttl',
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
+    });
+
+    this.table.addGlobalSecondaryIndex({
+      indexName: SlackUserMappingTable.PLATFORM_USER_INDEX,
+      partitionKey: { name: 'platform_user_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'linked_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
   }
 }

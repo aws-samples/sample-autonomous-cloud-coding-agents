@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { Annotations } from 'aws-cdk-lib';
+import { Annotations, Duration } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
@@ -241,6 +241,7 @@ export class Blueprint extends Construct {
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
+      timeout: Duration.minutes(5),
       onCreate: {
         service: 'DynamoDB',
         action: 'putItem',

@@ -15,6 +15,20 @@ Permission requirements vary by task type:
 
 Classic PATs with `repo` scope also work. See `agent/README.md` for edge cases.
 
+### Quick setup (single repo)
+
+To point the default Blueprint at your own repo without editing code, pass it as a CDK context variable or environment variable:
+
+```bash
+# Context variable (preferred)
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
+
+# Or environment variable
+BLUEPRINT_REPO=your-org/your-repo MISE_EXPERIMENTAL=1 mise //cdk:deploy
+```
+
+The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (e.g. `-c blueprintRepo=jane-doe/agent-plugins`).
+
 ### Multiple repositories
 
 To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
