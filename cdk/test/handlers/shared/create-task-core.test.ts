@@ -125,10 +125,57 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.message).toContain('Content screening is temporarily unavailable');
   });
 
-  test('returns 409 for duplicate idempotency key', async () => {
+  test('returns 200 with existing task for same-user idempotency replay', async () => {
+    const existingItem = {
+      task_id: 'existing',
+      user_id: 'user-123',
+      status: 'SUBMITTED',
+      repo: 'org/repo',
+      task_type: 'new_task',
+      task_description: 'Original work',
+      branch_name: 'bgagent/existing/slug',
+      channel_source: 'api',
+      channel_metadata: { source_ip: '1.2.3.4' },
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+      idempotency_key: 'my-key',
+    };
     mockSend
       .mockResolvedValueOnce({ Items: [{ task_id: 'existing' }] })
-      .mockResolvedValueOnce({ Item: { task_id: 'existing' } });
+      .mockResolvedValueOnce({ Item: existingItem });
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it' },
+      makeContext({ idempotencyKey: 'my-key' }),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
+    const body = JSON.parse(result.body);
+    expect(body.data.task_id).toBe('existing');
+    expect(body.data.task_description).toBe('Original work');
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 409 when idempotency key belongs to another user', async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing' }] })
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 'existing',
+          user_id: 'other-user',
+          status: 'SUBMITTED',
+          repo: 'org/repo',
+          task_type: 'new_task',
+          branch_name: 'bgagent/existing/slug',
+          channel_source: 'api',
+          status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+          created_at: '2020-01-01T00:00:00.000Z',
+          updated_at: '2020-01-01T00:00:00.000Z',
+        },
+      });
 
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it' },
@@ -137,6 +184,74 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(409);
     expect(JSON.parse(result.body).error.code).toBe('DUPLICATE_TASK');
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 500 when idempotent replay record is incomplete', async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing' }] })
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 'existing',
+          user_id: 'user-123',
+          // missing status, repo, branch_name, channel_source, created_at, updated_at
+        },
+      });
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it' },
+      makeContext({ idempotencyKey: 'my-key' }),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(500);
+    expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 500 when idempotent replay record has no user_id (fail-closed)', async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing' }] })
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 'existing',
+          // user_id missing entirely — must deny, not match
+          status: 'SUBMITTED',
+          repo: 'org/repo',
+          branch_name: 'bgagent/existing/slug',
+          channel_source: 'api',
+          created_at: '2020-01-01T00:00:00.000Z',
+          updated_at: '2020-01-01T00:00:00.000Z',
+        },
+      });
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it' },
+      makeContext({ idempotencyKey: 'my-key' }),
+      'req-1',
+    );
+    // Missing user_id → incomplete record → 500 (fail-closed)
+    expect(result.statusCode).toBe(500);
+    expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('creates new task when GSI matches but base-table item is gone (TTL race)', async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'gone-task' }] })
+      .mockResolvedValueOnce({ Item: undefined }) // GetCommand returns nothing
+      .mockResolvedValueOnce({}) // PutCommand for new task
+      .mockResolvedValueOnce({}); // PutCommand for event
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it' },
+      makeContext({ idempotencyKey: 'my-key' }),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.task_id).toBeDefined();
+    expect(body.data.task_id).not.toBe('gone-task');
+    expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
   test('returns 400 for invalid idempotency key', async () => {

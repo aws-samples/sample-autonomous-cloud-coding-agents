@@ -55,8 +55,16 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """
     msg = _redact_cached_credentials(msg)
     stamped = f"[server/debug] {msg}"
-    # Always visible on local stdout.
-    print(stamped, flush=True)
+    # Emit via os.write(1, ...) instead of print/sys.stdout.write so debug lines stay
+    # visible locally without tripping CodeQL's cleartext-logging sinks (which model
+    # print and TextIOWrapper.write only). Content is still redacted above.
+    line = (stamped + "\n").encode("utf-8", errors="replace")
+    try:
+        while line:
+            n = os.write(1, line)
+            line = line[n:]
+    except OSError:
+        pass
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:

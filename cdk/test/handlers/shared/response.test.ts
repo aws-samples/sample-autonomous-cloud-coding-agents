@@ -36,6 +36,23 @@ describe('successResponse', () => {
     const result = successResponse(200, {}, 'req-1');
     expect(result.headers?.['Content-Type']).toBe('application/json');
   });
+
+  test('merges optional extra headers', () => {
+    const result = successResponse(200, { ok: true }, 'req-1', { 'Idempotent-Replay': 'true' });
+    expect(result.headers?.['X-Request-Id']).toBe('req-1');
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
+  });
+
+  test('extraHeaders cannot override protected headers', () => {
+    const result = successResponse(200, { ok: true }, 'req-1', {
+      'Content-Type': 'text/html',
+      'Access-Control-Allow-Origin': 'https://evil.example',
+      'X-Request-Id': 'spoofed',
+    });
+    expect(result.headers?.['Content-Type']).toBe('application/json');
+    expect(result.headers?.['Access-Control-Allow-Origin']).toBe('*');
+    expect(result.headers?.['X-Request-Id']).toBe('req-1');
+  });
 });
 
 describe('paginatedResponse', () => {

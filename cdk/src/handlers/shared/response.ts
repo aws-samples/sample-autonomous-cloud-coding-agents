@@ -48,12 +48,19 @@ const COMMON_HEADERS = {
  * @param statusCode - HTTP status code.
  * @param data - the response payload.
  * @param requestId - unique request ID for the X-Request-Id header.
+ * @param extraHeaders - optional additional response headers. Cannot override Content-Type,
+ *   Access-Control-Allow-Origin, or X-Request-Id (common headers always take precedence).
  * @returns the API Gateway proxy result.
  */
-export function successResponse(statusCode: number, data: unknown, requestId: string): APIGatewayProxyResult {
+export function successResponse(
+  statusCode: number,
+  data: unknown,
+  requestId: string,
+  extraHeaders?: Record<string, string>,
+): APIGatewayProxyResult {
   return {
     statusCode,
-    headers: { ...COMMON_HEADERS, 'X-Request-Id': requestId },
+    headers: { ...extraHeaders, ...COMMON_HEADERS, 'X-Request-Id': requestId },
     body: JSON.stringify({ data }),
   };
 }
