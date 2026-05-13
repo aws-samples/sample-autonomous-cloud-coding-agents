@@ -126,4 +126,80 @@ describe('renderSlackBlocks', () => {
     const msg = renderSlackBlocks('task_completed', task);
     expect(sectionText(msg.blocks[0])).toContain('2m 5s');
   });
+
+  // -------------------------------------------------------------------
+  // PR #79 test gap #32 — task_stranded + agent_error renderers
+  // -------------------------------------------------------------------
+
+  test('renders task_stranded message with prior_status from event metadata', () => {
+    // The reconciler stamps ``code: STRANDED_NO_HEARTBEAT`` and
+    // ``prior_status`` on the event metadata (see
+    // reconcile-stranded-tasks.ts). The renderer must surface
+    // prior_status so operators can tell whether the task hung in
+    // HYDRATING vs RUNNING at a glance — without it, the reviewer's
+    // "generic Event: ..." UX regression would resurface.
+    const msg = renderSlackBlocks('task_stranded', baseTask, {
+      code: 'STRANDED_NO_HEARTBEAT',
+      prior_status: 'RUNNING',
+      age_seconds: 1800,
+    });
+    expect(msg.text).toBe('Task stranded for org/repo');
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(':warning:');
+    expect(text).toContain('Task stranded');
+    expect(text).toContain('org/repo');
+    expect(text).toContain('last status: RUNNING');
+  });
+
+  test('renders task_stranded message gracefully without metadata', () => {
+    // Missing prior_status (e.g. legacy event written before the
+    // reconciler started stamping it) must not crash; the renderer
+    // omits the parenthetical and produces a clean message.
+    const msg = renderSlackBlocks('task_stranded', baseTask);
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(':warning:');
+    expect(text).toContain('Task stranded');
+    expect(text).not.toContain('last status:');
+  });
+
+  test('renders agent_error message with error_type and message_preview', () => {
+    // ``agent/src/progress_writer.py::write_agent_error`` carries
+    // ``error_type`` and ``message_preview`` on the event metadata.
+    // Pre-PR-#79 this fell to the default branch
+    // (``Event: agent_error for org/repo``) — a UX regression.
+    const msg = renderSlackBlocks('agent_error', baseTask, {
+      error_type: 'TimeoutError',
+      message_preview: 'Tool call timed out after 30s',
+    });
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(':rotating_light:');
+    expect(text).toContain('Agent error');
+    expect(text).toContain('org/repo');
+    expect(text).toContain('TimeoutError');
+    expect(text).toContain('Tool call timed out after 30s');
+  });
+
+  test('renders agent_error message without metadata (legacy event shape)', () => {
+    // Defense-in-depth: an agent_error event with no metadata at all
+    // must still produce a sensible Slack message. The error_type and
+    // preview fields drop out cleanly without leaking ``undefined``.
+    const msg = renderSlackBlocks('agent_error', baseTask);
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(':rotating_light:');
+    expect(text).toContain('Agent error');
+    expect(text).not.toContain('undefined');
+    expect(text).not.toContain('_Type:_');
+  });
+
+  test('agent_error truncates long message_preview to keep Slack message readable', () => {
+    // The preview cap is 200 chars — protects channel UX from a
+    // pathological agent that emits a 4 KB error message.
+    const msg = renderSlackBlocks('agent_error', baseTask, {
+      error_type: 'BigError',
+      message_preview: 'X'.repeat(500),
+    });
+    const text = sectionText(msg.blocks[0]);
+    expect(text.length).toBeLessThan(400);
+    expect(text).toContain('...');
+  });
 });

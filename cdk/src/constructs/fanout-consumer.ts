@@ -20,6 +20,7 @@
 import * as path from 'path';
 import { Duration } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -61,6 +62,18 @@ export interface FanOutConsumerProps {
    * omitted and the repo has no override, the dispatcher skips.
    */
   readonly githubTokenSecret?: sm.ISecret;
+
+  /**
+   * Secrets Manager ARN-prefix pattern for per-workspace Slack bot
+   * tokens. Required ONLY when the platform deploys SlackIntegration —
+   * the Slack dispatcher reads bot tokens at this scope. Matches the
+   * other "guarded by prop" grants (taskTable, repoTable,
+   * githubTokenSecret): a deployment without Slack onboarding gets no
+   * dangling IAM permission to ``bgagent/slack/*``. Typically passed
+   * as ``Stack.of(this).formatArn({ ..., resourceName:
+   * 'bgagent/slack/*' })``. Found in PR #79 review (#2 CRITICAL).
+   */
+  readonly slackSecretArnPattern?: string;
 
   /**
    * Maximum batch size delivered to the Lambda per invocation.
@@ -132,6 +145,20 @@ export class FanOutConsumer extends Construct {
     if (props.githubTokenSecret) {
       props.githubTokenSecret.grantRead(this.fn);
       this.fn.addEnvironment('GITHUB_TOKEN_SECRET_ARN', props.githubTokenSecret.secretArn);
+    }
+
+    // Slack dispatcher reads per-workspace bot tokens from Secrets
+    // Manager (``bgagent/slack/<team_id>``). Scope the grant to the
+    // caller-provided prefix so the fan-out Lambda cannot read
+    // unrelated platform secrets — matches the policy the old
+    // standalone ``SlackNotifyFn`` held before issue #64. Guarded on
+    // ``slackSecretArnPattern`` so deployments without Slack
+    // onboarding don't get a dangling IAM grant (PR #79 review #2).
+    if (props.slackSecretArnPattern) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [props.slackSecretArnPattern],
+      }));
     }
 
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {

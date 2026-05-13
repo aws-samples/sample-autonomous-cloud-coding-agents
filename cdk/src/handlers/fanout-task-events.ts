@@ -29,19 +29,12 @@
  * status responses) that would be noise on Email, while GitHub only
  * cares about PR activity + terminal outcomes.
  *
- * This handler is a **skeleton**: per-channel dispatcher stubs log
- * each would-be delivery to CloudWatch but don't call Slack / GitHub /
- * SES yet. The design explicitly allows this:
- *
- *   "the fan-out Lambda itself can ship later without any change to
- *    the agent or CLI"  — §8.9
- *
- * Enabling a real dispatcher is a per-channel PR: add the SDK client
- * (e.g. `@slack/web-api`), replace the `log-only` block, add an IAM
- * policy (or Secrets Manager grant) on the Lambda's execution role,
- * and add the channel's configuration (OAuth token ARN + channel ID,
- * GitHub App credentials, SES verified identity) to the construct's
- * props. Chunk J ships the first real dispatcher (GitHub edit-in-place).
+ * Dispatcher state: GitHub edits a single issue comment in place
+ * (Chunk J). Slack posts threaded Block Kit messages with emoji
+ * transitions and session-message cleanup via the ``slack-notify``
+ * helper (issue #64 migrated the standalone SlackNotifyFn consumer onto
+ * this router, dropping ``TaskEventsTable`` from two stream readers
+ * back to one). Email remains a log-only stub until SES wiring lands.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -58,6 +51,7 @@ import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
+import { dispatchSlackEvent, SlackApiError } from './slack-notify';
 
 // Re-export the shared types so existing test imports (and any future
 // caller that only imports from the handler module) continue to work.
@@ -91,11 +85,27 @@ export type NotificationChannel = 'slack' | 'email' | 'github';
 
 export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> = {
   // Slack is the "on-call" channel per §6.2 — all terminal outcomes
-  // (including cancellations and strands) plus agent_error and the
-  // Phase 2/3 interactive signals.
+  // (including cancellations, strands, and timeouts) plus agent_error
+  // and the Phase 2/3 interactive signals. ``task_created`` and
+  // ``session_started`` are additionally delivered for Slack-origin
+  // tasks so the rocket/hourglass-flowing-sand message sequence lines up
+  // with the @mention thread — the Slack dispatcher itself enforces
+  // ``channel_source === 'slack'`` so the noisier early lifecycle
+  // events do not reach non-Slack tasks.
+  //
+  // ``pr_created`` is intentionally NOT in the Slack default — even
+  // though the original §6.2 design listed it. The
+  // ``task_completed`` message renders a "View PR" button carrying
+  // the same URL, and posting both produced visual duplication
+  // (observed during issue #64 dev-stack verification: two messages
+  // back-to-back with identical View PR buttons). GitHub's default
+  // keeps ``pr_created`` because the edit-in-place comment surface
+  // genuinely benefits from the early checkpoint.
   slack: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
-    'pr_created',
+    'task_timed_out',
+    'task_created',
+    'session_started',
     'agent_error',
     'approval_required', // Phase 3 (not yet emitted)
     'status_response', // Phase 2 (not yet emitted)
@@ -294,28 +304,73 @@ export function shouldFanOut(event: FanOutEvent, overrides?: TaskNotificationsCo
 }
 
 /**
- * Per-channel dispatcher stubs. Each currently just logs what it
- * WOULD have sent. Replace the body when a real integration lands —
- * the interface stays the same.
+ * Per-channel dispatcher implementations. Slack and GitHub both talk to
+ * real external APIs today; Email is still a log-only stub until SES
+ * wiring lands.
  *
- * Dispatchers do NOT catch their own errors. Error isolation lives in
- * ``routeEvent`` where ``Promise.allSettled`` records per-channel
- * outcomes and a single ``fanout.dispatcher.rejected`` warn fires on
- * rejection. Keeping one error sink ensures batch telemetry
+ * Dispatchers do NOT catch infra errors themselves. Error isolation
+ * lives in ``routeEvent`` where ``Promise.allSettled`` records
+ * per-channel outcomes and a single ``fanout.dispatcher.rejected`` warn
+ * fires on rejection — keeping one error sink ensures batch telemetry
  * (`dispatched` count) reflects reality: a channel whose dispatcher
- * threw is NOT counted as dispatched.
+ * threw is NOT counted as dispatched. Slack swallows ``SlackApiError``
+ * internally (the Slack API rejecting a message — e.g.
+ * ``channel_not_found`` — is not recoverable by a Lambda retry).
+ */
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+/**
+ * Slack dispatcher — hands the event to the in-module
+ * ``handlers/slack-notify.ts`` helper (issue #64). The helper gates on
+ * ``channel_source === 'slack'`` (so non-Slack tasks short-circuit after
+ * a single DDB Get without any Slack API call) and preserves every
+ * behaviour the old standalone ``SlackNotifyFn`` stream consumer had:
+ * terminal-event dedup, threaded replies, emoji transitions, session
+ * message cleanup. Slack-specific API failures are tagged with
+ * ``SlackApiError`` so the router records a dispatcher-rejected warn
+ * without escalating to the partial-batch retry path (a retry can't
+ * fix ``channel_not_found``). Infra errors (DDB, Secrets Manager) are
+ * rethrown unchanged so ``routeEvent``'s ``Promise.allSettled`` surfaces
+ * them alongside any other dispatcher's rejection.
  */
 async function dispatchToSlack(event: FanOutEvent): Promise<void> {
-  logger.info('[fanout/slack] would dispatch', {
-    event: 'fanout.slack.dispatch_stub',
-    task_id: event.task_id,
-    event_id: event.event_id,
-    event_type: event.event_type,
-    effective_event_type: effectiveEventType(event),
-  });
+  // Pass the effective event type to the Slack dispatcher so
+  // ``agent_milestone`` carriers (e.g. ``pr_created``) reach the
+  // matching renderer. Without this rewrite, the dispatcher's
+  // NOTIFIABLE_EVENTS gate would silently drop every milestone-wrapped
+  // event the router subscribed Slack to, lying in
+  // ``fanout.batch.complete`` telemetry (issue #64 review Cat 7).
+  const effectiveType = effectiveEventType(event);
+  const effectiveEvent = effectiveType === event.event_type
+    ? event
+    : { ...event, event_type: effectiveType };
+  try {
+    await dispatchSlackEvent(effectiveEvent, ddb);
+  } catch (err) {
+    // Match SlackApiError by class OR by ``name`` so a bundler that
+    // duplicates the slack-notify module (rare with NodejsFunction
+    // tree-shaking but possible if the module ever gets dual-bundled)
+    // can't make ``instanceof`` silently fail and turn a
+    // channel-terminal swallow into an infinite Lambda retry loop.
+    // Mirrors how ``GitHubCommentError`` is duck-typed by name in
+    // dispatchToGitHubComment (PR #79 review #7).
+    const isSlackApiErr =
+      err instanceof SlackApiError
+      || (err instanceof Error && err.name === 'SlackApiError');
+    if (isSlackApiErr) {
+      logger.warn('[fanout/slack] Slack API error — swallowing per channel policy', {
+        event: 'fanout.slack.api_error',
+        task_id: event.task_id,
+        event_id: event.event_id,
+        event_type: event.event_type,
+        effective_event_type: effectiveType,
+        error: (err as Error).message,
+      });
+      return;
+    }
+    throw err;
+  }
 }
-
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 /**
  * Load the TaskRecord fields the GitHub dispatcher needs. Returns
@@ -560,6 +615,38 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
       clearTokenCache();
       const freshToken = await resolveGitHubToken(tokenArn);
       result = await upsertTaskComment({ ...upsertParams, token: freshToken });
+    } else if (
+      isGhErr
+      && typeof httpStatus === 'number'
+      && httpStatus >= 400
+      && httpStatus < 500
+      // 403 (most often "API rate limit exceeded" on GitHub) and 429
+      // ("Too Many Requests") are 4xx but **transient** — retrying
+      // after the rate-limit window opens fixes them. Carving them
+      // out here keeps a reconciliation wave from permanently
+      // dropping every GitHub comment under the swallow path. The
+      // batch retry pumps the backoff naturally; if it never clears,
+      // the record DLQs after retryAttempts. Found in PR #79 review.
+      && httpStatus !== 403
+      && httpStatus !== 429
+    ) {
+      // Channel-terminal: a 4xx from GitHub (excluding the handled 401
+      // rotation path, the 404 re-POST handled inside
+      // ``upsertTaskComment``, and the 403/429 rate-limit carve-out
+      // above) means the request itself is malformed or the resource
+      // is gone — retrying will not change the outcome. Swallow the
+      // rejection so the post-issue-#64 router does not push the
+      // record into ``batchItemFailures`` and burn Lambda retries.
+      // Log a dedicated warn so operators can alarm distinctly from
+      // the retryable infra path.
+      logger.warn('[fanout/github] terminal 4xx from GitHub — swallowing per channel policy', {
+        event: 'fanout.github.api_error',
+        task_id: event.task_id,
+        event_id: event.event_id,
+        http_status: httpStatus,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
     } else {
       throw err;
     }
@@ -638,21 +725,44 @@ const DISPATCHERS: Record<NotificationChannel, (ev: FanOutEvent) => Promise<void
 };
 
 /**
- * Route an event to every subscribed channel. A dispatcher that
- * rejects must NOT fail the whole batch: we swallow per-channel
- * rejections so one Slack outage can't block GitHub comment delivery
- * or drop an email notification.
+ * Outcome of routing one event to every subscribed channel. ``dispatched``
+ * is the list of channels that succeeded; ``infraRejections`` is the list
+ * of channels whose dispatcher rejected with an *infrastructure* error
+ * (DDB throttle, Secrets Manager outage, transient Slack 5xx). Channel-
+ * terminal errors (e.g. Slack ``channel_not_found``, GitHub 4xx PATCH)
+ * are swallowed inside the dispatcher itself and never appear here —
+ * they are observable through ``fanout.<channel>.api_error`` warn lines.
  *
- * Returns the list of channels that **successfully** dispatched — a
- * channel whose dispatcher rejected is omitted so batch telemetry
- * (`dispatched` count in the handler) reflects reality. A rejected
- * dispatcher is still logged with a ``fanout.dispatcher.rejected``
- * warn line that operators can alert on.
+ * The handler reads ``infraRejections.length > 0`` to decide whether to
+ * push the record into ``batchItemFailures`` so Lambda retries the
+ * record with the partial-batch contract. This restores the retry
+ * semantic that the standalone ``SlackNotifyFn`` had pre-issue-#64
+ * (its handler rethrew non-``SlackApiError`` so Lambda retried the
+ * batch). Without this distinction, a transient DDB throttle inside the
+ * Slack dispatcher would be a permanent drop instead of a retry.
+ */
+export interface RouteOutcome {
+  readonly dispatched: ReadonlyArray<NotificationChannel>;
+  readonly infraRejections: ReadonlyArray<NotificationChannel>;
+}
+
+/**
+ * Route an event to every subscribed channel. A dispatcher rejection
+ * must NOT block sibling channels — we use ``Promise.allSettled`` so
+ * one Slack outage can't drop a GitHub comment or vice-versa.
+ *
+ * Returns ``{ dispatched, infraRejections }``. A successful dispatch
+ * lands in ``dispatched``; a rejection lands in ``infraRejections``
+ * because the dispatcher itself is responsible for swallowing channel-
+ * terminal errors (Slack ``channel_not_found``, etc.) before throwing.
+ * Anything that reaches the router as a rejection is, by contract, a
+ * retryable failure — and the handler will flag the record for
+ * partial-batch retry.
  */
 export async function routeEvent(
   ev: FanOutEvent,
   overrides?: TaskNotificationsConfig,
-): Promise<NotificationChannel[]> {
+): Promise<RouteOutcome> {
   const attempted: NotificationChannel[] = [];
   const tasks: Promise<unknown>[] = [];
   // Match against the effective type so ``agent_milestone`` carriers
@@ -671,18 +781,20 @@ export async function routeEvent(
   const results = await Promise.allSettled(tasks);
 
   const dispatched: NotificationChannel[] = [];
+  const infraRejections: NotificationChannel[] = [];
   results.forEach((r, i) => {
     const ch = attempted[i];
     if (r.status === 'fulfilled') {
       dispatched.push(ch);
       return;
     }
-    // Belt-and-braces — the dispatcher stubs catch inside their own
-    // try/catch so this branch only fires if a future refactor drops
-    // the inner catch or if the dispatcher throws synchronously before
-    // entering its try. Record at warn so the signal isn't lost.
+    // The dispatcher rejected. By contract this is an *infra* error —
+    // channel-terminal errors are swallowed inside the dispatcher
+    // before reaching us. Mark for partial-batch retry and emit the
+    // warn so operators can alert on the rate of retryable failures.
+    infraRejections.push(ch);
     const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
-    logger.warn('[fanout] dispatcher rejected — continuing batch', {
+    logger.warn('[fanout] dispatcher rejected — flagging record for retry', {
       event: 'fanout.dispatcher.rejected',
       channel: ch,
       task_id: ev.task_id,
@@ -690,9 +802,10 @@ export async function routeEvent(
       event_type: ev.event_type,
       effective_event_type: effectiveEventType(ev),
       error: reason,
+      retryable: true,
     });
   });
-  return dispatched;
+  return { dispatched, infraRejections };
 }
 
 /**
@@ -781,8 +894,18 @@ export const handler = async (
       }
       perTaskCounts.set(ev.task_id, seen + 1);
 
-      const channels = await routeEvent(ev, overrides);
-      if (channels.length > 0) dispatched++;
+      const outcome = await routeEvent(ev, overrides);
+      if (outcome.dispatched.length > 0) dispatched++;
+      // Per-channel infra rejections (DDB throttle, Secrets Manager
+      // 5xx, transient Slack 5xx) escalate to the partial-batch retry
+      // path. ``routeEvent`` already logged a warn per rejection; we
+      // just need to make sure Lambda retries the record so the next
+      // attempt has a chance to succeed. Without this push, a transient
+      // failure would be silently dropped — the regression that
+      // motivated this fix.
+      if (outcome.infraRejections.length > 0 && record.eventID !== undefined) {
+        batchItemFailures.push({ itemIdentifier: record.eventID });
+      }
     } catch (err) {
       // Poison-pill isolation: one record's unhandled throw must not
       // crash the batch. See the handler doc block for the full list of

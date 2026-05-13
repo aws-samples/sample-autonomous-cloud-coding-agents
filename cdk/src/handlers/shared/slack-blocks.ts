@@ -110,6 +110,14 @@ export function renderSlackBlocks(
       return simpleStatusMessage(task, ':no_entry_sign: Task cancelled');
     case 'task_timed_out':
       return taskTimedOutMessage(task);
+    case 'task_stranded':
+      // Emitted by reconcile-stranded-tasks when a task's heartbeat
+      // stops. Operators see this on stranded Slack-origin tasks; the
+      // generic "Event: ..." fallback would be a UX regression
+      // (issue #64 review Cat 7).
+      return taskStrandedMessage(task, eventMetadata);
+    case 'agent_error':
+      return agentErrorMessage(task, eventMetadata);
     default:
       return simpleStatusMessage(task, `Event: ${eventType}`);
   }
@@ -190,6 +198,50 @@ function sessionStartedMessage(
         dangerButton('Cancel Task', `cancel_task:${task.task_id}`),
       ]),
     ],
+  };
+}
+
+function taskStrandedMessage(
+  task: Pick<TaskRecord, 'task_id' | 'repo'>,
+  eventMetadata?: Record<string, unknown>,
+): SlackMessage {
+  // The reconciler stamps ``code: STRANDED_NO_HEARTBEAT`` and
+  // ``prior_status`` on the event metadata (see
+  // handlers/reconcile-stranded-tasks.ts). Surface the prior status so
+  // operators can tell at a glance whether the task hung in HYDRATING
+  // vs RUNNING.
+  const priorStatus = typeof eventMetadata?.prior_status === 'string'
+    ? eventMetadata.prior_status
+    : undefined;
+  const detail = priorStatus ? ` (last status: ${priorStatus})` : '';
+  const text = `:warning: *Task stranded* for \`${task.repo}\`${detail}`;
+  return {
+    text: `Task stranded for ${task.repo}`,
+    blocks: [section(text)],
+  };
+}
+
+function agentErrorMessage(
+  task: Pick<TaskRecord, 'task_id' | 'repo'>,
+  eventMetadata?: Record<string, unknown>,
+): SlackMessage {
+  // ``agent/src/progress_writer.py::write_agent_error`` carries
+  // ``error_type`` and ``message_preview``. Render whichever is
+  // present without leaking the full preview if it's noisy.
+  const errorType = typeof eventMetadata?.error_type === 'string'
+    ? eventMetadata.error_type
+    : undefined;
+  const preview = typeof eventMetadata?.message_preview === 'string'
+    ? eventMetadata.message_preview
+    : undefined;
+  const detail = errorType
+    ? `\n_Type:_ \`${errorType}\``
+    : '';
+  const previewLine = preview ? `\n${truncate(preview, 200)}` : '';
+  const text = `:rotating_light: *Agent error* during \`${task.repo}\`${detail}${previewLine}`;
+  return {
+    text: `Agent error during ${task.repo}`,
+    blocks: [section(text)],
   };
 }
 

@@ -70,6 +70,29 @@ jest.mock('../../src/handlers/shared/context-hydration', () => ({
   clearTokenCache: () => mockClearTokenCache(),
 }));
 
+// Issue #64: SlackNotifyFn migrated onto FanOutConsumer as a dispatcher.
+// The dispatcher calls into ``slack-notify.ts::dispatchSlackEvent``; we
+// mock that here so the fanout tests focus on routing invariants and
+// leave the per-dispatcher Slack behaviour to ``slack-notify.test.ts``.
+// Exposing the mock + the tagged ``SlackApiError`` class lets routing
+// tests drive the two observable outcomes the dispatcher produces
+// (resolve → ``fanout.slack.dispatched``; reject with SlackApiError →
+// router-level ``fanout.slack.api_error`` warn without dispatcher
+// rejection).
+const mockDispatchSlackEvent: jest.Mock = jest.fn();
+jest.mock('../../src/handlers/slack-notify', () => {
+  class SlackApiError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'SlackApiError';
+    }
+  }
+  return {
+    dispatchSlackEvent: (ev: unknown, ddb: unknown) => mockDispatchSlackEvent(ev, ddb),
+    SlackApiError,
+  };
+});
+
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:0:secret:platform';
 
@@ -138,15 +161,20 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
     timestamp: '2026-04-22T04:00:00Z',
   });
 
-  // Rev-6 design §6.2: chattier event types (task_created, agent_milestone)
-  // are intentionally dropped from defaults so users don't mute integrations
-  // on day one. The ``--verbose`` opt-in (Chunk K follow-up) will re-enable
-  // milestone delivery.
+  // Rev-6 design §6.2 + issue #64: the Slack dispatcher is the only
+  // channel that consumes ``task_created`` / ``session_started`` /
+  // ``task_timed_out`` — it gates further on ``channel_source ===
+  // 'slack'`` so the extra lifecycle signals never reach API / webhook
+  // / Linear tasks. That extra gate lives inside the dispatcher, so at
+  // the filter layer these events now fan out.
   test.each([
     'task_failed',
     'task_completed',
     'task_cancelled',
     'task_stranded',
+    'task_timed_out', // Slack lifecycle (issue #64)
+    'task_created', // Slack lifecycle (issue #64)
+    'session_started', // Slack lifecycle (issue #64)
     'agent_error',
     'pr_created',
     'approval_required', // Phase 3 forward-compat
@@ -156,7 +184,6 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
   });
 
   test.each([
-    'task_created', // intentionally dropped in rev-6 defaults
     // Bare ``agent_milestone`` (no ``metadata.milestone``) stays
     // dropped; wrapped milestones on the ``ROUTABLE_MILESTONES``
     // allowlist route by name — see the agent_milestone routing
@@ -166,7 +193,6 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
     'agent_tool_call',
     'agent_tool_result',
     'agent_cost_update',
-    'session_started',
     'hydration_started',
     'hydration_complete',
     'admission_rejected',
@@ -179,18 +205,48 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
 describe('fanout-task-events: per-channel filter contract (design §6.2)', () => {
   // Lock in the exact sets from the design doc so a drift in
   // CHANNEL_DEFAULTS surfaces here instead of in production telemetry.
-  test('Slack subscribes to terminal + PR + error + approval + status_response', () => {
+  test('Slack subscribes to terminal + error + approval + status_response + lifecycle (NOT pr_created)', () => {
     const f = CHANNEL_DEFAULTS.slack;
     expect([...f].sort()).toEqual([
       'agent_error',
       'approval_required',
-      'pr_created',
+      'session_started',
       'status_response',
       'task_cancelled',
       'task_completed',
+      'task_created',
       'task_failed',
       'task_stranded',
+      'task_timed_out',
     ]);
+    // ``pr_created`` is deliberately NOT in the Slack default — the
+    // ``task_completed`` message already renders a "View PR" button
+    // with the same URL, and posting both would visually duplicate.
+    // GitHub keeps ``pr_created`` because the edit-in-place comment
+    // benefits from the early checkpoint.
+    expect(f.has('pr_created')).toBe(false);
+  });
+
+  test('every Slack-default event the dispatcher actually renders today is in NOTIFIABLE_EVENTS (issue #64 review Cat 7 drift guard)', () => {
+    // The router subscribes Slack to events the dispatcher must
+    // render. ``approval_required`` and ``status_response`` are
+    // forward-compat (no emitter today) so they're allowed to be in
+    // CHANNEL_DEFAULTS.slack but absent from NOTIFIABLE_EVENTS — when
+    // their emitters land, this test will start failing and force the
+    // dispatcher update at the same time. Every OTHER Slack default
+    // must be renderable, otherwise telemetry lies. Use
+    // ``requireActual`` to bypass the slack-notify mock and read the
+    // real exported NOTIFIABLE_EVENTS set.
+    const real = jest.requireActual<typeof import('../../src/handlers/slack-notify')>(
+      '../../src/handlers/slack-notify',
+    );
+    const forwardCompat = new Set(['approval_required', 'status_response']);
+    const expectedRenderable = [...CHANNEL_DEFAULTS.slack].filter(
+      e => !forwardCompat.has(e),
+    );
+    for (const eventType of expectedRenderable) {
+      expect(real.NOTIFIABLE_EVENTS.has(eventType)).toBe(true);
+    }
   });
 
   test('Email subscribes to task_completed + task_failed + approval_required only (minimal per §6.2)', () => {
@@ -297,61 +353,66 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
   });
 
   test('task_completed routes to all three channels', async () => {
-    const channels = await routeEvent(mk('task_completed'));
-    expect(channels.sort()).toEqual(['email', 'github', 'slack']);
+    const outcome = await routeEvent(mk('task_completed'));
+    expect([...outcome.dispatched].sort()).toEqual(['email', 'github', 'slack']);
+    expect(outcome.infraRejections).toEqual([]);
   });
 
   test('task_cancelled skips Email per §6.2 (only Slack + GitHub)', async () => {
     // Regression guard against accidentally folding cancelled+stranded
     // into Email via a shared TERMINAL spread — design says Email is
     // minimal (task_completed, task_failed, approval_required only).
-    const channels = await routeEvent(mk('task_cancelled'));
-    expect(channels.sort()).toEqual(['github', 'slack']);
+    const outcome = await routeEvent(mk('task_cancelled'));
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'slack']);
   });
 
   test('task_stranded skips Email per §6.2', async () => {
-    const channels = await routeEvent(mk('task_stranded'));
-    expect(channels.sort()).toEqual(['github', 'slack']);
+    const outcome = await routeEvent(mk('task_stranded'));
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'slack']);
   });
 
   test('agent_error routes only to Slack', async () => {
-    const channels = await routeEvent(mk('agent_error'));
-    expect(channels).toEqual(['slack']);
+    const outcome = await routeEvent(mk('agent_error'));
+    expect(outcome.dispatched).toEqual(['slack']);
   });
 
-  test('pr_created routes to Slack + GitHub but not Email', async () => {
-    const channels = await routeEvent(mk('pr_created'));
-    expect(channels.sort()).toEqual(['github', 'slack']);
+  test('pr_created routes to GitHub only (not Slack — task_completed already carries View PR)', async () => {
+    const outcome = await routeEvent(mk('pr_created'));
+    expect(outcome.dispatched).toEqual(['github']);
+    expect(outcome.dispatched).not.toContain('slack');
   });
 
   test('event with no subscribers returns an empty channel list', async () => {
     // ``agent_milestone`` is not in any channel's default — routing
     // must produce an empty list so the handler records dispatched=0.
-    const channels = await routeEvent(mk('agent_milestone'));
-    expect(channels).toEqual([]);
+    const outcome = await routeEvent(mk('agent_milestone'));
+    expect(outcome.dispatched).toEqual([]);
+    expect(outcome.infraRejections).toEqual([]);
   });
 
   test('per-task override silences one channel without affecting others', async () => {
     const overrides: TaskNotificationsConfig = { slack: { enabled: false } };
-    const channels = await routeEvent(mk('task_completed'), overrides);
-    expect(channels.sort()).toEqual(['email', 'github']);
-    expect(channels).not.toContain('slack');
+    const outcome = await routeEvent(mk('task_completed'), overrides);
+    expect([...outcome.dispatched].sort()).toEqual(['email', 'github']);
+    expect(outcome.dispatched).not.toContain('slack');
   });
 });
 
 describe('fanout-task-events: channel isolation', () => {
   test('one channel rejecting does NOT prevent the others from dispatching', async () => {
-    // Simulate a Slack-side failure by making the Slack dispatcher's
-    // inner ``logger.info`` throw, which escapes its own try-block via
-    // the caught-and-rethrown path in the stub. The router's
-    // ``Promise.allSettled`` must record Slack as rejected while
-    // Email + GitHub complete normally. The assertions verify two
-    // independent signals:
-    //   (1) the other two dispatchers' stub log calls actually ran
-    //       (proving the work was done, not just that the router
-    //       reported success)
+    // Simulate a Slack infra failure by making the dispatchSlackEvent
+    // mock reject with a non-SlackApiError throw (SlackApiError would be
+    // swallowed at the dispatcher boundary — see the SlackApiError
+    // suppression test below). The router's ``Promise.allSettled`` must
+    // record Slack as rejected while Email + GitHub complete normally.
+    // The assertions verify two independent signals:
+    //   (1) the other two dispatchers' work actually ran (proving the
+    //       channels were attempted, not short-circuited)
     //   (2) Slack is omitted from the ``dispatched`` return so batch
     //       telemetry reflects reality
+    mockDispatchSlackEvent.mockReset().mockRejectedValueOnce(
+      Object.assign(new Error('slack infra down'), { name: 'ProvisionedThroughputExceededException' }),
+    );
     const loggerModule = await import('../../src/handlers/shared/logger');
     const originalInfo = loggerModule.logger.info.bind(loggerModule.logger);
     const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
@@ -360,41 +421,97 @@ describe('fanout-task-events: channel isolation', () => {
       (msg: string, meta?: Record<string, unknown>) => {
         const ev = meta?.event as string | undefined;
         if (ev) observedEvents.push(ev);
-        if (ev === 'fanout.slack.dispatch_stub') {
-          throw new Error('slack is down');
-        }
         return originalInfo(msg, meta);
       },
     );
     try {
-      const channels = await routeEvent({
+      const outcome = await routeEvent({
         task_id: 't-isol',
         event_id: 'e-isol',
         event_type: 'task_completed',
         timestamp: '2026-04-22T04:00:00Z',
       });
 
-      // (1) Email actually ran its dispatch path (GitHub short-circuits
-      // on "task not found" because the shared DDB mock returns no
-      // Item — that's fine; the key invariant is that one channel's
-      // failure doesn't block the others).
+      // (1) Email ran its dispatch path (GitHub short-circuits on
+      // "task not found" because the shared DDB mock returns no Item —
+      // that's fine; the key invariant is that one channel's failure
+      // doesn't block the others). Slack's dispatcher was invoked
+      // exactly once even though it rejected.
       expect(observedEvents).toContain('fanout.email.dispatch_stub');
-      // Slack also ran (it threw), so its log line was emitted before the throw.
-      expect(observedEvents).toContain('fanout.slack.dispatch_stub');
+      expect(mockDispatchSlackEvent).toHaveBeenCalledTimes(1);
 
       // (2) Telemetry truthfulness: Slack must NOT be in ``dispatched``
       // because its dispatcher rejected. Email + GitHub are.
-      expect(channels.sort()).toEqual(['email', 'github']);
-      expect(channels).not.toContain('slack');
+      expect([...outcome.dispatched].sort()).toEqual(['email', 'github']);
+      expect(outcome.dispatched).not.toContain('slack');
+
+      // (3) Slack landed in ``infraRejections`` so the handler will
+      // flag this record for partial-batch retry — the BLOCKER that
+      // motivated the post-issue-#64 review fix. Without this signal,
+      // a transient Slack-side DDB throttle would be a permanent drop.
+      expect(outcome.infraRejections).toEqual(['slack']);
 
       // The rejection surfaces in a warn log so operators can alert on it.
       const warnCalls = warnSpy.mock.calls.map(c => c[1] as Record<string, unknown> | undefined);
       const rejectedWarn = warnCalls.find(meta => meta?.event === 'fanout.dispatcher.rejected');
       expect(rejectedWarn).toBeDefined();
       expect(rejectedWarn?.channel).toBe('slack');
+      // The warn flags the rejection as retryable so operators can
+      // tell the difference between a noisy infra blip (this) and a
+      // channel-terminal swallow like ``channel_not_found`` (which
+      // emits ``fanout.slack.api_error`` instead).
+      expect(rejectedWarn?.retryable).toBe(true);
     } finally {
       infoSpy.mockRestore();
       warnSpy.mockRestore();
+      mockDispatchSlackEvent.mockReset();
+    }
+  });
+
+  test('SlackApiError from the dispatcher is swallowed (counted as dispatched)', async () => {
+    // Slack API errors like ``channel_not_found`` are not recoverable
+    // by a Lambda retry. The fanout Slack dispatcher catches
+    // SlackApiError internally and logs ``fanout.slack.api_error``
+    // without propagating, so the router treats Slack as dispatched.
+    // This keeps Lambda from burning retries on a bot-token misroute
+    // while still surfacing the failure in CloudWatch.
+    const { SlackApiError } = jest.requireMock<typeof import('../../src/handlers/slack-notify')>(
+      '../../src/handlers/slack-notify',
+    );
+    mockDispatchSlackEvent.mockReset().mockRejectedValueOnce(
+      new SlackApiError('slack chat.postMessage failed: channel_not_found'),
+    );
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const outcome = await routeEvent({
+        task_id: 't-api-err',
+        event_id: 'e-api-err',
+        event_type: 'task_completed',
+        timestamp: '2026-05-05T00:00:00Z',
+      });
+
+      // Slack is listed as dispatched despite the API error — the
+      // router never saw a rejection because the dispatcher swallowed
+      // it. The router-level ``fanout.dispatcher.rejected`` warn must
+      // NOT fire for this case, and ``infraRejections`` must NOT
+      // include Slack (so the handler does not push the record into
+      // ``batchItemFailures`` — Lambda must not waste retries on
+      // ``channel_not_found``).
+      expect(outcome.dispatched).toContain('slack');
+      expect(outcome.infraRejections).not.toContain('slack');
+      const rejected = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.dispatcher.rejected',
+      );
+      expect(rejected).toBeUndefined();
+      // The swallow was observable via ``fanout.slack.api_error``.
+      const apiErr = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.slack.api_error',
+      );
+      expect(apiErr).toBeDefined();
+    } finally {
+      warnSpy.mockRestore();
+      mockDispatchSlackEvent.mockReset();
     }
   });
 });
@@ -560,12 +677,21 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
   });
 
-  test('upsertTaskComment rejection does NOT break the batch (routeEvent catches)', async () => {
+  test('upsertTaskComment rejection escalates to partial-batch retry (post-issue-#64-review)', async () => {
+    // Pre-fix: this test asserted ``batchItemFailures: []`` because
+    // the router swallowed any dispatcher rejection. That hid
+    // transient GitHub 5xxs as permanent drops. After the fix, an
+    // upsertTaskComment rejection lands in ``infraRejections`` and
+    // the handler escalates the record for partial-batch retry —
+    // matching the legacy ``SlackNotifyFn`` semantic where infra
+    // errors triggered Lambda retry.
     mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE });
     mockUpsertTaskComment.mockRejectedValueOnce(new Error('github 500'));
 
-    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
-    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
+    const event = { Records: [mkEvent('task_completed', 't-gh')] } as DynamoDBStreamEvent;
+    const result = await handler(event);
+    expect(result.batchItemFailures).toHaveLength(1);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
     // No UpdateCommand fires (no id to persist from a failed upsert).
     const updateCalls = mockDdbSend.mock.calls.filter(
       c => (c[0] as { _type?: string })._type === 'Update',
@@ -668,18 +794,62 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       );
       expect(updateCalls).toHaveLength(0);
 
-      // The 400 surfaced as a dispatcher-rejected warn, not as a
-      // silent swallow.
+      // Post-issue-#64-review Cat 3 fix: GitHub 4xx (excluding 401 +
+      // 404 which have dedicated handling) is now treated as a
+      // **channel-terminal** error. The dispatcher swallows it via a
+      // dedicated ``fanout.github.api_error`` warn, NOT a generic
+      // ``fanout.dispatcher.rejected``. This keeps Lambda from
+      // burning retries on a fundamentally bad request — symmetric
+      // with the SlackApiError swallow on ``channel_not_found``.
+      const apiErrWarn = warnSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.github.api_error',
+      );
+      expect(apiErrWarn).toBeDefined();
+      expect((apiErrWarn?.[1] as Record<string, unknown>).http_status).toBe(400);
+      expect(String((apiErrWarn?.[1] as Record<string, unknown>).error)).toContain('HTTP 400');
+
+      // ``fanout.dispatcher.rejected`` must NOT fire — it is reserved
+      // for retryable infra rejections under the new contract.
       const rejectedWarn = warnSpy.mock.calls.find(
         c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.dispatcher.rejected',
       );
-      expect(rejectedWarn).toBeDefined();
-      expect((rejectedWarn?.[1] as Record<string, unknown>).channel).toBe('github');
-      expect(String((rejectedWarn?.[1] as Record<string, unknown>).error)).toContain('HTTP 400');
+      expect(rejectedWarn).toBeUndefined();
     } finally {
       warnSpy.mockRestore();
     }
   });
+
+  test.each([403, 429])(
+    'HTTP %s from GitHub escalates to partial-batch retry (rate-limit carve-out, PR #79 review #1)',
+    async (httpStatus) => {
+      // 403 ("API rate limit exceeded") and 429 ("Too Many Requests")
+      // are 4xx but transient. The original migration's blanket 4xx
+      // swallow would permanently drop entire reconciliation waves
+      // under sustained rate-limiting. The carve-out re-classifies
+      // them as infra rejections so the record retries until the
+      // rate-limit window clears (or DLQs after retryAttempts).
+      mockDdbSend.mockResolvedValueOnce({
+        Item: { ...TASK_RECORD_BASE, github_comment_id: 555 },
+      });
+      const { GitHubCommentError } = jest.requireMock<typeof import('../../src/handlers/shared/github-comment')>(
+        '../../src/handlers/shared/github-comment',
+      );
+      mockUpsertTaskComment.mockRejectedValueOnce(
+        new GitHubCommentError(
+          `PATCH /repos/owner/repo/issues/comments/555 failed: HTTP ${httpStatus}`,
+          httpStatus,
+        ),
+      );
+
+      const record = mkEvent('task_completed', 't-gh');
+      const result = await handler({ Records: [record] });
+
+      // Record IS in batchItemFailures — Lambda will replay until
+      // the rate-limit window opens. Critical: the swallow-as-terminal
+      // path would have produced an empty array (silent drop).
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    },
+  );
 
   test('falls back to issue_number when pr_number is absent', async () => {
     // Webhook-submitted issue tasks are the common real-world surface.
@@ -919,6 +1089,127 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Issue #64 — Slack dispatcher integration (SlackNotifyFn migration)
+// ---------------------------------------------------------------------------
+
+describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
+  // Confirm the Slack dispatcher is wired into the router and receives
+  // the parsed FanOutEvent (not a raw DynamoDB stream record). Detailed
+  // per-behaviour coverage (dedup, thread management, reactions, session
+  // cleanup) lives in ``slack-notify.test.ts``.
+
+  beforeEach(() => {
+    mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
+    mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
+  });
+
+  test('task_completed invokes the Slack dispatcher with the parsed event + shared ddb client', async () => {
+    const event: DynamoDBStreamEvent = {
+      Records: [mkEvent('task_completed', 't-slack')],
+    };
+    await handler(event);
+
+    expect(mockDispatchSlackEvent).toHaveBeenCalledTimes(1);
+    const [parsedEvent, ddbClient] = mockDispatchSlackEvent.mock.calls[0];
+    // Event is the pre-parsed FanOutEvent shape, not a raw stream record.
+    expect(parsedEvent).toMatchObject({
+      task_id: 't-slack',
+      event_type: 'task_completed',
+    });
+    // Routing threads the handler's shared DocumentClient through —
+    // otherwise every dispatched event would pay a fresh client init.
+    expect(ddbClient).toBeDefined();
+  });
+
+  test('task_created fans out (Slack lifecycle event re-added for issue #64)', async () => {
+    // Before #64, ``task_created`` was intentionally dropped at the
+    // filter layer to keep integrations quiet by default. The Slack
+    // dispatcher now gates further on ``channel_source === 'slack'``,
+    // so re-admitting it at the filter is safe.
+    const event: DynamoDBStreamEvent = {
+      Records: [mkEvent('task_created', 't-slack-created')],
+    };
+    await handler(event);
+
+    expect(mockDispatchSlackEvent).toHaveBeenCalledTimes(1);
+    expect(mockDispatchSlackEvent.mock.calls[0][0].event_type).toBe('task_created');
+  });
+
+  test('session_started and task_timed_out reach the Slack dispatcher', async () => {
+    const event: DynamoDBStreamEvent = {
+      Records: [
+        mkEvent('session_started', 't-slack-ss'),
+        mkEvent('task_timed_out', 't-slack-to'),
+      ],
+    };
+    await handler(event);
+
+    const types = mockDispatchSlackEvent.mock.calls.map(c => c[0].event_type);
+    expect(types.sort()).toEqual(['session_started', 'task_timed_out']);
+  });
+
+  test('Slack dispatcher infra rejection escalates record to partial-batch retry', async () => {
+    // Post-issue-#64-review BLOCKER fix: an infra error inside the
+    // Slack dispatcher (DDB throttling on the task GetItem, Secrets
+    // Manager 5xx, transient Slack API timeout) must NOT be silently
+    // dropped. The handler routes the rejection through the new
+    // ``infraRejections`` channel and pushes the record into
+    // ``batchItemFailures`` so Lambda retries it. Without this, the
+    // migration would lose the legacy ``SlackNotifyFn`` retry
+    // semantic.
+    mockDispatchSlackEvent.mockReset().mockRejectedValueOnce(
+      new Error('slack side ddb throttled'),
+    );
+
+    const record = mkEvent('task_completed', 't-slack-fail');
+    const result = await handler({ Records: [record] });
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+  });
+
+  test('Slack dispatcher SlackApiError swallow does NOT escalate to retry', async () => {
+    // The other side of the boundary: ``channel_not_found`` and
+    // similar terminal Slack API errors are wrapped in SlackApiError
+    // and swallowed inside ``dispatchToSlack``. The router never sees
+    // the rejection so the record advances cleanly. Pinning this
+    // distinction prevents a future "let's just retry everything"
+    // refactor from burning Lambda retries on channel_not_found.
+    const { SlackApiError } = jest.requireMock<typeof import('../../src/handlers/slack-notify')>(
+      '../../src/handlers/slack-notify',
+    );
+    mockDispatchSlackEvent.mockReset().mockRejectedValueOnce(
+      new SlackApiError('slack chat.postMessage failed: channel_not_found'),
+    );
+
+    const event: DynamoDBStreamEvent = {
+      Records: [mkEvent('task_completed', 't-slack-terminal')],
+    };
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
+  });
+
+  test('SlackApiError matched by name even when instanceof fails (PR #79 review #7)', async () => {
+    // Defense-in-depth: if a bundler ever duplicates the slack-notify
+    // module, two distinct SlackApiError classes coexist and
+    // ``instanceof`` against one fails for instances of the other.
+    // The dispatcher must fall back to ``err.name === 'SlackApiError'``
+    // so a duplicated-class scenario doesn't flip the channel-terminal
+    // swallow into an infinite retry loop. Synthesise that exact
+    // shape: a plain Error with name === 'SlackApiError', NOT an
+    // instance of the mock's SlackApiError class.
+    const fakeForeignSlackApiError = new Error(
+      'slack chat.postMessage failed: not_authed',
+    );
+    fakeForeignSlackApiError.name = 'SlackApiError';
+    mockDispatchSlackEvent.mockReset().mockRejectedValueOnce(fakeForeignSlackApiError);
+
+    const event: DynamoDBStreamEvent = {
+      Records: [mkEvent('task_completed', 't-slack-foreign-class')],
+    };
+    // Must still be caught — record advances, no batchItemFailures.
+    await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scenario 7-extended — agent_milestone routing regression
 // ---------------------------------------------------------------------------
 
@@ -954,7 +1245,8 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
   });
 
   test('shouldFanOut unwraps agent_milestone to its milestone name', () => {
-    // ``pr_created`` is in Slack + GitHub defaults → fan out.
+    // ``pr_created`` is in the GitHub default → fan out (Slack
+    // explicitly excludes pr_created; see CHANNEL_DEFAULTS comment).
     expect(shouldFanOut(makeMilestone('pr_created'))).toBe(true);
   });
 
@@ -1003,16 +1295,16 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
     expect(shouldFanOut(colliding)).toBe(false);
   });
 
-  test('routeEvent dispatches agent_milestone(pr_created) to Slack + GitHub, not Email', async () => {
-    const channels = await routeEvent(makeMilestone('pr_created'));
-    expect(channels.sort()).toEqual(['github', 'slack']);
+  test('routeEvent dispatches agent_milestone(pr_created) to GitHub only (Slack opted out to avoid duplicate View PR)', async () => {
+    const outcome = await routeEvent(makeMilestone('pr_created'));
+    expect(outcome.dispatched).toEqual(['github']);
   });
 
   test('routeEvent drops agent_milestone(agent_turn-like) that no channel subscribes to', async () => {
     // ``nudge_acknowledged`` is in no channel default today. Must
     // still route cleanly (empty list) rather than throw.
-    const channels = await routeEvent(makeMilestone('nudge_acknowledged'));
-    expect(channels).toEqual([]);
+    const outcome = await routeEvent(makeMilestone('nudge_acknowledged'));
+    expect(outcome.dispatched).toEqual([]);
   });
 
   test('handler dispatches GitHub comment on agent_milestone(pr_created) stream record', async () => {
@@ -1112,15 +1404,17 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
     mockClearTokenCache.mockReset();
   });
 
-  test('AccessDeniedException from resolveTokenSecretArn stays isolated via allSettled; batch still succeeds (finding #5 today)', async () => {
-    // Baseline: today's ``routeEvent`` catches the AccessDenied throw
-    // via ``Promise.allSettled`` so it surfaces as a
-    // ``fanout.dispatcher.rejected`` warn, NOT as a handler-level
-    // throw. The structured response is therefore an empty
-    // ``batchItemFailures`` — the record advances past the cursor.
-    // This test pins the current containment so a future change that
-    // accidentally rethrows past ``allSettled`` will flip it from
-    // "empty failures" to "one failure" and fail loudly here.
+  test('AccessDeniedException from resolveTokenSecretArn lands in infraRejections and flags the record for retry', async () => {
+    // Pre-issue-#64-review: this test asserted ``batchItemFailures: []``
+    // because ``Promise.allSettled`` swallowed the rejection — that
+    // pinned a real BLOCKER (transient infra errors silently dropped).
+    // After the fix, the dispatcher's rejection lands in
+    // ``infraRejections`` and the handler escalates it to the partial-
+    // batch retry path. AccessDenied is technically a hard configuration
+    // failure (not transient), but treating it as retryable is correct
+    // — operators will see the record stuck in retry and the warn rate
+    // climbing on ``fanout.dispatcher.rejected`` until they fix the
+    // IAM policy. Silently dropping was the worse failure mode.
     const loggerModule = await import('../../src/handlers/shared/logger');
     const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
     try {
@@ -1149,16 +1443,19 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
 
       const result = await handler(event);
 
-      // Containment invariant: ``Promise.allSettled`` caught the
-      // rejection; the handler sees no throw.
-      expect(result).toEqual({ batchItemFailures: [] });
-      // … but the rejection WAS observed by operators through the
-      // dispatcher-rejected warn (existing coverage path).
+      // Record is flagged for partial-batch retry — Lambda will replay
+      // this single eventID, leaving siblings alone.
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: poisonId }]);
+
+      // The rejection is observable through the dispatcher-rejected
+      // warn so operators can alarm distinctly from the generic
+      // record-failed warn.
       const rejectedWarn = warnSpy.mock.calls.find(
         c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.dispatcher.rejected',
       );
       expect(rejectedWarn).toBeDefined();
       expect((rejectedWarn?.[1] as Record<string, unknown>).channel).toBe('github');
+      expect((rejectedWarn?.[1] as Record<string, unknown>).retryable).toBe(true);
     } finally {
       warnSpy.mockRestore();
     }
