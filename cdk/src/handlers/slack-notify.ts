@@ -46,6 +46,11 @@
  */
 
 import { type DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+// Type-only import of ``FanOutEvent`` — values flow only one way at
+// runtime (fanout-task-events imports + calls ``dispatchSlackEvent``),
+// so importing the type back creates no runtime cycle. ``import type``
+// is erased after compile, so the bundler sees a one-way dep.
+import type { FanOutEvent } from './fanout-task-events';
 import { logger } from './shared/logger';
 import { renderSlackBlocks } from './shared/slack-blocks';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
@@ -86,17 +91,13 @@ export const NOTIFIABLE_EVENTS = new Set<string>([
 ]);
 
 /**
- * Minimal event shape the dispatcher needs. The fan-out router passes
- * the parsed ``FanOutEvent`` (plus the raw ``metadata`` map), so the
- * dispatcher never reparses a DynamoDB stream record.
+ * Minimal event shape the dispatcher needs. Defined as a type alias of
+ * ``FanOutEvent`` so the contract between the router and the dispatcher
+ * cannot silently drift if either side adds a field — TypeScript will
+ * propagate the change automatically (PR #79 review #10). Originally a
+ * standalone interface, but the structural duplication was a footgun.
  */
-export interface SlackDispatchEvent {
-  readonly task_id: string;
-  readonly event_id: string;
-  readonly event_type: string;
-  readonly timestamp: string;
-  readonly metadata?: Record<string, unknown>;
-}
+export type SlackDispatchEvent = FanOutEvent;
 
 /**
  * Thrown when the Slack API returns a **terminal** error — one that
