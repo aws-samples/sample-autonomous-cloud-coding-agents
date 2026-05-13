@@ -480,4 +480,134 @@ describe('dispatchSlackEvent', () => {
       errorSpy.mockRestore();
     }
   });
+
+  // -------------------------------------------------------------------
+  // PR #79 test gap #33 — agent_error dedup (review finding #4)
+  // -------------------------------------------------------------------
+
+  test('agent_error claims its own dedup attribute (slack_dispatched_agent_error)', async () => {
+    // Pre-PR-#79 review #4 fix: agent_error had no dedup, so a
+    // sibling-channel-failure retry could double-page operators.
+    // Post-fix: agent_error writes ``channel_metadata.slack_dispatched_agent_error``
+    // via a conditional UpdateItem before posting. This test pins
+    // the *attribute name* in the UpdateExpression so a future
+    // refactor that renames the attribute breaks loudly here.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' },
+          repo: 'org/repo',
+        },
+      })
+      .mockResolvedValueOnce({}); // dedup UpdateItem succeeds
+
+    await dispatchSlackEvent(mkEvent('t1', 'agent_error'), ddb);
+
+    // Second DDB call is the dedup UpdateItem — pin its shape.
+    const updateInput = ddbSend.mock.calls[1][0]._type === 'Update'
+      ? ddbSend.mock.calls[1][0].input
+      : null;
+    expect(updateInput).toBeTruthy();
+    expect(updateInput.UpdateExpression).toContain('slack_dispatched_agent_error');
+    expect(updateInput.ConditionExpression).toContain(
+      'attribute_not_exists(channel_metadata.slack_dispatched_agent_error)',
+    );
+  });
+
+  test('agent_error retry hits the dedup guard and skips the post (sibling-channel-failure scenario)', async () => {
+    // The actual scenario PR #79 review #4 is about: GitHub fails on
+    // the first run, the record retries, and the Slack agent_error
+    // dispatcher fires AGAIN. Without the per-event-type dedup, we
+    // would post a duplicate :rotating_light: line. With it, the
+    // ConditionalCheckFailedException short-circuits before
+    // chat.postMessage is ever called.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: {
+            slack_team_id: 'T1',
+            slack_channel_id: 'C1',
+            slack_dispatched_agent_error: true, // already posted on the first try
+          },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+
+    await dispatchSlackEvent(mkEvent('t1', 'agent_error'), ddb);
+
+    // No fetch — the dedup guard short-circuited.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('terminal dedup attribute is per-class (any first terminal claims; subsequent terminals dedup)', async () => {
+    // Defense-in-depth for the SLACK_DEDUP_ATTRIBUTE map: a
+    // ``task_completed`` followed by a sibling-failure-retry's
+    // ``task_failed`` (e.g. orchestrator wrote both because of a
+    // late-arriving failure) must dedup against the same
+    // ``slack_notified_terminal`` slot. Otherwise a flaky retry
+    // could post both a ✅ and an ❌ for the same task.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: {
+            slack_team_id: 'T1',
+            slack_channel_id: 'C1',
+            slack_notified_terminal: true, // task_completed already posted
+          },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+
+    // Simulate an orchestrator-emitted task_failed arriving after
+    // task_completed already claimed the terminal slot.
+    await dispatchSlackEvent(mkEvent('t1', 'task_failed'), ddb);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('agent_error and terminals use distinct dedup slots (do not collide)', async () => {
+    // An agent_error followed by a task_completed must both be
+    // delivered — they live in different slots
+    // (slack_dispatched_agent_error vs slack_notified_terminal).
+    // This test pins the separation so a future refactor can't
+    // accidentally collapse them and silently drop terminals after
+    // an agent_error.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: {
+            slack_team_id: 'T1',
+            slack_channel_id: 'C1',
+            slack_dispatched_agent_error: true, // agent_error already posted
+            // slack_notified_terminal is NOT set
+          },
+          repo: 'org/repo',
+        },
+      })
+      .mockResolvedValueOnce({}); // terminal dedup UpdateItem succeeds
+
+    await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
+
+    // Reaches chat.postMessage — the agent_error slot did not
+    // shadow the terminal slot.
+    expect(fetchMock).toHaveBeenCalled();
+    const postCall = fetchMock.mock.calls.find(
+      ([url]) => url === 'https://slack.com/api/chat.postMessage',
+    );
+    expect(postCall).toBeDefined();
+  });
 });
