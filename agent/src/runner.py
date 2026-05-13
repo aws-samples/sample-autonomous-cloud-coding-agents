@@ -378,12 +378,29 @@ async def run_agent(
 
             elif isinstance(message, ResultMessage):
                 message_counts["result"] += 1
-                result.status = message.subtype
+                subtype = getattr(message, "subtype", "unknown")
+                result.status = subtype
                 result.cost_usd = getattr(message, "total_cost_usd", None)
                 result.num_turns = getattr(message, "num_turns", 0)
                 result.duration_ms = getattr(message, "duration_ms", 0)
                 result.duration_api_ms = getattr(message, "duration_api_ms", 0)
                 result.session_id = getattr(message, "session_id", "") or ""
+
+                err_payload = getattr(message, "result", None)
+                is_terminal_error = bool(getattr(message, "is_error", False))
+                # The Claude Code CLI may emit ResultMessage with subtype "success"
+                # while setting is_error for Bedrock entitlement / model-access failures.
+                # Treat that as a hard failure so the pipeline writes FAILED (not COMPLETED).
+                if is_terminal_error:
+                    err_text = (str(err_payload).strip() if err_payload else "") or (
+                        f"Agent session error (subtype={subtype!r})"
+                    )
+                    log("ERROR", err_text)
+                    result.error = err_text
+                    result.status = "error"
+                elif subtype == "error" and err_payload:
+                    result.error = str(err_payload)
+                    log("ERROR", result.error)
 
                 # Capture token usage from ResultMessage
                 raw_usage = getattr(message, "usage", None)
@@ -409,16 +426,14 @@ async def run_agent(
 
                 log(
                     "DONE",
-                    f"status={message.subtype} turns={message.num_turns} "
+                    f"status={result.status} turns={message.num_turns} "
                     f"cost=${message.total_cost_usd or 0:.4f} "
                     f"duration={message.duration_ms / 1000:.1f}s",
                 )
-                if message.is_error and message.result:
-                    log("ERROR", message.result)
 
-                # Write trajectory result summary
+                # Write trajectory result summary (use effective status after is_error remap)
                 trajectory.write_result(
-                    subtype=message.subtype,
+                    subtype=result.status,
                     num_turns=getattr(message, "num_turns", 0),
                     cost_usd=getattr(message, "total_cost_usd", None),
                     duration_ms=getattr(message, "duration_ms", 0),

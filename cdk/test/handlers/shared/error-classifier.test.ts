@@ -305,6 +305,15 @@ describe('classifyError', () => {
   // --- Config errors ---
 
   describe('config errors', () => {
+    test('classifies Bedrock model not available on deployment', () => {
+      const result = classifyError(
+        'The model us.anthropic.claude-sonnet-4-6 is not available on your bedrock deployment. Try --model to switch',
+      );
+      expect(result!.category).toBe(ErrorCategory.CONFIG);
+      expect(result!.title).toBe('Bedrock model not available in this account or Region');
+      expect(result!.retryable).toBe(false);
+    });
+
     test('classifies blueprint config load failure', () => {
       const result = classifyError(
         'Blueprint config load failed: ResourceNotFoundException: Requested resource not found',
@@ -368,6 +377,7 @@ describe('classifyError', () => {
         'Agent SDK stream ended without a ResultMessage (agent_status=unknown).',
         'Guardrail blocked: nope',
         'Blueprint config load failed: boom',
+        'The model us.anthropic.claude-sonnet-4-6 is not available on your bedrock deployment.',
         'Orchestrator poll timeout exceeded',
         'mystery error',
       ];

@@ -42,10 +42,10 @@ describe('AgentMemory construct', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
   });
 
-  test('uses default memory name', () => {
+  test('auto-generates memory name when not provided', () => {
     const { template } = createStack();
     template.hasResourceProperties('AWS::BedrockAgentCore::Memory', {
-      Name: 'bgagent_memory',
+      Name: Match.stringLikeRegexp('^[a-zA-Z][a-zA-Z0-9_]*$'),
     });
   });
 

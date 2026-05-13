@@ -198,19 +198,37 @@ describe('create-task handler', () => {
     expect(body.data.issue_number).toBe(42);
   });
 
-  test('returns 409 for duplicate idempotency key', async () => {
+  test('returns 200 with same task_id for idempotency replay', async () => {
     // First call: QueryCommand returns existing task_id
     // Second call: GetCommand returns existing task
+    const existingItem = {
+      task_id: 'existing-task',
+      user_id: 'user-123',
+      status: 'SUBMITTED',
+      repo: 'org/repo',
+      task_type: 'new_task',
+      task_description: 'Fix the bug',
+      branch_name: 'bgagent/existing-task/slug',
+      channel_source: 'api',
+      channel_metadata: { source_ip: '1.2.3.4' },
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+      idempotency_key: 'my-key-123',
+    };
     mockSend
       .mockResolvedValueOnce({ Items: [{ task_id: 'existing-task' }] })
-      .mockResolvedValueOnce({ Item: { task_id: 'existing-task', user_id: 'user-123', status: 'SUBMITTED' } });
+      .mockResolvedValueOnce({ Item: existingItem });
 
     const event = makeEvent({ headers: { 'Idempotency-Key': 'my-key-123' } });
     const result = await handler(event);
 
-    expect(result.statusCode).toBe(409);
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
     const body = JSON.parse(result.body);
-    expect(body.error.code).toBe('DUPLICATE_TASK');
+    expect(body.data.task_id).toBe('existing-task');
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 
   test('returns 400 for invalid idempotency key format', async () => {
