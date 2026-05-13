@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -494,13 +494,24 @@ export class AgentStack extends Stack {
     // --- Fan-out plane consumer ---
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
     // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher (Chunk J) edits a single issue comment in place with
-    // If-Match ETag; Slack / Email remain log-only until Phase 2.
+    // dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
     });
 
     // --- Operator dashboard ---
