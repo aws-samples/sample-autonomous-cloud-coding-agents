@@ -8,10 +8,12 @@ When you create a task, the platform orchestrates it through these states:
 flowchart LR
     S[SUBMITTED] --> H[HYDRATING]
     H --> R[RUNNING]
+    R <--> A[AWAITING_APPROVAL]
     R --> C[COMPLETED]
     R --> F[FAILED]
     R --> X[CANCELLED]
     R --> T[TIMED_OUT]
+    A --> X
     H --> F
     H --> X
     S --> F
@@ -25,12 +27,13 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 | `SUBMITTED` | Task accepted; orchestrator invoked asynchronously |
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
+| `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
 | `FAILED` | Something went wrong - pre-flight check failed, concurrency limit reached, guardrail blocked the content, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~9 hours) |
 
-Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`.
+Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`. `AWAITING_APPROVAL` is not terminal — a decision (or an approval-timeout) always flips it back to `RUNNING` or onto a terminal state.
 
 Task records in terminal states are automatically deleted after 90 days (configurable via `taskRetentionDays`).
 
@@ -54,6 +57,7 @@ Available events:
 - **Orchestration** - `admission_rejected`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
+- **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
 - **Output** - `pr_created`, `pr_updated`
 
 **Error classifiers** on terminal failure events provide a specific reason:
