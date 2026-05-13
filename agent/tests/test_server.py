@@ -511,3 +511,60 @@ class TestExtractUserId:
         assert "user_id payload field is not a string" in captured.out
         assert "type=int" in captured.out
         assert "'t-warn'" in captured.out
+
+
+class TestExtractToolProfile:
+    """Tests for tool_profile, profile_mcp_servers, profile_skills extraction."""
+
+    def _fake_req(self) -> Any:
+        return _FakeRequest()
+
+    def _base_payload(self, **overrides) -> dict:
+        base: dict[str, Any] = {
+            "task_id": "t-profile",
+            "repo_url": "o/r",
+            "prompt": "fix",
+            "github_token": "ghp_x",
+            "aws_region": "us-east-1",
+        }
+        base.update(overrides)
+        return base
+
+    def test_tool_profile_defaults_to_empty(self):
+        params = server._extract_invocation_params(
+            self._base_payload(),
+            self._fake_req(),
+        )
+        assert params["tool_profile"] == ""
+        assert params["profile_mcp_servers"] == []
+        assert params["profile_skills"] == []
+
+    def test_tool_profile_extracted(self):
+        params = server._extract_invocation_params(
+            self._base_payload(tool_profile="frontend"),
+            self._fake_req(),
+        )
+        assert params["tool_profile"] == "frontend"
+
+    def test_profile_mcp_servers_extracted(self):
+        params = server._extract_invocation_params(
+            self._base_payload(profile_mcp_servers=["eslint-mcp", "prettier-mcp"]),
+            self._fake_req(),
+        )
+        assert params["profile_mcp_servers"] == ["eslint-mcp", "prettier-mcp"]
+
+    def test_profile_skills_extracted(self):
+        params = server._extract_invocation_params(
+            self._base_payload(profile_skills=["react-patterns"]),
+            self._fake_req(),
+        )
+        assert params["profile_skills"] == ["react-patterns"]
+
+    def test_null_profile_fields_default_to_empty(self):
+        params = server._extract_invocation_params(
+            self._base_payload(tool_profile=None, profile_mcp_servers=None, profile_skills=None),
+            self._fake_req(),
+        )
+        assert params["tool_profile"] == ""
+        assert params["profile_mcp_servers"] == []
+        assert params["profile_skills"] == []

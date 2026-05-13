@@ -143,6 +143,129 @@ class TestCedarPoliciesInjection:
         assert captured_config.cedar_policies == []
 
 
+class TestProfileMcpActivation:
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_configure_profile_mcp_called_when_servers_provided(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """When profile_mcp_servers is non-empty, configure_profile_mcp is called."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_configure_profile = MagicMock(return_value=True)
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value="https://github.com/org/repo/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("channel_mcp.configure_profile_mcp", mock_configure_profile),
+        ):
+            from pipeline import run_task
+
+            run_task(
+                repo_url="owner/repo",
+                task_description="fix bug",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="test-id",
+                profile_mcp_servers=["eslint-mcp", "prettier-mcp"],
+            )
+
+        mock_configure_profile.assert_called_once_with(
+            "/workspace/repo", ["eslint-mcp", "prettier-mcp"]
+        )
+
+    @patch("pipeline.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_configure_profile_mcp_not_called_when_empty(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """When profile_mcp_servers is empty, configure_profile_mcp is NOT called."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_configure_profile = MagicMock(return_value=False)
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value="https://github.com/org/repo/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("channel_mcp.configure_profile_mcp", mock_configure_profile),
+        ):
+            from pipeline import run_task
+
+            run_task(
+                repo_url="owner/repo",
+                task_description="fix bug",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="test-id",
+            )
+
+        mock_configure_profile.assert_not_called()
+
+
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):
         exc = RuntimeError("post-hook crash")
