@@ -34,6 +34,10 @@ Identify:
 - The `repoTable` reference used
 - Any patterns for compute/model overrides
 
+### Sample blueprint repo without a code change
+
+The stack’s **AgentPlugins** blueprint uses a `repo` value resolved in this order: **`BLUEPRINT_REPO`** (environment variable) → CDK context **`blueprintRepo`** → default `awslabs/agent-plugins` (see `blueprintRepo` in `cdk/src/stacks/agent.ts`). If the user only needs to target a fork of the sample repo, they can set `export BLUEPRINT_REPO=owner/repo` or pass `-c blueprintRepo=owner/repo` (or set `"context": { "blueprintRepo": "..." }` in `cdk/cdk.json`) and redeploy, instead of adding a new `Blueprint` construct.
+
 ## Step 3: Add the Blueprint Construct
 
 Add a new `Blueprint` construct instance to the stack. Follow the existing pattern. Example:
@@ -41,7 +45,7 @@ Add a new `Blueprint` construct instance to the stack. Follow the existing patte
 ```typescript
 new Blueprint(this, 'MyRepoBlueprint', {
   repo: 'owner/repo',
-  repoTable: repoTable,
+  repoTable: repoTable.table,
   // Optional overrides:
   // computeType: 'agentcore',
   // modelId: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
@@ -56,12 +60,15 @@ Use a descriptive construct ID derived from the repo name.
 
 ### Model ID and IAM Permissions
 
-When specifying a non-default model via `agent.modelId`, two things are required:
+When specifying a non-default model via `agent.modelId`, three things are required:
 
-1. **Use the inference profile ID, not the raw model ID.** Bedrock does not support on-demand invocation of raw foundation model IDs for most models. Use the cross-region inference profile ID instead:
+1. **Use the inference profile ID, not the raw model ID, when Bedrock requires it.** For `InvokeModel` / streaming, specify the cross-Region **inference profile** identifier (or ARN) where the Bedrock User Guide calls for it — not only the bare `anthropic.*` foundation model ID. Examples:
+   - Sonnet 4.6 (US geography profile): `us.anthropic.claude-sonnet-4-6`
    - Sonnet 4: `us.anthropic.claude-sonnet-4-20250514-v1:0`
    - Opus 4: `us.anthropic.claude-opus-4-20250514-v1:0`
-   - Haiku 4.5: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (on-demand works for Haiku)
+   - Haiku 4.5: `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+
+   See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
 
 2. **Grant the runtime IAM permissions for the model.** The Blueprint construct does not automatically grant `bedrock:InvokeModel*` — this is by design (least privilege). You must add a `grantInvoke` block in the stack for each model used:
    ```typescript
@@ -77,6 +84,8 @@ When specifying a non-default model via `agent.modelId`, two things are required
    });
    opusProfile.grantInvoke(runtime);
    ```
+
+3. **Account-level Bedrock model access (separate from IAM).** The runtime role must be allowed to invoke the model, and the **AWS account** must be able to use that model in Bedrock: complete [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) prerequisites (AWS Marketplace actions on first serverless use where applicable, Anthropic first-time use / `PutUseCaseForModelAccess` for Anthropic models, valid payment method for Marketplace-backed models). For geographic cross-Region inference profiles, IAM and SCPs must allow Bedrock in **source and destination** Regions per [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
 
 ## Step 4: Deploy
 
@@ -127,3 +136,4 @@ Task-level parameters override Blueprint defaults. If neither specifies a value,
 - **Preflight failures after onboarding** — GitHub PAT may lack permissions for the new repo. Check the PAT's fine-grained access includes the target repository with Contents (read/write) and Pull requests (read/write) permissions.
 - **400 "Invocation with on-demand throughput isn't supported"** — The Blueprint `modelId` is using a raw foundation model ID instead of an inference profile ID. Change e.g. `anthropic.claude-opus-4-20250514-v1:0` to `us.anthropic.claude-opus-4-20250514-v1:0`.
 - **403 "not authorized to perform bedrock:InvokeModelWithResponseStream"** — The runtime IAM role lacks permissions for the model specified in the Blueprint. Add `grantInvoke` for both the model and its cross-region inference profile in `agent.ts`.
+- **Model not available / "not available on your Bedrock deployment"** — IAM is not the whole story: the account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for that model family and Region, and `modelId` should be an **enabled** inference profile ID (for example `us.anthropic.claude-sonnet-4-6`) where Bedrock requires it. After fixing access in the console, align Blueprint / DynamoDB `model_id` and redeploy if you change IAM grants.

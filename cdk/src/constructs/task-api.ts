@@ -59,12 +59,6 @@ export interface TaskApiProps {
   readonly taskApprovalsTable?: dynamodb.ITable;
 
   /**
-   * Slack user mapping table. When provided, the POST
-   * /notifications/slack/link endpoint is created (§11.2 finding #4).
-   */
-  readonly slackUserMappingTable?: dynamodb.ITable;
-
-  /**
    * Cedar-wasm Lambda layer (CedarWasmLayer.layer). Required by the
    * handlers that parse blueprint policies (`GetPoliciesFn`,
    * `CreateTaskFn`). Attached only when all approval-gate plumbing
@@ -262,6 +256,25 @@ export class TaskApi extends Construct {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
+              // Inbound webhook payloads from mature SaaS tools (Linear ships
+              // full Issue payloads > 8 KB) trip SizeRestrictions_BODY in this
+              // ruleset. Exempt the Linear webhook path from CRS entirely:
+              // the route is HMAC-verified in the Lambda, parsed as strict
+              // JSON, never interpolated into SQL/HTML, and rate-limited by
+              // the priority-3 rule below. CRS still applies to every other
+              // route (user API, Slack, etc.).
+              scopeDownStatement: {
+                notStatement: {
+                  statement: {
+                    byteMatchStatement: {
+                      fieldToMatch: { uriPath: {} },
+                      positionalConstraint: 'EXACTLY',
+                      searchString: '/v1/linear/webhook',
+                      textTransformations: [{ priority: 0, type: 'NONE' }],
+                    },
+                  },
+                },
+              },
             },
           },
           visibilityConfig: {
@@ -717,33 +730,6 @@ export class TaskApi extends Construct {
         );
         allFunctions.push(getPoliciesFn);
       }
-    }
-
-    // --- Slack user mapping endpoint (§11.2 finding #4) ---
-    if (props.slackUserMappingTable) {
-      const linkSlackUserFn = new lambda.NodejsFunction(this, 'LinkSlackUserFn', {
-        entry: path.join(handlersDir, 'link-slack-user.ts'),
-        handler: 'handler',
-        runtime: Runtime.NODEJS_24_X,
-        architecture: Architecture.ARM_64,
-        environment: {
-          SLACK_USER_MAPPING_TABLE_NAME: props.slackUserMappingTable.tableName,
-        },
-        bundling: commonBundling,
-        timeout: Duration.seconds(10),
-        memorySize: 256,
-      });
-      props.slackUserMappingTable.grantReadWriteData(linkSlackUserFn);
-
-      const notifications = this.api.root.addResource('notifications');
-      const slack = notifications.addResource('slack');
-      const slackLink = slack.addResource('link');
-      slackLink.addMethod(
-        'POST',
-        new apigw.LambdaIntegration(linkSlackUserFn),
-        cognitoAuthOptions,
-      );
-      allFunctions.push(linkSlackUserFn);
     }
 
     // --- Webhook endpoints (only when webhookTable is provided) ---

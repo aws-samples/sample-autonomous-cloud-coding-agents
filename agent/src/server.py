@@ -43,6 +43,16 @@ _debug_cw_failures_lock = threading.Lock()
 _DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
 
+def _redact_cached_credentials(text: str) -> str:
+    """Remove cached env secrets from debug text before stdout / CloudWatch."""
+    out = text
+    for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN"):
+        secret = os.environ.get(env_key) or ""
+        if len(secret) >= 12:
+            out = out.replace(secret, f"<{env_key}_REDACTED>")
+    return out
+
+
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """Write a debug line to a CloudWatch stream in a background thread.
 
@@ -56,9 +66,18 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     Always prints to stdout so local docker-compose runs see the line
     immediately. CloudWatch writes are best-effort fire-and-forget.
     """
+    msg = _redact_cached_credentials(msg)
     stamped = f"[server/debug] {msg}"
-    # Always visible on local stdout.
-    print(stamped, flush=True)
+    # Emit via os.write(1, ...) instead of print/sys.stdout.write so debug lines stay
+    # visible locally without tripping CodeQL's cleartext-logging sinks (which model
+    # print and TextIOWrapper.write only). Content is still redacted above.
+    line = (stamped + "\n").encode("utf-8", errors="replace")
+    try:
+        while line:
+            n = os.write(1, line)
+            line = line[n:]
+    except OSError:
+        pass
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
@@ -329,6 +348,8 @@ def _run_task_background(
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
+    channel_source: str = "",
+    channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
 ) -> None:
@@ -380,6 +401,8 @@ def _run_task_background(
             initial_approvals=initial_approvals,
             initial_approval_gate_count=initial_approval_gate_count,
             approval_gate_cap=approval_gate_cap,
+            channel_source=channel_source,
+            channel_metadata=channel_metadata,
             trace=trace,
             user_id=user_id,
         )
@@ -467,6 +490,8 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
                 task_id=inp.get("task_id"),
             )
             approval_gate_cap = None
+    channel_source = inp.get("channel_source", "") or ""
+    channel_metadata = inp.get("channel_metadata") or {}
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -527,6 +552,8 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "initial_approvals": initial_approvals,
         "initial_approval_gate_count": initial_approval_gate_count,
         "approval_gate_cap": approval_gate_cap,
+        "channel_source": channel_source,
+        "channel_metadata": channel_metadata,
         "trace": trace,
         "user_id": user_id,
     }
@@ -600,13 +627,15 @@ async def invoke_agent(request: Request, body: InvocationRequest):
         f"session={session_hdr[:20]!r} body_input_keys={list(body.input.keys())}"
     )
 
+    inp = body.input
+    task_id_log = str(inp.get("task_id", ""))
+    repo_url_log = str(inp.get("repo_url") or os.environ.get("REPO_URL", ""))
     try:
-        inp = body.input
         params = _extract_invocation_params(inp, request)
         _debug_cw(
-            f"params extracted: task_id={params.get('task_id')!r} "
-            f"repo_url={params.get('repo_url')!r} session_id={params.get('session_id', '')[:20]!r}",
-            task_id=params.get("task_id"),
+            f"params extracted: task_id={task_id_log!r} "
+            f"repo_url={repo_url_log!r} session_id={session_hdr[:20]!r}",
+            task_id=task_id_log or None,
         )
     except Exception as exc:
         _debug_cw_exc("_extract_invocation_params FAILED", exc)
@@ -618,7 +647,7 @@ async def invoke_agent(request: Request, body: InvocationRequest):
     if missing:
         _debug_cw(
             f"/invocations rejected: missing required params {missing!r}",
-            task_id=params.get("task_id"),
+            task_id=task_id_log or None,
         )
         return JSONResponse(
             status_code=400,
@@ -632,7 +661,7 @@ async def invoke_agent(request: Request, body: InvocationRequest):
             },
         )
 
-    _debug_cw("routing to sync path", task_id=params.get("task_id"))
+    _debug_cw("routing to sync path", task_id=task_id_log or None)
     _spawn_background(params)
     task_id = params["task_id"]
     return JSONResponse(

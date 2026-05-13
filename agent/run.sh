@@ -217,6 +217,8 @@ DOCKER_ARGS=(
 [[ -n "${DRY_RUN:-}" ]] && DOCKER_ARGS+=(-e "DRY_RUN=${DRY_RUN}")
 [[ -n "${MAX_TURNS:-}" ]] && DOCKER_ARGS+=(-e "MAX_TURNS=${MAX_TURNS}")
 [[ -n "${MAX_BUDGET_USD:-}" ]] && DOCKER_ARGS+=(-e "MAX_BUDGET_USD=${MAX_BUDGET_USD}")
+[[ -n "${LINEAR_API_TOKEN:-}" ]] && DOCKER_ARGS+=(-e "LINEAR_API_TOKEN=${LINEAR_API_TOKEN}")
+[[ -n "${LINEAR_API_TOKEN_SECRET_ARN:-}" ]] && DOCKER_ARGS+=(-e "LINEAR_API_TOKEN_SECRET_ARN=${LINEAR_API_TOKEN_SECRET_ARN}")
 
 # Local events mode: connect to DynamoDB Local via the agent-local network
 if [[ "$LOCAL_EVENTS" == true ]]; then

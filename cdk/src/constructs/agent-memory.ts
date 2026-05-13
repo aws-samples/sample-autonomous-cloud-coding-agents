@@ -70,7 +70,7 @@ export class AgentMemory extends Construct {
     super(scope, id);
 
     this.memory = new agentcore.Memory(this, 'Memory', {
-      memoryName: props?.memoryName ?? 'bgagent_memory',
+      memoryName: props?.memoryName,
       description: 'Cross-task interaction memory for background coding agents',
       expirationDuration: props?.expirationDuration ?? Duration.days(365),
       memoryStrategies: [

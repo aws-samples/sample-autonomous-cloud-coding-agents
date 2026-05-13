@@ -114,7 +114,9 @@ Creates a new task. The orchestrator runs admission control, context hydration, 
 
 For PR tasks, `branch_name` is initially `pending:pr_resolution` and resolved to the PR's `head_ref` during hydration.
 
-**Errors:** `400 VALIDATION_ERROR`, `400 GUARDRAIL_BLOCKED`, `401 UNAUTHORIZED`, `409 DUPLICATE_TASK`, `422 REPO_NOT_ONBOARDED`, `429 RATE_LIMIT_EXCEEDED`, `503 SERVICE_UNAVAILABLE`.
+**Idempotency:** Clients may send `Idempotency-Key` (same format as other `POST` requests). The first successful create returns **`201 Created`** with the body shape above. A subsequent request with the same key and the **same authenticated user** returns **`200 OK`** with the same `{ data: ... }` envelope (full `TaskDetail`, reflecting **current** task state), plus response header `Idempotent-Replay: true`. No duplicate task is created and the orchestrator is not invoked again for that replay. If the key is already bound to a task owned by **another** user, the API returns **`409 DUPLICATE_TASK`** without exposing that task (extremely unlikely for high-entropy keys).
+
+**Errors:** `400 VALIDATION_ERROR`, `400 GUARDRAIL_BLOCKED`, `401 UNAUTHORIZED`, `409 DUPLICATE_TASK` (idempotency key collision across users only), `422 REPO_NOT_ONBOARDED`, `429 RATE_LIMIT_EXCEEDED`, `503 SERVICE_UNAVAILABLE`.
 
 ### Get task
 
@@ -331,7 +333,7 @@ Tasks created via webhook record `channel_source: 'webhook'` with audit metadata
 | `FORBIDDEN` | 403 | Not authorized (e.g. accessing another user's task) |
 | `TASK_NOT_FOUND` | 404 | Task ID does not exist |
 | `WEBHOOK_NOT_FOUND` | 404 | Webhook does not exist or belongs to another user |
-| `DUPLICATE_TASK` | 409 | Idempotency key matches existing task |
+| `DUPLICATE_TASK` | 409 | Idempotency key already used by another user (`POST /v1/tasks` / webhook create); same-user replays return `200` with the existing task instead |
 | `TASK_ALREADY_TERMINAL` | 409 | Cannot cancel a terminal task |
 | `WEBHOOK_ALREADY_REVOKED` | 409 | Webhook is already revoked |
 | `REPO_NOT_ONBOARDED` | 422 | Repository not registered (onboard via CDK, not runtime API) |

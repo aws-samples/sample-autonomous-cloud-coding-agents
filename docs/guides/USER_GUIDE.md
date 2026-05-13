@@ -4,13 +4,15 @@
 
 ABCA is a platform for running autonomous background coding agents on AWS. You submit a task (a GitHub repository + a task description or issue number), an agent works autonomously in an isolated environment, and delivers a pull request when done. This guide covers how to submit coding tasks, monitor their progress, and get the most out of the platform.
 
-There are three ways to interact with the platform. You can use them independently or combine them for different workflows:
+There are five ways to interact with the platform. You can use them independently or combine them for different workflows:
 
 1. **CLI** (recommended) - The `bgagent` CLI authenticates via Cognito and calls the Task API. Best for individual developers submitting tasks from the terminal. Handles login, token caching, and output formatting.
 2. **REST API** (direct) - Call the Task API endpoints directly with a JWT token. Best for building custom integrations, dashboards, or internal tools on top of the platform. Full validation, audit logging, and idempotency support.
 3. **Webhook** - External systems (CI pipelines, GitHub Actions) can create tasks via HMAC-authenticated HTTP requests. Best for automated workflows where tasks should be triggered by events (e.g., a new issue is labeled, a PR needs review). No Cognito credentials needed; uses a shared secret per integration.
+4. **Slack** - Submit tasks by @mentioning the bot and receive threaded progress notifications with reaction-based status. See the [Slack setup guide](./SLACK_SETUP_GUIDE.md).
+5. **Linear** - Apply a label to a Linear issue to trigger a task; the agent posts progress comments back on the issue via Linear's MCP server. See the [Linear setup guide](./LINEAR_SETUP_GUIDE.md).
 
-For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `pr_review` on every new PR via GitHub Actions, and the **REST API** to build a dashboard that tracks task status across repositories.
+For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `pr_review` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
 ## Prerequisites
 
@@ -87,9 +89,7 @@ aws cognito-idp admin-create-user \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username user@example.com \
-  --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
-  --temporary-password 'TempPass123!@' \
-  --message-action SUPPRESS
+  --temporary-password 'TempPass123!@'
 
 aws cognito-idp admin-set-user-password \
   --region "$REGION" \
@@ -99,14 +99,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-**Pool constraints** (enforced server-side; ignoring them yields cryptic Cognito errors at login):
-
-- **Username MUST be an email address.** The pool is configured with email as the sign-in alias, so `--username` has to be a valid email — short handles like `alice` are rejected at create time.
-- **Password policy**: minimum 12 characters, with at least one uppercase letter, one lowercase letter, one digit, and one symbol.
-- **`email_verified=true` attribute is required** for the account to log in. Creating a user without it leaves the account in `FORCE_CHANGE_PASSWORD` state and subsequent `initiate-auth` calls fail with `User is not confirmed`.
-- **`--message-action SUPPRESS`** stops Cognito from trying to email the temporary password. If SES isn't configured on the account, omitting this flag causes `admin-create-user` to fail with `NotAuthorizedException`. Safe for non-prod; omit only if you have a working SES sender identity.
-
-The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so you do not have to go through a password change flow on first login.
+Password requirements: minimum 12 characters, uppercase, lowercase, digits, and symbols.
 
 ### Obtain a JWT token
 
@@ -337,7 +330,7 @@ curl "$API_URL/tasks/01KN36YGQV6BEPDD7CVMKP1PF3" -H "Authorization: $TOKEN"
 ```
 
 ```json
-{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/krokoko/agent-plugins/pull/59","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":"125.9","cost_usd":"0.15938219999999997","build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/krokoko/agent-plugins/pull/59","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
 ```
 
 ### Cancel a task
