@@ -309,4 +309,175 @@ describe('dispatchSlackEvent', () => {
     const postBody = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
     expect(postBody.text).toContain('org/repo');
   });
+
+  // ---------------------------------------------------------------------
+  // PR #79 test gap #31 — conditional UpdateItem race + dup-delete
+  // ---------------------------------------------------------------------
+
+  test('task_created persist ConditionalCheckFailed → posts duplicate then deletes it', async () => {
+    // Race: a sibling retry already wrote ``slack_created_msg_ts``.
+    // Our POST landed in Slack first, the conditional UpdateItem
+    // failed, and we must clean up the duplicate root message via
+    // ``chat.delete``. Without this, the channel accumulates ghost
+    // task_created posts on every retry-after-success-write race.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+    // Default fetchMock returns ok=true with ts; fine for the post +
+    // best-effort reaction calls. The chat.delete call uses the same
+    // default which is also ``ok: true`` — perfect for the success path.
+
+    await dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb);
+
+    // Find the chat.delete invocation by URL — the duplicate cleanup
+    // is the load-bearing assertion. Reaction add/remove calls fall
+    // through to the default mock and don't carry test signal here.
+    const deleteCall = fetchMock.mock.calls.find(
+      ([url]) => url === 'https://slack.com/api/chat.delete',
+    );
+    expect(deleteCall).toBeDefined();
+    const deleteBody = JSON.parse((deleteCall![1] as { body: string }).body);
+    expect(deleteBody.ts).toBe('1234.0001');
+  });
+
+  test('session_started persist ConditionalCheckFailed → posts duplicate then deletes it', async () => {
+    // Same race as task_created but for session_started; uses
+    // ``slack_session_msg_ts`` as the conditional attribute. Without
+    // delete, terminal cleanup would orphan the duplicate session
+    // message (terminal cleanup deletes a single session_msg_ts, not
+    // the duplicate that was never persisted).
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: {
+            slack_team_id: 'T1',
+            slack_channel_id: 'C1',
+            slack_thread_ts: '999.000', // session_started threads under task_created
+          },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+
+    await dispatchSlackEvent(mkEvent('t1', 'session_started'), ddb);
+
+    const deleteCall = fetchMock.mock.calls.find(
+      ([url]) => url === 'https://slack.com/api/chat.delete',
+    );
+    expect(deleteCall).toBeDefined();
+    const deleteBody = JSON.parse((deleteCall![1] as { body: string }).body);
+    expect(deleteBody.ts).toBe('1234.0001');
+  });
+
+  test('dup-delete failure emits fanout.slack.dup_delete_failed with error_id (PR #79 review #6)', async () => {
+    // The conditional persist hit a sibling retry; we tried to delete
+    // the duplicate Slack message but ``chat.delete`` failed. The
+    // duplicate is now permanent in the thread — operators need a
+    // dedicated alarmable signal so they can detect ghost-message
+    // accumulation. We override the default mock for chat.delete
+    // specifically by URL-routing the fetch implementation rather
+    // than relying on call-order, so reactions can fall through to
+    // the default without consuming our scripted responses.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === 'https://slack.com/api/chat.delete') {
+        return {
+          ok: true,
+          json: () => Promise.resolve({ ok: false, error: 'cant_delete_message' }),
+        };
+      }
+      // Default: chat.postMessage / reactions.* succeed.
+      return {
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ ok: true, ts: '1234.0001' }),
+      };
+    });
+
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const errorSpy = jest.spyOn(loggerModule.logger, 'error').mockImplementation(() => undefined);
+    try {
+      await dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb);
+
+      const ghostError = errorSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.slack.dup_delete_failed',
+      );
+      expect(ghostError).toBeDefined();
+      expect((ghostError?.[1] as Record<string, unknown>).error_id).toBe('FANOUT_SLACK_DUP_DELETE_FAILED');
+      expect((ghostError?.[1] as Record<string, unknown>).duplicate_ts).toBe('1234.0001');
+      expect((ghostError?.[1] as Record<string, unknown>).event_type).toBe('task_created');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  test('chat.delete returning message_not_found is treated as success (no dup_delete_failed)', async () => {
+    // ``message_not_found`` means the duplicate already got cleaned
+    // up by something else (e.g. a previous retry's delete). The
+    // dup_delete_failed alarm must NOT fire on this benign case, or
+    // operators will see false positives whenever the race resolves
+    // cleanly.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === 'https://slack.com/api/chat.delete') {
+        return {
+          ok: true,
+          json: () => Promise.resolve({ ok: false, error: 'message_not_found' }),
+        };
+      }
+      return {
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ ok: true, ts: '1234.0001' }),
+      };
+    });
+
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const errorSpy = jest.spyOn(loggerModule.logger, 'error').mockImplementation(() => undefined);
+    try {
+      await dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb);
+
+      const ghostError = errorSpy.mock.calls.find(
+        c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.slack.dup_delete_failed',
+      );
+      expect(ghostError).toBeUndefined();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
