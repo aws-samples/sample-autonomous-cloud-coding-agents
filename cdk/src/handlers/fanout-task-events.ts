@@ -610,15 +610,25 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
       && typeof httpStatus === 'number'
       && httpStatus >= 400
       && httpStatus < 500
+      // 403 (most often "API rate limit exceeded" on GitHub) and 429
+      // ("Too Many Requests") are 4xx but **transient** — retrying
+      // after the rate-limit window opens fixes them. Carving them
+      // out here keeps a reconciliation wave from permanently
+      // dropping every GitHub comment under the swallow path. The
+      // batch retry pumps the backoff naturally; if it never clears,
+      // the record DLQs after retryAttempts. Found in PR #79 review.
+      && httpStatus !== 403
+      && httpStatus !== 429
     ) {
       // Channel-terminal: a 4xx from GitHub (excluding the handled 401
-      // rotation path and the 404 re-POST handled inside
-      // ``upsertTaskComment``) means the request itself is malformed
-      // or the resource is gone — retrying will not change the
-      // outcome. Swallow the rejection so the post-issue-#64 router
-      // does not push the record into ``batchItemFailures`` and burn
-      // Lambda retries. Log a dedicated warn so operators can alarm
-      // distinctly from the retryable infra path.
+      // rotation path, the 404 re-POST handled inside
+      // ``upsertTaskComment``, and the 403/429 rate-limit carve-out
+      // above) means the request itself is malformed or the resource
+      // is gone — retrying will not change the outcome. Swallow the
+      // rejection so the post-issue-#64 router does not push the
+      // record into ``batchItemFailures`` and burn Lambda retries.
+      // Log a dedicated warn so operators can alarm distinctly from
+      // the retryable infra path.
       logger.warn('[fanout/github] terminal 4xx from GitHub — swallowing per channel policy', {
         event: 'fanout.github.api_error',
         task_id: event.task_id,

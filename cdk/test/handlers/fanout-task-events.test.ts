@@ -819,6 +819,38 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     }
   });
 
+  test.each([403, 429])(
+    'HTTP %s from GitHub escalates to partial-batch retry (rate-limit carve-out, PR #79 review #1)',
+    async (httpStatus) => {
+      // 403 ("API rate limit exceeded") and 429 ("Too Many Requests")
+      // are 4xx but transient. The original migration's blanket 4xx
+      // swallow would permanently drop entire reconciliation waves
+      // under sustained rate-limiting. The carve-out re-classifies
+      // them as infra rejections so the record retries until the
+      // rate-limit window clears (or DLQs after retryAttempts).
+      mockDdbSend.mockResolvedValueOnce({
+        Item: { ...TASK_RECORD_BASE, github_comment_id: 555 },
+      });
+      const { GitHubCommentError } = jest.requireMock<typeof import('../../src/handlers/shared/github-comment')>(
+        '../../src/handlers/shared/github-comment',
+      );
+      mockUpsertTaskComment.mockRejectedValueOnce(
+        new GitHubCommentError(
+          `PATCH /repos/owner/repo/issues/comments/555 failed: HTTP ${httpStatus}`,
+          httpStatus,
+        ),
+      );
+
+      const record = mkEvent('task_completed', 't-gh');
+      const result = await handler({ Records: [record] });
+
+      // Record IS in batchItemFailures — Lambda will replay until
+      // the rate-limit window opens. Critical: the swallow-as-terminal
+      // path would have produced an empty array (silent drop).
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    },
+  );
+
   test('falls back to issue_number when pr_number is absent', async () => {
     // Webhook-submitted issue tasks are the common real-world surface.
     mockDdbSend
