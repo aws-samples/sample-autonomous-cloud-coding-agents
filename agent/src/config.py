@@ -92,6 +92,7 @@ def build_config(
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
+    tool_profile: str = "",
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -146,6 +147,7 @@ def build_config(
         channel_metadata=channel_metadata or {},
         trace=trace,
         user_id=user_id,
+        tool_profile=tool_profile,
     )
 
 
@@ -170,6 +172,7 @@ def get_config() -> TaskConfig:
             # an unreachable ``traces//`` key.
             trace=os.environ.get("TRACE", "").lower() in ("1", "true", "yes"),
             user_id=os.environ.get("USER_ID", ""),
+            tool_profile=os.environ.get("TOOL_PROFILE", ""),
         )
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)

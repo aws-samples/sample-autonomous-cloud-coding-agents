@@ -106,6 +106,8 @@ export interface TaskRecord {
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
   readonly compute_metadata?: Record<string, string>;
+  /** Tool profile name selected at task submission (from Blueprint.toolProfiles). */
+  readonly tool_profile?: string;
   readonly ttl?: number;
   /**
    * Optional per-task override for the FanOutConsumer's channel filters
@@ -198,6 +200,8 @@ export interface TaskDetail {
    *  the field being present; CLI download resolves this via the
    *  ``get-trace-url`` handler rather than hitting S3 directly. */
   readonly trace_s3_uri: string | null;
+  /** Tool profile selected at submission, or ``null`` for legacy single-tier tasks. */
+  readonly tool_profile: string | null;
 }
 
 /**
@@ -275,6 +279,12 @@ export interface CreateTaskRequest {
   readonly attachments?: Attachment[];
   /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
   readonly trace?: boolean;
+  /**
+   * Named tool profile to activate for this task. Must reference a profile
+   * defined in the repo's Blueprint.toolProfiles. When omitted, the repo's
+   * legacy single-tier behavior applies.
+   */
+  readonly tool_profile?: string;
 }
 
 /**
@@ -333,6 +343,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,
+    tool_profile: record.tool_profile ?? null,
   };
 }
 

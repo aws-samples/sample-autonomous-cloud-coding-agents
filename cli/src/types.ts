@@ -96,6 +96,9 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  /** Tool profile selected at submission, or ``null`` for legacy
+   *  single-tier tasks. Mirrors ``cdk/src/handlers/shared/types.ts``. */
+  readonly tool_profile: string | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
@@ -165,6 +168,14 @@ export interface CreateTaskRequest {
    * ``bgagent watch`` / notifications.
    */
   readonly trace?: boolean;
+  /**
+   * Named tool profile to activate for this task. Must reference a profile
+   * defined in the repo's Blueprint.toolProfiles. When omitted, the repo's
+   * legacy single-tier behavior applies.
+   *
+   * Mirrors ``cdk/src/handlers/shared/types.ts::CreateTaskRequest``.
+   */
+  readonly tool_profile?: string;
 }
 
 /**

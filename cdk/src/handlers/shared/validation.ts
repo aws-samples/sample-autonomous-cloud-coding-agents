@@ -210,6 +210,27 @@ export function computeTtlEpoch(retentionDays: number): number {
   return Math.floor(Date.now() / 1000) + retentionDays * 86400;
 }
 
+/** Maximum allowed length for a tool profile name. */
+export const MAX_TOOL_PROFILE_NAME_LENGTH = 64;
+const TOOL_PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
+
+/**
+ * Validate a tool_profile value from a request body.
+ * @param value - the raw value from the request.
+ * @returns the valid string, null if invalid (caller should return 400), or undefined if absent.
+ */
+export function validateToolProfile(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  if (value.length === 0 || value.length > MAX_TOOL_PROFILE_NAME_LENGTH) return null;
+  // Single-char profile names: must be [a-z0-9]
+  if (value.length === 1) {
+    return /^[a-z0-9]$/.test(value) ? value : null;
+  }
+  if (!TOOL_PROFILE_NAME_PATTERN.test(value)) return null;
+  return value;
+}
+
 /** Valid task type values. Compile-time check ensures this stays in sync with TaskType. */
 const TASK_TYPE_LIST = ['new_task', 'pr_iteration', 'pr_review'] as const satisfies readonly TaskType[];
 type _AssertExhaustive = Exclude<TaskType, (typeof TASK_TYPE_LIST)[number]> extends never ? true : never;

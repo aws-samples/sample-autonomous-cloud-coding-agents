@@ -85,3 +85,22 @@ class TestBuildConfig:
         )
         assert config.task_id
         assert len(config.task_id) == 12
+
+    def test_tool_profile_defaults_to_empty(self):
+        config = build_config(
+            repo_url="owner/repo",
+            task_description="fix bug",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config.tool_profile == ""
+
+    def test_tool_profile_passed_through(self):
+        config = build_config(
+            repo_url="owner/repo",
+            task_description="fix bug",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            tool_profile="frontend",
+        )
+        assert config.tool_profile == "frontend"

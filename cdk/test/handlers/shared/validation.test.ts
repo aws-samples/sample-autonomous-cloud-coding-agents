@@ -35,6 +35,7 @@ import {
   VALID_TASK_TYPES,
   validateMaxTurns,
   validatePrNumber,
+  validateToolProfile,
 } from '../../../src/handlers/shared/validation';
 
 describe('parseBody', () => {
@@ -405,5 +406,61 @@ describe('validatePrNumber', () => {
     expect(validatePrNumber(1.5)).toBeNull();
     expect(validatePrNumber('42')).toBeNull();
     expect(validatePrNumber(true)).toBeNull();
+  });
+});
+
+describe('validateToolProfile', () => {
+  test('returns undefined for absent values', () => {
+    expect(validateToolProfile(undefined)).toBeUndefined();
+    expect(validateToolProfile(null)).toBeUndefined();
+  });
+
+  test('returns the string for valid profile names', () => {
+    expect(validateToolProfile('frontend')).toBe('frontend');
+    expect(validateToolProfile('backend')).toBe('backend');
+    expect(validateToolProfile('my-infra')).toBe('my-infra');
+    expect(validateToolProfile('a1')).toBe('a1');
+  });
+
+  test('accepts single-char alphanumeric names', () => {
+    expect(validateToolProfile('a')).toBe('a');
+    expect(validateToolProfile('9')).toBe('9');
+  });
+
+  test('returns null for uppercase names', () => {
+    expect(validateToolProfile('FRONTEND')).toBeNull();
+    expect(validateToolProfile('Frontend')).toBeNull();
+  });
+
+  test('returns null for names with special characters', () => {
+    expect(validateToolProfile('front end')).toBeNull();
+    expect(validateToolProfile('front_end')).toBeNull();
+    expect(validateToolProfile('front.end')).toBeNull();
+    expect(validateToolProfile('front/end')).toBeNull();
+  });
+
+  test('returns null for names starting or ending with hyphen', () => {
+    expect(validateToolProfile('-frontend')).toBeNull();
+    expect(validateToolProfile('frontend-')).toBeNull();
+  });
+
+  test('returns null for empty string', () => {
+    expect(validateToolProfile('')).toBeNull();
+  });
+
+  test('returns null for names exceeding 64 chars', () => {
+    expect(validateToolProfile('a'.repeat(65))).toBeNull();
+  });
+
+  test('accepts name at exactly 64 chars', () => {
+    const name = 'a'.repeat(64);
+    expect(validateToolProfile(name)).toBe(name);
+  });
+
+  test('returns null for non-string types', () => {
+    expect(validateToolProfile(123)).toBeNull();
+    expect(validateToolProfile(true)).toBeNull();
+    expect(validateToolProfile({})).toBeNull();
+    expect(validateToolProfile([])).toBeNull();
   });
 });

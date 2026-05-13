@@ -314,6 +314,23 @@ class TestTaskConfig:
         assert config.trace is False
         assert config.user_id == ""
 
+    def test_tool_profile_defaults_to_empty_string(self):
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        assert config.tool_profile == ""
+
+    def test_tool_profile_accepts_valid_name(self):
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            tool_profile="frontend",
+        )
+        assert config.tool_profile == "frontend"
+
 
 class TestRepoSetup:
     def test_construction(self):

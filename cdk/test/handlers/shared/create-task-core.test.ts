@@ -40,8 +40,12 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
 }));
 
 const mockCheckRepoOnboarded = jest.fn();
+const mockLoadRepoConfig = jest.fn();
 jest.mock('../../../src/handlers/shared/repo-config', () => ({
   checkRepoOnboarded: mockCheckRepoOnboarded,
+  loadRepoConfig: mockLoadRepoConfig,
+  parseToolProfiles: jest.requireActual('../../../src/handlers/shared/repo-config').parseToolProfiles,
+  isValidToolProfile: jest.requireActual('../../../src/handlers/shared/repo-config').isValidToolProfile,
 }));
 
 let ulidCounter = 0;
@@ -73,6 +77,7 @@ beforeEach(() => {
   mockLambdaSend.mockResolvedValue({});
   mockBedrockSend.mockResolvedValue({ action: 'NONE' });
   mockCheckRepoOnboarded.mockResolvedValue({ onboarded: true });
+  mockLoadRepoConfig.mockResolvedValue(null);
 });
 
 describe('createTaskCore', () => {
@@ -550,5 +555,110 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(400);
     expect(JSON.parse(result.body).error.message).toContain('trace');
+  });
+
+  // -- tool_profile (dynamic tool selection) ----------------------------
+
+  test('tool_profile omitted creates task without tool_profile field', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug' },
+      makeContext(),
+      'req-tp-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.tool_profile).toBeNull();
+  });
+
+  test('tool_profile persists on task record and surfaces in response', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      tool_profiles: JSON.stringify({ frontend: { capabilityTier: 'extended' } }),
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug', tool_profile: 'frontend' },
+      makeContext(),
+      'req-tp-2',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.tool_profile).toBe('frontend');
+  });
+
+  test('returns 400 for invalid tool_profile format (uppercase)', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug', tool_profile: 'FRONTEND' } as any,
+      makeContext(),
+      'req-tp-3',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('tool_profile');
+  });
+
+  test('returns 400 for invalid tool_profile format (special chars)', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug', tool_profile: 'front end!' } as any,
+      makeContext(),
+      'req-tp-4',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('tool_profile');
+  });
+
+  test('returns 422 when tool_profile does not exist in repo config', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      tool_profiles: JSON.stringify({ backend: { capabilityTier: 'default' } }),
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug', tool_profile: 'nonexistent' },
+      makeContext(),
+      'req-tp-5',
+    );
+    expect(result.statusCode).toBe(422);
+    expect(JSON.parse(result.body).error.message).toContain('does not exist');
+  });
+
+  test('tool_profile passes when profile exists in repo config', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      tool_profiles: JSON.stringify({ infra: { capabilityTier: 'extended', mcpServers: ['aws-cdk-mcp'] } }),
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Deploy infra', tool_profile: 'infra' },
+      makeContext(),
+      'req-tp-6',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.tool_profile).toBe('infra');
+  });
+
+  test('tool_profile skips existence check when repo has no tool_profiles', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      // no tool_profiles field
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug', tool_profile: 'frontend' },
+      makeContext(),
+      'req-tp-7',
+    );
+    // When repo has no profiles defined, specifying a profile that doesn't exist should 422
+    expect(result.statusCode).toBe(422);
+  });
+
+  test('returns 400 for non-string tool_profile', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix bug', tool_profile: 123 } as any,
+      makeContext(),
+      'req-tp-8',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('tool_profile');
   });
 });

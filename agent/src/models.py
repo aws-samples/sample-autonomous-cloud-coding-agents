@@ -127,6 +127,9 @@ class TaskConfig(BaseModel):
     # previews live, so dropping ``trace`` here silently no-ops the
     # feature for the fields that matter.
     trace: bool = False
+    # Tool profile selected at task submission (from Blueprint.toolProfiles).
+    # Empty string means legacy single-tier behavior (no profile selected).
+    tool_profile: str = ""
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
     issue: GitHubIssue | None = None

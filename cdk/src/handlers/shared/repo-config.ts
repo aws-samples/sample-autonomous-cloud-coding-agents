@@ -27,6 +27,15 @@ import { logger } from './logger';
  */
 export type ComputeType = 'agentcore' | 'ecs';
 
+/** Runtime representation of a tool profile stored in RepoConfig. */
+export interface StoredToolProfile {
+  readonly capabilityTier?: 'default' | 'extended';
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly cedarPolicies?: readonly string[];
+  readonly description?: string;
+}
+
 export interface RepoConfig {
   readonly repo: string;
   readonly status: 'active' | 'removed';
@@ -42,6 +51,8 @@ export interface RepoConfig {
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
+  /** JSON-serialized map of profile name → ToolProfile, written by Blueprint. */
+  readonly tool_profiles?: string;
 }
 
 /**
@@ -59,6 +70,8 @@ export interface BlueprintConfig {
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
+  /** Parsed tool profiles map (profile name → definition). */
+  readonly tool_profiles?: Readonly<Record<string, StoredToolProfile>>;
 }
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -137,4 +150,35 @@ export async function loadRepoConfig(repo: string): Promise<RepoConfig | null> {
     });
     throw new Error(`Unable to load repo config for '${repo}': ${String(err)}`);
   }
+}
+
+/**
+ * Parse the tool_profiles JSON string from a RepoConfig into a typed map.
+ * Returns an empty object if the field is absent or unparseable.
+ */
+export function parseToolProfiles(raw: string | undefined): Readonly<Record<string, StoredToolProfile>> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      logger.warn('tool_profiles is not a valid object, ignoring', { raw_type: typeof parsed });
+      return {};
+    }
+    return parsed as Record<string, StoredToolProfile>;
+  } catch (err) {
+    logger.warn('Failed to parse tool_profiles JSON', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
+}
+
+/**
+ * Validate that a tool profile name exists in the given profiles map.
+ * @param profileName - the profile name from the task request.
+ * @param profiles - the parsed tool profiles from RepoConfig.
+ * @returns true if the profile exists.
+ */
+export function isValidToolProfile(profileName: string, profiles: Readonly<Record<string, StoredToolProfile>>): boolean {
+  return Object.prototype.hasOwnProperty.call(profiles, profileName);
 }

@@ -30,7 +30,7 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 
 process.env.REPO_TABLE_NAME = 'RepoConfig';
 
-import { checkRepoOnboarded, loadRepoConfig } from '../../../src/handlers/shared/repo-config';
+import { checkRepoOnboarded, loadRepoConfig, parseToolProfiles, isValidToolProfile } from '../../../src/handlers/shared/repo-config';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -145,5 +145,51 @@ describe('loadRepoConfig', () => {
     await expect(loadRepoConfig('org/repo')).rejects.toThrow(
       "Unable to load repo config for 'org/repo'",
     );
+  });
+});
+
+describe('parseToolProfiles', () => {
+  test('returns empty object for undefined', () => {
+    expect(parseToolProfiles(undefined)).toEqual({});
+  });
+
+  test('returns empty object for empty string', () => {
+    expect(parseToolProfiles('')).toEqual({});
+  });
+
+  test('parses valid JSON profiles', () => {
+    const profiles = {
+      frontend: { capabilityTier: 'extended', mcpServers: ['eslint-mcp'], skills: ['react-patterns'] },
+      backend: { capabilityTier: 'default' },
+    };
+    expect(parseToolProfiles(JSON.stringify(profiles))).toEqual(profiles);
+  });
+
+  test('returns empty object for invalid JSON', () => {
+    expect(parseToolProfiles('not json')).toEqual({});
+  });
+
+  test('returns empty object for JSON array', () => {
+    expect(parseToolProfiles('["not", "an", "object"]')).toEqual({});
+  });
+
+  test('returns empty object for JSON null', () => {
+    expect(parseToolProfiles('null')).toEqual({});
+  });
+});
+
+describe('isValidToolProfile', () => {
+  test('returns true for existing profile', () => {
+    const profiles = { frontend: { capabilityTier: 'extended' as const }, backend: {} };
+    expect(isValidToolProfile('frontend', profiles)).toBe(true);
+  });
+
+  test('returns false for non-existent profile', () => {
+    const profiles = { frontend: { capabilityTier: 'extended' as const } };
+    expect(isValidToolProfile('backend', profiles)).toBe(false);
+  });
+
+  test('returns false for empty profiles map', () => {
+    expect(isValidToolProfile('any', {})).toBe(false);
   });
 });

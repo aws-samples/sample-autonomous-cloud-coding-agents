@@ -29,10 +29,10 @@ import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
-import { checkRepoOnboarded } from './repo-config';
+import { checkRepoOnboarded, loadRepoConfig, parseToolProfiles, isValidToolProfile } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
 import { type ChannelSource, type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber, validateToolProfile } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -131,6 +131,23 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid trace. Must be a boolean.', requestId);
   }
   const userTrace = body.trace === true;
+
+  // Validate tool_profile format (if provided)
+  const toolProfileResult = validateToolProfile(body.tool_profile);
+  if (toolProfileResult === null) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid tool_profile. Must be a lowercase alphanumeric string with hyphens (1-64 chars).', requestId);
+  }
+
+  // If a tool_profile is specified, validate it exists in the repo's Blueprint
+  if (toolProfileResult !== undefined) {
+    const repoConfig = await loadRepoConfig(body.repo);
+    if (repoConfig) {
+      const profiles = parseToolProfiles(repoConfig.tool_profiles);
+      if (!isValidToolProfile(toolProfileResult, profiles)) {
+        return errorResponse(422, ErrorCode.VALIDATION_ERROR, 'Invalid tool_profile. The specified profile does not exist for this repository.', requestId);
+      }
+    }
+  }
 
   // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
@@ -233,6 +250,7 @@ export async function createTaskCore(
     ...(userMaxTurns !== undefined && { max_turns: userMaxTurns }),
     ...(userMaxBudgetUsd !== undefined && { max_budget_usd: userMaxBudgetUsd }),
     ...(userTrace && { trace: true }),
+    ...(toolProfileResult !== undefined && { tool_profile: toolProfileResult }),
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,

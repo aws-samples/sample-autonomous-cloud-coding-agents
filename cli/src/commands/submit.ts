@@ -36,6 +36,7 @@ export function makeSubmitCommand(): Command {
     .option('--review-pr <number>', 'PR number to review (sets task_type to pr_review)', parseInt)
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
+    .option('--tool-profile <name>', 'Tool profile to activate (must be defined in repo Blueprint)')
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
@@ -64,6 +65,14 @@ export function makeSubmitCommand(): Command {
           throw new CliError('--max-budget must be a number between 0.01 and 100.');
         }
       }
+      if (opts.toolProfile !== undefined) {
+        if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(opts.toolProfile) && !/^[a-z0-9]$/.test(opts.toolProfile)) {
+          throw new CliError('--tool-profile must be lowercase alphanumeric with hyphens (1-64 chars).');
+        }
+        if (opts.toolProfile.length > 64) {
+          throw new CliError('--tool-profile must be lowercase alphanumeric with hyphens (1-64 chars).');
+        }
+      }
 
       const client = new ApiClient();
       const body: CreateTaskRequest = {
@@ -76,6 +85,7 @@ export function makeSubmitCommand(): Command {
         ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
         ...(opts.reviewPr !== undefined && { task_type: 'pr_review' as const, pr_number: opts.reviewPr }),
         ...(opts.trace && { trace: true }),
+        ...(opts.toolProfile && { tool_profile: opts.toolProfile }),
       };
 
       const task = await client.createTask(body, opts.idempotencyKey);

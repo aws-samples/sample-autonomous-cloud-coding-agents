@@ -25,6 +25,48 @@ import { Construct, IValidation } from 'constructs';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+const TOOL_PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
+
+/**
+ * A named tool profile that defines which tools, MCP servers, skills,
+ * and Cedar policies are available to the agent for a given task scope.
+ *
+ * Profiles are deploy-time artifacts — defined in CDK source, deployed
+ * via CloudFormation, and stored in DynamoDB. At task submission time,
+ * only the profile *name* is user-controlled; the definition itself
+ * is trusted (same trust level as Blueprint.security.cedarPolicies).
+ */
+export interface ToolProfile {
+  /**
+   * Tool capability tier for this profile.
+   * @default 'default'
+   */
+  readonly capabilityTier?: 'default' | 'extended';
+
+  /**
+   * MCP server identifiers activated for this profile.
+   * These must correspond to MCP servers registered with the platform.
+   */
+  readonly mcpServers?: readonly string[];
+
+  /**
+   * Skill identifiers activated for this profile.
+   * References deploy-time skill definitions (SKILL.md directories)
+   * bundled into the agent runtime image or fetched at session start.
+   */
+  readonly skills?: readonly string[];
+
+  /**
+   * Additional Cedar policy statements for this profile.
+   * Appended to baseline deny-list policies during evaluation.
+   */
+  readonly cedarPolicies?: readonly string[];
+
+  /**
+   * Human-readable description of the profile's purpose.
+   */
+  readonly description?: string;
+}
 
 /**
  * Properties for the Blueprint construct.
@@ -119,6 +161,17 @@ export interface BlueprintProps {
      */
     readonly egressAllowlist?: string[];
   };
+
+  /**
+   * Named tool profiles defining per-task tool configurations.
+   * Keys are profile names (lowercase alphanumeric + hyphens, 2-64 chars).
+   * At task submission, the user selects a profile by name; the platform
+   * activates only the tools/skills/policies defined in that profile.
+   *
+   * If omitted, the repo uses legacy single-tier behavior based on
+   * security.cedarPolicies alone.
+   */
+  readonly toolProfiles?: Readonly<Record<string, ToolProfile>>;
 }
 
 /**
@@ -145,15 +198,22 @@ export class Blueprint extends Construct {
    */
   public readonly cedarPolicies: readonly string[];
 
+  /**
+   * Tool profiles from the toolProfiles prop, exposed for inspection.
+   */
+  public readonly toolProfiles: Readonly<Record<string, ToolProfile>>;
+
   constructor(scope: Construct, id: string, props: BlueprintProps) {
     super(scope, id);
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
+    this.toolProfiles = props.toolProfiles ?? {};
 
     // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
+    this.node.addValidation(new ToolProfileNameValidation(this.toolProfiles));
 
     const now = new Date().toISOString();
 
@@ -191,6 +251,9 @@ export class Blueprint extends Construct {
     }
     if (this.cedarPolicies.length > 0) {
       item.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    }
+    if (Object.keys(this.toolProfiles).length > 0) {
+      item.tool_profiles = { S: JSON.stringify(this.toolProfiles) };
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
@@ -263,6 +326,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
+    if (Object.keys(this.toolProfiles).length > 0) fields.push(', #tool_profiles = :tool_profiles');
     return fields.join('');
   }
 
@@ -277,6 +341,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
+    if (Object.keys(this.toolProfiles).length > 0) names['#tool_profiles'] = 'tool_profiles';
     return names;
   }
 
@@ -291,6 +356,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    if (Object.keys(this.toolProfiles).length > 0) values[':tool_profiles'] = { S: JSON.stringify(this.toolProfiles) };
     return values;
   }
 }
@@ -320,6 +386,28 @@ class DomainFormatValidation implements IValidation {
     for (const domain of this.domains) {
       if (!DOMAIN_PATTERN.test(domain)) {
         errors.push(`Invalid egress allowlist domain: '${domain}'. Expected a lowercase domain (e.g. 'example.com' or '*.example.com').`);
+      }
+    }
+    return errors;
+  }
+}
+
+/**
+ * Validates tool profile names (lowercase alphanumeric + hyphens, 2-64 chars).
+ * Single-char profile names are allowed if they match [a-z0-9].
+ */
+class ToolProfileNameValidation implements IValidation {
+  constructor(private readonly profiles: Readonly<Record<string, ToolProfile>>) {}
+
+  public validate(): string[] {
+    const errors: string[] = [];
+    for (const name of Object.keys(this.profiles)) {
+      if (name.length === 1) {
+        if (!/^[a-z0-9]$/.test(name)) {
+          errors.push(`Invalid tool profile name: '${name}'. Expected lowercase alphanumeric and hyphens (2-64 chars).`);
+        }
+      } else if (!TOOL_PROFILE_NAME_PATTERN.test(name)) {
+        errors.push(`Invalid tool profile name: '${name}'. Expected lowercase alphanumeric and hyphens (2-64 chars).`);
       }
     }
     return errors;

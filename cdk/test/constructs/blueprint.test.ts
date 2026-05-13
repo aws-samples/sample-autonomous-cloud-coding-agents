@@ -20,7 +20,7 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import { Blueprint, type BlueprintProps } from '../../src/constructs/blueprint';
+import { Blueprint, type BlueprintProps, type ToolProfile } from '../../src/constructs/blueprint';
 
 function createStack(props?: Partial<BlueprintProps>): { stack: Stack; template: Template } {
   const app = new App();
@@ -406,5 +406,114 @@ describe('Blueprint validation', () => {
     });
 
     expect(() => app.synth()).not.toThrow();
+  });
+
+  test('rejects invalid tool profile name (uppercase)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'my-org/my-repo',
+      repoTable,
+      toolProfiles: { 'INVALID': { capabilityTier: 'default' } },
+    });
+
+    expect(() => app.synth()).toThrow(/Invalid tool profile name/);
+  });
+
+  test('accepts valid tool profile names', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'my-org/my-repo',
+      repoTable,
+      toolProfiles: {
+        frontend: { capabilityTier: 'extended', mcpServers: ['eslint-mcp'], skills: ['react-patterns'] },
+        backend: { capabilityTier: 'default' },
+        'my-infra': { mcpServers: ['aws-cdk-mcp'] },
+      },
+    });
+
+    expect(() => app.synth()).not.toThrow();
+  });
+});
+
+describe('Blueprint toolProfiles', () => {
+  test('maps tool_profiles to DynamoDB JSON string', () => {
+    const profiles = {
+      frontend: { capabilityTier: 'extended' as const, mcpServers: ['eslint-mcp'], skills: ['react-patterns'] },
+      backend: { capabilityTier: 'default' as const },
+    };
+    const { template } = createStack({ toolProfiles: profiles });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('"tool_profiles":{"S":');
+    expect(serialized).toContain('frontend');
+    expect(serialized).toContain('eslint-mcp');
+    expect(serialized).toContain('react-patterns');
+  });
+
+  test('omits tool_profiles when not provided', () => {
+    const { template } = createStack();
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('tool_profiles');
+  });
+
+  test('omits tool_profiles when empty object', () => {
+    const { template } = createStack({ toolProfiles: {} });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('tool_profiles');
+  });
+
+  test('onUpdate includes tool_profiles in UpdateExpression', () => {
+    const { template } = createStack({
+      toolProfiles: { frontend: { capabilityTier: 'extended' as const } },
+    });
+    const parts = getUpdateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('#tool_profiles');
+  });
+
+  test('exposes toolProfiles as public property', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const profiles = { frontend: { capabilityTier: 'extended' as const } };
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      toolProfiles: profiles,
+    });
+
+    expect(blueprint.toolProfiles).toEqual(profiles);
+  });
+
+  test('toolProfiles defaults to empty object', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+    });
+
+    expect(blueprint.toolProfiles).toEqual({});
   });
 });
