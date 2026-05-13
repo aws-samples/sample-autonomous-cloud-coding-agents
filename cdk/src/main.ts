@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, Aspects } from 'aws-cdk-lib';
+import { App, Aspects, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { AgentStack } from './stacks/agent';
 
@@ -33,7 +33,7 @@ Aspects.of(app).add(new AwsSolutionsChecks());
 
 const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
 
-new AgentStack(
+const stack = new AgentStack(
   app,
   stackName,
   {
@@ -41,5 +41,22 @@ new AgentStack(
     description: 'ABCA Development Stack',
   },
 );
+
+const githubTagKeys = [
+  'sha',
+  'ref',
+  'ref-type',
+  'actor',
+  'head-ref',
+  'run-id',
+  'event',
+  'repository',
+  'clean',
+] as const;
+
+for (const key of githubTagKeys) {
+  const value = app.node.tryGetContext(`github:${key}`);
+  Tags.of(stack).add(`github:${key}`, value || 'none');
+}
 
 app.synth();
