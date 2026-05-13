@@ -212,4 +212,74 @@ describe('webhook-create-task handler', () => {
     const taskPut = putCalls[0][0];
     expect(taskPut.input.Item.channel_metadata.webhook_id).toBe('wh-123');
   });
+
+  test('returns 200 with Idempotent-Replay header for webhook replay', async () => {
+    const existingItem = {
+      task_id: 'existing-task',
+      user_id: 'user-abc',
+      status: 'SUBMITTED',
+      repo: 'org/repo',
+      task_type: 'new_task',
+      task_description: 'Fix the bug',
+      branch_name: 'bgagent/existing-task/slug',
+      channel_source: 'webhook',
+      channel_metadata: { webhook_id: 'wh-123' },
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+      idempotency_key: 'wh-key-123',
+    };
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing-task' }] })
+      .mockResolvedValueOnce({ Item: existingItem });
+
+    const body = JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug' });
+    const event = makeEvent({
+      body,
+      headers: {
+        'X-Webhook-Signature': sign(body, TEST_SECRET),
+        'Idempotency-Key': 'wh-key-123',
+      },
+    });
+    const result = await handler(event);
+
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
+    const respBody = JSON.parse(result.body);
+    expect(respBody.data.task_id).toBe('existing-task');
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 409 for webhook replay with different user', async () => {
+    const existingItem = {
+      task_id: 'existing-task',
+      user_id: 'other-user',
+      status: 'SUBMITTED',
+      repo: 'org/repo',
+      task_type: 'new_task',
+      branch_name: 'bgagent/existing-task/slug',
+      channel_source: 'webhook',
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+    };
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing-task' }] })
+      .mockResolvedValueOnce({ Item: existingItem });
+
+    const body = JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug' });
+    const event = makeEvent({
+      body,
+      headers: {
+        'X-Webhook-Signature': sign(body, TEST_SECRET),
+        'Idempotency-Key': 'wh-key-123',
+      },
+    });
+    const result = await handler(event);
+
+    expect(result.statusCode).toBe(409);
+    expect(JSON.parse(result.body).error.code).toBe('DUPLICATE_TASK');
+    expect(JSON.parse(result.body).error.message).toBe('A task with this idempotency key already exists.');
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
 });
