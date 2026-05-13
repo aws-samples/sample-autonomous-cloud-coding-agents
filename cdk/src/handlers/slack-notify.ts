@@ -345,7 +345,20 @@ export async function dispatchSlackEvent(
             task_id: taskId,
             duplicate_ts: result.ts,
           });
-          await deleteMessage(botToken, channel, result.ts);
+          const deleted = await deleteMessage(botToken, channel, result.ts);
+          if (!deleted) {
+            // The duplicate Slack root is now permanently in the
+            // thread. Dedicated event key + error_id so operators can
+            // alarm on the rate of ghost task_created messages
+            // (PR #79 review #6).
+            logger.error('[fanout/slack] dup-delete failed — ghost task_created message stays in thread', {
+              event: 'fanout.slack.dup_delete_failed',
+              error_id: 'FANOUT_SLACK_DUP_DELETE_FAILED',
+              task_id: taskId,
+              event_type: eventType,
+              duplicate_ts: result.ts,
+            });
+          }
           return;
         }
         logger.warn('[fanout/slack] failed to store task_created message ts', {
@@ -373,7 +386,16 @@ export async function dispatchSlackEvent(
             task_id: taskId,
             duplicate_ts: result.ts,
           });
-          await deleteMessage(botToken, channel, result.ts);
+          const deleted = await deleteMessage(botToken, channel, result.ts);
+          if (!deleted) {
+            logger.error('[fanout/slack] dup-delete failed — ghost session_started message stays in thread', {
+              event: 'fanout.slack.dup_delete_failed',
+              error_id: 'FANOUT_SLACK_DUP_DELETE_FAILED',
+              task_id: taskId,
+              event_type: eventType,
+              duplicate_ts: result.ts,
+            });
+          }
           return;
         }
         logger.warn('[fanout/slack] failed to store session message ts', {
@@ -502,7 +524,12 @@ async function updateReaction(botToken: string, channel: string, threadTs: strin
   await addReaction(botToken, channel, threadTs, newEmoji);
 }
 
-async function deleteMessage(botToken: string, channel: string, messageTs: string): Promise<void> {
+/** Returns ``true`` iff the message was successfully deleted (or was
+ *  already gone — ``message_not_found`` is benign). Callers that care
+ *  about the outcome (the conditional-persist dup-delete path) can
+ *  emit a ``fanout.slack.dup_delete_failed`` event so operators can
+ *  alarm on accumulating ghost messages (PR #79 review #6). */
+async function deleteMessage(botToken: string, channel: string, messageTs: string): Promise<boolean> {
   try {
     const response = await fetch('https://slack.com/api/chat.delete', {
       method: 'POST',
@@ -514,15 +541,21 @@ async function deleteMessage(botToken: string, channel: string, messageTs: strin
     });
     const result = await response.json() as { ok: boolean; error?: string };
     if (!result.ok) {
-      // ``message_not_found`` is benign (message already gone);
-      // anything else (e.g. ``cant_delete_message``) leaves an
-      // orphan in the thread that operators may want to alarm on.
+      // ``message_not_found`` is benign (message already gone) and is
+      // treated as a successful delete by the caller's perspective.
+      // Anything else (e.g. ``cant_delete_message``) leaves an orphan
+      // in the thread.
+      if (result.error === 'message_not_found') {
+        return true;
+      }
       logger.warn('[fanout/slack] failed to delete intermediate message', {
         event: 'fanout.slack.message_delete_api_error',
         error: result.error,
         message_ts: messageTs,
       });
+      return false;
     }
+    return true;
   } catch (err) {
     // Network failure → orphan message stays in the thread silently.
     // Promote to error so operators can alarm on the orphan rate
@@ -534,5 +567,6 @@ async function deleteMessage(botToken: string, channel: string, messageTs: strin
       error_name: err instanceof Error ? err.name : undefined,
       error: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
 }
