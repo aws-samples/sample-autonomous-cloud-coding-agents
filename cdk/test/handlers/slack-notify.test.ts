@@ -610,4 +610,75 @@ describe('dispatchSlackEvent', () => {
     );
     expect(postCall).toBeDefined();
   });
+
+  // -------------------------------------------------------------------
+  // PR #79 test gap #35 — task_stranded through terminal dedup
+  // -------------------------------------------------------------------
+
+  test('task_stranded posts and writes the terminal dedup marker on first arrival', async () => {
+    // task_stranded is one of the 5 terminals that share
+    // ``slack_notified_terminal``. The reconciler emits
+    // task_stranded + task_failed back-to-back when a heartbeat
+    // expires (handlers/reconcile-stranded-tasks.ts:170+); whichever
+    // arrives first claims the slot and posts a Slack message.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' },
+          repo: 'org/repo',
+        },
+      })
+      .mockResolvedValueOnce({}); // dedup UpdateItem succeeds
+
+    await dispatchSlackEvent(
+      mkEvent('t1', 'task_stranded', { code: 'STRANDED_NO_HEARTBEAT', prior_status: 'RUNNING' }),
+      ddb,
+    );
+
+    // Dedup wrote against the shared terminal slot.
+    const updateInput = ddbSend.mock.calls[1][0]._type === 'Update'
+      ? ddbSend.mock.calls[1][0].input
+      : null;
+    expect(updateInput).toBeTruthy();
+    expect(updateInput.UpdateExpression).toContain('slack_notified_terminal');
+
+    // chat.postMessage fired with the stranded warning.
+    const postCall = fetchMock.mock.calls.find(
+      ([url]) => url === 'https://slack.com/api/chat.postMessage',
+    );
+    expect(postCall).toBeDefined();
+    const postBody = JSON.parse((postCall![1] as { body: string }).body);
+    expect(postBody.text).toContain('Task stranded');
+  });
+
+  test('task_stranded after a sibling task_failed dedups (no double-page on the reconciler twin)', async () => {
+    // Real-world scenario: the reconciler writes BOTH task_stranded
+    // and task_failed for a heartbeat-expired task (one for the
+    // operator signal, one to drive the FAILED status transition).
+    // If both fan out to Slack, the slot must dedup the second
+    // arrival so operators see exactly one alert per stranded task,
+    // not a paired ``Task stranded`` + ``Task failed`` storm.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: {
+            slack_team_id: 'T1',
+            slack_channel_id: 'C1',
+            slack_notified_terminal: true, // task_failed already claimed
+          },
+          repo: 'org/repo',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
+      );
+
+    await dispatchSlackEvent(mkEvent('t1', 'task_stranded'), ddb);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
