@@ -354,7 +354,7 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
 
   test('task_completed routes to all three channels', async () => {
     const outcome = await routeEvent(mk('task_completed'));
-    expect(outcome.dispatched.sort()).toEqual(['email', 'github', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['email', 'github', 'slack']);
     expect(outcome.infraRejections).toEqual([]);
   });
 
@@ -363,12 +363,12 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     // into Email via a shared TERMINAL spread — design says Email is
     // minimal (task_completed, task_failed, approval_required only).
     const outcome = await routeEvent(mk('task_cancelled'));
-    expect(outcome.dispatched.sort()).toEqual(['github', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'slack']);
   });
 
   test('task_stranded skips Email per §6.2', async () => {
     const outcome = await routeEvent(mk('task_stranded'));
-    expect(outcome.dispatched.sort()).toEqual(['github', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'slack']);
   });
 
   test('agent_error routes only to Slack', async () => {
@@ -393,7 +393,7 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
   test('per-task override silences one channel without affecting others', async () => {
     const overrides: TaskNotificationsConfig = { slack: { enabled: false } };
     const outcome = await routeEvent(mk('task_completed'), overrides);
-    expect(outcome.dispatched.sort()).toEqual(['email', 'github']);
+    expect([...outcome.dispatched].sort()).toEqual(['email', 'github']);
     expect(outcome.dispatched).not.toContain('slack');
   });
 });
@@ -442,7 +442,7 @@ describe('fanout-task-events: channel isolation', () => {
 
       // (2) Telemetry truthfulness: Slack must NOT be in ``dispatched``
       // because its dispatcher rejected. Email + GitHub are.
-      expect(outcome.dispatched.sort()).toEqual(['email', 'github']);
+      expect([...outcome.dispatched].sort()).toEqual(['email', 'github']);
       expect(outcome.dispatched).not.toContain('slack');
 
       // (3) Slack landed in ``infraRejections`` so the handler will

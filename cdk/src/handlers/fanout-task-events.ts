@@ -742,8 +742,8 @@ const DISPATCHERS: Record<NotificationChannel, (ev: FanOutEvent) => Promise<void
  * Slack dispatcher would be a permanent drop instead of a retry.
  */
 export interface RouteOutcome {
-  readonly dispatched: NotificationChannel[];
-  readonly infraRejections: NotificationChannel[];
+  readonly dispatched: ReadonlyArray<NotificationChannel>;
+  readonly infraRejections: ReadonlyArray<NotificationChannel>;
 }
 
 /**
