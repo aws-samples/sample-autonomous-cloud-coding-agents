@@ -23,8 +23,7 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture, StartingPosition, FilterCriteria, FilterRule } from 'aws-cdk-lib/aws-lambda';
-import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
@@ -73,9 +72,14 @@ export interface SlackIntegrationProps {
  * Creates:
  * - SlackInstallationTable (per-workspace installation records)
  * - SlackUserMappingTable (Slack user → platform user mappings)
- * - Lambda handlers for OAuth, slash commands, events, notifications, and account linking
+ * - Lambda handlers for OAuth, slash commands, events, and account linking
  * - API Gateway routes under /slack/*
- * - DynamoDB Streams event source for outbound notifications
+ *
+ * Outbound Slack delivery (task lifecycle notifications) runs through
+ * ``FanOutConsumer`` as a per-channel dispatcher. Before issue #64 this
+ * construct also owned a ``SlackNotifyFn`` DynamoDB Streams consumer on
+ * ``TaskEventsTable``; that consumer was removed to keep the stream at
+ * the DynamoDB-documented one-reader-per-shard limit.
  */
 export class SlackIntegration extends Construct {
   /** The Slack installation table. */
@@ -330,34 +334,8 @@ export class SlackIntegration extends Construct {
     });
     this.userMappingTable.grantReadWriteData(slackLinkFn);
 
-    // --- Outbound Notification Handler (DynamoDB Streams trigger) ---
-    const slackNotifyFn = new lambda.NodejsFunction(this, 'SlackNotifyFn', {
-      entry: path.join(handlersDir, 'slack-notify.ts'),
-      handler: 'handler',
-      runtime: Runtime.NODEJS_24_X,
-      architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(30),
-      environment: {
-        TASK_TABLE_NAME: props.taskTable.tableName,
-      },
-      bundling: commonBundling,
-    });
-    props.taskTable.grantReadWriteData(slackNotifyFn);
-    slackNotifyFn.addToRolePolicy(readSlackSecretsPolicy);
-
-    // DynamoDB Streams event source with filtering
-    slackNotifyFn.addEventSource(new lambdaEventSources.DynamoEventSource(props.taskEventsTable, {
-      startingPosition: StartingPosition.LATEST,
-      batchSize: 10,
-      maxBatchingWindow: Duration.seconds(0),
-      retryAttempts: 3,
-      bisectBatchOnError: true,
-      filters: [
-        FilterCriteria.filter({
-          eventName: FilterRule.isEqual('INSERT'),
-        }),
-      ],
-    }));
+    // Outbound Slack delivery runs through FanOutConsumer — see the
+    // construct doc above for the reader-count rationale (issue #64).
 
     // ═══════════════════════════════════════════════════════════════════════════
     // API Gateway Routes
@@ -436,7 +414,7 @@ export class SlackIntegration extends Construct {
     }
 
     // Standard Lambda suppressions
-    const allFunctions = [oauthCallbackFn, slackEventsFn, slackCommandsFn, commandProcessorFn, slackLinkFn, slackNotifyFn, slackInteractionsFn];
+    const allFunctions = [oauthCallbackFn, slackEventsFn, slackCommandsFn, commandProcessorFn, slackLinkFn, slackInteractionsFn];
     for (const fn of allFunctions) {
       NagSuppressions.addResourceSuppressions(fn, [
         {
