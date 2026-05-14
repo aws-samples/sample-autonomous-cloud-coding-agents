@@ -69,7 +69,7 @@ jobs:
         id: self_mutation
         run: |-
           git add .
-          git diff --staged --patch --exit-code -- . ':!cdk/cdk-*.out' > repo.patch || echo "self_mutation_happened=true" >> $GITHUB_OUTPUT
+          git diff --staged --patch --exit-code > repo.patch || echo "self_mutation_happened=true" >> $GITHUB_OUTPUT
         shell: bash
         working-directory: ./
 
