@@ -15,6 +15,20 @@ Permission requirements vary by task type:
 
 Classic PATs with `repo` scope also work. See `agent/README.md` for edge cases.
 
+### Quick setup (single repo)
+
+To point the default Blueprint at your own repo without editing code, pass it as a CDK context variable or environment variable:
+
+```bash
+# Context variable (preferred)
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
+
+# Or environment variable
+BLUEPRINT_REPO=your-org/your-repo MISE_EXPERIMENTAL=1 mise //cdk:deploy
+```
+
+The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (e.g. `-c blueprintRepo=jane-doe/agent-plugins`).
+
 ### Multiple repositories
 
 To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
@@ -33,6 +47,12 @@ Redeploy after changing Blueprints: `mise run //cdk:deploy`.
 ### Customizing the agent image
 
 The default image (`agent/Dockerfile`) includes Python, Node 20, `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
+
+### Writing Cedar policies for the repo
+
+A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
+
+See the [Cedar policy guide](/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
 
 ### Other options
 

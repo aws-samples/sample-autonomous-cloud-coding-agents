@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -39,8 +39,9 @@ import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
+import { LinearIntegration } from '../constructs/linear-integration';
 import { RepoTable } from '../constructs/repo-table';
-import { SlackUserMappingTable } from '../constructs/slack-user-mapping-table';
+import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { TaskApi } from '../constructs/task-api';
@@ -80,9 +81,6 @@ export class AgentStack extends Stack {
     // old one. Acceptable in dev; in a future prod migration the
     // dual-index pattern is preferred (see §10.1 of the design doc).
     const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
-    // Cedar HITL Slack → Cognito mapping (§11.2). Written only via the
-    // user-initiated OAuth link handler (Chunk 5).
-    const slackUserMappingTable = new SlackUserMappingTable(this, 'SlackUserMappingTable');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
@@ -121,8 +119,9 @@ export class AgentStack extends Stack {
     ]);
 
     // --- Repository onboarding ---
+    const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
-      repo: 'krokoko/agent-plugins',
+      repo: blueprintRepo,
       repoTable: repoTable.table,
     });
 
@@ -143,17 +142,15 @@ export class AgentStack extends Stack {
       },
     ]);
 
-    const runtimeName = 'jean_cloude';
-
     // Log groups (created before runtime so we can reference the name in env vars)
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${runtimeName}`,
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
     const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${runtimeName}`,
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
@@ -188,7 +185,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: 'task-input-guardrail',
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
@@ -245,7 +242,6 @@ export class AgentStack extends Stack {
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
       taskApprovalsTable: taskApprovalsTable.table,
-      slackUserMappingTable: slackUserMappingTable.table,
       cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
@@ -320,7 +316,6 @@ export class AgentStack extends Stack {
     // AgentCore's account-level runtimeName uniqueness and triggering an
     // UPDATE_ROLLBACK.
     const runtime = new agentcore.Runtime(this, 'Runtime', {
-      runtimeName,
       agentRuntimeArtifact: artifact,
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
@@ -412,7 +407,9 @@ export class AgentStack extends Stack {
     inferenceProfile2.grantInvoke(runtime);
 
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
+    // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
+    // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
+    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
 
     NagSuppressions.addResourceSuppressions(runtime, [
@@ -423,7 +420,7 @@ export class AgentStack extends Stack {
     ], true);
 
     // Chunk 10 deploy-prep: the Cedar HITL additions (TaskApprovalsTable
-    // grant + SlackUserMappingTable + extra env vars) pushed the runtime
+    // grant + extra env vars) pushed the runtime
     // execution role past CDK's per-inline-policy size limit, causing CDK
     // to auto-split excess statements into ``OverflowPolicy1`` / etc.
     // Those overflow policies inherit the same wildcard
@@ -482,11 +479,6 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskApprovalsTableName', {
       value: taskApprovalsTable.table.tableName,
       description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
-    });
-
-    new CfnOutput(this, 'SlackUserMappingTableName', {
-      value: slackUserMappingTable.table.tableName,
-      description: 'Name of the DynamoDB slack_user_id → cognito_sub mapping table',
     });
 
     new CfnOutput(this, 'CedarWasmLayerArn', {
@@ -589,13 +581,24 @@ export class AgentStack extends Stack {
     // --- Fan-out plane consumer ---
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
     // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher (Chunk J) edits a single issue comment in place with
-    // If-Match ETag; Slack / Email remain log-only until Phase 2.
+    // dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
     });
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
@@ -615,9 +618,113 @@ export class AgentStack extends Stack {
       runtimeArn: runtime.agentRuntimeArn,
     });
 
+    // --- Slack integration (always deployed — secrets populated post-deploy) ---
+    const slackIntegration = new SlackIntegration(this, 'SlackIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    // --- Slack App setup outputs ---
+    // Pre-filled manifest URL: opens Slack's "Create New App" page with all
+    // URLs, scopes, and events pre-configured. User just clicks Create.
+    const apiHost = Fn.select(2, Fn.split('/', taskApi.api.url));
+    const apiStage = Fn.select(3, Fn.split('/', taskApi.api.url));
+    const apiBase = Fn.join('', ['https://', apiHost, '/', apiStage]);
+
+    // Build the YAML manifest as a string using Fn.join (API URL tokens resolve at deploy time).
+    // Slack's ?new_app=1&manifest_json= endpoint accepts URL-encoded JSON.
+    const manifestJson = Fn.join('', [
+      '{"_metadata":{"major_version":1,"minor_version":1},',
+      '"display_information":{"name":"Shoof","description":"Submit coding tasks to autonomous background agents","background_color":"#1a1a2e"},',
+      '"features":{"app_home":{"messages_tab_enabled":true,"messages_tab_read_only_enabled":false},"bot_user":{"display_name":"Shoof","always_online":true},',
+      '"slash_commands":[{"command":"/bgagent","url":"', apiBase, '/slack/commands","description":"Link your account or get help with Shoof","usage_hint":"link | help","should_escape":false}]},',
+      '"oauth_config":{"scopes":{"bot":["app_mentions:read","commands","chat:write","chat:write.public","channels:read","groups:read","im:history","im:write","users:read","reactions:write"]},',
+      '"redirect_urls":["', apiBase, '/slack/oauth/callback"]},',
+      '"settings":{"event_subscriptions":{"request_url":"', apiBase, '/slack/events","bot_events":["app_mention","message.im","app_uninstalled","tokens_revoked"]},',
+      '"interactivity":{"is_enabled":true,"request_url":"', apiBase, '/slack/interactions"},',
+      '"org_deploy_enabled":false,"socket_mode_enabled":false,"token_rotation_enabled":false}}',
+    ]);
+
+    new CfnOutput(this, 'SlackAppManifestJson', {
+      value: manifestJson,
+      description: 'Slack App manifest JSON — the CLI URL-encodes this into the create URL',
+    });
+
+    new CfnOutput(this, 'SlackSigningSecretArn', {
+      value: slackIntegration.signingSecret.secretArn,
+      description: 'Secrets Manager ARN for the Slack signing secret — populate after creating the Slack App',
+    });
+
+    new CfnOutput(this, 'SlackClientSecretArn', {
+      value: slackIntegration.clientSecret.secretArn,
+      description: 'Secrets Manager ARN for the Slack client secret — populate after creating the Slack App',
+    });
+
+    new CfnOutput(this, 'SlackClientIdSecretArn', {
+      value: slackIntegration.clientIdSecret.secretArn,
+      description: 'Secrets Manager ARN for the Slack client ID — populate after creating the Slack App',
+    });
+
+    new CfnOutput(this, 'SlackInstallationTableName', {
+      value: slackIntegration.installationTable.tableName,
+      description: 'Name of the DynamoDB Slack installation table',
+    });
+
+    new CfnOutput(this, 'SlackUserMappingTableName', {
+      value: slackIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Slack user mapping table',
+    });
+
+    // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
+    const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    // Pipe the Linear API token secret into the AgentCore runtime so the
+    // agent's `resolve_linear_api_token()` can populate `LINEAR_API_TOKEN`
+    // for the Linear MCP's `${LINEAR_API_TOKEN}` placeholder.
+    linearIntegration.apiTokenSecret.grantRead(runtime);
+    cfnRuntime.addPropertyOverride(
+      'EnvironmentVariables.LINEAR_API_TOKEN_SECRET_ARN',
+      linearIntegration.apiTokenSecret.secretArn,
+    );
+
+    new CfnOutput(this, 'LinearWebhookSecretArn', {
+      value: linearIntegration.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',
+    });
+
+    new CfnOutput(this, 'LinearApiTokenSecretArn', {
+      value: linearIntegration.apiTokenSecret.secretArn,
+      description: 'Secrets Manager ARN for the Linear personal API token (agent-side MCP) — populate via `bgagent linear setup`',
+    });
+
+    new CfnOutput(this, 'LinearProjectMappingTableName', {
+      value: linearIntegration.projectMappingTable.tableName,
+      description: 'Name of the DynamoDB Linear project → repo mapping table',
+    });
+
+    new CfnOutput(this, 'LinearUserMappingTableName', {
+      value: linearIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Linear user mapping table',
+    });
+
     // --- Bedrock model invocation logging (account-level) ---
     const invocationLogGroup = new logs.LogGroup(this, 'ModelInvocationLogGroup', {
-      logGroupName: '/aws/bedrock/model-invocation-logs',
+      logGroupName: `/aws/bedrock/model-invocation-logs/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
@@ -670,12 +777,8 @@ export class AgentStack extends Stack {
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
         ignoreErrorCodesMatching: '.*',
       },
-      onDelete: {
-        service: 'Bedrock',
-        action: 'deleteModelInvocationLoggingConfiguration',
-        parameters: {},
-        ignoreErrorCodesMatching: '.*',
-      },
+      // onDelete intentionally omitted — model invocation logging is account-level;
+      // deleting one stack should not disable logging that another stack relies on.
       policy: cr.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: [

@@ -70,7 +70,7 @@ describe('checkRepoOnboarded', () => {
   test('throws on DynamoDB error', async () => {
     mockSend.mockRejectedValueOnce(new Error('DynamoDB throttle'));
     await expect(checkRepoOnboarded('org/repo')).rejects.toThrow(
-      "Unable to verify onboarding status for 'org/repo'",
+      "Unable to look up repo config for 'org/repo'",
     );
   });
 });
@@ -171,7 +171,7 @@ describe('loadRepoConfig', () => {
   test('throws on DynamoDB error', async () => {
     mockSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
     await expect(loadRepoConfig('org/repo')).rejects.toThrow(
-      "Unable to load repo config for 'org/repo'",
+      "Unable to look up repo config for 'org/repo'",
     );
   });
 });

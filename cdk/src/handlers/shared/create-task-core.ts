@@ -18,6 +18,7 @@
  */
 
 // HTTP create-task path: validation, persistence, orchestrator invoke. Related: orchestrator.ts, preflight.ts.
+// Idempotent replay: same user + same Idempotency-Key → 200 + TaskDetail (no duplicate write, no orchestrator re-invoke).
 // Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/create-task.test.ts
 
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
@@ -29,7 +30,7 @@ import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
-import { checkRepoOnboarded, loadRepoConfig } from './repo-config';
+import { lookupRepo } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
 import {
   APPROVAL_GATE_CAP_DEFAULT,
@@ -38,14 +39,15 @@ import {
   APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
-  INITIAL_APPROVALS_MAX_ENTRIES,
+  type ChannelSource,
   type CreateTaskRequest,
+  INITIAL_APPROVALS_MAX_ENTRIES,
   isPrTaskType,
   type TaskRecord,
   type TaskType,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -53,7 +55,7 @@ import { TaskStatus } from '../../constructs/task-status';
  */
 export interface TaskCreationContext {
   readonly userId: string;
-  readonly channelSource: 'api' | 'webhook';
+  readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
 }
@@ -89,20 +91,16 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
   }
 
-  // 1b. Check repo is onboarded (conditional — skipped when REPO_TABLE_NAME is not set)
-  const onboardingResult = await checkRepoOnboarded(body.repo);
-  if (!onboardingResult.onboarded) {
+  // 1b. Single RepoTable GetItem covers BOTH the onboarding gate AND
+  //     the Cedar HITL blueprint-cap resolution (§4 step 5, decision
+  //     #13). Capturing the cap at submit-time means mid-task blueprint
+  //     edits cannot shift the cap beneath a running task. Previously
+  //     this path issued two back-to-back GetItems for the same key;
+  //     ``lookupRepo`` consolidates them.
+  const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
+  if (!onboarded) {
     return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
   }
-
-  // 1c. Cedar HITL (§4 step 5, decision #13): load the full RepoConfig so
-  //     we can resolve the blueprint-configured approval-gate cap and
-  //     persist it on the TaskRecord — capturing the cap at submit-time
-  //     means mid-task blueprint edits cannot shift the cap beneath a
-  //     running task. Separate GetItem from ``checkRepoOnboarded`` for
-  //     now; the two calls can be consolidated when the onboarding check
-  //     grows further responsibilities.
-  const repoConfig = await loadRepoConfig(body.repo);
   const blueprintCap = repoConfig?.approval_gate_cap;
   let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
   if (blueprintCap !== undefined) {
@@ -327,7 +325,34 @@ export async function createTaskCore(
       }));
 
       if (existingTask.Item) {
-        return errorResponse(409, ErrorCode.DUPLICATE_TASK, 'A task with this idempotency key already exists.', requestId);
+        const existingRecord = existingTask.Item as TaskRecord;
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'repo', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
+        const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
+        if (missingFields.length > 0) {
+          logger.error('Idempotent replay: existing task record is incomplete', {
+            task_id: existingRecord.task_id,
+            missing_fields: missingFields,
+            present_fields: Object.keys(existingTask.Item),
+            request_id: requestId,
+          });
+          return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Failed to retrieve existing task for idempotent replay.', requestId);
+        }
+        if (existingRecord.user_id !== context.userId) {
+          return errorResponse(409, ErrorCode.DUPLICATE_TASK, 'A task with this idempotency key already exists.', requestId);
+        }
+        logger.info('Idempotent task submit replay', {
+          task_id: existingRecord.task_id,
+          user_id: context.userId,
+          request_id: requestId,
+        });
+        return successResponse(200, toTaskDetail(existingRecord), requestId, { 'Idempotent-Replay': 'true' });
+      } else {
+        logger.warn('Idempotency key matched GSI but task record is gone (TTL/deletion race)', {
+          idempotency_key: context.idempotencyKey,
+          stale_task_id: existingTaskId,
+          user_id: context.userId,
+          request_id: requestId,
+        });
       }
     }
   }

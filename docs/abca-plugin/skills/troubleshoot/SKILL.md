@@ -111,13 +111,19 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - The Blueprint specifies a model that the runtime IAM role doesn't have permissions for
 - Fix: add `grantInvoke` for the model and its cross-region inference profile in `cdk/src/stacks/agent.ts`, then redeploy
 
+**Model not enabled / "not available on your Bedrock deployment" (often immediate failure, few turns, zero or near-zero tokens):**
+- **IAM is necessary but not sufficient.** The AgentCore role may already have `bedrock:InvokeModel*`, but the **account** must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html): Marketplace subscription flow on first serverless use (with `aws-marketplace:Subscribe` / `ViewSubscriptions` where needed), Anthropic **first-time use** details (`PutUseCaseForModelAccess` or the console model catalog), and a valid payment method for Marketplace-backed models.
+- **Use an inference profile ID** in the Blueprint / DynamoDB `model_id` when Bedrock requires it for on-demand invocation (for example `us.anthropic.claude-sonnet-4-6` for US Sonnet 4.6). See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html). Raw `anthropic.*` IDs often hit "on-demand not supported" or wrong routing — see the **400** row below.
+- **Cross-Region profiles** route across Regions in a geography; ensure IAM and any SCPs allow Bedrock in **all destination Regions** for that profile. See [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
+- **Task status:** When the Claude CLI reports a terminal error via `ResultMessage.is_error`, the agent marks the task **FAILED** (not COMPLETED) and persists `error_message` in DynamoDB.
+
 **400 "Invocation with on-demand throughput isn't supported":**
 - The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-20250514-v1:0`)
 - Fix: change to the inference profile ID (e.g. `us.anthropic.claude-opus-4-20250514-v1:0`), update DynamoDB via redeploy
 
 **503 "Too many connections" / task completes with 0 tokens after long duration:**
 - Bedrock is throttling model invocations. The agent retries for minutes then gives up.
-- Symptoms: task runs for 10-15 minutes, completes with `COMPLETED` status but 0 tokens, 0 cost, no PR, `disk_delta: 0 B`
+- Symptoms: task runs for 10-15 minutes, may end with `COMPLETED` if the SDK does not flag `ResultMessage.is_error` (unlike hard Bedrock entitlement errors, which surface as **FAILED** once the CLI sets `is_error` on the result)
 - Diagnosis:
   1. Check application logs for `"text": "API Error: 503 Too many connections"`
   2. **Check what model_id is actually being passed** — the DynamoDB record may have a stale model override:

@@ -36,10 +36,12 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 8 DynamoDB tables', () => {
-    // Six pre-existing + TaskApprovalsTable + SlackUserMappingTable
-    // (Cedar HITL gates, Chunk 4).
-    template.resourceCountIs('AWS::DynamoDB::Table', 8);
+  test('creates exactly 12 DynamoDB tables', () => {
+    // task, task-events, repo, user-concurrency, webhook, task-nudges,
+    // task-approvals (Cedar HITL V2),
+    // slack-installation, slack-user-mapping,
+    // linear-project-mapping, linear-user-mapping, linear-webhook-dedup
+    template.resourceCountIs('AWS::DynamoDB::Table', 12);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
@@ -57,24 +59,10 @@ describe('AgentStack', () => {
     expect(gsis.map((g) => g.IndexName)).toContain('user_id-status-index');
   });
 
-  test('creates SlackUserMappingTable with slack_user_id PK only', () => {
-    const tables = template.findResources('AWS::DynamoDB::Table');
-    const slackMappingTables = Object.values(tables).filter((t) => {
-      const ks = (t as { Properties?: { KeySchema?: Array<{ AttributeName: string }> } })
-        .Properties?.KeySchema ?? [];
-      return ks.length === 1 && ks[0]!.AttributeName === 'slack_user_id';
-    });
-    expect(slackMappingTables).toHaveLength(1);
-  });
-
   test('outputs TaskApprovalsTableName', () => {
     template.hasOutput('TaskApprovalsTableName', {
       Description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
     });
-  });
-
-  test('outputs SlackUserMappingTableName', () => {
-    template.hasOutput('SlackUserMappingTableName', {});
   });
 
   test('outputs CedarWasmLayerArn', () => {
@@ -365,7 +353,7 @@ describe('AgentStack', () => {
 
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
-      LogGroupName: '/aws/bedrock/model-invocation-logs',
+      LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',
       RetentionInDays: 90,
     });
   });
