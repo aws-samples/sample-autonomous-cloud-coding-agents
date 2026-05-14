@@ -121,7 +121,7 @@ Per-user preferences extracted from task descriptions (explicit) and review patt
 | Component | Strategy | Namespace | Read | Write |
 |---|---|---|---|---|
 | Repo knowledge | Semantic (`SemanticKnowledge`) | `/{actorId}/knowledge/` | Task start | Task end |
-| Task episodes | Episodic (`TaskEpisodes`) | `/{actorId}/episodes/{sessionId}/` | Task start (prefix match) | Task end |
+| Task episodes | Episodic (`TaskEpisodes`) | `/{actorId}/episodes/{sessionId}/` | Task start | Task end |
 | Review feedback | Custom (planned) | `/{actorId}/review-rules/` | Task start | PR review webhook |
 | User preferences | User preference (planned) | `users/{username}` | Task start | Extracted from patterns |
 | Self-feedback | Semantic (`SemanticKnowledge`) | `/{actorId}/knowledge/` | Task start | Task end |
@@ -130,6 +130,7 @@ Namespace conventions:
 - `{actorId}` and `{sessionId}` are the only valid AgentCore template variables. Templates are set on extraction strategies at resource creation.
 - `actorId = "owner/repo"` for all writes. `sessionId = taskId` for episodic partitioning.
 - Changing namespace templates requires recreating the Memory resource (breaking infrastructure change).
+- Reads use the `namespacePath` field on [`RetrieveMemoryRecords`](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_RetrieveMemoryRecords.html) for hierarchical retrieval — episodic records live one level below the parent path so a hierarchical query is required to surface them.
 
 ## Memory consolidation
 

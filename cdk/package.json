@@ -16,7 +16,7 @@
     "@aws-cdk/aws-bedrock-agentcore-alpha": "2.238.0-alpha.0",
     "@aws-cdk/aws-bedrock-alpha": "2.238.0-alpha.0",
     "@aws-cdk/mixins-preview": "2.238.0-alpha.0",
-    "@aws-sdk/client-bedrock-agentcore": "^3.1021.0",
+    "@aws-sdk/client-bedrock-agentcore": "^3.1046.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1021.0",
     "@aws-sdk/client-ecs": "^3.1021.0",
     "@aws-sdk/client-dynamodb": "^3.1021.0",

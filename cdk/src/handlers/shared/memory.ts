@@ -116,7 +116,7 @@ function processMemoryRecords(
   records: MemoryRecordSummary[],
   out: string[],
   repo: string,
-  namespace: string,
+  namespacePath: string,
   recordType: string,
 ): void {
   for (const record of records) {
@@ -129,7 +129,7 @@ function processMemoryRecords(
       // CloudWatch alarms can detect spikes (genuine tampering or write bugs).
       logger.warn('Memory record hash mismatch (expected for extracted records)', {
         repo,
-        namespace,
+        namespace_path: namespacePath,
         record_type: recordType,
         expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
         actual_hash: hashContent(sanitized),
@@ -164,7 +164,10 @@ function getClient(): BedrockAgentCoreClient {
  *
  * Namespaces match the templates configured on the extraction strategies:
  *   - Semantic: `/{actorId}/knowledge/`  (actorId = repo)
- *   - Episodic: `/{actorId}/episodes/`   (prefix matches all sessions)
+ *   - Episodic: `/{actorId}/episodes/`   (covers all sessions and reflections)
+ *
+ * Both calls use `namespacePath` for hierarchical retrieval — episodic per-task
+ * records live at `/{actorId}/episodes/{sessionId}/`, which is below the read path.
  *
  * Results are trimmed to a 2000-token budget (knowledge is prioritized before episodes;
  * entries beyond the budget are dropped).
@@ -183,14 +186,11 @@ export async function loadMemoryContext(
   try {
     const client = getClient();
 
-    // Namespaces derived from the strategy templates configured in agent-memory.ts:
-    //   Semantic:  /{actorId}/knowledge/
-    //   Episodic:  /{actorId}/episodes/{sessionId}/
-    // Events are written with actorId = repo (e.g. "krokoko/agent-plugins"),
-    // so extracted records land at /{repo}/knowledge/ and /{repo}/episodes/{taskId}/.
-    // Reads use these paths as namespace prefixes.
-    const semanticNamespace = `/${repo}/knowledge/`;
-    const episodicNamespace = `/${repo}/episodes/`;
+    // Namespace paths derived from the strategy templates configured in agent-memory.ts.
+    // Events are written with actorId = repo, so extracted records land at
+    // /{repo}/knowledge/ and /{repo}/episodes/{taskId}/.
+    const semanticNamespacePath = `/${repo}/knowledge/`;
+    const episodicNamespacePath = `/${repo}/episodes/`;
 
     // Run semantic and episodic searches in parallel
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
@@ -199,7 +199,7 @@ export async function loadMemoryContext(
       taskDescription
         ? client.send(new RetrieveMemoryRecordsCommand({
           memoryId,
-          namespace: semanticNamespace,
+          namespacePath: semanticNamespacePath,
           searchCriteria: {
             searchQuery: taskDescription,
             topK: 5,
@@ -212,7 +212,7 @@ export async function loadMemoryContext(
       // Episodic search — recent task episodes (prefix matches all sessions)
       client.send(new RetrieveMemoryRecordsCommand({
         memoryId,
-        namespace: episodicNamespace,
+        namespacePath: episodicNamespacePath,
         searchCriteria: {
           searchQuery: 'recent task episodes',
           topK: 3,
@@ -227,11 +227,11 @@ export async function loadMemoryContext(
     const pastEpisodes: string[] = [];
 
     if (semanticResult?.memoryRecordSummaries) {
-      processMemoryRecords(semanticResult.memoryRecordSummaries, repoKnowledge, repo, semanticNamespace, 'repo_knowledge');
+      processMemoryRecords(semanticResult.memoryRecordSummaries, repoKnowledge, repo, semanticNamespacePath, 'repo_knowledge');
     }
 
     if (episodicResult?.memoryRecordSummaries) {
-      processMemoryRecords(episodicResult.memoryRecordSummaries, pastEpisodes, repo, episodicNamespace, 'past_episode');
+      processMemoryRecords(episodicResult.memoryRecordSummaries, pastEpisodes, repo, episodicNamespacePath, 'past_episode');
     }
 
     if (repoKnowledge.length === 0 && pastEpisodes.length === 0) {
