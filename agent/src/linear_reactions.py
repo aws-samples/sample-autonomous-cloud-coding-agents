@@ -234,7 +234,7 @@ def _sweep_stale_reactions(issue_id: str, exclude_id: str | None = None) -> None
         )
         return
 
-    reactions = ((data.get("issue") or {}).get("reactions") or [])
+    reactions = (data.get("issue") or {}).get("reactions") or []
     deletes = 0
     deletes_start = time.monotonic()
     for r in reactions:

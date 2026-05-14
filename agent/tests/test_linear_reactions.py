@@ -274,8 +274,8 @@ class TestSweepStaleReactions:
             "linear_reactions.requests.post",
             side_effect=[
                 _ok_response(reaction_id="r-new-eyes"),  # new 👀 (first, user-visible)
-                _viewer_response("viewer-bot"),          # sweep: viewer fetch
-                _reactions_response(prior_reactions),    # sweep: reactions query
+                _viewer_response("viewer-bot"),  # sweep: viewer fetch
+                _reactions_response(prior_reactions),  # sweep: reactions query
                 delete_resp,  # delete r-bot-eyes
                 delete_resp,  # delete r-bot-check
                 delete_resp,  # delete r-bot-x
@@ -359,11 +359,11 @@ class TestSweepStaleReactions:
         with patch(
             "linear_reactions.requests.post",
             side_effect=[
-                _ok_response(reaction_id="r-1"),   # 1st call's 👀
-                _viewer_response("viewer-bot"),    # 1st call's viewer fetch (sweep)
-                _empty_reactions_response(),       # 1st call's reactions query (sweep)
-                _ok_response(reaction_id="r-2"),   # 2nd call's 👀
-                _empty_reactions_response(),       # 2nd call's reactions only (cached viewer)
+                _ok_response(reaction_id="r-1"),  # 1st call's 👀
+                _viewer_response("viewer-bot"),  # 1st call's viewer fetch (sweep)
+                _empty_reactions_response(),  # 1st call's reactions query (sweep)
+                _ok_response(reaction_id="r-2"),  # 2nd call's 👀
+                _empty_reactions_response(),  # 2nd call's reactions only (cached viewer)
             ],
         ) as post:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
