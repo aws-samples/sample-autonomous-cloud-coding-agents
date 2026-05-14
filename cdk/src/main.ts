@@ -48,8 +48,12 @@ const githubTagKeys = [
   'ref-type',
   'actor',
   'head-ref',
+  'base-ref',
+  'pr-number',
   'run-id',
+  'run-attempt',
   'event',
+  'workflow',
   'repository',
   'clean',
 ] as const;
