@@ -37,6 +37,7 @@ jobs:
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Keep secret and dependency scanning enabled in CI; only disable the
       # remaining tools that are intentionally skipped here.
+      CDK_CONTEXT_computeVariant: ${{ matrix.variant }}
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
     steps:
       - name: Checkout
