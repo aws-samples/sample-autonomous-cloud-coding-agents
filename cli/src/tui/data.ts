@@ -8,10 +8,10 @@
  * `DataSource` interface in `./api/source.ts`.
  */
 
-import type { TaskEvent } from '../types.js';
+import type { ChannelSource, TaskEvent } from '../types.js';
 
 // Re-export so components can import from './data.js' exclusively.
-export type { TaskEvent };
+export type { ChannelSource, TaskEvent };
 
 // ─── View shapes panels bind to ─────────────────────────────────────
 
@@ -28,6 +28,11 @@ export interface TaskRowView {
   readonly task_description: string;
   readonly branch_name: string;
   readonly pr_url: string | null;
+  /** Submission provenance (api / webhook / slack / linear). Surfaced
+   *  in the TaskList SOURCE column so users can see which channel
+   *  produced the task. Optional so pre-ChannelSource records and
+   *  already-loaded mock rows don't require a migration. */
+  readonly channel_source?: ChannelSource;
   readonly created_at: string;
   readonly updated_at: string;
   readonly cost_usd: number | null;

@@ -121,6 +121,26 @@ export const SEVERITY_LABEL: Record<string, string> = {
   LOW: 'Low risk',
 };
 
+// ── Channel source (submission provenance) ─────────────────────────
+// Short labels fit under an 8-char column width without truncation.
+// Colors let the user scan "which tasks came from where" at a glance:
+//   CLI / webhook — neutral (gray / white)
+//   Slack / Linear — integration-branded hues
+
+export const CHANNEL_LABEL: Record<string, string> = {
+  api: 'CLI',
+  webhook: 'Hook',
+  slack: 'Slack',
+  linear: 'Linear',
+};
+
+export const CHANNEL_COLOR: Record<string, string | undefined> = {
+  api: undefined,
+  webhook: 'gray',
+  slack: 'magenta',
+  linear: 'blue',
+};
+
 // ── Policy tiers (plain-English labels) ─────────────────────────────
 // API buckets from GET /repos/{id}/policies are `hard` and `soft`.
 // Legacy TUI tiers `hard-deny` / `hard-gate` are kept as aliases so the

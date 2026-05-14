@@ -3,7 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import figures from 'figures';
 import type { TaskRowView } from '../data.js';
 import { TRUNC_DESCRIPTION, TRUNC_REPO } from '../data.js';
-import { STATUS_COLOR, STATUS_ICON, STATUS_LABEL, timeAgo, trunc } from '../constants.js';
+import { CHANNEL_COLOR, CHANNEL_LABEL, STATUS_COLOR, STATUS_ICON, STATUS_LABEL, timeAgo, trunc } from '../constants.js';
 
 interface TaskListProps {
   tasks: TaskRowView[];
@@ -45,6 +45,7 @@ const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, active }) => {
         <Text dimColor bold>{'ID'.padEnd(8)}</Text>
         <Text dimColor>{'  '}</Text>
         <Text dimColor bold>{'STATUS'.padEnd(20)}</Text>
+        <Text dimColor bold>{'SOURCE'.padEnd(8)}</Text>
         <Text dimColor bold>{'REPO'.padEnd(26)}</Text>
         <Text dimColor bold>{'STEP'.padEnd(8)}</Text>
         <Text dimColor bold>{'GATES'.padEnd(8)}</Text>
@@ -66,12 +67,16 @@ const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, active }) => {
           : 0;
         const gateColor: string | undefined =
           gateRatio >= 0.8 ? 'red' : gateRatio >= 0.5 ? 'yellow' : undefined;
+        const cs = t.channel_source;
+        const csLabel = cs ? (CHANNEL_LABEL[cs] ?? cs) : '—';
+        const csColor = cs ? CHANNEL_COLOR[cs] : undefined;
         return (
           <Box key={t.task_id}>
             <Text color={sel ? 'cyan' : undefined}>{sel ? figures.pointer + ' ' : '  '}</Text>
             <Text color="blue" underline>{'..'+t.task_id.slice(-4)}</Text>
             <Text>{'    '}</Text>
             <Text color={sc} bold={sel}>{`${si} ${sl}`.padEnd(20)}</Text>
+            <Text color={csColor}>{csLabel.padEnd(8)}</Text>
             <Text>{trunc(t.repo, TRUNC_REPO).padEnd(26)}</Text>
             <Text>{`${t.turn ?? 0}/~${t.max_turns ?? '?'}`.padEnd(8)}</Text>
             <Text color={gateColor}>{gates.padEnd(8)}</Text>

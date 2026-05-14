@@ -68,6 +68,7 @@ export type TaskFixture = Pick<
   | 'task_description'
   | 'branch_name'
   | 'pr_url'
+  | 'channel_source'
   | 'created_at'
   | 'updated_at'
   | 'cost_usd'
@@ -104,6 +105,7 @@ export const MOCK_TASKS: readonly TaskFixture[] = [
     task_description: 'Add input validation to the /api/users endpoint using zod schemas',
     branch_name: 'agent/input-validation-42',
     pr_url: null,
+    channel_source: 'api',
     created_at: minutesAgo(3),
     updated_at: minutesAgo(0.1),
     cost_usd: 0.1847,
@@ -125,6 +127,7 @@ export const MOCK_TASKS: readonly TaskFixture[] = [
     task_description: 'Fix the failing unit tests in the auth module and update snapshots',
     branch_name: 'agent/fix-auth-tests-38',
     pr_url: null,
+    channel_source: 'slack',
     created_at: minutesAgo(15),
     updated_at: minutesAgo(0.5),
     cost_usd: 0.3412,
@@ -146,6 +149,7 @@ export const MOCK_TASKS: readonly TaskFixture[] = [
     task_description: 'Refactor database connection pooling to use pgbouncer',
     branch_name: 'agent/refactor-db-pool-29',
     pr_url: 'https://github.com/acme-corp/backend-api/pull/156',
+    channel_source: 'linear',
     created_at: minutesAgo(62),
     updated_at: minutesAgo(15),
     cost_usd: 0.8923,
@@ -167,6 +171,7 @@ export const MOCK_TASKS: readonly TaskFixture[] = [
     task_description: 'Migrate the dashboard from Class components to React hooks',
     branch_name: 'agent/migrate-hooks-55',
     pr_url: null,
+    channel_source: 'webhook',
     created_at: minutesAgo(120),
     updated_at: minutesAgo(30),
     cost_usd: 1.2345,
@@ -376,6 +381,7 @@ export function submitMockTask(
     task_description: description,
     branch_name: `agent/${id.slice(-6).toLowerCase()}`,
     pr_url: null,
+    channel_source: 'api',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     cost_usd: null,

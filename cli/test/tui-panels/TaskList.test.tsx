@@ -10,7 +10,7 @@ import { flush, KEY_DOWN, KEY_ENTER } from './_helpers';
 import { MockDataSource } from '../../src/tui/api/source-mock';
 
 describe('TaskList panel', () => {
-  it('renders the column headers including the new GATES column', async () => {
+  it('renders the column headers including the new GATES + SOURCE columns', async () => {
     const source = new MockDataSource();
     const tasks = await source.listTasks();
     const { lastFrame, unmount } = renderPanel(
@@ -20,8 +20,28 @@ describe('TaskList panel', () => {
     await flush();
     const frame = lastFrame() ?? '';
     expect(frame).toContain('STATUS');
+    expect(frame).toContain('SOURCE');
     expect(frame).toContain('GATES');
     expect(frame).toContain('DESCRIPTION');
+    unmount();
+  });
+
+  it('renders channel-source labels in the SOURCE column', async () => {
+    const source = new MockDataSource();
+    const tasks = await source.listTasks();
+    const { lastFrame, unmount } = renderPanel(
+      <TaskList tasks={tasks} onSelectTask={() => {}} active />,
+      { source },
+    );
+    await flush();
+    const frame = lastFrame() ?? '';
+    // The mock fixture varies channel_source across the 4 rows so
+    // users see the column doing something; assert each label is
+    // actually in the frame.
+    expect(frame).toContain('CLI');
+    expect(frame).toContain('Slack');
+    expect(frame).toContain('Linear');
+    expect(frame).toContain('Hook');
     unmount();
   });
 

@@ -53,6 +53,7 @@ function toTaskRowView(t: TaskDetail): TaskRowView {
     task_description: t.task_description ?? '',
     branch_name: t.branch_name,
     pr_url: t.pr_url,
+    channel_source: t.channel_source,
     created_at: t.created_at,
     updated_at: t.updated_at,
     cost_usd: t.cost_usd,
@@ -81,6 +82,9 @@ function toTaskRowFromSummary(s: TaskSummary): TaskRowView {
     task_description: s.task_description ?? '',
     branch_name: s.branch_name,
     pr_url: s.pr_url,
+    // TaskSummary does not carry channel_source. Leave undefined so
+    // the row renders a "—" until the detail hydration populates it.
+    channel_source: undefined,
     created_at: s.created_at,
     updated_at: s.updated_at,
     cost_usd: null,

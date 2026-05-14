@@ -43,6 +43,10 @@ function toTaskRowView(t: TaskFixture): TaskRowView {
     task_description: t.task_description ?? '',
     branch_name: t.branch_name,
     pr_url: t.pr_url,
+    // Pass through the fixture's channel_source (varied across mock
+    // tasks so the SOURCE column demo shows all four values).
+    // Default to 'api' for pre-ChannelSource fixtures.
+    channel_source: t.channel_source ?? 'api',
     created_at: t.created_at,
     updated_at: t.updated_at,
     cost_usd: t.cost_usd,
