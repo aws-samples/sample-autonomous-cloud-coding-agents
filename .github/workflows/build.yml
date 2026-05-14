@@ -24,6 +24,9 @@ jobs:
       actions: write # upload-artifact when self-mutation is detected
       contents: read
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [agentcore]
     outputs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
     env:
@@ -41,6 +44,105 @@ jobs:
         with:
           fetch-depth: 1  # shallow clone
           persist-credentials: false
+      - name: Resolve github:* tag values
+        id: tags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_SHA: ${{ github.sha }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_REF_TYPE: ${{ github.ref_type }}
+          GH_HEAD_REF: ${{ github.head_ref }}
+          GH_BASE_REF: ${{ github.base_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          case "$EVENT_NAME" in
+            merge_group)
+              echo "sha=${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              echo "ref=${MG_BASE_REF}" >> "$GITHUB_OUTPUT"
+              echo "ref-type=branch" >> "$GITHUB_OUTPUT"
+              echo "head-ref=${MG_HEAD_REF}" >> "$GITHUB_OUTPUT"
+              echo "base-ref=${MG_BASE_REF}" >> "$GITHUB_OUTPUT"
+              PR_NUM=$(echo "$MG_HEAD_REF" | grep -oP 'pr-\K[0-9]+' || echo "")
+              echo "pr-number=${PR_NUM}" >> "$GITHUB_OUTPUT"
+              ;;
+            pull_request|pull_request_target)
+              echo "sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              echo "ref=${GH_HEAD_REF}" >> "$GITHUB_OUTPUT"
+              echo "ref-type=branch" >> "$GITHUB_OUTPUT"
+              echo "head-ref=${GH_HEAD_REF}" >> "$GITHUB_OUTPUT"
+              echo "base-ref=${GH_BASE_REF}" >> "$GITHUB_OUTPUT"
+              echo "pr-number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+              ;;
+            push)
+              echo "sha=${GH_SHA}" >> "$GITHUB_OUTPUT"
+              echo "ref=${GH_REF_NAME}" >> "$GITHUB_OUTPUT"
+              echo "ref-type=${GH_REF_TYPE}" >> "$GITHUB_OUTPUT"
+              echo "head-ref=" >> "$GITHUB_OUTPUT"
+              echo "base-ref=" >> "$GITHUB_OUTPUT"
+              echo "pr-number=" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "sha=${GH_SHA}" >> "$GITHUB_OUTPUT"
+              echo "ref=${GH_REF_NAME}" >> "$GITHUB_OUTPUT"
+              echo "ref-type=${GH_REF_TYPE}" >> "$GITHUB_OUTPUT"
+              echo "head-ref=" >> "$GITHUB_OUTPUT"
+              echo "base-ref=" >> "$GITHUB_OUTPUT"
+              echo "pr-number=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+      - name: Generate CDK context
+        env:
+          VARIANT: ${{ matrix.variant }}
+          TAG_SHA: ${{ steps.tags.outputs.sha }}
+          TAG_REF: ${{ steps.tags.outputs.ref }}
+          TAG_REF_TYPE: ${{ steps.tags.outputs.ref-type }}
+          TAG_ACTOR: ${{ github.actor }}
+          TAG_HEAD_REF: ${{ steps.tags.outputs.head-ref }}
+          TAG_BASE_REF: ${{ steps.tags.outputs.base-ref }}
+          TAG_PR_NUMBER: ${{ steps.tags.outputs.pr-number }}
+          TAG_RUN_ID: ${{ github.run_id }}
+          TAG_RUN_ATTEMPT: ${{ github.run_attempt }}
+          TAG_EVENT: ${{ github.event_name }}
+          TAG_WORKFLOW: ${{ github.workflow }}
+          TAG_REPOSITORY: ${{ github.repository }}
+        run: |
+          jq -n \
+            --arg computeVariant "$VARIANT" \
+            --arg stackName "backgroundagent-dev" \
+            --arg sha "$TAG_SHA" \
+            --arg ref "$TAG_REF" \
+            --arg ref_type "$TAG_REF_TYPE" \
+            --arg actor "$TAG_ACTOR" \
+            --arg head_ref "$TAG_HEAD_REF" \
+            --arg base_ref "$TAG_BASE_REF" \
+            --arg pr_number "$TAG_PR_NUMBER" \
+            --arg run_id "$TAG_RUN_ID" \
+            --arg run_attempt "$TAG_RUN_ATTEMPT" \
+            --arg event "$TAG_EVENT" \
+            --arg workflow "$TAG_WORKFLOW" \
+            --arg repository "$TAG_REPOSITORY" \
+            '{
+              "computeVariant": $computeVariant,
+              "stackName": $stackName,
+              "github:sha": $sha,
+              "github:ref": $ref,
+              "github:ref-type": $ref_type,
+              "github:actor": $actor,
+              "github:head-ref": $head_ref,
+              "github:base-ref": $base_ref,
+              "github:pr-number": $pr_number,
+              "github:run-id": $run_id,
+              "github:run-attempt": $run_attempt,
+              "github:event": $event,
+              "github:workflow": $workflow,
+              "github:repository": $repository,
+              "github:clean": "true"
+            }' > cdk/cdk.context.json
+          cat cdk/cdk.context.json
       - name: Install mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
@@ -53,6 +155,13 @@ jobs:
         run: mise run install
       - name: build
         run: mise run build
+      - name: Upload CDK artifact (${{ matrix.variant }})
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cdk-${{ matrix.variant }}-out
+          path: |
+            cdk/cdk.out/
+            cdk/cdk.context.json
       - name: Find mutations
         id: self_mutation
         run: |-

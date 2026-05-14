@@ -52,6 +52,7 @@ agent/.venv/
 # ──────────────────────────────────────────────
 cdk.out/
 /cdk/cdk.out*/
+/cdk/cdk-*.out/
 .cdk.staging/
 cdk.context.json
 /assets/
