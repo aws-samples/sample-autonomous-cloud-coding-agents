@@ -56,14 +56,11 @@ jobs:
         run: mise run install
       - name: build
         run: mise run build
-      - name: CDK Synth (${{ matrix.variant }})
-        run: npx cdk synth -c computeVariant=${{ matrix.variant }} --output cdk-${{ matrix.variant }}.out
-        working-directory: cdk
       - name: Upload CDK artifact (${{ matrix.variant }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cdk-${{ matrix.variant }}-out
-          path: cdk/cdk-${{ matrix.variant }}.out/
+          path: cdk/cdk.out/
       - name: Find mutations
         id: self_mutation
         run: |-
