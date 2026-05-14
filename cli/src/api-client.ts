@@ -115,10 +115,27 @@ export class ApiClient {
       // Non-JSON or envelope-less error body — still an HTTP error, still
       // must carry the status so classification works. Code/request_id
       // are unavailable at this layer; surface ``HTTP_ERROR`` / empty.
+      //
+      // When the server returns a body that is not our envelope
+      // (API Gateway Cognito-authorizer denial `{"message": "..."}`,
+      // a WAF page, a bespoke admission-check failure), drop it
+      // verbatim into the message — diagnosing these otherwise
+      // requires cross-checking CloudWatch by request_id, which
+      // most users can't do. Cap at 200 chars so a full HTML page
+      // doesn't blow up the terminal.
+      let detail = '';
+      if (jsonParseOk) {
+        // Prefer common body shapes (API Gateway uses `message`).
+        const body = json as { message?: unknown; Message?: unknown };
+        const raw = typeof body.message === 'string' ? body.message
+          : typeof body.Message === 'string' ? body.Message
+          : JSON.stringify(json);
+        if (raw) detail = ` — ${raw.slice(0, 200)}`;
+      }
       throw new ApiError(
         res.status,
         'HTTP_ERROR',
-        `HTTP ${res.status}: ${res.statusText}${jsonParseOk ? '' : ' (non-JSON response)'}`,
+        `HTTP ${res.status}: ${res.statusText}${jsonParseOk ? '' : ' (non-JSON response)'}${detail}`,
         '',
       );
     }

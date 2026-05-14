@@ -1,12 +1,12 @@
 import React, { useState, useCallback } from 'react';
 import { Box, Text, useInput } from 'ink';
 import figures from 'figures';
-import type { TaskSummary } from '../data.js';
+import type { TaskRowView } from '../data.js';
 import { TRUNC_DESCRIPTION, TRUNC_REPO } from '../data.js';
 import { STATUS_COLOR, STATUS_ICON, STATUS_LABEL, timeAgo, trunc } from '../constants.js';
 
 interface TaskListProps {
-  tasks: TaskSummary[];
+  tasks: TaskRowView[];
   onSelectTask: (taskId: string) => void;
   active: boolean;
 }
@@ -17,7 +17,7 @@ const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, active }) => {
   // Clamp cursor if tasks change
   const safeCursor = Math.min(cursor, Math.max(0, tasks.length - 1));
 
-  useInput(useCallback((input, key) => {
+  useInput(useCallback((_input, key) => {
     if (!active || tasks.length === 0) return;
     if (key.upArrow) setCursor(c => Math.max(0, c - 1));
     if (key.downArrow) setCursor(c => Math.min(tasks.length - 1, c + 1));
@@ -47,6 +47,7 @@ const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, active }) => {
         <Text dimColor bold>{'STATUS'.padEnd(20)}</Text>
         <Text dimColor bold>{'REPO'.padEnd(26)}</Text>
         <Text dimColor bold>{'STEP'.padEnd(8)}</Text>
+        <Text dimColor bold>{'GATES'.padEnd(8)}</Text>
         <Text dimColor bold>{'AGE'.padEnd(8)}</Text>
         <Text dimColor bold>DESCRIPTION</Text>
       </Box>
@@ -56,6 +57,15 @@ const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, active }) => {
         const si = STATUS_ICON[t.status] ?? '?';
         const sl = STATUS_LABEL[t.status] ?? t.status;
 
+        const gates = t.approval_gate_count != null && t.approval_gate_cap != null
+          ? `${t.approval_gate_count}/${t.approval_gate_cap}`
+          : '—';
+        // Color turn counter red when approaching the cap (≥80%)
+        const gateRatio = t.approval_gate_count != null && t.approval_gate_cap
+          ? t.approval_gate_count / t.approval_gate_cap
+          : 0;
+        const gateColor: string | undefined =
+          gateRatio >= 0.8 ? 'red' : gateRatio >= 0.5 ? 'yellow' : undefined;
         return (
           <Box key={t.task_id}>
             <Text color={sel ? 'cyan' : undefined}>{sel ? figures.pointer + ' ' : '  '}</Text>
@@ -63,7 +73,8 @@ const TaskList: React.FC<TaskListProps> = ({ tasks, onSelectTask, active }) => {
             <Text>{'    '}</Text>
             <Text color={sc} bold={sel}>{`${si} ${sl}`.padEnd(20)}</Text>
             <Text>{trunc(t.repo, TRUNC_REPO).padEnd(26)}</Text>
-            <Text>{`${t.turn}/~${t.max_turns ?? '?'}`.padEnd(8)}</Text>
+            <Text>{`${t.turn ?? 0}/~${t.max_turns ?? '?'}`.padEnd(8)}</Text>
+            <Text color={gateColor}>{gates.padEnd(8)}</Text>
             <Text dimColor>{timeAgo(t.created_at).padEnd(8)}</Text>
             <Text dimColor={!sel}>{trunc(t.task_description, TRUNC_DESCRIPTION)}</Text>
           </Box>

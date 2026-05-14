@@ -4,9 +4,21 @@ import Spinner from 'ink-spinner';
 import figures from 'figures';
 import EventLine from '../components/EventLine.js';
 import ApprovalCard from '../components/ApprovalCard.js';
+import ScopePicker from '../components/ScopePicker.js';
+import DenyReasonInput from '../components/DenyReasonInput.js';
 import { useApprovals, useEditing } from '../context.js';
-import { getEventsForTask, TERM_WIDTH, type TaskSummary } from '../data.js';
+import { TERM_WIDTH, type TaskRowView, type TaskEvent } from '../data.js';
+import { useData } from '../hooks/useData.js';
+import type { ApprovalScope } from '../../types.js';
+import { TERMINAL_STATUSES } from '../../types.js';
 import { fmtDuration, STATUS_COLOR, STATUS_LABEL, trunc } from '../constants.js';
+import { INITIAL_POLL_CADENCE, nextCadence, type PollCadenceState } from '../utils/polling.js';
+
+/** Broaden `readonly string[]` so callers can test arbitrary strings
+ *  without `as`. Mirrors the usage in `commands/watch.ts`. */
+function isTerminalStatus(status: string): boolean {
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
 
 /** Wrap long text to fit within a max width, breaking at word boundaries. */
 function wordWrap(text: string, maxWidth: number): string[] {
@@ -26,7 +38,7 @@ function wordWrap(text: string, maxWidth: number): string[] {
 }
 
 interface WatchProps {
-  task: TaskSummary;
+  task: TaskRowView;
   active: boolean;
   onBack: () => void;
 }
@@ -44,42 +56,139 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
 
   const { approvals, approve, deny } = useApprovals();
   const { setEditing } = useEditing();
-  const [events, setEvents] = useState<typeof taskEvents>([]);
+  const { getTaskEvents, source } = useData();
+  const [events, setEvents] = useState<TaskEvent[]>([]);
+  const [taskEvents, setTaskEvents] = useState<TaskEvent[]>([]);
   const [eventIdx, setEventIdx] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [nudging, setNudging] = useState(false);
   const [nudgeText, setNudgeText] = useState('');
   const [message, setMessage] = useState('');
   const [confirmDeny, setConfirmDeny] = useState(false);
+  const [showScopePicker, setShowScopePicker] = useState(false);
+  const [showDenyInput, setShowDenyInput] = useState(false);
   const [scrollOffset, setScrollOffset] = useState(-1); // -1 = auto-follow (show latest)
   const msgTimer = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const [, setTick] = useState(0);
 
-  const taskEvents = useMemo(() => getEventsForTask(task.task_id), [task.task_id]);
+  const taskIsTerminal = isTerminalStatus(task.status);
+
+  // Hydrate events on task change. In mock mode the full list resolves
+  // immediately and the simulated-polling effect below replays it one
+  // frame at a time. In real mode we refetch on an adaptive cadence
+  // (500ms → 1s/2s/5s backoff on consecutive empty polls, reset to
+  // fast on the next non-empty poll) — matches `commands/watch.ts`
+  // so the TUI's perceived liveness is the same as the CLI's.
+  //
+  // When the task is already in a terminal status (COMPLETED / FAILED
+  // / CANCELLED / TIMED_OUT), we do ONE event hydration and stop —
+  // no further polling. This mirrors `bgagent watch`'s
+  // already-terminal short-circuit and avoids burning API calls on
+  // a task whose stream is closed. The `task.status` dep makes the
+  // effect re-run when a running task transitions to terminal while
+  // the Watch panel is mounted.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof globalThis.setTimeout> | null = null;
+    let cadence: PollCadenceState = INITIAL_POLL_CADENCE;
+    // Cursor is the last seen event_id. On first poll it's null →
+    // the source drains all pages. On subsequent polls we pass it
+    // via `after` so the source's `catchUpEvents` only returns the
+    // new tail. This makes `pr_created` / `task_completed` always
+    // land even on 300+ event streams, and keeps the user's scroll
+    // position stable between polls.
+    let lastEventId: string | null = null;
+
+    // Reset event state when the task changes. If we're re-entering
+    // the same task, the cursor is fresh (null) → a full reload.
+    setTaskEvents([]);
+
+    const scheduleNext = (ms: number) => {
+      if (cancelled) return;
+      timer = globalThis.setTimeout(() => { void poll(); }, ms);
+    };
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const newEvents = await getTaskEvents(
+          task.task_id,
+          lastEventId ? { after: lastEventId } : undefined,
+        );
+        if (cancelled) return;
+        const sawNew = newEvents.length > 0;
+        if (sawNew) {
+          lastEventId = newEvents[newEvents.length - 1].event_id;
+          // Append to existing — dedup by event_id in case the server
+          // echoes a boundary row (ULIDs are monotonic so in practice
+          // this is belt-and-suspenders). Stable order is maintained
+          // because `catchUpEvents` preserves ascending event_id.
+          setTaskEvents((prev) => {
+            const seen = new Set(prev.map(e => e.event_id));
+            const toAppend = newEvents.filter(e => !seen.has(e.event_id));
+            return toAppend.length > 0 ? [...prev, ...toAppend] : prev;
+          });
+        }
+        if (source.label === 'live' && !taskIsTerminal) {
+          cadence = nextCadence(cadence, sawNew);
+          scheduleNext(cadence.intervalMs);
+        }
+      } catch {
+        // Surface errors via the data provider's error channel
+        // (future: inline toast); keep the old events and retry on
+        // the slowest cadence slot so we don't hammer a degraded
+        // upstream. Terminal tasks don't retry — their stream is
+        // closed and retrying is pointless.
+        if (!cancelled && source.label === 'live' && !taskIsTerminal) {
+          scheduleNext(5_000);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [task.task_id, task.status, getTaskEvents, source.label, taskIsTerminal]);
 
   const pendingApproval = useMemo(() => {
-    const pa = approvals.find(a => a.task_id === task.task_id);
+    // Source of truth: the task's `awaiting_approval_request_id`.
+    // Fall back to a task-id match on the approvals list if the
+    // task detail is still loading (real-mode race) or if this is
+    // a pre-Cedar-HITL record missing the field.
+    const expectedId = task.awaiting_approval_request_id;
+    const pa = expectedId
+      ? approvals.find(a => a.request_id === expectedId)
+      : approvals.find(a => a.task_id === task.task_id);
     if (!pa) return null;
-    const remaining = Math.max(0, pa.timeout_s - Math.floor((Date.now() - new Date(pa.created_at).getTime()) / 1000));
+    // Prefer server `expires_at` for the countdown — authoritative
+    // once the approval row lands. Fall back to `timeout_s - elapsed`
+    // on records without it.
+    const expiresAt = pa.expires_at ? new Date(pa.expires_at).getTime() : null;
+    const remaining = expiresAt
+      ? Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))
+      : Math.max(0, pa.timeout_s - Math.floor((Date.now() - new Date(pa.created_at).getTime()) / 1000));
     return {
       event: {
         event_id: `synth_${pa.request_id}`,
-        task_id: pa.task_id,
         event_type: 'approval_requested' as const,
         timestamp: pa.created_at,
         metadata: {
+          task_id: pa.task_id,
           request_id: pa.request_id,
           tool_name: pa.tool_name,
           input_preview: pa.tool_input_preview,
           reason: pa.reason,
           severity: pa.severity,
         },
-      },
+      } as TaskEvent,
       timeoutRemaining: remaining,
       requestId: pa.request_id,
       toolName: pa.tool_name,
     };
-  }, [approvals, task.task_id]);
+  }, [approvals, task.task_id, task.awaiting_approval_request_id]);
 
   useEffect(() => {
     const timer = setInterval(() => setTick(t => t + 1), 1000);
@@ -94,8 +203,15 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
 
   useEffect(() => () => { if (msgTimer.current) clearTimeout(msgTimer.current); }, []);
 
-  // Single interval: simulate polling + elapsed
+  // In mock mode replay events one-at-a-time so the stream looks
+  // alive. In live mode we already see real events as they land, so
+  // just flush the whole list and only animate the elapsed counter.
   useEffect(() => {
+    if (source.label === 'live') {
+      setEvents(taskEvents);
+      const timer = setInterval(() => setElapsed(p => p + 1), 1000);
+      return () => clearInterval(timer);
+    }
     const timer = setInterval(() => {
       setEventIdx(prev => {
         if (prev < taskEvents.length) {
@@ -107,22 +223,27 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
       setElapsed(p => p + 1);
     }, 600);
     return () => clearInterval(timer);
-  }, [taskEvents]);
+  }, [taskEvents, source.label]);
 
-  // Editing lock
+  // Editing lock — pick the most specific lock mode for the help bar
   useEffect(() => {
-    if (confirmDeny) setEditing(true, 'deny-confirm');
+    if (showScopePicker) setEditing(true, 'scope-picker');
+    else if (showDenyInput) setEditing(true, 'text');
+    else if (confirmDeny) setEditing(true, 'deny-confirm');
     else if (nudging) setEditing(true, 'text');
     else setEditing(false);
     return () => setEditing(false);
-  }, [nudging, confirmDeny, setEditing]);
+  }, [nudging, confirmDeny, showScopePicker, showDenyInput, setEditing]);
 
   useInput(useCallback((input, key) => {
     if (!active) return;
 
+    // Scope picker + deny-input own their own input while mounted.
+    if (showScopePicker || showDenyInput) return;
+
     if (confirmDeny) {
       if (input === 'y' || input === 'Y') {
-        if (pendingApproval) { deny(pendingApproval.requestId); showMessage(`${figures.cross} Denied ${pendingApproval.toolName}`); }
+        if (pendingApproval) { setShowDenyInput(true); }
         setConfirmDeny(false); return;
       }
       if (key.escape || input === 'n' || input === 'N') { setConfirmDeny(false); return; }
@@ -157,12 +278,32 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
 
     if (key.escape) { onBack(); return; }
     if (input === 'n') { setNudging(true); return; }
-    if (input === 'a' && pendingApproval) { approve(pendingApproval.requestId); showMessage(`${figures.tick} Approved ${pendingApproval.toolName}`); return; }
+    if (input === 'a' && pendingApproval) { setShowScopePicker(true); return; }
     if (input === 'd' && pendingApproval) { setConfirmDeny(true); return; }
     if ((input === 'a' || input === 'd') && !pendingApproval) { showMessage('No pending approval for this task'); return; }
-  }, [active, nudging, confirmDeny, nudgeText, pendingApproval, approve, deny, onBack, showMessage, events.length]));
+  }, [active, nudging, confirmDeny, showScopePicker, showDenyInput, nudgeText, pendingApproval, approve, deny, onBack, showMessage, events.length]));
 
-  const isPolling = eventIdx < taskEvents.length;
+  const handleApproveWithScope = useCallback((scope: ApprovalScope) => {
+    if (pendingApproval) {
+      approve(pendingApproval.requestId, scope);
+      showMessage(`${figures.tick} Approved ${pendingApproval.toolName} (${scope})`);
+    }
+    setShowScopePicker(false);
+  }, [pendingApproval, approve, showMessage]);
+
+  const handleDenyWithReason = useCallback((reason: string) => {
+    if (pendingApproval) {
+      deny(pendingApproval.requestId, reason || undefined);
+      showMessage(`${figures.cross} Denied ${pendingApproval.toolName}${reason ? ` — "${trunc(reason, 30)}"` : ''}`);
+    }
+    setShowDenyInput(false);
+  }, [pendingApproval, deny, showMessage]);
+
+  // Mock-mode "replay animation still in flight" indicator. Irrelevant
+  // in live mode (the stream is either polling or closed — tracked via
+  // `taskIsTerminal`). Suppressed once the task reaches terminal status
+  // so a COMPLETED/FAILED task doesn't keep showing a spinner.
+  const isPolling = !taskIsTerminal && eventIdx < taskEvents.length;
   const sc = STATUS_COLOR[task.status] ?? 'white';
   const sl = STATUS_LABEL[task.status] ?? task.status;
 
@@ -186,9 +327,35 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
         <Text color="blue" underline>..{task.task_id.slice(-4)}</Text>
         <Text>  </Text>
         <Text color={sc} bold>{sl}</Text>
-        <Text dimColor>  {task.repo}  Step {task.turn}/~{task.max_turns ?? '?'}  {fmtDuration(elapsed)}</Text>
+        <Text dimColor>  {task.repo}  Step {task.turn ?? 0}/~{task.max_turns ?? '?'}  {fmtDuration(elapsed)}</Text>
         {task.cost_usd != null && <Text color="yellow">  ${task.cost_usd.toFixed(4)}</Text>}
       </Box>
+      {/* Cedar HITL gate budget — only rendered when we have the
+          counters (null on pre-Cedar-HITL tasks). */}
+      {task.approval_gate_count != null && task.approval_gate_cap != null && (
+        <Box>
+          <Text dimColor>  Approval gates: </Text>
+          <Text color={
+            task.approval_gate_count >= task.approval_gate_cap * 0.8 ? 'red'
+            : task.approval_gate_count >= task.approval_gate_cap * 0.5 ? 'yellow'
+            : undefined
+          }>
+            {task.approval_gate_count}/{task.approval_gate_cap}
+          </Text>
+          <Text dimColor> used</Text>
+        </Box>
+      )}
+      {/* PR banner — pinned to the header area so once a PR lands it
+          stays visible regardless of event-stream scroll position.
+          `pr_url` is populated by the agent's `pr_created` milestone
+          and carried on TaskDetail; we just echo it. */}
+      {task.pr_url && (
+        <Box>
+          <Text color="green" bold>  {figures.tick} PR:</Text>
+          <Text>  </Text>
+          <Text color="blue" underline>{task.pr_url}</Text>
+        </Box>
+      )}
       {/* Description — word wrapped */}
       {descLines.map((line, i) => (
         <Text key={i} dimColor>  {line}</Text>
@@ -209,13 +376,20 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
         {isPolling && isAutoFollow && events.length > 0 && (
           <Box><Text color="cyan"><Spinner type="dots" /></Text><Text dimColor> polling…</Text></Box>
         )}
+        {taskIsTerminal && events.length > 0 && (
+          <Box>
+            <Text color={sc}>{figures.tick} </Text>
+            <Text dimColor>Stream closed — task </Text>
+            <Text color={sc}>{sl}</Text>
+          </Box>
+        )}
         {canScrollDown && (
           <Text dimColor>  {figures.arrowDown} more events below (↓ to scroll, or keep waiting)</Text>
         )}
       </Box>
 
       {/* Approval card */}
-      {pendingApproval && !nudging && !confirmDeny && (
+      {pendingApproval && !nudging && !confirmDeny && !showScopePicker && !showDenyInput && (
         <ApprovalCard
           event={pendingApproval.event}
           taskDescription={task.task_description}
@@ -224,13 +398,28 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
         />
       )}
 
-      {/* Deny confirmation */}
+      {/* Scope picker (approve) */}
+      {showScopePicker && pendingApproval && (
+        <ScopePicker
+          heading={`Approve ${pendingApproval.toolName}`}
+          onConfirm={handleApproveWithScope}
+          onCancel={() => setShowScopePicker(false)}
+        />
+      )}
+
+      {/* Deny confirmation → deny reason input */}
       {confirmDeny && (
         <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" marginTop={1}>
           <Text color="red" bold>{figures.warning} Confirm deny?</Text>
           <Text>The agent will be blocked and may not be able to continue.</Text>
-          <Box><Text color="red" bold>[y]</Text><Text> Deny  </Text><Text bold>[n]</Text><Text> Cancel</Text></Box>
+          <Box><Text color="red" bold>[y]</Text><Text> Add reason  </Text><Text bold>[n]</Text><Text> Cancel</Text></Box>
         </Box>
+      )}
+      {showDenyInput && (
+        <DenyReasonInput
+          onConfirm={handleDenyWithReason}
+          onCancel={() => setShowDenyInput(false)}
+        />
       )}
 
       {/* Nudge input */}

@@ -33,6 +33,7 @@ import { makePoliciesCommand } from '../commands/policies';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
 import { makeTraceCommand } from '../commands/trace';
+import { makeTuiCommand } from '../commands/tui';
 import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
@@ -67,6 +68,7 @@ program.addCommand(makePoliciesCommand());
 program.addCommand(makeEventsCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
+program.addCommand(makeTuiCommand());
 program.addCommand(makeWebhookCommand());
 
 // Execute the CLI only when run directly. Importing this module (e.g.

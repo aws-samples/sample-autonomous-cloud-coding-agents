@@ -1,27 +1,87 @@
 /**
- * Data access layer — single abstraction over mock data.
- * All panels import from here, NOT from mock/data.ts directly.
- * To wire to a real backend, replace the implementations here
- * and change return types to Promise<T>.
+ * TUI viewmodel types + layout constants.
+ *
+ * Panels bind to the view shapes in this module. Runtime data comes
+ * off `useData()` from `./hooks/useData.tsx`, which picks between
+ * mock and real sources based on `BGAGENT_TUI_MOCK`. This module
+ * deliberately has no runtime queries — all I/O lives behind the
+ * `DataSource` interface in `./api/source.ts`.
  */
-import {
-  MOCK_TASKS,
-  MOCK_EVENTS,
-  MOCK_PENDING_APPROVALS,
-  MOCK_POLICIES,
-  MOCK_REPOS,
-  submitTask as mockSubmitTask,
-  type TaskSummary,
-  type TaskEvent,
-  type PendingApproval,
-  type CedarPolicy,
-  type RegisteredRepo,
-} from './mock/data.js';
 
-// Re-export types so consumers only depend on this module
-export type { TaskSummary, TaskEvent, PendingApproval, CedarPolicy, RegisteredRepo };
+import type { TaskEvent } from '../types.js';
 
-// ── Status union ────────────────────────────────────────────────────
+// Re-export so components can import from './data.js' exclusively.
+export type { TaskEvent };
+
+// ─── View shapes panels bind to ─────────────────────────────────────
+
+/** Row the TaskList + Watch panels render. Pre-joins the fields
+ *  panels need from `TaskDetail` (wire) with display-friendly
+ *  derived fields (`turn` = `turns_completed ?? turns_attempted`). */
+export interface TaskRowView {
+  readonly task_id: string;
+  readonly status: string;
+  readonly repo: string;
+  readonly issue_number: number | null;
+  readonly task_type: string;
+  readonly pr_number: number | null;
+  readonly task_description: string;
+  readonly branch_name: string;
+  readonly pr_url: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly cost_usd: number | null;
+  readonly duration_s: number | null;
+  readonly max_turns: number | null;
+  readonly turns_attempted: number | null;
+  readonly turns_completed: number | null;
+  /** Current step for the Watch header. Null on pre-DATA-1 records. */
+  readonly turn: number | null;
+  readonly approval_gate_count: number | null;
+  readonly approval_gate_cap: number | null;
+  readonly awaiting_approval_request_id: string | null;
+}
+
+/** Approval row rendered by the Approvals + Watch panels. Merges
+ *  `PendingApprovalSummary` (wire) with the parent task's `repo` +
+ *  `task_description`. Severity normalized to UPPERCASE. */
+export interface PendingApprovalView {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly tool_name: string;
+  readonly tool_input_preview: string;
+  readonly severity: 'HIGH' | 'MEDIUM' | 'LOW';
+  readonly reason: string;
+  readonly created_at: string;
+  readonly timeout_s: number;
+  readonly expires_at: string;
+  readonly matching_rule_ids: readonly string[];
+  readonly repo: string;
+  readonly task_description: string;
+}
+
+/** Cedar policy row for the Policies panel. `tier` uses the API
+ *  vocabulary (`hard`/`soft`). `cedar_source` is mock-only — real
+ *  mode leaves it undefined and the panel hides the section. */
+export interface PolicyRuleView {
+  readonly rule_id: string;
+  readonly tier: 'hard' | 'soft';
+  readonly summary: string;
+  readonly severity?: string;
+  readonly category?: string;
+  readonly approval_timeout_s?: number;
+  readonly action?: string;
+  readonly condition_summary?: string;
+  readonly cedar_source?: string;
+}
+
+/** Registered repo for the Submit panel's repo picker. */
+export interface RegisteredRepoView {
+  readonly repo: string;
+  readonly default_branch: string;
+}
+
+// ─── Status union (rendering-only) ──────────────────────────────────
 
 export type TaskStatus =
   | 'RUNNING'
@@ -34,46 +94,12 @@ export type TaskStatus =
   | 'FINALIZING'
   | 'TIMED_OUT';
 
-// ── Queries ─────────────────────────────────────────────────────────
-
-export function getTasks(): TaskSummary[] {
-  return MOCK_TASKS;
-}
-
-export function getTask(taskId: string): TaskSummary | undefined {
-  return MOCK_TASKS.find(t => t.task_id === taskId);
-}
-
-/** Get active registered repos from the RepoTable. */
-export function getRegisteredRepos(): RegisteredRepo[] {
-  return MOCK_REPOS.filter(r => r.status === 'active');
-}
-
-export function getEventsForTask(taskId: string): TaskEvent[] {
-  return MOCK_EVENTS.filter(e => e.task_id === taskId);
-}
-
-export function getPendingApprovals(): PendingApproval[] {
-  return MOCK_PENDING_APPROVALS;
-}
-
-export function getPolicies(): CedarPolicy[] {
-  return MOCK_POLICIES;
-}
-
-// ── Mutations ───────────────────────────────────────────────────────
-
-export function submitNewTask(repo: string, description: string): TaskSummary {
-  return mockSubmitTask(repo, description);
-}
-
-// ── Layout constants ────────────────────────────────────────────────
-// Terminal-aware widths. Swap with process.stdout.columns for responsive.
+// ─── Layout constants ───────────────────────────────────────────────
 
 export const TERM_WIDTH = 80;
 export const SEPARATOR_WIDTH = TERM_WIDTH - 8;
 export const TRUNC_DESCRIPTION = 35;
-export const TRUNC_DESCRIPTION_LONG = 55; // Watch header, Approvals goal
+export const TRUNC_DESCRIPTION_LONG = 55;
 export const TRUNC_REPO = 24;
 export const TRUNC_TOOL_INPUT = 40;
 export const TRUNC_REASON = 50;

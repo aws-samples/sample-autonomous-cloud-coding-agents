@@ -3,14 +3,14 @@ import { Box, Text } from 'ink';
 import figures from 'figures';
 import { useApprovals } from '../context.js';
 import { SEPARATOR_WIDTH } from '../data.js';
-import type { TaskSummary } from '../data.js';
+import type { TaskRowView } from '../data.js';
 import PeccyMini from './PeccyMini.js';
 
 export type PanelId = 'tasks' | 'watch' | 'approvals' | 'policies' | 'submit';
 
 interface TabBarProps {
   active: PanelId;
-  tasks: TaskSummary[];
+  tasks: TaskRowView[];
 }
 
 const TabBar: React.FC<TabBarProps> = ({ active, tasks }) => {

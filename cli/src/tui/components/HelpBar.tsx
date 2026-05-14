@@ -7,7 +7,7 @@ interface HelpBarProps {
   panel: PanelId;
   hasApproval?: boolean;
   isEditing?: boolean;
-  editMode?: 'text' | 'deny-confirm' | null;
+  editMode?: 'text' | 'deny-confirm' | 'scope-picker' | null;
   inDetail?: boolean;
 }
 
@@ -25,6 +25,8 @@ const HelpBar: React.FC<HelpBarProps> = ({ panel, hasApproval, isEditing, editMo
         <Box paddingX={1}>
           {editMode === 'deny-confirm' ? (
             <><K k="y" label=" deny" color="red" /><K k="n" label=" cancel" /><K k="Esc" label=" cancel" /></>
+          ) : editMode === 'scope-picker' ? (
+            <><K k="↑↓" label=" pick scope" /><K k="Enter" label=" confirm" /><K k="Esc" label=" cancel" /></>
           ) : (
             <><K k="Enter" label=" confirm" /><K k="Esc" label=" cancel" /></>
           )}

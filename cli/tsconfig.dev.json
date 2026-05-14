@@ -9,7 +9,7 @@
     "lib": [
       "es2020"
     ],
-    "module": "CommonJS",
+    "module": "ESNext",
     "noEmitOnError": false,
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": true,
@@ -23,6 +23,9 @@
     "strictPropertyInitialization": true,
     "stripInternal": true,
     "target": "ES2020",
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
     "types": [
       "node",
       "jest"
@@ -30,7 +33,9 @@
   },
   "include": [
     "src/**/*.ts",
-    "test/**/*.ts"
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "test/**/*.tsx"
   ],
   "exclude": [
     "node_modules"

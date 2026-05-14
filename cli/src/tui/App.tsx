@@ -9,7 +9,7 @@ import PeccyIcon from './components/PeccyIcon.js';
 import TabBar, { type PanelId } from './components/TabBar.js';
 import HelpBar from './components/HelpBar.js';
 import { useEditing, useApprovals } from './context.js';
-import { getTasks, getTask } from './data.js';
+import { useData } from './hooks/useData.js';
 import TaskList from './panels/TaskList.js';
 import Watch from './panels/Watch.js';
 import Approvals from './panels/Approvals.js';
@@ -23,12 +23,13 @@ const App: React.FC = () => {
   const { exit } = useApp();
   const { isEditing, editMode } = useEditing();
   const { approvals } = useApprovals();
+  const { snapshot } = useData();
   const [splash, setSplash] = useState(true);
   const [ready, setReady] = useState(false);
   const [panel, setPanel] = useState<PanelId>('tasks');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [approvalsInDetail, setApprovalsInDetail] = useState(false);
-  const tasks = getTasks();
+  const tasks = snapshot.tasks;
 
   // Splash timer — any keypress also dismisses it
   useEffect(() => {
@@ -44,7 +45,9 @@ const App: React.FC = () => {
     }
   }, [splash, ready]);
 
-  const selectedTask = selectedTaskId ? getTask(selectedTaskId) : undefined;
+  const selectedTask = selectedTaskId
+    ? snapshot.tasks.find(t => t.task_id === selectedTaskId)
+    : undefined;
 
   const hasApproval = panel === 'watch' && selectedTask &&
     approvals.some(a => a.task_id === selectedTask.task_id);

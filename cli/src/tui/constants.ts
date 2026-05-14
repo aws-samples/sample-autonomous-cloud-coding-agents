@@ -44,37 +44,66 @@ export const STATUS_LABEL: Record<string, string> = {
 
 // ── Event types ─────────────────────────────────────────────────────
 
+// Keys include both the mock fixture event names and the real
+// agent-side names (`agent_turn`, `agent_tool_call`, ...). Keeping
+// both in one map lets EventLine handle mixed streams and the mock
+// demo without branching. See agent/src/progress_writer.py for the
+// authoritative producer-side vocabulary.
 export const EVENT_COLOR: Record<string, string> = {
+  // Lifecycle
   task_started: 'green',
+  task_complete: 'green',
+  task_completed: 'green',
+  task_failed: 'red',
+  // Agent runtime (real)
+  agent_turn: 'gray',
+  agent_tool_call: 'yellow',
+  agent_tool_result: 'gray',
+  agent_milestone: 'cyan',
+  agent_cost_update: 'yellow',
+  agent_error: 'red',
+  // Mock fixture aliases
   turn_start: 'gray',
   tool_call: 'yellow',
   tool_result: 'gray',
   milestone: 'cyan',
   cost_update: 'yellow',
   error: 'red',
+  // Cedar HITL milestones
   approval_requested: 'magenta',
   approval_granted: 'green',
   approval_denied: 'red',
   approval_timed_out: 'redBright',
+  approval_stranded: 'redBright',
   nudge_acknowledged: 'cyan',
-  task_complete: 'green',
-  task_failed: 'red',
 };
 
 export const EVENT_ICON: Record<string, string> = {
+  // Lifecycle
   task_started: figures.star,
+  task_complete: figures.tick,
+  task_completed: figures.tick,
+  task_failed: figures.cross,
+  // Agent runtime (real)
+  agent_turn: figures.line,
+  agent_tool_call: figures.play,
+  agent_tool_result: figures.pointer,
+  agent_milestone: figures.star,
+  agent_cost_update: '$',
+  agent_error: figures.cross,
+  // Mock fixture aliases
   turn_start: figures.line,
   tool_call: figures.play,
   tool_result: figures.pointer,
   milestone: figures.star,
   cost_update: '$',
   error: figures.cross,
+  // Cedar HITL milestones
   approval_requested: figures.warning,
   approval_granted: figures.tick,
   approval_denied: figures.cross,
   approval_timed_out: figures.cross,
-  task_complete: figures.tick,
-  task_failed: figures.cross,
+  approval_stranded: figures.cross,
 };
 
 // ── Severity ────────────────────────────────────────────────────────
@@ -93,13 +122,21 @@ export const SEVERITY_LABEL: Record<string, string> = {
 };
 
 // ── Policy tiers (plain-English labels) ─────────────────────────────
+// API buckets from GET /repos/{id}/policies are `hard` and `soft`.
+// Legacy TUI tiers `hard-deny` / `hard-gate` are kept as aliases so the
+// mock fixture and any in-flight callers stay rendering-clean through
+// the Phase 1 → Phase 3 transition.
 
 export const TIER_LABEL: Record<string, string> = {
+  hard: 'Blocked',
+  soft: 'Requires approval',
   'hard-deny': 'Blocked',
   'hard-gate': 'Requires approval',
 };
 
 export const TIER_COLOR: Record<string, string> = {
+  hard: 'red',
+  soft: 'magenta',
   'hard-deny': 'red',
   'hard-gate': 'magenta',
 };

@@ -12,9 +12,18 @@ interface ApprovalCardProps {
   timeoutRemaining?: number;
 }
 
+/** Narrow a `Record<string, unknown>` metadata field to string for
+ *  display. Wire `TaskEvent.metadata` is typed `unknown` per value so
+ *  the agent side can evolve without breaking the consumer; the TUI
+ *  always just wants a string for preview. */
+function mstr(m: Record<string, unknown>, key: string, fallback = ''): string {
+  const v = m[key];
+  return typeof v === 'string' ? v : fallback;
+}
+
 const ApprovalCard: React.FC<ApprovalCardProps> = ({ event, taskDescription, repo, timeoutRemaining }) => {
   const m = event.metadata;
-  const sev = ((m.severity ?? 'MEDIUM') as string).toUpperCase();
+  const sev = mstr(m, 'severity', 'MEDIUM').toUpperCase();
   const sevColor = SEVERITY_COLOR[sev] ?? 'yellow';
   const sevLabel = SEVERITY_LABEL[sev] ?? sev;
   const timeColor = timeoutRemaining != null
@@ -35,13 +44,13 @@ const ApprovalCard: React.FC<ApprovalCardProps> = ({ event, taskDescription, rep
       <Text> </Text>
       <Box>
         <Text dimColor>Wants to:  </Text>
-        <Text bold>{m.tool_name}</Text>
+        <Text bold>{mstr(m, 'tool_name')}</Text>
         <Text> {figures.arrowRight} </Text>
-        <Text>{trunc(m.input_preview ?? '', TRUNC_TOOL_INPUT)}</Text>
+        <Text>{trunc(mstr(m, 'input_preview'), TRUNC_TOOL_INPUT)}</Text>
       </Box>
       <Box>
         <Text dimColor>Why:       </Text>
-        <Text>{trunc(m.reason ?? '', TRUNC_REASON)}</Text>
+        <Text>{trunc(mstr(m, 'reason'), TRUNC_REASON)}</Text>
       </Box>
       {timeoutRemaining != null && (
         <Box>

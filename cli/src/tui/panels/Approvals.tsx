@@ -4,6 +4,9 @@ import figures from 'figures';
 import { useApprovals, useEditing } from '../context.js';
 import { SEPARATOR_WIDTH, TRUNC_TOOL_INPUT, TRUNC_REASON, TRUNC_DESCRIPTION_LONG } from '../data.js';
 import { SEVERITY_COLOR, SEVERITY_LABEL, trunc, fmtDuration } from '../constants.js';
+import ScopePicker from '../components/ScopePicker.js';
+import DenyReasonInput from '../components/DenyReasonInput.js';
+import type { ApprovalScope } from '../../types.js';
 
 interface ApprovalsProps {
   active: boolean;
@@ -16,6 +19,8 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
   const [cursor, setCursor] = useState(0);
   const [message, setMessage] = useState('');
   const [confirmDeny, setConfirmDeny] = useState<string | null>(null);
+  const [denyReasonFor, setDenyReasonFor] = useState<string | null>(null);
+  const [scopePickerFor, setScopePickerFor] = useState<string | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [, setTick] = useState(0);
   const msgTimer = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
@@ -61,11 +66,27 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
   }, [detailId, onDetailChange]);
 
   useEffect(() => {
-    setEditing(!!confirmDeny, 'deny-confirm');
+    if (scopePickerFor) setEditing(true, 'scope-picker');
+    else if (denyReasonFor) setEditing(true, 'text');
+    else if (confirmDeny) setEditing(true, 'deny-confirm');
+    else setEditing(false);
     return () => setEditing(false);
-  }, [confirmDeny, setEditing]);
+  }, [confirmDeny, denyReasonFor, scopePickerFor, setEditing]);
 
   const elapsed = (iso: string): number => Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+
+  /** Seconds remaining before the approval auto-denies. Prefer the
+   *  server's `expires_at` (authoritative — the server already
+   *  accounts for cap clipping etc.); fall back to derived
+   *  `timeout_s - elapsed(created_at)` only if expires_at is
+   *  missing. */
+  const computeRemaining = (expiresAt: string, createdAt: string, timeoutS: number): number => {
+    if (expiresAt) {
+      const ms = new Date(expiresAt).getTime() - Date.now();
+      return Math.max(0, Math.floor(ms / 1000));
+    }
+    return Math.max(0, timeoutS - elapsed(createdAt));
+  };
 
   // The approval currently being viewed in detail (or selected in list)
   const activeApproval = detailId
@@ -75,12 +96,14 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
   useInput(useCallback((input, key) => {
     if (!active) return;
 
-    // Deny confirmation
+    // Child overlays own input while mounted.
+    if (scopePickerFor || denyReasonFor) return;
+
+    // Deny confirmation — pressing y now opens the reason input.
     if (confirmDeny) {
       if (input === 'y' || input === 'Y') {
-        const a = flatList.find(x => x.request_id === confirmDeny);
-        if (a) { deny(confirmDeny); showMessage(`${figures.cross} Denied ${a.tool_name} for ..${a.task_id.slice(-4)}`); }
-        setConfirmDeny(null); setDetailId(null); return;
+        setDenyReasonFor(confirmDeny);
+        setConfirmDeny(null); return;
       }
       if (key.escape || input === 'n' || input === 'N') { setConfirmDeny(null); return; }
       return;
@@ -90,9 +113,8 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
     if (detailId) {
       if (key.escape) { setDetailId(null); return; }
       if (input === 'a' && activeApproval) {
-        approve(activeApproval.request_id);
-        showMessage(`${figures.tick} Approved ${activeApproval.tool_name} for ..${activeApproval.task_id.slice(-4)}`);
-        setDetailId(null); return;
+        setScopePickerFor(activeApproval.request_id);
+        return;
       }
       if (input === 'd' && activeApproval) { setConfirmDeny(activeApproval.request_id); return; }
       return;
@@ -109,11 +131,31 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
       return;
     }
 
-    // Quick approve/deny from list
+    // Quick approve/deny from list → open picker / reason input
     const selected = flatList[cursor];
-    if (input === 'a' && selected) { approve(selected.request_id); showMessage(`${figures.tick} Approved ${selected.tool_name} for ..${selected.task_id.slice(-4)}`); }
+    if (input === 'a' && selected) { setScopePickerFor(selected.request_id); }
     if (input === 'd' && selected) { setConfirmDeny(selected.request_id); }
-  }, [active, flatList, cursor, confirmDeny, detailId, activeApproval, approve, deny, showMessage]));
+  }, [active, flatList, cursor, confirmDeny, detailId, activeApproval, scopePickerFor, denyReasonFor]));
+
+  const handleApproveWithScope = useCallback((scope: ApprovalScope) => {
+    const a = flatList.find(x => x.request_id === scopePickerFor);
+    if (a && scopePickerFor) {
+      approve(scopePickerFor, scope);
+      showMessage(`${figures.tick} Approved ${a.tool_name} for ..${a.task_id.slice(-4)} (${scope})`);
+    }
+    setScopePickerFor(null);
+    setDetailId(null);
+  }, [flatList, scopePickerFor, approve, showMessage]);
+
+  const handleDenyWithReason = useCallback((reason: string) => {
+    const a = flatList.find(x => x.request_id === denyReasonFor);
+    if (a && denyReasonFor) {
+      deny(denyReasonFor, reason || undefined);
+      showMessage(`${figures.cross} Denied ${a.tool_name} for ..${a.task_id.slice(-4)}${reason ? ` — "${trunc(reason, 30)}"` : ''}`);
+    }
+    setDenyReasonFor(null);
+    setDetailId(null);
+  }, [flatList, denyReasonFor, deny, showMessage]);
 
   let renderIdx = 0;
 
@@ -121,8 +163,8 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
 
   if (detailId && activeApproval) {
     const a = activeApproval;
-    const sev = a.severity.toUpperCase();
-    const remaining = Math.max(0, a.timeout_s - elapsed(a.created_at));
+    const sev = a.severity; // already UPPERCASE per view-model contract
+    const remaining = computeRemaining(a.expires_at, a.created_at, a.timeout_s);
     const timeColor = remaining <= 120 ? 'red' : remaining <= 300 ? 'yellow' : undefined;
 
     return (
@@ -198,11 +240,26 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
           <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" marginTop={1}>
             <Text color="red" bold>{figures.warning} Confirm deny?</Text>
             <Text>The agent will be blocked and may not be able to continue.</Text>
-            <Box><Text color="red" bold>[y]</Text><Text> Deny  </Text><Text bold>[n]</Text><Text> Cancel</Text></Box>
+            <Box><Text color="red" bold>[y]</Text><Text> Add reason  </Text><Text bold>[n]</Text><Text> Cancel</Text></Box>
           </Box>
         )}
 
-        {message && !confirmDeny && (
+        {scopePickerFor && (
+          <ScopePicker
+            heading={`Approve ${a.tool_name}`}
+            onConfirm={handleApproveWithScope}
+            onCancel={() => setScopePickerFor(null)}
+          />
+        )}
+
+        {denyReasonFor && (
+          <DenyReasonInput
+            onConfirm={handleDenyWithReason}
+            onCancel={() => setDenyReasonFor(null)}
+          />
+        )}
+
+        {message && !confirmDeny && !scopePickerFor && !denyReasonFor && (
           <Box marginTop={1}><Text color="green">{message}</Text></Box>
         )}
       </Box>
@@ -242,8 +299,8 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
               {taskApprovals.map(a => {
                 const idx = renderIdx++;
                 const sel = idx === cursor && active;
-                const sev = a.severity.toUpperCase();
-                const remaining = Math.max(0, a.timeout_s - elapsed(a.created_at));
+                const sev = a.severity; // already UPPERCASE
+                const remaining = computeRemaining(a.expires_at, a.created_at, a.timeout_s);
                 const timeColor = remaining <= 120 ? 'red' : remaining <= 300 ? 'yellow' : undefined;
 
                 return (
@@ -281,11 +338,29 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
         <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" marginTop={1}>
           <Text color="red" bold>{figures.warning} Confirm deny?</Text>
           <Text>The agent will be blocked and may not be able to continue.</Text>
-          <Box><Text color="red" bold>[y]</Text><Text> Deny  </Text><Text bold>[n]</Text><Text> Cancel</Text></Box>
+          <Box><Text color="red" bold>[y]</Text><Text> Add reason  </Text><Text bold>[n]</Text><Text> Cancel</Text></Box>
         </Box>
       )}
 
-      {message && !confirmDeny && (
+      {scopePickerFor && (() => {
+        const sel = flatList.find(x => x.request_id === scopePickerFor);
+        return sel ? (
+          <ScopePicker
+            heading={`Approve ${sel.tool_name}`}
+            onConfirm={handleApproveWithScope}
+            onCancel={() => setScopePickerFor(null)}
+          />
+        ) : null;
+      })()}
+
+      {denyReasonFor && (
+        <DenyReasonInput
+          onConfirm={handleDenyWithReason}
+          onCancel={() => setDenyReasonFor(null)}
+        />
+      )}
+
+      {message && !confirmDeny && !scopePickerFor && !denyReasonFor && (
         <Box marginTop={1}><Text color="green">{message}</Text></Box>
       )}
     </Box>

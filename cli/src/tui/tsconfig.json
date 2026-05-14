@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
-    "rootDir": ".",
-    "outDir": "../../lib/tui",
+    "rootDir": "..",
+    "outDir": "../../lib",
     "target": "ES2022",
     "module": "Node16",
     "moduleResolution": "Node16",
@@ -15,6 +15,10 @@
     "noUnusedParameters": false,
     "types": ["node"]
   },
-  "include": ["./**/*.ts", "./**/*.tsx"],
+  "include": [
+    "./**/*.ts",
+    "./**/*.tsx",
+    "../types.ts"
+  ],
   "exclude": []
 }

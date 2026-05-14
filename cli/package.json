@@ -4,12 +4,13 @@
     "bgagent": "lib/bin/bgagent.js"
   },
   "scripts": {
-    "compile": "tsc --build tsconfig.json",
+    "compile": "tsc --build tsconfig.json && npm run tui:compile",
     "eslint": "eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test build-tools",
-    "test": "jest --passWithNoTests --updateSnapshot",
+    "test": "jest --passWithNoTests --updateSnapshot && npm run test:tui",
+    "test:tui": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.tui.config.cjs --passWithNoTests",
     "test:watch": "jest --watch",
     "build": "npm run compile && npm run test && npm run eslint",
-    "tui:compile": "tsc --build src/tui/tsconfig.json",
+    "tui:compile": "tsc --build src/tui/tsconfig.json && node -e \"require('fs').writeFileSync('lib/tui/package.json', JSON.stringify({type:'module'}))\"",
     "tui": "npm run tui:compile && node --enable-source-maps lib/tui/index.js",
     "security:retire": "retire --path . --severity high"
   },
@@ -26,6 +27,7 @@
     "eslint-plugin-jest": "^29.15.1",
     "eslint-plugin-jsdoc": "^62.8.1",
     "eslint-plugin-license-header": "^0.9.0",
+    "ink-testing-library": "^4.0.0",
     "jest": "^30.3.0",
     "jest-junit": "^16",
     "retire": "^5.4.2",
@@ -67,7 +69,8 @@
       "/node_modules/"
     ],
     "testPathIgnorePatterns": [
-      "/node_modules/"
+      "/node_modules/",
+      "/test/tui-panels/"
     ],
     "watchPathIgnorePatterns": [
       "/node_modules/"
@@ -81,6 +84,9 @@
         }
       ]
     ],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
     "transform": {
       "^.+\\.[t]sx?$": [
         "ts-jest",
