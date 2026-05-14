@@ -24,6 +24,9 @@ jobs:
       actions: write # upload-artifact when self-mutation is detected
       contents: read
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [agentcore]
     outputs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
     env:
@@ -53,11 +56,20 @@ jobs:
         run: mise run install
       - name: build
         run: mise run build
+      - name: CDK Synth (${{ matrix.variant }})
+        run: npx cdk synth -c computeVariant=${{ matrix.variant }} --output cdk-${{ matrix.variant }}.out
+        working-directory: cdk
+      - name: Upload CDK artifact (${{ matrix.variant }})
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cdk-${{ matrix.variant }}-out
+          path: cdk/cdk-${{ matrix.variant }}.out/
+          retention-days: 5
       - name: Find mutations
         id: self_mutation
         run: |-
           git add .
-          git diff --staged --patch --exit-code > repo.patch || echo "self_mutation_happened=true" >> $GITHUB_OUTPUT
+          git diff --staged --patch --exit-code -- . ':!cdk/cdk-*.out' > repo.patch || echo "self_mutation_happened=true" >> $GITHUB_OUTPUT
         shell: bash
         working-directory: ./
 
