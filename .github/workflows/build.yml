@@ -64,7 +64,6 @@ jobs:
         with:
           name: cdk-${{ matrix.variant }}-out
           path: cdk/cdk-${{ matrix.variant }}.out/
-          retention-days: 5
       - name: Find mutations
         id: self_mutation
         run: |-
