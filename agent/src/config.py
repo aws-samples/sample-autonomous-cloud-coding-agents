@@ -5,6 +5,7 @@ import sys
 import uuid
 
 from models import TaskConfig, TaskType
+from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 
@@ -58,6 +59,7 @@ def resolve_linear_api_token() -> str:
         return ""
     try:
         import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = boto3.client("secretsmanager", region_name=region)
@@ -66,10 +68,12 @@ def resolve_linear_api_token() -> str:
         if token:
             os.environ["LINEAR_API_TOKEN"] = token
         return token
-    except Exception as e:
+    except (BotoCoreError, ClientError) as e:
         # Never let a Secrets Manager outage crash the agent. The Linear MCP
-        # will simply fail on first call with a clear auth error.
-        print(f"[config] resolve_linear_api_token failed: {type(e).__name__}: {e}", flush=True)
+        # will simply fail on first call with a clear auth error. Narrowed
+        # to botocore exceptions per Alain's #63 review — broader `except`
+        # hid genuine bugs in the Secrets Manager call shape.
+        log("WARN", f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
         return ""
 
 
