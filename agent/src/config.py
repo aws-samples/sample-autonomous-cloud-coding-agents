@@ -39,54 +39,101 @@ def resolve_github_token() -> str:
 
 
 def resolve_linear_api_token() -> str:
-    """Resolve the Linear personal API token from Secrets Manager or env.
+    """Resolve the Linear personal API token via AgentCore Identity.
 
-    Mirrors ``resolve_github_token``: in deployed mode
-    ``LINEAR_API_TOKEN_SECRET_ARN`` is set and the token is fetched once
-    and cached in ``LINEAR_API_TOKEN``. For local development, falls back
-    to ``LINEAR_API_TOKEN`` directly.
+    In deployed mode, ``LINEAR_API_KEY_PROVIDER_NAME`` names a credential
+    provider in AgentCore Identity (the token vault). The agent runtime
+    auto-injects a workload access token into ``BedrockAgentCoreContext``;
+    we exchange that for the API key value and cache it in
+    ``LINEAR_API_TOKEN`` so downstream consumers (the Linear MCP's
+    ``${LINEAR_API_TOKEN}`` placeholder in ``.mcp.json`` and
+    ``linear_reactions.py``'s GraphQL Authorization header) keep working
+    unchanged.
 
-    Returns an empty string if the secret is absent or empty — the agent-side
+    For local development, falls back to a pre-set ``LINEAR_API_TOKEN``
+    env var so the agent can run outside AgentCore Runtime.
+
+    Returns an empty string if the credential is absent — the agent-side
     MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}`` env
     placeholder, and the Linear MCP will reject the request (fail-closed).
     This function is only called when ``channel_source == 'linear'``.
+
+    Phase 2.0a: replaces the prior Secrets Manager path. Phase 2.0b will
+    swap this function entirely for the ``@requires_access_token`` OAuth
+    decorator pattern; this imperative shape exists because API keys
+    don't need refresh and the MCP config expects a static token.
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
     if cached:
         return cached
-    secret_arn = os.environ.get("LINEAR_API_TOKEN_SECRET_ARN")
-    if not secret_arn:
+
+    provider_name = os.environ.get("LINEAR_API_KEY_PROVIDER_NAME")
+    if not provider_name:
         return ""
-    try:
-        import boto3
-        from botocore.exceptions import BotoCoreError, ClientError
-    except ImportError as e:
-        # boto3 missing from the container image — degrade gracefully rather
-        # than hard-crashing the agent. The Linear MCP will fail on first
-        # call with a clear auth error.
-        log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        log("WARN", "resolve_linear_api_token: AWS_REGION not set; cannot resolve API key")
         return ""
 
     try:
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("secretsmanager", region_name=region)
-        resp = client.get_secret_value(SecretId=secret_arn)
-        token = resp.get("SecretString", "") or ""
+        import asyncio
+
+        from bedrock_agentcore.runtime import BedrockAgentCoreContext
+        from bedrock_agentcore.services.identity import IdentityClient
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:
+        # bedrock_agentcore SDK missing from the container image — degrade
+        # gracefully rather than hard-crashing the agent. The Linear MCP
+        # will fail on first call with a clear auth error.
+        log("WARN", f"resolve_linear_api_token: bedrock_agentcore unavailable ({e}); skipping")
+        return ""
+
+    try:
+        workload_token = BedrockAgentCoreContext.get_workload_access_token()
+        if workload_token is None:
+            # Outside the AgentCore Runtime container (e.g. local dev). The
+            # SDK's `_set_up_local_auth` fallback writes `.agentcore.json`
+            # which doesn't fit our flow; bail out and let the caller see
+            # an empty token so the MCP config fails closed.
+            log(
+                "WARN",
+                "resolve_linear_api_token: workload access token not in context "
+                "(agent must run inside AgentCore Runtime, or set LINEAR_API_TOKEN "
+                "directly for local dev)",
+            )
+            return ""
+
+        client = IdentityClient(region=region)
+        token = (
+            asyncio.run(
+                client.get_api_key(
+                    provider_name=provider_name,
+                    agent_identity_token=workload_token,
+                )
+            )
+            or ""
+        )
         if token:
             os.environ["LINEAR_API_TOKEN"] = token
         return token
     except ClientError as e:
-        # Narrowed from a broader `except` per #63 review — broader catches
-        # hid genuine bugs in the Secrets Manager call shape. AccessDenied
-        # is logged at ERROR because it's a persistent IAM misconfig that
-        # should page someone, not a transient blip.
+        # Narrowed from a broader `except` per #63 review. AccessDenied is
+        # logged at ERROR because it's a persistent IAM misconfig (likely
+        # the runtime role missing bedrock-agentcore:GetResourceApiKey or
+        # GetWorkloadAccessToken) that should page someone, not a transient
+        # blip. ResourceNotFound (provider name unknown) is also persistent
+        # — same severity. Other ClientErrors are likely transient (throttle,
+        # network blip) and stay at WARN.
         code = e.response.get("Error", {}).get("Code", "")
-        severity = "ERROR" if code == "AccessDeniedException" else "WARN"
+        severity = (
+            "ERROR" if code in ("AccessDeniedException", "ResourceNotFoundException") else "WARN"
+        )
         log(severity, f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
         return ""
     except BotoCoreError as e:
-        # Never let a Secrets Manager outage crash the agent. The Linear MCP
-        # will simply fail on first call with a clear auth error.
+        # Never let an Identity outage crash the agent. The Linear MCP will
+        # fail on first call with a clear auth error.
         log("WARN", f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
         return ""
 

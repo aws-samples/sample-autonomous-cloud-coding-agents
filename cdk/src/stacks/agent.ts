@@ -595,14 +595,32 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
     });
 
-    // Pipe the Linear API token secret into the AgentCore runtime so the
-    // agent's `resolve_linear_api_token()` can populate `LINEAR_API_TOKEN`
-    // for the Linear MCP's `${LINEAR_API_TOKEN}` placeholder.
-    linearIntegration.apiTokenSecret.grantRead(runtime);
+    // Phase 2.0a: agent runtime resolves the Linear API token via AgentCore
+    // Identity, not Secrets Manager. The credential lives in an Identity
+    // api-key provider; the runtime container's resolve_linear_api_token()
+    // exchanges its auto-injected workload access token for the API key
+    // value. Phase 2.0b will swap this for an OAuth provider + Gateway.
+    //
+    // Lambdas (orchestrator + processor) are intentionally NOT migrated
+    // here — the bedrock_agentcore Python SDK has no Node.js equivalent;
+    // they keep using Secrets Manager via `linearIntegration.apiTokenSecret`
+    // until 2.0b's full cutover.
+    const linearApiKeyProviderName = 'linear-api-key';
     cfnRuntime.addPropertyOverride(
-      'EnvironmentVariables.LINEAR_API_TOKEN_SECRET_ARN',
-      linearIntegration.apiTokenSecret.secretArn,
+      'EnvironmentVariables.LINEAR_API_KEY_PROVIDER_NAME',
+      linearApiKeyProviderName,
     );
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'bedrock-agentcore:GetResourceApiKey',
+        'bedrock-agentcore:GetWorkloadAccessToken',
+      ],
+      // AgentCore Identity ARN format isn't fully standardized in public
+      // docs as of 2026-05-14; scope to all bedrock-agentcore resources in
+      // this account/region. Tighten to specific provider/workload ARNs in
+      // 2.0b once OAuth migration documents the canonical resource shape.
+      resources: ['*'],
+    }));
 
     // Pipe the Linear API token secret into the orchestrator Lambda so the
     // concurrency-cap rejection path can post a Linear comment + ❌ instead

@@ -57,6 +57,30 @@ Both are stored in Secrets Manager (`LinearWebhookSecret` and `LinearApiTokenSec
 
 As a final step, `setup` calls the Linear API with the token you just stored, looks up the token owner, and auto-links that Linear identity to the Cognito user currently logged in to the CLI. This skips the code-exchange ceremony for the common case where one person installs ABCA for their own workspace. If the auto-link fails (token invalid, not logged in, etc.) setup prints a warning and continues.
 
+### Step 4.5: Register the API token with AgentCore Identity
+
+Phase 2.0a (May 2026) added a second consumer for the Linear token: the **agent runtime container** resolves the token through AWS Bedrock AgentCore Identity rather than Secrets Manager, so the agent never needs IAM read permission on `LinearApiTokenSecret` at the runtime layer.
+
+> **Why two stores?** Lambdas (the webhook processor and orchestrator) keep using Secrets Manager because the AgentCore Identity SDK doesn't ship a Node.js client yet. The agent container (Python) uses Identity. Phase 2.0b will migrate Lambdas to OAuth via Identity, retire Secrets Manager for Linear, and converge on a single store.
+
+After completing Step 4, register the **same** API token with AgentCore Identity (one-time, admin):
+
+```bash
+agentcore add credential --type api-key --name linear-api-key
+# (paste the same lin_api_… token when prompted)
+```
+
+The CDK stack hardcodes the provider name `linear-api-key`. If you use a different name, override `LINEAR_API_KEY_PROVIDER_NAME` on the AgentCore runtime in `cdk/src/stacks/agent.ts`.
+
+To verify the credential was stored:
+
+```bash
+agentcore list credentials
+# linear-api-key (api-key)  created: …
+```
+
+If you skip this step the agent's `resolve_linear_api_token()` returns an empty string, the Linear MCP fails with an auth error on the first call, and you'll see `WARN linear_reactions: HTTP 401 from Linear` in CloudWatch.
+
 **If auto-link fails persistently** (rare — usually transient Linear API hiccups, just re-run `bgagent linear setup`), an admin can insert the mapping directly into the `LinearUserMappingTable` DynamoDB table:
 
 ```bash
