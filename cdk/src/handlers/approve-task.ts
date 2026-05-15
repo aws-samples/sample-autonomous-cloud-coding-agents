@@ -24,6 +24,7 @@ import { ulid } from 'ulid';
 import { VALID_APPROVAL_SCOPE_PREFIXES, parseApprovalScope } from './shared/approval-scope';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { ApprovalRequest, ApprovalResponse, ApprovalScope } from './shared/types';
 
@@ -321,11 +322,3 @@ function classifyCancel(
   );
 }
 
-function formatMinuteBucket(date: Date): string {
-  const y = date.getUTCFullYear().toString().padStart(4, '0');
-  const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
-  const d = date.getUTCDate().toString().padStart(2, '0');
-  const h = date.getUTCHours().toString().padStart(2, '0');
-  const mi = date.getUTCMinutes().toString().padStart(2, '0');
-  return `${y}${m}${d}${h}${mi}`;
-}
