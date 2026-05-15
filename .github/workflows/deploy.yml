@@ -32,8 +32,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER_FROM_EVENT: ${{ github.event.workflow_run.pull_requests[0].number }}
+          ALLOWED_COMPUTE_TYPES: "agentcore"
         run: |
           ALL_TYPES='["agentcore"]'
+
+          validate_compute_type() {
+            local type="$1"
+            for allowed in $ALLOWED_COMPUTE_TYPES; do
+              [[ "$type" == "$allowed" ]] && return 0
+            done
+            echo "::error::Invalid compute_type: '$type'. Allowed: $ALLOWED_COMPUTE_TYPES"
+            return 1
+          }
+
+          filter_valid_types() {
+            local input_json="$1"
+            local valid_json="[]"
+            for type in $(echo "$input_json" | jq -r '.[]'); do
+              if validate_compute_type "$type" 2>/dev/null; then
+                valid_json=$(echo "$valid_json" | jq --arg t "$type" '. + [$t]')
+              else
+                echo "::warning::Ignoring invalid compute_type from label: '$type'"
+              fi
+            done
+            echo "$valid_json"
+          }
+
           INTENT=$(jq -r '.deploy' deploy-intent.json)
           echo "Deploy intent from build: $INTENT"
 
@@ -43,7 +67,6 @@ jobs:
               echo "has_targets=false" >> "$GITHUB_OUTPUT"
               ;;
             labels)
-              # PR-triggered build — check labels
               if [[ -z "$PR_NUMBER_FROM_EVENT" ]]; then
                 echo "matrix=[]" >> "$GITHUB_OUTPUT"
                 echo "has_targets=false" >> "$GITHUB_OUTPUT"
@@ -56,9 +79,17 @@ jobs:
                 echo "matrix=$ALL_TYPES" >> "$GITHUB_OUTPUT"
                 echo "has_targets=true" >> "$GITHUB_OUTPUT"
               elif echo "$LABELS" | jq -e '[.[] | select(startswith("deploy:"))] | length > 0' > /dev/null 2>&1; then
-                TYPES=$(echo "$LABELS" | jq -c '[.[] | select(startswith("deploy:")) | ltrimstr("deploy:")]')
-                echo "matrix=$TYPES" >> "$GITHUB_OUTPUT"
-                echo "has_targets=true" >> "$GITHUB_OUTPUT"
+                RAW_TYPES=$(echo "$LABELS" | jq -c '[.[] | select(startswith("deploy:")) | ltrimstr("deploy:")]')
+                VALIDATED=$(filter_valid_types "$RAW_TYPES")
+                COUNT=$(echo "$VALIDATED" | jq 'length')
+                if [[ "$COUNT" -gt 0 ]]; then
+                  echo "matrix=$VALIDATED" >> "$GITHUB_OUTPUT"
+                  echo "has_targets=true" >> "$GITHUB_OUTPUT"
+                else
+                  echo "::warning::All deploy:<type> labels were invalid"
+                  echo "matrix=[]" >> "$GITHUB_OUTPUT"
+                  echo "has_targets=false" >> "$GITHUB_OUTPUT"
+                fi
               elif echo "$LABELS" | jq -e 'index("deploy")' > /dev/null 2>&1; then
                 echo "matrix=$ALL_TYPES" >> "$GITHUB_OUTPUT"
                 echo "has_targets=true" >> "$GITHUB_OUTPUT"
@@ -68,7 +99,11 @@ jobs:
               fi
               ;;
             *)
-              # Specific compute_type from push-to-main or workflow_dispatch
+              if ! validate_compute_type "$INTENT"; then
+                echo "matrix=[]" >> "$GITHUB_OUTPUT"
+                echo "has_targets=false" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
               echo "matrix=[\"$INTENT\"]" >> "$GITHUB_OUTPUT"
               echo "has_targets=true" >> "$GITHUB_OUTPUT"
               ;;
