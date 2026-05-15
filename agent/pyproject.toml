@@ -5,7 +5,7 @@ description = "Background coding agent — runs tasks in isolated cloud environm
 requires-python = ">=3.13"
 dependencies = [
     "boto3==1.43.6", #https://pypi.org/project/boto3/
-    "claude-agent-sdk==0.1.81", #https://github.com/anthropics/claude-agent-sdk-python
+    "claude-agent-sdk==0.2.82", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.82
     "requests==2.34.0", #https://pypi.org/project/requests/
     "fastapi==0.136.1", #https://pypi.org/project/fastapi/
     "uvicorn==0.46.0", #https://pypi.org/project/uvicorn/
