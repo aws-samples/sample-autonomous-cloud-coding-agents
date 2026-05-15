@@ -214,6 +214,7 @@ export class TaskApi extends Construct {
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
       { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
     ]);
 
     // --- REST API ---
