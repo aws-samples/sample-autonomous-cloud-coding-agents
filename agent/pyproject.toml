@@ -9,7 +9,7 @@ dependencies = [
     "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.136.1", #https://pypi.org/project/fastapi/
     "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro~=0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
+    "aws-opentelemetry-distro==0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
     "mcp==1.27.1", #https://pypi.org/project/mcp/
     "cedarpy==4.8.3", #https://github.com/k9securityio/cedar-py
 ]

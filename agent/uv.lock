@@ -152,7 +152,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aws-opentelemetry-distro", specifier = "~=0.17.0" },
+    { name = "aws-opentelemetry-distro", specifier = "==0.17.0" },
     { name = "boto3", specifier = "==1.43.9" },
     { name = "cedarpy", specifier = "==4.8.3" },
     { name = "claude-agent-sdk", specifier = "==0.2.82" },
