@@ -424,7 +424,15 @@ async def _handle_require_approval(
             )
         except Exception as exc:
             log("WARN", f"approval TIMED_OUT write raised: {type(exc).__name__}: {exc}")
-            wrote = True  # fall through with original TIMED_OUT
+            # Fall into the IMPL-24 re-read path. A transient DDB write
+            # error MUST NOT bypass the late-approval check — the user's
+            # APPROVED decision may already be on the row, and skipping
+            # the re-read would falsely deny their tool call. Setting
+            # ``wrote = False`` triggers the ConsistentRead below; if
+            # the row still says PENDING the re-read is a no-op and we
+            # keep the TIMED_OUT outcome. If it says APPROVED/DENIED,
+            # ``_reconcile_late_decision`` honors the user's choice.
+            wrote = False
         if not wrote:
             # User's decision beat our timer; re-read with ConsistentRead.
             try:

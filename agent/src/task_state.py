@@ -218,6 +218,14 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             ":running": "RUNNING",
             ":hydrating": "HYDRATING",
             ":finalizing": "FINALIZING",
+            # AWAITING_APPROVAL is included so a container shutdown
+            # mid-gate can still record the terminal transition. Without
+            # it, a crash while the user is deciding leaves the task
+            # stuck until the stranded-task reconciler catches it (~2h).
+            # Cedar HITL state machine (design §9): RUNNING ↔
+            # AWAITING_APPROVAL, both can transition straight to a
+            # terminal state.
+            ":awaiting_approval": "AWAITING_APPROVAL",
         }
         update_parts = ["#s = :s", "completed_at = :t", "status_created_at = :sca"]
 
@@ -262,7 +270,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
         table.update_item(
             Key={"task_id": task_id},
             UpdateExpression="SET " + ", ".join(update_parts),
-            ConditionExpression="#s IN (:running, :hydrating, :finalizing)",
+            ConditionExpression="#s IN (:running, :hydrating, :finalizing, :awaiting_approval)",
             ExpressionAttributeNames=expr_names,
             ExpressionAttributeValues=expr_values,
         )
