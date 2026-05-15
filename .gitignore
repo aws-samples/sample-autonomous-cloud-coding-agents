@@ -58,6 +58,11 @@ cdk.context.json
 /assets/
 
 # ──────────────────────────────────────────────
+# CI artifacts (generated during build)
+# ──────────────────────────────────────────────
+deploy-intent.json
+
+# ──────────────────────────────────────────────
 # Build outputs (compiled TS → JS)
 # ──────────────────────────────────────────────
 /cdk/lib/
