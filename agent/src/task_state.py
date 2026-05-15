@@ -7,8 +7,38 @@ operations are no-ops.
 
 import os
 import time
+from typing import TypedDict
 
 from shell import log, log_error_cw
+
+
+class ApprovalRow(TypedDict):
+    """Schema for the approval row written by ``transact_write_approval_request``.
+
+    Mirrors the DDB column layout described in design §10.1 and the
+    TypeScript ``ApprovalRecord`` discriminated union in
+    ``cdk/src/handlers/shared/types.ts``. Used as the typed contract
+    between the PreToolUse hook (which builds the row) and the
+    transactional writer (which serializes it to DDB attributes).
+    Pre-S7 the function accepted a bare ``dict`` so missing or
+    misspelled fields would fail at runtime, not at the call site.
+    """
+
+    task_id: str
+    request_id: str
+    tool_name: str
+    tool_input_preview: str
+    tool_input_sha256: str
+    reason: str
+    severity: str  # 'low' | 'medium' | 'high' — matches TS Severity literal.
+    matching_rule_ids: list[str]
+    status: str  # always 'PENDING' on initial write.
+    created_at: str
+    timeout_s: int
+    ttl: int
+    user_id: str
+    repo: str
+
 
 _table = None
 
@@ -584,7 +614,7 @@ def _ddb_attr_to_py(attr):
 def transact_write_approval_request(
     task_id: str,
     request_id: str,
-    approval_row: dict,
+    approval_row: ApprovalRow,
     *,
     client=None,
 ) -> None:

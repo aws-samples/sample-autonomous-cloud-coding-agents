@@ -64,11 +64,13 @@ const cedar = require('@cedar-policy/cedar-wasm/nodejs');
  * `diagnostics.reason[]` back to `rule_id` on an evaluation path; not
  * useful outside this module.
  */
+import type { Severity } from './types';
+
 export interface ParsedRule {
   readonly policy_id: string;
   readonly rule_id: string;
   readonly tier: 'hard' | 'soft';
-  readonly severity?: 'low' | 'medium' | 'high';
+  readonly severity?: Severity;
   readonly approval_timeout_s?: number;
   readonly category?: string;
   readonly summary: string;

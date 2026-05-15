@@ -25,7 +25,7 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import type { GetPendingResponse, PendingApprovalSummary } from './shared/types';
+import type { GetPendingResponse, PendingApprovalSummary, Severity } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
@@ -148,7 +148,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 }
 
-function coerceSeverity(value: unknown): 'low' | 'medium' | 'high' {
+function coerceSeverity(value: unknown): Severity {
   if (value === 'low' || value === 'medium' || value === 'high') {
     return value;
   }

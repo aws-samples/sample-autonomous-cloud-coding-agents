@@ -377,13 +377,20 @@ export interface DenyResponse {
   readonly decided_at: string;
 }
 
+/**
+ * Cedar HITL severity literal. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::Severity``. Shared alias so
+ * the same union is not redefined inline across types.
+ */
+export type Severity = 'low' | 'medium' | 'high';
+
 /** Pending approval summary returned by `GET /v1/pending`. */
 export interface PendingApprovalSummary {
   readonly task_id: string;
   readonly request_id: string;
   readonly tool_name: string;
   readonly tool_input_preview: string;
-  readonly severity: 'low' | 'medium' | 'high';
+  readonly severity: Severity;
   readonly reason: string;
   readonly created_at: string;
   readonly timeout_s: number;
@@ -403,7 +410,7 @@ export interface GetPendingResponse {
 export interface PolicyRuleSummary {
   readonly rule_id: string;
   readonly category?: string;
-  readonly severity?: 'low' | 'medium' | 'high';
+  readonly severity?: Severity;
   readonly approval_timeout_s?: number;
   readonly summary: string;
 }
