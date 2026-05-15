@@ -1,7 +1,15 @@
 name: build
 on:
   pull_request: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy after build (- = no deploy)"
+        type: choice
+        default: "-"
+        options:
+          - "-"
+          - agentcore
 permissions:
   actions: none
   attestations: none
@@ -202,6 +210,39 @@ jobs:
           path: |
             cdk/cdk.out/
             cdk/cdk.context.json
+      - name: Write deploy intent
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          DISPATCH_DEPLOY: ${{ inputs.deploy }}
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+        run: |
+          # Determine deploy intent based on trigger type
+          case "$EVENT_NAME" in
+            push)
+              if [[ "$GH_REF_NAME" == "main" ]]; then
+                INTENT="$COMPUTE_TYPE"
+              else
+                INTENT="-"
+              fi
+              ;;
+            workflow_dispatch)
+              INTENT="$DISPATCH_DEPLOY"
+              ;;
+            pull_request|pull_request_target)
+              INTENT="labels"
+              ;;
+            *)
+              INTENT="-"
+              ;;
+          esac
+          echo "{\"deploy\":\"$INTENT\"}" > deploy-intent.json
+          echo "Deploy intent: $INTENT"
+      - name: Upload deploy intent
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-intent
+          path: deploy-intent.json
       - name: Find mutations
         id: self_mutation
         run: |-
