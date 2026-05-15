@@ -639,7 +639,14 @@ class TestTransactWriteApprovalRequest:
 
     def test_unsupported_row_type_rejected(self, approval_tables_env):
         client = MagicMock()
-        bad_row = {"task_id": "01K", "request_id": "01R", "extra": 3.14}
+        # Deliberately malformed row — verifies the runtime guard in
+        # ``_py_to_ddb_attr``. The static cast through ``Any`` is needed
+        # because ``ApprovalRow`` is a TypedDict (S7); without it ``ty``
+        # rejects the malformed dict at compile time, which would
+        # defeat the runtime-check this test exists to pin.
+        from typing import Any
+
+        bad_row: Any = {"task_id": "01K", "request_id": "01R", "extra": 3.14}
         with pytest.raises(TypeError):
             task_state.transact_write_approval_request("01K", "01R", bad_row, client=client)
         client.transact_write_items.assert_not_called()
@@ -656,9 +663,7 @@ class TestTransactWriteApprovalRequest:
         client = MagicMock()
         client.transact_write_items.return_value = {}
 
-        task_state.transact_write_approval_request(
-            "01KTASK", "01KREQ", approval_row, client=client
-        )
+        task_state.transact_write_approval_request("01KTASK", "01KREQ", approval_row, client=client)
 
         items = client.transact_write_items.call_args.kwargs["TransactItems"]
         # 1. Approval row must be created exactly once per request_id
@@ -677,7 +682,9 @@ class TestTransactWriteApprovalRequest:
         # let a runaway gate cascade re-pause an already-paused task.
         assert ":awaiting" not in cond
 
-    def test_condition_failed_reason_includes_both_branches(self, approval_tables_env, approval_row):
+    def test_condition_failed_reason_includes_both_branches(
+        self, approval_tables_env, approval_row
+    ):
         """When TransactWriteItems is cancelled, both branches'
         cancellation reasons must propagate to the caller so the
         hook can distinguish "request_id collision" from "task
@@ -700,8 +707,7 @@ class TestTransactWriteApprovalRequest:
         # error-classification logic depends on inspecting both.
         assert len(exc_info.value.cancellation_reasons) == 2
         assert all(
-            r.get("Code") == "ConditionalCheckFailed"
-            for r in exc_info.value.cancellation_reasons
+            r.get("Code") == "ConditionalCheckFailed" for r in exc_info.value.cancellation_reasons
         )
 
 

@@ -33,6 +33,7 @@
  * ships.
  */
 
+import type { Severity } from './types';
 // cedar-wasm is a CommonJS package; the nodejs build ships a default
 // export that behaves like a module namespace. eslint's
 // ``@typescript-eslint/no-require-imports`` is disabled here because
@@ -64,7 +65,6 @@ const cedar = require('@cedar-policy/cedar-wasm/nodejs');
  * `diagnostics.reason[]` back to `rule_id` on an evaluation path; not
  * useful outside this module.
  */
-import type { Severity } from './types';
 
 export interface ParsedRule {
   readonly policy_id: string;

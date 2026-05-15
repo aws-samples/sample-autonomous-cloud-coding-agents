@@ -11,8 +11,6 @@ the all-PENDING happy-path timeout was tested.
 import asyncio
 from unittest.mock import MagicMock
 
-import pytest
-
 import hooks
 
 

@@ -170,4 +170,3 @@ function computeExpiresAt(createdAt: string, timeoutS: number): string {
   }
   return new Date(created + timeoutS * 1000).toISOString();
 }
-

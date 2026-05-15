@@ -20,6 +20,13 @@ COPY --from=gh-builder /out/gh /usr/local/bin/gh
 #   - build-essential (native compilation for some repos)
 #   - curl (downloads)
 RUN apt-get update && \
+    # Patch any base-image CVEs that have a fix available in the
+    # current Debian point release. Without this, transitive system-
+    # library CVEs (e.g. libnghttp2 CVE-2026-27135) ride the base
+    # ``python:3.13-slim`` tag until upstream rebuilds, which can be
+    # weeks. ``--no-install-recommends`` keeps the upgrade narrow and
+    # reproducible — only already-installed packages get bumped.
+    apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
         curl \
         git \

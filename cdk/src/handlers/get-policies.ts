@@ -224,7 +224,6 @@ function toSummary(rule: ReturnType<typeof parseRules>[number]): PolicyRuleSumma
   return out as PolicyRuleSummary;
 }
 
-
 /** Test-only cache reset — exposed for unit tests. */
 export function _resetCacheForTests(): void {
   cache.clear();

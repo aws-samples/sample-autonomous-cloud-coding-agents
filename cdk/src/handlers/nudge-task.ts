@@ -231,4 +231,3 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
   }
 }
-

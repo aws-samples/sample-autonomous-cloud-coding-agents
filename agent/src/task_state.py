@@ -179,7 +179,10 @@ def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) ->
         ):
             # Task already advanced — concurrent legitimate transition wins.
             return
-        log("WARN", f"[task_state] write_session_info failed (best-effort): {type(e).__name__}: {e}")
+        log(
+            "WARN",
+            f"[task_state] write_session_info failed (best-effort): {type(e).__name__}: {e}",
+        )
 
 
 def write_running(task_id: str) -> None:

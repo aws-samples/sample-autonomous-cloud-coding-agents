@@ -267,4 +267,3 @@ function classifyCancel(
     requestId,
   );
 }
-
