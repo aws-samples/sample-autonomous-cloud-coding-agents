@@ -644,6 +644,66 @@ class TestTransactWriteApprovalRequest:
             task_state.transact_write_approval_request("01K", "01R", bad_row, client=client)
         client.transact_write_items.assert_not_called()
 
+    def test_exact_condition_expressions_pinned(self, approval_tables_env, approval_row):
+        """I5 — pin the exact ConditionExpression strings on both
+        transact items so a future refactor that loosens the
+        fail-closed enforcement layer fails here. The condition
+        guards are the only thing standing between a stale-state
+        request and a falsely-recorded approval; their strings
+        deserve dedicated assertions, not just call-arg snooping
+        in a happy-path test.
+        """
+        client = MagicMock()
+        client.transact_write_items.return_value = {}
+
+        task_state.transact_write_approval_request(
+            "01KTASK", "01KREQ", approval_row, client=client
+        )
+
+        items = client.transact_write_items.call_args.kwargs["TransactItems"]
+        # 1. Approval row must be created exactly once per request_id
+        #    — collision => the duplicate write is rejected at DDB.
+        put_cond = items[0]["Put"]["ConditionExpression"]
+        assert put_cond == "attribute_not_exists(request_id)"
+
+        # 2. Task row precondition is the exact RUNNING check (the
+        #    transition can only fire from RUNNING; AWAITING_APPROVAL
+        #    or terminal statuses must reject the write).
+        upd = items[1]["Update"]
+        cond = upd["ConditionExpression"]
+        assert "#s = :running" in cond
+        # Defensive: the condition must NOT accept AWAITING_APPROVAL
+        # as a precondition for *initial* gate-write — that would
+        # let a runaway gate cascade re-pause an already-paused task.
+        assert ":awaiting" not in cond
+
+    def test_condition_failed_reason_includes_both_branches(self, approval_tables_env, approval_row):
+        """When TransactWriteItems is cancelled, both branches'
+        cancellation reasons must propagate to the caller so the
+        hook can distinguish "request_id collision" from "task
+        already moved past RUNNING".
+        """
+        client = MagicMock()
+        reasons = [
+            {"Code": "ConditionalCheckFailed"},  # approvals row collision
+            {"Code": "ConditionalCheckFailed"},  # task row no longer RUNNING
+        ]
+        client.transact_write_items.side_effect = _FakeClientError(
+            "TransactionCanceledException", cancellation_reasons=reasons
+        )
+
+        with pytest.raises(task_state.ApprovalWriteError) as exc_info:
+            task_state.transact_write_approval_request(
+                "01KTASK", "01KREQ", approval_row, client=client
+            )
+        # Both branches of the cancellation must surface — the hook's
+        # error-classification logic depends on inspecting both.
+        assert len(exc_info.value.cancellation_reasons) == 2
+        assert all(
+            r.get("Code") == "ConditionalCheckFailed"
+            for r in exc_info.value.cancellation_reasons
+        )
+
 
 class TestTransactResumeFromApproval:
     def test_env_missing_raises(self, monkeypatch):
@@ -675,6 +735,30 @@ class TestTransactResumeFromApproval:
         )
         with pytest.raises(task_state.ApprovalResumeError):
             task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+    def test_resume_condition_pins_joint_invariant(self, approval_tables_env):
+        """I5 — pin the joint condition expression so a refactor that
+        forgets the ``awaiting_approval_request_id = :rid`` half
+        (e.g. allowing resume on ANY AWAITING_APPROVAL row, not
+        just the one matching the decided request_id) fails here.
+        Mismatching that half would let an out-of-order
+        approve_other_request decision resume the wrong gate.
+        """
+        client = MagicMock()
+        client.transact_write_items.return_value = {}
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        upd = client.transact_write_items.call_args.kwargs["TransactItems"][0]["Update"]
+        cond = upd["ConditionExpression"]
+        # Both halves must be present and joined by AND.
+        assert "#s = :awaiting" in cond
+        assert "awaiting_approval_request_id = :rid" in cond
+        assert "AND" in cond
+        # The cleared-on-resume column must be REMOVE'd, not just
+        # overwritten — otherwise the next ``transact_write_approval_request``
+        # would see a stale request_id pointing at a finished gate.
+        assert "REMOVE awaiting_approval_request_id" in upd["UpdateExpression"]
 
 
 class TestBestEffortUpdateApprovalStatus:
