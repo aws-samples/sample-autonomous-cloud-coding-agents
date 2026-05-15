@@ -44,6 +44,9 @@ function synthWithTags(context: Record<string, string> = {}): Template {
     env: { account: '123456789012', region: 'us-east-1' },
   });
 
+  const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
+  Tags.of(stack).add('compute_type', computeType);
+
   const githubTagKeys = [
     'sha', 'ref', 'ref-type', 'actor', 'head-ref',
     'base-ref', 'pr-number', 'run-id', 'run-attempt',
@@ -124,5 +127,26 @@ describe('github:* resource tags', () => {
 
     expect(tags.find(t => t.Key === 'github:sha')!.Value).toBe('none');
     expect(tags.find(t => t.Key === 'github:head-ref')!.Value).toBe('none');
+  });
+
+  test('compute_type tag defaults to "agentcore" when no context is provided', () => {
+    const resources = templateWithDefaults.findResources('AWS::DynamoDB::Table');
+    const firstResource = Object.values(resources)[0];
+    const tags: Array<{ Key: string; Value: string }> = firstResource?.Properties?.Tags ?? [];
+
+    const tag = tags.find(t => t.Key === 'compute_type');
+    expect(tag).toBeDefined();
+    expect(tag!.Value).toBe('agentcore');
+  });
+
+  test('compute_type tag reflects context value when provided', () => {
+    const template = synthWithTags({ compute_type: 'ecs' });
+    const resources = template.findResources('AWS::DynamoDB::Table');
+    const firstResource = Object.values(resources)[0];
+    const tags: Array<{ Key: string; Value: string }> = firstResource?.Properties?.Tags ?? [];
+
+    const tag = tags.find(t => t.Key === 'compute_type');
+    expect(tag).toBeDefined();
+    expect(tag!.Value).toBe('ecs');
   });
 });
