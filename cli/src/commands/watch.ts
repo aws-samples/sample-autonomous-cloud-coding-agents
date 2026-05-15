@@ -579,7 +579,13 @@ export function makeWatchCommand(): Command {
             // rather than erroring out after already streaming the tail.
             let terminalTask: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'> = {
               task_id: taskId,
-              status: snapshot.taskStatus,
+              // ``snapshot.taskStatus`` is the live-stream's last
+              // observed status string. We cast to the narrowed
+              // ``TaskStatusType`` because by the terminal-event
+              // path it must be one of the API's known terminal
+              // values; the GET below replaces it with the
+              // canonical record on success anyway.
+              status: snapshot.taskStatus as TaskDetail['status'],
               error_classification: null,
               error_message: null,
             };

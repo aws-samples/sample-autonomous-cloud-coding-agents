@@ -23,6 +23,13 @@ import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
 import type { TaskStatusType } from '../../constructs/task-status';
 
+/**
+ * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
+ * check sees a single declaration site for the API status union. The
+ * canonical source remains ``cdk/src/constructs/task-status.ts``.
+ */
+export type { TaskStatusType };
+
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
@@ -325,14 +332,17 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
-  readonly attachments?: Attachment[];
+  readonly attachments?: readonly Attachment[];
   /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
   readonly trace?: boolean;
   /** Cedar HITL: per-task approval timeout (§7.3). Bounded by
    *  ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
   readonly approval_timeout_s?: number;
-  /** Cedar HITL: pre-approved scopes that skip the gate (§7.3 step 4). */
-  readonly initial_approvals?: readonly string[];
+  /** Cedar HITL: pre-approved scopes that skip the gate (§7.3 step 4).
+   *  Typed as ``ApprovalScope[]`` (the strict union accepted by the
+   *  agent's ``parse_approval_scope``); CDK validates the parse result
+   *  before forwarding. */
+  readonly initial_approvals?: readonly ApprovalScope[];
 }
 
 /**

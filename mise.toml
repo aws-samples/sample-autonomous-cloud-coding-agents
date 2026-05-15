@@ -58,6 +58,10 @@ run = [
 #### SECURITY ####
 ##################
 
+[tasks."check:types-sync"]
+description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
+run = "node --experimental-strip-types scripts/check-types-sync.ts"
+
 [tasks."security:secrets"]
 description = "Scan for secrets with gitleaks"
 run = "gitleaks detect --source . --no-banner"

@@ -21,6 +21,23 @@
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
 /**
+ * Task status literal union. Mirrors ``cdk/src/constructs/task-status.ts``
+ * — the values returned by the API are exactly these. Defined inline
+ * here (rather than imported from the CDK construct) so the CLI type
+ * surface stays portable.
+ */
+export type TaskStatusType =
+  | 'SUBMITTED'
+  | 'HYDRATING'
+  | 'RUNNING'
+  | 'AWAITING_APPROVAL'
+  | 'FINALIZING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'TIMED_OUT';
+
+/**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
@@ -48,7 +65,7 @@ export interface ErrorClassification {
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: TaskType;
@@ -123,7 +140,7 @@ export interface TraceUrlResponse {
 /** Task summary returned by GET /v1/tasks list responses. */
 export interface TaskSummary {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: TaskType;
@@ -229,7 +246,7 @@ export interface NudgeResponse {
 /** Cancel task response from DELETE /v1/tasks/{task_id}. */
 export interface CancelTaskResponse {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly cancelled_at: string;
 }
 
