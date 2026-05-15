@@ -42,6 +42,9 @@ const stack = new AgentStack(
   },
 );
 
+const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
+Tags.of(stack).add('compute_type', computeType);
+
 const githubTagKeys = [
   'sha',
   'ref',

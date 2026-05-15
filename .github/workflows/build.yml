@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        variant: [agentcore]
+        compute_type: [agentcore]
     outputs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
     env:
@@ -96,7 +96,7 @@ jobs:
           esac
       - name: Generate CDK context
         env:
-          VARIANT: ${{ matrix.variant }}
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
           TAG_SHA: ${{ steps.tags.outputs.sha }}
           TAG_REF: ${{ steps.tags.outputs.ref }}
           TAG_REF_TYPE: ${{ steps.tags.outputs.ref-type }}
@@ -111,7 +111,7 @@ jobs:
           TAG_REPOSITORY: ${{ github.repository }}
         run: |
           jq -n \
-            --arg computeVariant "$VARIANT" \
+            --arg compute_type "$COMPUTE_TYPE" \
             --arg stackName "backgroundagent-dev" \
             --arg sha "$TAG_SHA" \
             --arg ref "$TAG_REF" \
@@ -126,7 +126,7 @@ jobs:
             --arg workflow "$TAG_WORKFLOW" \
             --arg repository "$TAG_REPOSITORY" \
             '{
-              "computeVariant": $computeVariant,
+              "compute_type": $compute_type,
               "stackName": $stackName,
               "github:sha": $sha,
               "github:ref": $ref,
@@ -155,10 +155,10 @@ jobs:
         run: mise run install
       - name: build
         run: mise run build
-      - name: Upload CDK artifact (${{ matrix.variant }})
+      - name: Upload CDK artifact (${{ matrix.compute_type }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cdk-${{ matrix.variant }}-out
+          name: cdk-${{ matrix.compute_type }}-out
           path: |
             cdk/cdk.out/
             cdk/cdk.context.json
