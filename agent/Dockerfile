@@ -26,6 +26,8 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         gnupg && \
+    # Upgrade base image's CVE-2026-27135 vulnerability
+    apt-get upgrade -y --no-install-recommends libnghttp2-14 && \
     # Cleanup early to keep peak disk usage low during builds.
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
