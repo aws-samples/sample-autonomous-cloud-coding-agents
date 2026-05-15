@@ -96,6 +96,7 @@ agent/gitleaks-report.json
 # ──────────────────────────────────────────────
 .mcp.json
 .remember/
+.claude/worktrees/
 
 # ──────────────────────────────────────────────
 # Misc
