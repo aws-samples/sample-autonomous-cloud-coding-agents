@@ -32,7 +32,7 @@ from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, Outcome
 from progress_writer import _generate_ulid
-from shell import log
+from shell import log, log_error_cw
 
 if TYPE_CHECKING:
     from policy import PolicyEngine
@@ -1296,16 +1296,36 @@ def build_hook_matchers(
     async def _pre(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
-        result = await pre_tool_use_hook(
-            hook_input,
-            tool_use_id,
-            ctx,
-            engine=engine,
-            trajectory=trajectory,
-            task_id=task_id or None,
-            user_id=user_id or None,
-            progress=progress,
-        )
+        # Fail-closed wrapper (mirrors _post and _stop). If the inner hook
+        # or its dispatch path raises an unexpected exception (asyncio
+        # cancellation, TypeError from a malformed payload, etc.), the
+        # SDK's default behaviour for an unhandled hook exception is
+        # undefined — we MUST NOT trust it to fail closed. Mapping every
+        # uncaught exception to a DENY here makes the security posture
+        # explicit at the SDK boundary.
+        try:
+            result = await pre_tool_use_hook(
+                hook_input,
+                tool_use_id,
+                ctx,
+                engine=engine,
+                trajectory=trajectory,
+                task_id=task_id or None,
+                user_id=user_id or None,
+                progress=progress,
+            )
+        except Exception as exc:
+            log(
+                "ERROR",
+                f"PreToolUse wrapper crashed (task_id={task_id}): {type(exc).__name__}: {exc}",
+            )
+            log_error_cw(
+                f"PreToolUse wrapper crashed: {type(exc).__name__}: {exc}",
+                task_id=task_id or None,
+            )
+            return SyncHookJSONOutput(
+                **_deny_response("Hook error — fail-closed deny"),
+            )
         return SyncHookJSONOutput(**result)
 
     async def _post(

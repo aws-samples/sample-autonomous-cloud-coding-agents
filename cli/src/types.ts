@@ -59,6 +59,10 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
+  /** Prompt-template version applied during context hydration. Null on
+   *  pre-versioned records. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly prompt_version: string | null;
   /** Provenance of the task's submission — ``api`` for CLI / Cognito
    *  submissions, ``webhook`` for HMAC-signed inbound webhooks.
    *  Mirrors ``cdk/src/handlers/shared/types.ts::TaskDetail``; kept
@@ -158,6 +162,18 @@ export interface GetTaskEventsQuery {
   readonly desc?: string;
 }
 
+/**
+ * Attachment in a create-task request. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::Attachment``.
+ */
+export interface Attachment {
+  readonly type: 'image' | 'file' | 'url';
+  readonly content_type?: string;
+  readonly data?: string;
+  readonly url?: string;
+  readonly filename?: string;
+}
+
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -167,6 +183,7 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
+  readonly attachments?: readonly Attachment[];
   /**
    * Enable the ``--trace`` debug path (design §10.1). When true, the
    * agent's ProgressWriter raises its preview-truncation cap from 200
