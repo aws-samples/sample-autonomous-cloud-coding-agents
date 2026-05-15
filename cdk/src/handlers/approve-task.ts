@@ -98,6 +98,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const scope: ApprovalScope = rawScope ?? 'this_call';
     const scopeCheck = parseApprovalScope(scope);
     if (!scopeCheck.ok) {
+      // Security-relevant: malformed scopes can indicate probing,
+      // CLI version mismatches, or downstream contract drift. Logged
+      // with the structured fields a CloudWatch Insights query needs
+      // to triage (task_id + user_id + raw_scope + parser-error).
+      logger.warn('Approval scope validation failed', {
+        task_id: taskId,
+        user_id: callerUserId,
+        raw_scope: scope,
+        error: scopeCheck.message,
+        request_id: requestId,
+      });
       return errorResponse(
         400,
         ErrorCode.VALIDATION_ERROR,

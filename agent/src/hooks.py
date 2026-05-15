@@ -837,12 +837,31 @@ def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# S10: per-method consecutive-failure counters for ``_try_progress``.
+# Progress writes are best-effort, but a hard infrastructure failure
+# (DDB throttle, IAM regression, missing table) would otherwise be
+# masked as a stream of WARN lines with no escalation. After
+# ``_TRY_PROGRESS_ESCALATE_AFTER`` consecutive failures of the same
+# method the next failure is logged at ERROR via ``log_error_cw`` so
+# it lands in APPLICATION_LOGS / TaskDashboard, and the counter
+# resets so escalations don't spam. Per-method state because a
+# single failing method shouldn't suppress visibility into other
+# kinds of progress writes that might still be working.
+_TRY_PROGRESS_ESCALATE_AFTER = 5
+_try_progress_consecutive_failures: dict[str, int] = {}
+
+
 def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     """Call a progress-writer method, swallowing errors.
 
     Progress is best-effort observability; a throttled DDB write must not
     break the approval flow. ``_emit_nudge_milestone`` uses a similar
     pattern for the Phase 2 nudges.
+
+    S10 escalation: repeated consecutive failures of the same
+    ``method_name`` are tracked per-process and escalated to ERROR
+    after ``_TRY_PROGRESS_ESCALATE_AFTER`` so a silent live-stream
+    outage becomes operator-visible.
     """
     if getattr(progress, "_disabled", False) is True:
         log("WARN", f"progress {method_name!r} skipped: circuit breaker open")
@@ -854,7 +873,21 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     try:
         method(**kwargs)
     except Exception as exc:  # pragma: no cover — defensive
-        log("WARN", f"progress {method_name!r} raised: {type(exc).__name__}: {exc}")
+        prev = _try_progress_consecutive_failures.get(method_name, 0)
+        count = prev + 1
+        if count >= _TRY_PROGRESS_ESCALATE_AFTER:
+            log_error_cw(
+                f"progress {method_name!r} has failed {count} consecutive times; "
+                f"latest: {type(exc).__name__}: {exc}",
+            )
+            _try_progress_consecutive_failures[method_name] = 0  # reset to avoid spam
+        else:
+            log("WARN", f"progress {method_name!r} raised: {type(exc).__name__}: {exc}")
+            _try_progress_consecutive_failures[method_name] = count
+        return
+    # Success path — reset the consecutive-failure count.
+    if _try_progress_consecutive_failures.get(method_name):
+        _try_progress_consecutive_failures[method_name] = 0
 
 
 async def post_tool_use_hook(
