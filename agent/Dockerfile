@@ -44,8 +44,8 @@ RUN npm install -g npm@latest && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
 
-# Install uv (fast Python package manager)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv (fast Python package manager) — pinned for reproducibility
+COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 
 # Install Python dependencies via uv
 COPY pyproject.toml uv.lock /app/
