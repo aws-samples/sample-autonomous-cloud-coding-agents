@@ -6,10 +6,21 @@ on:
   workflow_run:
     workflows: [build]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      compute_type:
+        description: "Compute type to deploy"
+        required: true
+        type: choice
+        options:
+          - all
+          - agentcore
 permissions: {}
 jobs:
   resolve-targets:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -17,21 +28,41 @@ jobs:
     outputs:
       matrix: ${{ steps.targets.outputs.matrix }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
-      run_id: ${{ github.event.workflow_run.id }}
+      run_id: ${{ steps.targets.outputs.run_id }}
     steps:
-      - name: Resolve deploy targets from labels
+      - name: Resolve deploy targets
         id: targets
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          EVENT_TYPE: ${{ github.event.workflow_run.event }}
+          BUILD_EVENT_TYPE: ${{ github.event.workflow_run.event }}
           REPO: ${{ github.repository }}
           PR_NUMBER_FROM_EVENT: ${{ github.event.workflow_run.pull_requests[0].number }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          DISPATCH_COMPUTE_TYPE: ${{ inputs.compute_type }}
         run: |
           ALL_TYPES='["agentcore"]'
 
-          # Push to main always deploys all registered types
-          if [[ "$HEAD_BRANCH" == "main" && "$EVENT_TYPE" == "push" ]]; then
+          # workflow_dispatch: use input choice
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$DISPATCH_COMPUTE_TYPE" == "all" ]]; then
+              echo "matrix=$ALL_TYPES" >> "$GITHUB_OUTPUT"
+            else
+              echo "matrix=[\"$DISPATCH_COMPUTE_TYPE\"]" >> "$GITHUB_OUTPUT"
+            fi
+            echo "has_targets=true" >> "$GITHUB_OUTPUT"
+            # Find the latest successful build run for this branch
+            RUN_ID=$(gh api "repos/$REPO/actions/workflows/build.yml/runs?branch=$(git branch --show-current 2>/dev/null || echo main)&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')
+            echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # workflow_run context from here on
+          echo "run_id=${WORKFLOW_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+          # Push to main or workflow_dispatch on build always deploys all
+          if [[ "$HEAD_BRANCH" == "main" && ("$BUILD_EVENT_TYPE" == "push" || "$BUILD_EVENT_TYPE" == "workflow_dispatch") ]]; then
             echo "matrix=$ALL_TYPES" >> "$GITHUB_OUTPUT"
             echo "has_targets=true" >> "$GITHUB_OUTPUT"
             exit 0
