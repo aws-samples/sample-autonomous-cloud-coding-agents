@@ -21,6 +21,10 @@ import { classifyError, type ErrorClassification } from './error-classifier';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
+// Cross-language constants — see ``contracts/constants.md``. Imported at
+// TypeScript compile time (resolveJsonModule); esbuild inlines the values
+// into the bundled Lambda artifact, so no runtime FS read is needed.
+import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /**
@@ -845,9 +849,14 @@ export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
  * (design decision #13, §4 step 5). Blueprints may override via
  * ``security.approvalGateCap``; the submit path bounds-checks the
  * resolved value against these constants so an out-of-bounds blueprint
- * never persists a bad cap onto a TaskRecord. MUST stay in lock-step
- * with ``APPROVAL_GATE_CAP_MIN / MAX`` in ``agent/src/policy.py``.
+ * never persists a bad cap onto a TaskRecord.
+ *
+ * Sourced from ``contracts/constants.json`` (S9 — see
+ * ``contracts/constants.md``). The same JSON is read by
+ * ``agent/src/policy.py`` at import; the drift check
+ * (``scripts/check-types-sync.ts``) verifies no other site declares
+ * these constants as literals.
  */
-export const APPROVAL_GATE_CAP_MIN = 1;
-export const APPROVAL_GATE_CAP_MAX = 500;
-export const APPROVAL_GATE_CAP_DEFAULT = 50;
+export const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
+export const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
+export const APPROVAL_GATE_CAP_DEFAULT = sharedConstants.approval_gate_cap.default;

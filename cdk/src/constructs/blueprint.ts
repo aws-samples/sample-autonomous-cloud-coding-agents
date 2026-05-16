@@ -22,19 +22,22 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct, IValidation } from 'constructs';
+// Cross-language constants (S9 — see ``contracts/constants.md``). Import
+// the JSON directly rather than re-using ``handlers/shared/types.ts`` so
+// the construct layer stays decoupled from runtime-side types.
+import sharedConstants from '../../../contracts/constants.json';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
 /**
  * Cedar HITL — bounds on the per-task approval-gate cap (design decision #13).
- * Kept here (not imported from handlers/shared/types.ts) so the construct layer
- * does not pull in runtime-side types; these values MUST match
- * ``APPROVAL_GATE_CAP_MIN / MAX`` in ``agent/src/policy.py`` and the bounds
- * enforced by ``create-task-core.ts`` when resolving the blueprint value.
+ * Single source of truth: ``contracts/constants.json``. Same JSON is read
+ * by ``agent/src/policy.py`` at import and re-exported from
+ * ``handlers/shared/types.ts``.
  */
-const APPROVAL_GATE_CAP_MIN = 1;
-const APPROVAL_GATE_CAP_MAX = 500;
+const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
+const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 
 /**
  * Properties for the Blueprint construct.

@@ -54,22 +54,28 @@ RUN npm install -g npm@latest && \
 # Install uv (fast Python package manager)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install Python dependencies via uv
-COPY pyproject.toml uv.lock /app/
+# Install Python dependencies via uv. Build context is repo root (set in
+# ``cdk/src/stacks/agent.ts``) so source paths are prefixed with ``agent/``.
+COPY agent/pyproject.toml agent/uv.lock /app/
 RUN uv sync --frozen --no-dev --directory /app
 
 # Copy agent code (ARG busts cache so file edits are always picked up)
 ARG CACHE_BUST=0
-COPY src/ /app/src/
+COPY agent/src/ /app/src/
 # Cedar HITL built-in policy files (hard_deny.cedar + soft_deny.cedar).
 # ``agent/src/policy.py::_POLICIES_DIR`` resolves to ``/app/policies``
 # at import time; without these files the PolicyEngine init raises
 # ``missing built-in hard-deny policies`` and every task fails at 0
 # turns before the agent even connects to the CLI. Discovered during
 # Chunk 10 E2E T2.2 — the Dockerfile previously only copied ``src/``.
-COPY policies/ /app/policies/
-COPY prepare-commit-msg.sh /app/
-COPY test_sdk_smoke.py test_subprocess_threading.py /app/
+COPY agent/policies/ /app/policies/
+# Cross-language constants (S9). ``agent/src/policy.py`` reads
+# ``/app/contracts/constants.json`` at import; the same file is consumed
+# by ``cdk/src/handlers/shared/types.ts`` at synth time. See
+# ``contracts/README.md`` for the contract.
+COPY contracts/ /app/contracts/
+COPY agent/prepare-commit-msg.sh /app/
+COPY agent/test_sdk_smoke.py agent/test_subprocess_threading.py /app/
 
 # Create non-root user (Claude Code CLI refuses bypassPermissions as root)
 RUN useradd -m -s /bin/bash agent && \

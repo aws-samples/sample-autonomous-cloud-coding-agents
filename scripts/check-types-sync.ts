@@ -86,9 +86,8 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // Internal extension shape used by create-task-core.ts to thread
   // Cedar HITL fields without widening the public CreateTaskRequest:
   'CreateTaskApprovalExtensions',
-  // Server-side bound constants — agent/policy.py is the runtime
-  // source of truth for these (cross-language drift tracked
-  // separately as S9 / project_chunk7b_followups.md).
+  // Server-side bound constants — sourced from contracts/constants.json
+  // (S9). Cross-language drift is enforced by scripts/check-constants-sync.ts.
   'APPROVAL_GATE_CAP_MIN',
   'APPROVAL_GATE_CAP_MAX',
   'APPROVAL_GATE_CAP_DEFAULT',
