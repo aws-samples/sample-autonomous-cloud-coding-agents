@@ -27,8 +27,12 @@ const GITHUB_TAG_KEYS = [
   'github:ref-type',
   'github:actor',
   'github:head-ref',
+  'github:base-ref',
+  'github:pr-number',
   'github:run-id',
+  'github:run-attempt',
   'github:event',
+  'github:workflow',
   'github:repository',
   'github:clean',
 ] as const;
@@ -40,9 +44,13 @@ function synthWithTags(context: Record<string, string> = {}): Template {
     env: { account: '123456789012', region: 'us-east-1' },
   });
 
+  const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
+  Tags.of(stack).add('compute_type', computeType);
+
   const githubTagKeys = [
     'sha', 'ref', 'ref-type', 'actor', 'head-ref',
-    'run-id', 'event', 'repository', 'clean',
+    'base-ref', 'pr-number', 'run-id', 'run-attempt',
+    'event', 'workflow', 'repository', 'clean',
   ] as const;
 
   for (const key of githubTagKeys) {
@@ -65,14 +73,18 @@ describe('github:* resource tags', () => {
       'github:ref-type': 'branch',
       'github:actor': 'scottschreckengaust',
       'github:head-ref': '',
+      'github:base-ref': 'main',
+      'github:pr-number': '85',
       'github:run-id': '12345678',
+      'github:run-attempt': '1',
       'github:event': 'push',
+      'github:workflow': 'deploy.yml',
       'github:repository': 'aws-samples/sample-autonomous-cloud-coding-agents',
       'github:clean': 'true',
     });
   });
 
-  test('all 9 github:* tags default to "none" when no context is provided', () => {
+  test('all 13 github:* tags default to "none" when no context is provided', () => {
     const resources = templateWithDefaults.findResources('AWS::DynamoDB::Table');
     const firstResource = Object.values(resources)[0];
     const tags: Array<{ Key: string; Value: string }> = firstResource?.Properties?.Tags ?? [];
@@ -94,8 +106,12 @@ describe('github:* resource tags', () => {
     expect(tags.find(t => t.Key === 'github:ref-type')!.Value).toBe('branch');
     expect(tags.find(t => t.Key === 'github:actor')!.Value).toBe('scottschreckengaust');
     expect(tags.find(t => t.Key === 'github:head-ref')!.Value).toBe('none');
+    expect(tags.find(t => t.Key === 'github:base-ref')!.Value).toBe('main');
+    expect(tags.find(t => t.Key === 'github:pr-number')!.Value).toBe('85');
     expect(tags.find(t => t.Key === 'github:run-id')!.Value).toBe('12345678');
+    expect(tags.find(t => t.Key === 'github:run-attempt')!.Value).toBe('1');
     expect(tags.find(t => t.Key === 'github:event')!.Value).toBe('push');
+    expect(tags.find(t => t.Key === 'github:workflow')!.Value).toBe('deploy.yml');
     expect(tags.find(t => t.Key === 'github:repository')!.Value).toBe('aws-samples/sample-autonomous-cloud-coding-agents');
     expect(tags.find(t => t.Key === 'github:clean')!.Value).toBe('true');
   });
@@ -111,5 +127,26 @@ describe('github:* resource tags', () => {
 
     expect(tags.find(t => t.Key === 'github:sha')!.Value).toBe('none');
     expect(tags.find(t => t.Key === 'github:head-ref')!.Value).toBe('none');
+  });
+
+  test('compute_type tag defaults to "agentcore" when no context is provided', () => {
+    const resources = templateWithDefaults.findResources('AWS::DynamoDB::Table');
+    const firstResource = Object.values(resources)[0];
+    const tags: Array<{ Key: string; Value: string }> = firstResource?.Properties?.Tags ?? [];
+
+    const tag = tags.find(t => t.Key === 'compute_type');
+    expect(tag).toBeDefined();
+    expect(tag!.Value).toBe('agentcore');
+  });
+
+  test('compute_type tag reflects context value when provided', () => {
+    const template = synthWithTags({ compute_type: 'ecs' });
+    const resources = template.findResources('AWS::DynamoDB::Table');
+    const firstResource = Object.values(resources)[0];
+    const tags: Array<{ Key: string; Value: string }> = firstResource?.Properties?.Tags ?? [];
+
+    const tag = tags.find(t => t.Key === 'compute_type');
+    expect(tag).toBeDefined();
+    expect(tag!.Value).toBe('ecs');
   });
 });

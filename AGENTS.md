@@ -45,7 +45,8 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 - **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 - **`mise run build`** runs **`//agent:quality`** before CDK — the deployed image bundles **`agent/`**; agent changes belong in that tree.
 - **`prek install`** fails if Git **`core.hooksPath`** is set — another hook manager owns hooks; see [CONTRIBUTING.md](./CONTRIBUTING.md).
-- **Git worktrees** — `node_modules/` and `agent/.venv/` are per-tree (not shared). Run **`mise run install`** in each new worktree before building. All CDK path references (`__dirname`-relative) and mise `config_roots` resolve correctly without extra setup.
+- **Editing on `main` directly** — ALWAYS create a worktree with a feature branch for changes, even trivial ones. Main should stay clean; all work flows through worktree → branch → PR → merge.
+- **Git worktrees** — Always **`git fetch origin main`** before creating a new worktree to ensure you branch from the latest remote state. `node_modules/` and `agent/.venv/` are per-tree (not shared). Run **`mise run install`** in each new worktree before building. All CDK path references (`__dirname`-relative) and mise `config_roots` resolve correctly without extra setup.
 
 ### Tech stack
 

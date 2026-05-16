@@ -52,6 +52,7 @@ agent/.venv/
 # ──────────────────────────────────────────────
 cdk.out/
 /cdk/cdk.out*/
+/cdk/cdk-*.out/
 .cdk.staging/
 cdk.context.json
 /assets/
@@ -95,6 +96,7 @@ agent/gitleaks-report.json
 # ──────────────────────────────────────────────
 .mcp.json
 .remember/
+.claude/worktrees/
 
 # ──────────────────────────────────────────────
 # Misc
