@@ -38,7 +38,7 @@ run = "uvx ruff format --check"
 
 [tasks.typecheck]
 description = "Type check with ty"
-run = "uvx ty check"
+run = "uv run ty check"
 
 [tasks.test]
 description = "Run tests with pytest"
