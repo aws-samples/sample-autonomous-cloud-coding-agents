@@ -98,8 +98,11 @@ _viewer_id_cache: str | None = None
 #: 2xx response resets the counter. The lock guards the read-modify-write
 #: against the daemon sweep thread.
 _AUTH_FAILURE_THRESHOLD = 3
-_consecutive_auth_failures = 0
-_auth_circuit_open = False
+# Annotated explicitly so ty doesn't narrow the initial values to
+# `Literal[0]` / `Literal[False]` — that narrowing would reject the
+# legitimate flips below (and any test that resets them).
+_consecutive_auth_failures: int = 0
+_auth_circuit_open: bool = False
 _auth_state_lock = threading.Lock()
 
 
