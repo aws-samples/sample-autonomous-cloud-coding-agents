@@ -728,6 +728,20 @@ export class AgentStack extends Stack {
       // 2.0b once OAuth migration documents the canonical resource shape.
       resources: ['*'],
     }));
+    // AgentCore Identity stores credential-vault payloads in Secrets Manager
+    // under the reserved prefix `bedrock-agentcore-identity!*`. The
+    // `GetResourceApiKey` API call surfaces the underlying secret value to
+    // the caller, and AWS verifies the caller (our runtime role) has
+    // GetSecretValue on the actual secret resource — empirically confirmed
+    // 2026-05-18 against an api-key provider in us-east-1. This grant is
+    // tightly scoped to the Identity-managed prefix; it does NOT grant read
+    // access to any other Secrets Manager resources in the account.
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!*`,
+      ],
+    }));
 
     // Pipe the Linear API token secret into the orchestrator Lambda so the
     // concurrency-cap rejection path can post a Linear comment + ❌ instead
