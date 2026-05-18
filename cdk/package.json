@@ -4,6 +4,7 @@
   "private": true,
   "description": "ABCA CDK application",
   "license": "MIT-0",
+  "_cedar_parity_pin": "DO NOT BUMP @cedar-policy/cedar-wasm IN ISOLATION. The Python cedarpy binding (agent/pyproject.toml) and this WASM binding share a Rust core and must move together. Drift between bindings can produce divergent (decision, matching_rule_ids) on the same (policy, input). See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23). The contracts/cedar-parity/ golden fixtures are how CI catches divergence; bumping either side requires bumping the other AND refreshing the fixtures in the same commit.",
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
@@ -26,6 +27,7 @@
     "@aws-sdk/lib-dynamodb": "^3.1021.0",
     "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@aws/durable-execution-sdk-js": "^1.1.0",
+    "@cedar-policy/cedar-wasm": "4.10.0",
     "aws-cdk-lib": "^2.238.0",
     "cdk-nag": "^2.37.55",
     "constructs": "^10.3.0",

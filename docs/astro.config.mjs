@@ -67,6 +67,7 @@ export default defineConfig({
             { slug: 'customizing/repository-onboarding' },
             { slug: 'customizing/per-repo-overrides' },
             { label: 'Prompt Engineering', slug: 'customizing/prompt-engineering' },
+            { label: 'Cedar Policies', slug: 'customizing/cedar-policies' },
           ],
         },
         {

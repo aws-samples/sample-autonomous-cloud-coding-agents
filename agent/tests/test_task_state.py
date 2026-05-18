@@ -1,5 +1,7 @@
 """Unit tests for pure functions in task_state.py."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 import task_state
@@ -520,3 +522,431 @@ class TestWriteTraceUriConditional:
         monkeypatch.setattr(task_state, "_get_table", lambda: None)
         healed = task_state.write_trace_uri_conditional("t-x", "s3://b/x.gz")
         assert healed is False
+
+
+# ---------------------------------------------------------------------------
+# Chunk 3: TaskApprovalsTable + AWAITING_APPROVAL transition primitives
+# ---------------------------------------------------------------------------
+
+
+class _FakeClientError(Exception):
+    """Minimal ClientError-shaped exception for the task_state tests.
+
+    ``_extract_error_code`` / ``_extract_cancellation_reasons`` duck-type on
+    ``exc.response``, so a plain class that carries a response dict lets us
+    simulate ``TransactionCanceledException`` /
+    ``ConditionalCheckFailedException`` without pulling in botocore.
+    """
+
+    def __init__(self, code: str, cancellation_reasons: list | None = None):
+        super().__init__(code)
+        self.response: dict = {"Error": {"Code": code}}
+        if cancellation_reasons is not None:
+            self.response["CancellationReasons"] = cancellation_reasons
+
+
+@pytest.fixture()
+def approval_tables_env(monkeypatch):
+    """Set both approval-related env vars so _require_tables passes."""
+    monkeypatch.setenv("TASK_TABLE_NAME", "task-table")
+    monkeypatch.setenv("TASK_APPROVALS_TABLE_NAME", "approvals-table")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+
+@pytest.fixture()
+def approval_row():
+    """A §10.1-shaped approval row for the happy-path write test."""
+    return {
+        "task_id": "01KTASK",
+        "request_id": "01KREQ",
+        "tool_name": "Bash",
+        "tool_input_preview": "git push --force",
+        "tool_input_sha256": "a" * 64,
+        "reason": "Soft-deny: force_push_any",
+        "severity": "high",
+        "matching_rule_ids": ["force_push_any"],
+        "status": "PENDING",
+        "created_at": "2026-05-07T00:00:00Z",
+        "timeout_s": 300,
+        "ttl": 1_800_000_000,
+        "user_id": "u-alice",
+        "repo": "owner/repo",
+    }
+
+
+class TestTransactWriteApprovalRequest:
+    def test_env_missing_raises(self, monkeypatch, approval_row):
+        monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
+        monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
+        with pytest.raises(task_state.ApprovalTablesUnavailable):
+            task_state.transact_write_approval_request(
+                "01KTASK", "01KREQ", approval_row, client=MagicMock()
+            )
+
+    def test_happy_path_calls_transact_write_items(self, approval_tables_env, approval_row):
+        client = MagicMock()
+        client.transact_write_items.return_value = {}
+
+        task_state.transact_write_approval_request("01KTASK", "01KREQ", approval_row, client=client)
+
+        call = client.transact_write_items.call_args
+        items = call.kwargs["TransactItems"]
+        assert len(items) == 2
+
+        # Item 1 — Put on approvals table with attribute_not_exists(request_id)
+        put = items[0]["Put"]
+        assert put["TableName"] == "approvals-table"
+        assert put["ConditionExpression"] == "attribute_not_exists(request_id)"
+        assert put["Item"]["task_id"] == {"S": "01KTASK"}
+        assert put["Item"]["request_id"] == {"S": "01KREQ"}
+        assert put["Item"]["status"] == {"S": "PENDING"}
+        assert put["Item"]["matching_rule_ids"] == {"L": [{"S": "force_push_any"}]}
+        assert put["Item"]["timeout_s"] == {"N": "300"}
+
+        # Item 2 — Update on task table with RUNNING precondition
+        upd = items[1]["Update"]
+        assert upd["TableName"] == "task-table"
+        assert upd["Key"] == {"task_id": {"S": "01KTASK"}}
+        assert "#s = :running" in upd["ConditionExpression"]
+        assert upd["ExpressionAttributeValues"][":awaiting"] == {"S": "AWAITING_APPROVAL"}
+        assert upd["ExpressionAttributeValues"][":running"] == {"S": "RUNNING"}
+        assert upd["ExpressionAttributeValues"][":rid"] == {"S": "01KREQ"}
+
+    def test_transaction_cancelled_raises_approval_write_error(
+        self, approval_tables_env, approval_row
+    ):
+        client = MagicMock()
+        reasons = [{"Code": "ConditionalCheckFailed"}, {"Code": "None"}]
+        client.transact_write_items.side_effect = _FakeClientError(
+            "TransactionCanceledException", cancellation_reasons=reasons
+        )
+
+        with pytest.raises(task_state.ApprovalWriteError) as exc_info:
+            task_state.transact_write_approval_request(
+                "01KTASK", "01KREQ", approval_row, client=client
+            )
+        assert exc_info.value.cancellation_reasons == reasons
+
+    def test_other_errors_propagate(self, approval_tables_env, approval_row):
+        client = MagicMock()
+        client.transact_write_items.side_effect = _FakeClientError(
+            "ProvisionedThroughputExceededException"
+        )
+        with pytest.raises(_FakeClientError):
+            task_state.transact_write_approval_request(
+                "01KTASK", "01KREQ", approval_row, client=client
+            )
+
+    def test_unsupported_row_type_rejected(self, approval_tables_env):
+        client = MagicMock()
+        # Deliberately malformed row — verifies the runtime guard in
+        # ``_py_to_ddb_attr``. The static cast through ``Any`` is needed
+        # because ``ApprovalRow`` is a TypedDict (S7); without it ``ty``
+        # rejects the malformed dict at compile time, which would
+        # defeat the runtime-check this test exists to pin.
+        from typing import Any
+
+        bad_row: Any = {"task_id": "01K", "request_id": "01R", "extra": 3.14}
+        with pytest.raises(TypeError):
+            task_state.transact_write_approval_request("01K", "01R", bad_row, client=client)
+        client.transact_write_items.assert_not_called()
+
+    def test_exact_condition_expressions_pinned(self, approval_tables_env, approval_row):
+        """I5 — pin the exact ConditionExpression strings on both
+        transact items so a future refactor that loosens the
+        fail-closed enforcement layer fails here. The condition
+        guards are the only thing standing between a stale-state
+        request and a falsely-recorded approval; their strings
+        deserve dedicated assertions, not just call-arg snooping
+        in a happy-path test.
+        """
+        client = MagicMock()
+        client.transact_write_items.return_value = {}
+
+        task_state.transact_write_approval_request("01KTASK", "01KREQ", approval_row, client=client)
+
+        items = client.transact_write_items.call_args.kwargs["TransactItems"]
+        # 1. Approval row must be created exactly once per request_id
+        #    — collision => the duplicate write is rejected at DDB.
+        put_cond = items[0]["Put"]["ConditionExpression"]
+        assert put_cond == "attribute_not_exists(request_id)"
+
+        # 2. Task row precondition is the exact RUNNING check (the
+        #    transition can only fire from RUNNING; AWAITING_APPROVAL
+        #    or terminal statuses must reject the write).
+        upd = items[1]["Update"]
+        cond = upd["ConditionExpression"]
+        assert "#s = :running" in cond
+        # Defensive: the condition must NOT accept AWAITING_APPROVAL
+        # as a precondition for *initial* gate-write — that would
+        # let a runaway gate cascade re-pause an already-paused task.
+        assert ":awaiting" not in cond
+
+    def test_condition_failed_reason_includes_both_branches(
+        self, approval_tables_env, approval_row
+    ):
+        """When TransactWriteItems is cancelled, both branches'
+        cancellation reasons must propagate to the caller so the
+        hook can distinguish "request_id collision" from "task
+        already moved past RUNNING".
+        """
+        client = MagicMock()
+        reasons = [
+            {"Code": "ConditionalCheckFailed"},  # approvals row collision
+            {"Code": "ConditionalCheckFailed"},  # task row no longer RUNNING
+        ]
+        client.transact_write_items.side_effect = _FakeClientError(
+            "TransactionCanceledException", cancellation_reasons=reasons
+        )
+
+        with pytest.raises(task_state.ApprovalWriteError) as exc_info:
+            task_state.transact_write_approval_request(
+                "01KTASK", "01KREQ", approval_row, client=client
+            )
+        # Both branches of the cancellation must surface — the hook's
+        # error-classification logic depends on inspecting both.
+        assert len(exc_info.value.cancellation_reasons) == 2
+        assert all(
+            r.get("Code") == "ConditionalCheckFailed" for r in exc_info.value.cancellation_reasons
+        )
+
+
+class TestTransactResumeFromApproval:
+    def test_env_missing_raises(self, monkeypatch):
+        monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
+        monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
+        with pytest.raises(task_state.ApprovalTablesUnavailable):
+            task_state.transact_resume_from_approval("01K", "01R", client=MagicMock())
+
+    def test_happy_path_updates_task_table(self, approval_tables_env):
+        client = MagicMock()
+        client.transact_write_items.return_value = {}
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        items = client.transact_write_items.call_args.kwargs["TransactItems"]
+        assert len(items) == 1
+        upd = items[0]["Update"]
+        assert upd["TableName"] == "task-table"
+        assert "awaiting_approval_request_id = :rid" in upd["ConditionExpression"]
+        assert "#s = :awaiting" in upd["ConditionExpression"]
+        assert upd["ExpressionAttributeValues"][":rid"] == {"S": "01KREQ"}
+        assert "REMOVE awaiting_approval_request_id" in upd["UpdateExpression"]
+
+    def test_cancellation_raises_approval_resume_error(self, approval_tables_env):
+        client = MagicMock()
+        client.transact_write_items.side_effect = _FakeClientError(
+            "TransactionCanceledException",
+            cancellation_reasons=[{"Code": "ConditionalCheckFailed"}],
+        )
+        with pytest.raises(task_state.ApprovalResumeError):
+            task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+    def test_resume_condition_pins_joint_invariant(self, approval_tables_env):
+        """I5 — pin the joint condition expression so a refactor that
+        forgets the ``awaiting_approval_request_id = :rid`` half
+        (e.g. allowing resume on ANY AWAITING_APPROVAL row, not
+        just the one matching the decided request_id) fails here.
+        Mismatching that half would let an out-of-order
+        approve_other_request decision resume the wrong gate.
+        """
+        client = MagicMock()
+        client.transact_write_items.return_value = {}
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        upd = client.transact_write_items.call_args.kwargs["TransactItems"][0]["Update"]
+        cond = upd["ConditionExpression"]
+        # Both halves must be present and joined by AND.
+        assert "#s = :awaiting" in cond
+        assert "awaiting_approval_request_id = :rid" in cond
+        assert "AND" in cond
+        # The cleared-on-resume column must be REMOVE'd, not just
+        # overwritten — otherwise the next ``transact_write_approval_request``
+        # would see a stale request_id pointing at a finished gate.
+        assert "REMOVE awaiting_approval_request_id" in upd["UpdateExpression"]
+
+
+class TestBestEffortUpdateApprovalStatus:
+    def test_happy_path_returns_true(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.return_value = {}
+
+        ok = task_state.best_effort_update_approval_status(
+            "01KTASK", "01KREQ", "TIMED_OUT", client=client
+        )
+
+        assert ok is True
+        call = client.update_item.call_args
+        assert call.kwargs["TableName"] == "approvals-table"
+        assert call.kwargs["ConditionExpression"] == "#s = :pending"
+        assert call.kwargs["ExpressionAttributeValues"][":new"] == {"S": "TIMED_OUT"}
+        # Default: no reason attr is added when caller omits it.
+        assert "deny_reason" not in call.kwargs["UpdateExpression"]
+
+    def test_reason_optional_attached(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.return_value = {}
+
+        task_state.best_effort_update_approval_status(
+            "01KTASK", "01KREQ", "DENIED", reason="no prod pushes", client=client
+        )
+
+        call = client.update_item.call_args
+        assert "deny_reason = :reason" in call.kwargs["UpdateExpression"]
+        assert call.kwargs["ExpressionAttributeValues"][":reason"] == {"S": "no prod pushes"}
+
+    def test_conditional_check_failed_returns_false(self, approval_tables_env):
+        """IMPL-24 — this is the VM-throttle race signal the hook re-reads on."""
+        client = MagicMock()
+        client.update_item.side_effect = _FakeClientError("ConditionalCheckFailedException")
+
+        ok = task_state.best_effort_update_approval_status(
+            "01KTASK", "01KREQ", "TIMED_OUT", client=client
+        )
+
+        assert ok is False
+
+    def test_other_errors_propagate(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.side_effect = _FakeClientError("ProvisionedThroughputExceededException")
+        with pytest.raises(_FakeClientError):
+            task_state.best_effort_update_approval_status(
+                "01KTASK", "01KREQ", "TIMED_OUT", client=client
+            )
+
+
+class TestGetApprovalRow:
+    def test_consistent_read_default(self, approval_tables_env):
+        client = MagicMock()
+        client.get_item.return_value = {"Item": {}}
+
+        task_state.get_approval_row("01KTASK", "01KREQ", client=client)
+
+        call = client.get_item.call_args
+        assert call.kwargs["ConsistentRead"] is True
+        assert call.kwargs["TableName"] == "approvals-table"
+        assert call.kwargs["Key"] == {
+            "task_id": {"S": "01KTASK"},
+            "request_id": {"S": "01KREQ"},
+        }
+
+    def test_eventual_read_opt_in(self, approval_tables_env):
+        client = MagicMock()
+        client.get_item.return_value = {"Item": {}}
+
+        task_state.get_approval_row("01KTASK", "01KREQ", consistent_read=False, client=client)
+
+        assert client.get_item.call_args.kwargs["ConsistentRead"] is False
+
+    def test_row_not_found_returns_none(self, approval_tables_env):
+        client = MagicMock()
+        client.get_item.return_value = {}
+
+        row = task_state.get_approval_row("01KTASK", "01KREQ", client=client)
+
+        assert row is None
+
+    def test_row_unmarshalled_to_python(self, approval_tables_env):
+        client = MagicMock()
+        client.get_item.return_value = {
+            "Item": {
+                "task_id": {"S": "01KTASK"},
+                "request_id": {"S": "01KREQ"},
+                "status": {"S": "APPROVED"},
+                "scope": {"S": "tool_type:Read"},
+                "timeout_s": {"N": "300"},
+                "matching_rule_ids": {"L": [{"S": "force_push_any"}]},
+                "deny_reason": {"NULL": True},
+            }
+        }
+
+        row = task_state.get_approval_row("01KTASK", "01KREQ", client=client)
+
+        assert row == {
+            "task_id": "01KTASK",
+            "request_id": "01KREQ",
+            "status": "APPROVED",
+            "scope": "tool_type:Read",
+            "timeout_s": 300,
+            "matching_rule_ids": ["force_push_any"],
+            "deny_reason": None,
+        }
+
+
+class TestIncrementApprovalGateCountInDdb:
+    """Chunk 7: best-effort persistence of ``approval_gate_count`` so a
+    container restart (§13.6) resumes the cumulative gate budget instead
+    of resetting to 0.
+    """
+
+    def test_happy_path_returns_true_and_issues_add(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.return_value = {}
+
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
+
+        assert ok is True
+        call = client.update_item.call_args
+        # Writes to TaskTable (not approvals-table) — survival of the
+        # TASK-owned counter, not of the approval row.
+        assert call.kwargs["TableName"] == "task-table"
+        assert call.kwargs["Key"] == {"task_id": {"S": "01KTASK"}}
+        # Atomic ADD (not SET) so concurrent hooks never clobber the counter
+        # and the CreateTaskFn seed of ``approval_gate_count: 0`` (which
+        # initializes the attribute) is still respected.
+        assert call.kwargs["UpdateExpression"] == "ADD approval_gate_count :one"
+        assert call.kwargs["ExpressionAttributeValues"] == {":one": {"N": "1"}}
+        # No ConditionExpression — the counter is monotonic; we never gate
+        # the bump on any read-modify-write state.
+        assert "ConditionExpression" not in call.kwargs
+
+    def test_env_missing_returns_false_best_effort(self, monkeypatch):
+        # §13.6: counter persistence is a safety bound, not a correctness
+        # bound. A missing TASK_TABLE_NAME must not block the gate.
+        monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
+        monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
+
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=MagicMock())
+
+        assert ok is False
+
+    def test_ddb_client_error_returns_false_not_raises(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.side_effect = _FakeClientError("ProvisionedThroughputExceededException")
+
+        # Best-effort: swallow the error so the hook proceeds with the
+        # session-scoped counter as authoritative within the container.
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
+
+        assert ok is False
+
+    def test_ddb_unknown_exception_returns_false_not_raises(self, approval_tables_env):
+        client = MagicMock()
+        client.update_item.side_effect = RuntimeError("AWS SDK internal error")
+
+        ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
+
+        assert ok is False
+
+
+class TestCancellationHelpers:
+    def test_extract_error_code_none_on_missing_response(self):
+        assert task_state._extract_error_code(RuntimeError("boom")) is None
+
+    def test_extract_error_code_reads_clienterror_shape(self):
+        assert (
+            task_state._extract_error_code(_FakeClientError("TransactionCanceledException"))
+            == "TransactionCanceledException"
+        )
+
+    def test_extract_cancellation_reasons(self):
+        exc = _FakeClientError(
+            "TransactionCanceledException",
+            cancellation_reasons=[{"Code": "ConditionalCheckFailed"}],
+        )
+        reasons = task_state._extract_cancellation_reasons(exc)
+        assert reasons == [{"Code": "ConditionalCheckFailed"}]
+
+    def test_extract_cancellation_reasons_none_on_plain_exception(self):
+        assert task_state._extract_cancellation_reasons(RuntimeError()) == []

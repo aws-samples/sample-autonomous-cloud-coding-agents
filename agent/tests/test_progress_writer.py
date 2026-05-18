@@ -745,3 +745,324 @@ class TestSharedCircuitBreaker:
         w2._table = t2
         w2.write_agent_milestone("normal", "y")
         t2.put_item.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Chunk 3: approval-gate milestone helpers (§11.1)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalMilestoneHelpers:
+    """Lock the 14 agent-side approval milestone payloads against §11.1.
+
+    Every helper emits ``event_type == "agent_milestone"`` with structured
+    metadata that downstream consumers (fan-out Lambda, SSE stream, dashboard
+    queries) read by key. Testing at the ``_put_event`` boundary verifies the
+    DDB shape without coupling to the internal ``_put_approval_milestone``
+    helper.
+    """
+
+    @pytest.fixture()
+    def writer(self, monkeypatch):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        w = _ProgressWriter("task-approval")
+        w._table = MagicMock()
+        return w
+
+    def _last_event(self, writer) -> tuple[str, dict]:
+        call = writer._table.put_item.call_args
+        assert call is not None, "put_item not called"
+        item = call.kwargs.get("Item") or call.args[0]
+        return item["event_type"], item["metadata"]
+
+    def test_pre_approvals_loaded(self, writer):
+        writer.write_approval_pre_approvals_loaded(count=2, scopes=["tool_type:Read", "rule:foo"])
+        event_type, metadata = self._last_event(writer)
+        assert event_type == "agent_milestone"
+        assert metadata["milestone"] == "pre_approvals_loaded"
+        assert metadata["count"] == 2
+        assert metadata["scopes"] == ["tool_type:Read", "rule:foo"]
+
+    def test_approval_requested(self, writer):
+        writer.write_approval_requested(
+            request_id="01KREQ",
+            tool_name="Bash",
+            input_preview="git push --force",
+            reason="Soft-deny: force_push_any",
+            severity="high",
+            timeout_s=300,
+            matching_rule_ids=["force_push_any"],
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_requested"
+        assert metadata["request_id"] == "01KREQ"
+        assert metadata["tool_name"] == "Bash"
+        assert metadata["input_preview"] == "git push --force"
+        assert metadata["severity"] == "high"
+        assert metadata["timeout_s"] == 300
+        assert metadata["matching_rule_ids"] == ["force_push_any"]
+
+    def test_approval_requested_truncates_long_preview(self, writer):
+        long_preview = "x" * 5000
+        writer.write_approval_requested(
+            request_id="01KREQ",
+            tool_name="Bash",
+            input_preview=long_preview,
+            reason="Soft-deny: force_push_any",
+            severity="high",
+            timeout_s=300,
+            matching_rule_ids=[],
+        )
+        _, metadata = self._last_event(writer)
+        # Default preview cap is 200 chars; helper truncates to preserve DDB budget.
+        assert len(metadata["input_preview"]) <= 210
+
+    def test_approval_granted(self, writer):
+        writer.write_approval_granted(
+            request_id="01KREQ", scope="tool_type:Read", decided_at="2026-05-07T00:00:00Z"
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_granted"
+        assert metadata["request_id"] == "01KREQ"
+        assert metadata["scope"] == "tool_type:Read"
+        assert metadata["decided_at"] == "2026-05-07T00:00:00Z"
+
+    def test_approval_denied(self, writer):
+        writer.write_approval_denied(
+            request_id="01KREQ", reason="build the Makefile target first", decided_at=None
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_denied"
+        assert metadata["request_id"] == "01KREQ"
+        assert metadata["reason"] == "build the Makefile target first"
+        assert metadata["decided_at"] is None
+
+    def test_approval_timed_out(self, writer):
+        writer.write_approval_timed_out(request_id="01KREQ", timeout_s=300)
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_timed_out"
+        assert metadata["request_id"] == "01KREQ"
+        assert metadata["timeout_s"] == 300
+
+    # --- Chunk 8a: outcome-event schema superset for ApprovalMetricsPublisher
+
+    def test_approval_granted_includes_created_at_when_supplied(self, writer):
+        # ApprovalMetricsPublisher needs ``created_at`` to compute
+        # ``ApprovalDecisionLatencyMs`` on the APPROVED branch. The agent
+        # caller (hooks.py) propagates it from the approval row; the
+        # writer must surface it on the emitted event metadata.
+        writer.write_approval_granted(
+            request_id="01KREQ",
+            scope="tool_type:Read",
+            decided_at="2026-05-07T00:00:05Z",
+            created_at="2026-05-07T00:00:00Z",
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_granted"
+        assert metadata["created_at"] == "2026-05-07T00:00:00Z"
+        assert metadata["decided_at"] == "2026-05-07T00:00:05Z"
+
+    def test_approval_granted_omits_created_at_when_absent(self, writer):
+        # Backward-compat — a caller that hasn't been updated (or the
+        # deploy-window old container) must still produce a valid event.
+        # The publisher Lambda's schema-mismatch branch handles these
+        # by skipping the latency emit + firing METRIC_EMIT_SKIPPED.
+        writer.write_approval_granted(
+            request_id="01KREQ",
+            scope="tool_type:Read",
+            decided_at="2026-05-07T00:00:05Z",
+        )
+        _, metadata = self._last_event(writer)
+        assert "created_at" not in metadata
+
+    def test_approval_denied_includes_created_at_when_supplied(self, writer):
+        writer.write_approval_denied(
+            request_id="01KREQ",
+            reason="build the Makefile target first",
+            decided_at="2026-05-07T00:00:05Z",
+            created_at="2026-05-07T00:00:00Z",
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_denied"
+        assert metadata["created_at"] == "2026-05-07T00:00:00Z"
+
+    def test_approval_denied_omits_created_at_when_absent(self, writer):
+        writer.write_approval_denied(
+            request_id="01KREQ",
+            reason="build the Makefile target first",
+            decided_at=None,
+        )
+        _, metadata = self._last_event(writer)
+        assert "created_at" not in metadata
+
+    def test_approval_timed_out_includes_8a_fields_when_supplied(self, writer):
+        # ApprovalMetricsPublisher needs all three for its TIMED_OUT
+        # branch: ``created_at`` for latency, ``effective_timeout_s``
+        # for the breakdown histogram, ``matching_rule_ids`` for the
+        # rule_id dimension. Emitting all three lets the publisher
+        # drop only the specific metric branch whose input is missing
+        # rather than the whole event.
+        writer.write_approval_timed_out(
+            request_id="01KREQ",
+            timeout_s=300,
+            created_at="2026-05-07T00:00:00Z",
+            effective_timeout_s=120,
+            matching_rule_ids=["deny-force-push", "escalate-credentials"],
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_timed_out"
+        assert metadata["timeout_s"] == 300
+        assert metadata["created_at"] == "2026-05-07T00:00:00Z"
+        assert metadata["effective_timeout_s"] == 120
+        assert metadata["matching_rule_ids"] == [
+            "deny-force-push",
+            "escalate-credentials",
+        ]
+
+    def test_approval_timed_out_omits_8a_fields_when_absent(self, writer):
+        # Backward-compat — legacy caller shape keeps working.
+        writer.write_approval_timed_out(request_id="01KREQ", timeout_s=300)
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_timed_out"
+        assert "created_at" not in metadata
+        assert "effective_timeout_s" not in metadata
+        assert "matching_rule_ids" not in metadata
+
+    def test_approval_timed_out_matching_rule_ids_list_copy(self, writer):
+        # Defensive copy — mutating the caller's list post-call must not
+        # corrupt the emitted metadata. Mirrors the pattern used for
+        # ``initial_approvals`` / other list payloads in this module.
+        rule_ids = ["a", "b"]
+        writer.write_approval_timed_out(
+            request_id="01KREQ", timeout_s=300, matching_rule_ids=rule_ids
+        )
+        rule_ids.append("c")
+        _, metadata = self._last_event(writer)
+        assert metadata["matching_rule_ids"] == ["a", "b"]
+
+    def test_approval_stranded(self, writer):
+        writer.write_approval_stranded(request_id="01KREQ", age_s=600, reason="container evicted")
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_stranded"
+        assert metadata["age_s"] == 600
+        assert metadata["reason"] == "container evicted"
+
+    def test_approval_write_failed(self, writer):
+        writer.write_approval_write_failed(request_id="01KREQ", error="TransactionCanceled")
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_write_failed"
+        assert metadata["request_id"] == "01KREQ"
+        assert metadata["error"] == "TransactionCanceled"
+
+    def test_approval_write_failed_request_id_may_be_none(self, writer):
+        writer.write_approval_write_failed(request_id=None, error="boom")
+        _, metadata = self._last_event(writer)
+        assert metadata["request_id"] is None
+
+    def test_approval_resume_failed(self, writer):
+        writer.write_approval_resume_failed(request_id="01KREQ", error="task cancelled")
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_resume_failed"
+
+    def test_approval_poll_degraded(self, writer):
+        writer.write_approval_poll_degraded(request_id="01KREQ", consecutive_failures=3)
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_poll_degraded"
+        assert metadata["consecutive_failures"] == 3
+
+    def test_approval_timeout_capped_rule_annotation(self, writer):
+        writer.write_approval_timeout_capped(
+            request_id="01KREQ",
+            requested_timeout_s=600,
+            effective_timeout_s=300,
+            reason="rule_annotation",
+            matching_rule_ids=["write_credentials"],
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_timeout_capped"
+        assert metadata["reason"] == "rule_annotation"
+        assert metadata["matching_rule_ids"] == ["write_credentials"]
+
+    def test_approval_timeout_capped_maxlifetime_omits_rule_ids(self, writer):
+        writer.write_approval_timeout_capped(
+            request_id="01KREQ",
+            requested_timeout_s=600,
+            effective_timeout_s=120,
+            reason="maxLifetime_ceiling",
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["reason"] == "maxLifetime_ceiling"
+        assert "matching_rule_ids" not in metadata
+
+    def test_approval_ceiling_shrinking(self, writer):
+        writer.write_approval_ceiling_shrinking(
+            request_id="01KREQ",
+            max_lifetime_remaining_s=900,
+            cleanup_margin_s=120,
+            task_default_timeout_s=300,
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_ceiling_shrinking"
+        # Key name uses the design-doc spelling for downstream parsers.
+        assert metadata["maxLifetime_remaining_s"] == 900
+        assert metadata["cleanup_margin_s"] == 120
+        assert metadata["task_default_timeout_s"] == 300
+
+    def test_approval_cap_exceeded(self, writer):
+        writer.write_approval_cap_exceeded(request_id="01KREQ", count=50, cap=50)
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_cap_exceeded"
+        assert metadata["count"] == 50
+        assert metadata["cap"] == 50
+
+    def test_approval_rate_limit_exceeded(self, writer):
+        writer.write_approval_rate_limit_exceeded(request_id="01KREQ", rate=20, limit=20)
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_rate_limit_exceeded"
+        assert metadata["rate"] == 20
+        assert metadata["limit"] == 20
+
+    def test_approval_late_win(self, writer):
+        writer.write_approval_late_win(
+            request_id="01KREQ",
+            outcome="APPROVED",
+            reason="user decision landed during TIMED_OUT write",
+        )
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "approval_late_win"
+        assert metadata["outcome"] == "APPROVED"
+        assert metadata["reason"] == "user decision landed during TIMED_OUT write"
+
+    def test_policy_decision_cached(self, writer):
+        # IMPL-23: cache hits emit a `policy_decision` milestone with
+        # `decision_source="recent_decision_cache"`. Validates the IMPL-23
+        # metadata contract documented in §12.8.
+        writer.write_policy_decision_cached(
+            tool_name="Bash",
+            tool_input_sha256="abcdef123456",
+            cached_decision="DENIED",
+            cached_reason="user said force-push is too risky",
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+        event_type, metadata = self._last_event(writer)
+        assert event_type == "agent_milestone"
+        assert metadata["milestone"] == "policy_decision"
+        assert metadata["decision_source"] == "recent_decision_cache"
+        assert metadata["tool_name"] == "Bash"
+        assert metadata["tool_input_sha256"] == "abcdef123456"
+        assert metadata["cached_decision"] == "DENIED"
+        assert metadata["cached_reason"] == "user said force-push is too risky"
+        assert metadata["original_decision_ts"] == "2026-05-07T12:00:00Z"
+
+    def test_policy_decision_cached_truncates_long_reason(self, writer):
+        writer.write_policy_decision_cached(
+            tool_name="Bash",
+            tool_input_sha256="abc",
+            cached_decision="TIMED_OUT",
+            cached_reason="x" * 5000,
+            original_decision_ts="2026-05-07T12:00:00Z",
+        )
+        _, metadata = self._last_event(writer)
+        # Default preview cap is 200 chars; preserve DDB budget under adversarial reasons.
+        assert len(metadata["cached_reason"]) <= 210

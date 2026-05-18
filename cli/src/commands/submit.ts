@@ -21,8 +21,35 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { CliError } from '../errors';
 import { formatJson, formatTaskDetail } from '../format';
-import { CreateTaskRequest } from '../types';
+import {
+  APPROVAL_TIMEOUT_S_MAX,
+  APPROVAL_TIMEOUT_S_MIN,
+  ApprovalScope,
+  CreateTaskRequest,
+  INITIAL_APPROVALS_MAX_ENTRIES,
+  INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
+} from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
+
+/** Scope prefixes the server accepts (see ``parseApprovalScope`` on the
+ *  CDK side). Special short forms without ``:`` are also valid. */
+const SCOPE_PREFIXES = [
+  'tool_type:',
+  'tool_group:',
+  'bash_pattern:',
+  'write_path:',
+  'rule:',
+] as const;
+const SCOPE_SHORT_FORMS = new Set([
+  'this_call',
+  'tool_type_session',
+  'tool_group_session',
+  'all_session',
+]);
+
+function collect<T>(value: T, previous: readonly T[]): readonly T[] {
+  return [...previous, value];
+}
 
 export function makeSubmitCommand(): Command {
   return new Command('submit')
@@ -36,6 +63,20 @@ export function makeSubmitCommand(): Command {
     .option('--review-pr <number>', 'PR number to review (sets task_type to pr_review)', parseInt)
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
+    .option(
+      '--approval-timeout <seconds>',
+      `Cedar HITL per-task default approval timeout (${APPROVAL_TIMEOUT_S_MIN}-${APPROVAL_TIMEOUT_S_MAX}s). `
+        + 'Overrides the platform default of 300s. Per-rule @approval_timeout_s still min-wins at gate-firing.',
+      parseInt,
+    )
+    .option(
+      '--pre-approve <scope>',
+      'Cedar HITL pre-approval scope to seed at task start (repeatable). '
+        + 'Valid forms: this_call, tool_type_session, tool_group_session, all_session, '
+        + 'tool_type:<name>, tool_group:<name>, bash_pattern:<glob>, write_path:<glob>, rule:<id>.',
+      collect<string>,
+      [] as readonly string[],
+    )
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
@@ -64,6 +105,46 @@ export function makeSubmitCommand(): Command {
           throw new CliError('--max-budget must be a number between 0.01 and 100.');
         }
       }
+      if (opts.approvalTimeout !== undefined) {
+        if (
+          isNaN(opts.approvalTimeout)
+          || !Number.isInteger(opts.approvalTimeout)
+          || opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN
+          || opts.approvalTimeout > APPROVAL_TIMEOUT_S_MAX
+        ) {
+          throw new CliError(
+            `--approval-timeout must be an integer between ${APPROVAL_TIMEOUT_S_MIN} `
+              + `and ${APPROVAL_TIMEOUT_S_MAX} seconds.`,
+          );
+        }
+      }
+      const preApproveRaw = (opts.preApprove ?? []) as readonly string[];
+      let initialApprovals: readonly ApprovalScope[] | undefined;
+      if (preApproveRaw.length > 0) {
+        if (preApproveRaw.length > INITIAL_APPROVALS_MAX_ENTRIES) {
+          throw new CliError(
+            `--pre-approve exceeds ${INITIAL_APPROVALS_MAX_ENTRIES} entries.`,
+          );
+        }
+        for (const scope of preApproveRaw) {
+          if (scope.length > INITIAL_APPROVALS_MAX_ENTRY_LENGTH) {
+            throw new CliError(
+              `--pre-approve "${scope}" exceeds ${INITIAL_APPROVALS_MAX_ENTRY_LENGTH} characters.`,
+            );
+          }
+          if (
+            !SCOPE_SHORT_FORMS.has(scope)
+            && !SCOPE_PREFIXES.some((p) => scope.startsWith(p) && scope.length > p.length)
+          ) {
+            throw new CliError(
+              `--pre-approve "${scope}" has an invalid scope. Use one of: `
+                + 'this_call, tool_type_session, tool_group_session, all_session, '
+                + 'or a prefix: tool_type:, tool_group:, bash_pattern:, write_path:, rule:.',
+            );
+          }
+        }
+        initialApprovals = preApproveRaw as readonly ApprovalScope[];
+      }
 
       const client = new ApiClient();
       const body: CreateTaskRequest = {
@@ -76,6 +157,8 @@ export function makeSubmitCommand(): Command {
         ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
         ...(opts.reviewPr !== undefined && { task_type: 'pr_review' as const, pr_number: opts.reviewPr }),
         ...(opts.trace && { trace: true }),
+        ...(opts.approvalTimeout !== undefined && { approval_timeout_s: opts.approvalTimeout }),
+        ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
       };
 
       const task = await client.createTask(body, opts.idempotencyKey);

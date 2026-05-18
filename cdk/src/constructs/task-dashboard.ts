@@ -318,5 +318,261 @@ export class TaskDashboard extends Construct {
         height: 6,
       }),
     );
+
+    // --- Row 8+9: Cedar HITL approval widgets (§11.3, IMPL-28) --------------
+    //
+    // Three native-CloudWatch-metric widgets backed by the
+    // ApprovalMetricsPublisher Lambda (see
+    // ``approval-metrics-publisher-consumer.ts``), which consumes the
+    // TaskEventsTable stream and emits EMF to namespace
+    // ``ABCA/Cedar-HITL``. Widget layout per IMPL-28:
+    //
+    //   Row 8:  [ ApprovalTimeoutClipRate ][ ApprovalTimeoutBreakdown ]
+    //   Row 9:  [ ApprovalDecisionLatency (full width)                ]
+    //
+    // At a glance, an operator can tell whether a "timeout" wave is:
+    //   - a policy-authoring problem (clip-rate on ``rule_annotation``),
+    //   - a task-sizing problem (clip-rate on ``maxLifetime_ceiling``),
+    //   - a UX problem (decision latency high but within timeout), or
+    //   - a notification problem (decision latency absent, timeouts
+    //     high).
+    //
+    // Note: §11.3 mentions "Retired the old bundled widget" — that
+    // widget never shipped in this codebase; the language is
+    // historical framing for the design-doc reader. Nothing to remove.
+    const HITL_NAMESPACE = 'ABCA/Cedar-HITL';
+
+    this.dashboard.addWidgets(
+      // ApprovalTimeoutClipRate — percentage of approvals whose
+      // effective_timeout_s < requested_timeout_s, bucketed by
+      // ``reason`` dimension. MathExpression uses IF(requested > 0,
+      // ...) so a period with zero approvals renders as 0 rather than
+      // NaN (which CloudWatch silently renders as a gap — visually
+      // identical to a broken pipeline).
+      new cloudwatch.GraphWidget({
+        title: 'Approval Timeout Clip Rate (%)',
+        left: [
+          new cloudwatch.MathExpression({
+            label: 'rule_annotation',
+            expression: 'IF(requested > 0, 100 * clipped_rule / requested, 0)',
+            usingMetrics: {
+              clipped_rule: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ClippedApprovalCount',
+                dimensionsMap: { reason: 'rule_annotation' },
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+              requested: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ApprovalRequestCount',
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+            },
+            period: Duration.minutes(15),
+          }),
+          new cloudwatch.MathExpression({
+            label: 'maxLifetime_ceiling',
+            expression: 'IF(requested > 0, 100 * clipped_ml / requested, 0)',
+            usingMetrics: {
+              clipped_ml: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ClippedApprovalCount',
+                dimensionsMap: { reason: 'maxLifetime_ceiling' },
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+              requested: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ApprovalRequestCount',
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+            },
+            period: Duration.minutes(15),
+          }),
+          new cloudwatch.MathExpression({
+            label: 'runtime_jwt_ceiling',
+            expression: 'IF(requested > 0, 100 * clipped_jwt / requested, 0)',
+            usingMetrics: {
+              clipped_jwt: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ClippedApprovalCount',
+                dimensionsMap: { reason: 'runtime_jwt_ceiling' },
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+              requested: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ApprovalRequestCount',
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+            },
+            period: Duration.minutes(15),
+          }),
+          // ``unknown`` surfaces when the publisher Lambda received a
+          // clip event with a reason value the normalizer didn't
+          // recognize — per ``normalizeClipReason`` in
+          // ``shared/approval-metrics.ts``. This series should
+          // normally be flat at 0; a sustained non-zero rate is a
+          // deploy signal that the agent emitted a new reason value
+          // the dashboard (and allowlist) hasn't been taught about.
+          // Rendering the line explicitly prevents the "invisible
+          // cost bucket" problem a reviewer flagged — otherwise the
+          // custom metric would accrue at ~$0.30/month without any
+          // operator-visible signal.
+          new cloudwatch.MathExpression({
+            label: 'unknown',
+            expression: 'IF(requested > 0, 100 * clipped_unknown / requested, 0)',
+            usingMetrics: {
+              clipped_unknown: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ClippedApprovalCount',
+                dimensionsMap: { reason: 'unknown' },
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+              requested: new cloudwatch.Metric({
+                namespace: HITL_NAMESPACE,
+                metricName: 'ApprovalRequestCount',
+                statistic: 'Sum',
+                period: Duration.minutes(15),
+              }),
+            },
+            period: Duration.minutes(15),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      // ApprovalTimeoutBreakdown — for timed-out approvals only, the
+      // effective_timeout_s that was actually in effect. Aggregated
+      // p50/p90/p99 so operators can distinguish "timeout was 30s,
+      // obviously the user couldn't respond" from "timeout was 600s
+      // and the user really was unavailable." ``rule_id`` dimension
+      // is emitted per normalized rule id (allowlist + ``other``
+      // bucket to cap cardinality); the three lines below roll up
+      // across all dimension values at dashboard-render time.
+      new cloudwatch.GraphWidget({
+        title: 'Approval Timeout Breakdown — effective timeout on timed-out approvals (s)',
+        left: [
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'TimedOutEffectiveTimeout',
+            statistic: 'p50',
+            period: Duration.minutes(15),
+            label: 'p50',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'TimedOutEffectiveTimeout',
+            statistic: 'p90',
+            period: Duration.minutes(15),
+            label: 'p90',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'TimedOutEffectiveTimeout',
+            statistic: 'p99',
+            period: Duration.minutes(15),
+            label: 'p99',
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      // ApprovalDecisionLatency — decided_at - created_at for each
+      // terminal outcome. Three sets of percentiles keyed by
+      // ``outcome`` dim so operators can see "users ARE responding,
+      // just slowly" (approved p99 climbing) vs "users aren't
+      // responding at all" (timed_out p50 ≈ timeout cap).
+      new cloudwatch.GraphWidget({
+        title: 'Approval Decision Latency by outcome (ms, p50 / p90 / p99)',
+        left: [
+          // Approved outcome
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'approved' },
+            statistic: 'p50',
+            period: Duration.minutes(15),
+            label: 'approved p50',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'approved' },
+            statistic: 'p90',
+            period: Duration.minutes(15),
+            label: 'approved p90',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'approved' },
+            statistic: 'p99',
+            period: Duration.minutes(15),
+            label: 'approved p99',
+          }),
+          // Denied outcome
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'denied' },
+            statistic: 'p50',
+            period: Duration.minutes(15),
+            label: 'denied p50',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'denied' },
+            statistic: 'p90',
+            period: Duration.minutes(15),
+            label: 'denied p90',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'denied' },
+            statistic: 'p99',
+            period: Duration.minutes(15),
+            label: 'denied p99',
+          }),
+          // Timed-out outcome
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'timed_out' },
+            statistic: 'p50',
+            period: Duration.minutes(15),
+            label: 'timed_out p50',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'timed_out' },
+            statistic: 'p90',
+            period: Duration.minutes(15),
+            label: 'timed_out p90',
+          }),
+          new cloudwatch.Metric({
+            namespace: HITL_NAMESPACE,
+            metricName: 'ApprovalDecisionLatencyMs',
+            dimensionsMap: { outcome: 'timed_out' },
+            statistic: 'p99',
+            period: Duration.minutes(15),
+            label: 'timed_out p99',
+          }),
+        ],
+        width: 24,
+        height: 6,
+      }),
+    );
   }
 }

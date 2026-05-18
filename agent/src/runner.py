@@ -33,7 +33,7 @@ from urllib.parse import quote
 from config import AGENT_WORKSPACE
 from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
-from shell import log, truncate
+from shell import log, log_error_cw, truncate
 from telemetry import _TrajectoryWriter
 
 
@@ -175,6 +175,104 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     return otlp_endpoint, otlp_protocol
 
 
+def _initialize_policy_engine_and_hooks(
+    *,
+    config: TaskConfig,
+    trajectory: _TrajectoryWriter | None,
+    progress: _ProgressWriter,
+) -> tuple[Any, dict]:
+    """Construct the per-task ``PolicyEngine`` and wire its hook matchers.
+
+    Extracted from ``run_agent`` so the policy-engine bootstrap path is
+    directly unit-testable without spinning up the full SDK / agent loop.
+    Handles:
+
+    * Threading per-task approval params (``initial_approvals``,
+      ``approval_timeout_s``, and Chunk 7's ``initial_approval_gate_count``)
+      through to ``PolicyEngine.__init__``.
+    * Emitting the ``pre_approvals_loaded`` milestone (§4 step 7, §11.1)
+      unconditionally so "no pre-approvals seeded" is explicit rather than
+      inferred from silence.
+    * Building the SDK hook matchers that route PreToolUse / PostToolUse /
+      Stop invocations through the engine.
+    """
+    from hooks import build_hook_matchers
+    from policy import PolicyEngine
+
+    cedar_policies = config.cedar_policies
+    # Cedar HITL (§7.3, §10.2) — per-task approval defaults threaded
+    # from the orchestrator payload. Engine clamps invalid values
+    # at construction.
+    engine_kwargs: dict = {}
+    if config.initial_approvals:
+        engine_kwargs["initial_approvals"] = list(config.initial_approvals)
+    if config.approval_timeout_s is not None:
+        engine_kwargs["task_default_timeout_s"] = config.approval_timeout_s
+    # Chunk 7 (§13.6): seed the session counter from the TaskTable
+    # persisted value so a container restart mid-task resumes the
+    # cumulative gate budget and the ``approval_gate_cap`` remains
+    # the terminal bound across restarts.
+    if config.initial_approval_gate_count:
+        engine_kwargs["initial_approval_gate_count"] = config.initial_approval_gate_count
+    # Chunk 7b (§4 step 5, decision #13): adopt the per-task cap
+    # resolved at submit-time (blueprint override or platform default,
+    # frozen on the TaskRecord). When absent (legacy task predating
+    # Chunk 7b), ``PolicyEngine`` falls back to DEFAULT_APPROVAL_GATE_CAP
+    # so the behavior matches pre-Chunk-7b deploys.
+    if config.approval_gate_cap is not None:
+        engine_kwargs["approval_gate_cap"] = config.approval_gate_cap
+    policy_engine = PolicyEngine(
+        task_type=config.task_type,
+        repo=config.repo_url,
+        extra_policies=cedar_policies if cedar_policies else None,
+        **engine_kwargs,
+    )
+    # Chunk 7c: surface the resolved cap + its source so operators can
+    # distinguish a blueprint-threaded value from the engine's compile-time
+    # default on a container restart. Mirrors the ``approval_gate_cap_source``
+    # field on the handler's "Task created" log so both ends of the cascade
+    # carry the same key name — CloudWatch Insights queries can
+    # filter/group by ``approval_gate_cap_source`` across handler +
+    # agent events. Value domains differ intentionally: the handler
+    # distinguishes ``blueprint`` vs ``platform_default``, but the
+    # agent only sees the threaded number (blueprint-set or default-50
+    # frozen on the TaskRecord both look the same from here), so it
+    # emits ``threaded`` vs ``engine_default`` (the latter only fires
+    # for legacy tasks that predate Chunk 7b and have no cap on the
+    # TaskRecord at all). Cross-reference handler log at
+    # ``create-task-core.ts::logger.info('Task created', ...)`` for the
+    # ground-truth blueprint-vs-default distinction.
+    if config.approval_gate_cap is not None:
+        cap_log = f" approval_gate_cap={config.approval_gate_cap} approval_gate_cap_source=threaded"
+    else:
+        cap_log = " approval_gate_cap=unset approval_gate_cap_source=engine_default"
+    log(
+        "AGENT",
+        f"Cedar policy engine initialized for task_type={config.task_type}"
+        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else "")
+        + cap_log,
+    )
+
+    # §4 step 7, §11.1: surface the starting pre-approval posture to the
+    # live SSE stream + 90d DDB record so operators can see exactly which
+    # scopes were seeded at task start. Emit unconditionally (count=0,
+    # scopes=[]) so "no pre-approvals seeded" is explicit rather than
+    # inferred from silence.
+    progress.write_approval_pre_approvals_loaded(
+        count=len(config.initial_approvals),
+        scopes=list(config.initial_approvals),
+    )
+
+    hooks = build_hook_matchers(
+        engine=policy_engine,
+        trajectory=trajectory,
+        task_id=config.task_id or "",
+        progress=progress,
+        user_id=config.user_id or "",
+    )
+    return policy_engine, hooks
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -243,27 +341,11 @@ async def run_agent(
     # in UserMessages (ToolResultBlock carries only the id, not the name).
     tool_use_id_to_name: dict[str, str] = {}
 
-    from hooks import build_hook_matchers
-    from policy import PolicyEngine
-
-    task_type = config.task_type
-    repo_url = config.repo_url
-    cedar_policies = config.cedar_policies
-    policy_engine = PolicyEngine(
-        task_type=task_type,
-        repo=repo_url,
-        extra_policies=cedar_policies if cedar_policies else None,
-    )
-    log(
-        "AGENT",
-        f"Cedar policy engine initialized for task_type={task_type}"
-        + (f" with {len(cedar_policies)} extra policies" if cedar_policies else ""),
-    )
-
-    hooks = build_hook_matchers(
-        engine=policy_engine,
+    # Engine is consumed by ``build_hook_matchers`` inside the helper; the
+    # caller only needs the hook matchers for ``ClaudeAgentOptions``.
+    _policy_engine, hooks = _initialize_policy_engine_and_hooks(
+        config=config,
         trajectory=trajectory,
-        task_id=config.task_id or "",
         progress=progress,
     )
 
@@ -430,6 +512,12 @@ async def run_agent(
                     f"cost=${message.total_cost_usd or 0:.4f} "
                     f"duration={message.duration_ms / 1000:.1f}s",
                 )
+                if message.is_error and message.result:
+                    # Mirror SDK-level result errors to APPLICATION_LOGS
+                    # so the dashboard + ``bgagent status`` see them
+                    # (stdout-only logs route to runtime-DEFAULT, not
+                    # the group TaskDashboard reads).
+                    log_error_cw(str(message.result), task_id=config.task_id or None)
 
                 # Write trajectory result summary (use effective status after is_error remap)
                 trajectory.write_result(
@@ -483,7 +571,13 @@ async def run_agent(
                 )
 
     except Exception as e:
-        log("ERROR", f"Exception during receive_response(): {type(e).__name__}: {e}")
+        # Mirror the SDK-loop crash to APPLICATION_LOGS so operators
+        # see it on the dashboard widget + ``bgagent status`` and not
+        # just on the runtime-DEFAULT stream.
+        log_error_cw(
+            f"Exception during receive_response(): {type(e).__name__}: {e}",
+            task_id=config.task_id or None,
+        )
         progress.write_agent_error(error_type=type(e).__name__, message=str(e))
         if result.status == "unknown":
             result.status = "error"

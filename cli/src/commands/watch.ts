@@ -252,15 +252,22 @@ export function formatTerminalMessage(task: Pick<TaskDetail, 'task_id' | 'status
   const status = task.status.toLowerCase();
   const prefix = `Task ${task.task_id} ${status}.`;
   if (task.status === 'COMPLETED') return prefix;
-  // Prefer the structured classification (category + title) when the
-  // server has computed one — it's both stable and user-oriented. Fall
-  // back to the raw ``error_message`` so a classifier gap doesn't
-  // swallow the only signal we have. Never return the whole prefix
-  // with a trailing empty reason.
+  // See ``format.ts::describeReason`` for the full rationale. In short:
+  // when the classifier's category is ``unknown`` (catch-all), the
+  // title "Unexpected error" hides the concrete error string the
+  // agent surfaced. Prefer the raw ``error_message`` in that case so
+  // novel failure modes remain diagnosable inline.
   const cls = task.error_classification;
-  if (cls) return `${prefix} ${cls.category}: ${cls.title}`;
   const msg = task.error_message?.trim();
+  if (cls && cls.category !== 'unknown') {
+    if (msg) {
+      const firstLine = msg.split(/\r?\n/, 1)[0];
+      return `${prefix} ${cls.category}: ${cls.title} — ${firstLine}`;
+    }
+    return `${prefix} ${cls.category}: ${cls.title}`;
+  }
   if (msg) return `${prefix} ${msg}`;
+  if (cls) return `${prefix} ${cls.category}: ${cls.title}`;
   return prefix;
 }
 
@@ -572,7 +579,13 @@ export function makeWatchCommand(): Command {
             // rather than erroring out after already streaming the tail.
             let terminalTask: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'> = {
               task_id: taskId,
-              status: snapshot.taskStatus,
+              // ``snapshot.taskStatus`` is the live-stream's last
+              // observed status string. We cast to the narrowed
+              // ``TaskStatusType`` because by the terminal-event
+              // path it must be one of the API's known terminal
+              // values; the GET below replaces it with the
+              // canonical record on success anyway.
+              status: snapshot.taskStatus as TaskDetail['status'],
               error_classification: null,
               error_message: null,
             };

@@ -89,7 +89,9 @@ aws cognito-idp admin-create-user \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username user@example.com \
-  --temporary-password 'TempPass123!@'
+  --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
+  --temporary-password 'TempPass123!@' \
+  --message-action SUPPRESS
 
 aws cognito-idp admin-set-user-password \
   --region "$REGION" \
@@ -99,7 +101,14 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-Password requirements: minimum 12 characters, uppercase, lowercase, digits, and symbols.
+**Pool constraints** (enforced server-side; ignoring them yields cryptic Cognito errors at login):
+
+- **Username MUST be an email address.** The pool is configured with email as the sign-in alias, so `--username` has to be a valid email — short handles like `alice` are rejected at create time.
+- **Password policy**: minimum 12 characters, with at least one uppercase letter, one lowercase letter, one digit, and one symbol.
+- **`email_verified=true` attribute is required** for the account to log in. Creating a user without it leaves the account in `FORCE_CHANGE_PASSWORD` state and subsequent `initiate-auth` calls fail with `User is not confirmed`.
+- **`--message-action SUPPRESS`** stops Cognito from trying to email the temporary password. If SES isn't configured on the account, omitting this flag causes `admin-create-user` to fail with `NotAuthorizedException`. Safe for non-prod; omit only if you have a working SES sender identity.
+
+The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so you do not have to go through a password change flow on first login.
 
 ### Obtain a JWT token
 
@@ -425,6 +434,8 @@ Created:     2026-04-01T00:39:51.271Z
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
+| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
+| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
@@ -543,6 +554,112 @@ node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
 ```bash
 node lib/bin/bgagent.js cancel <TASK_ID>
 ```
+
+## Approval gates (Cedar HITL)
+
+The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.
+
+The mechanism is Cedar HITL gates — "Human-In-The-Loop." It is the same policy language you can already author at the blueprint level, with one added annotation (`@tier("soft")`) that flips a rule from hard-deny to require-approval.
+
+For the full design and guarantees (atomicity, fail-closed posture, timeout semantics, late-approval handling), see [Cedar HITL gates design doc](../design/CEDAR_HITL_GATES.md). For writing policies, see the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md).
+
+### When a gate fires
+
+When a rule marked `@tier("soft")` matches a tool call:
+
+1. The agent stops before invoking the tool.
+2. A row is atomically written to the approvals table and the task status flips to `AWAITING_APPROVAL`.
+3. A progress event (`approval_requested`) is emitted so `bgagent watch` shows the gate in real time.
+4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per-rule and per-task).
+5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
+
+A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.
+
+### Listing pending approvals
+
+```bash
+node lib/bin/bgagent.js pending
+```
+
+Lists every approval across your tasks that is currently awaiting your decision. The default text output gives you the `request_id`, tool, severity, the reason the rule matched, the tool-input preview, the expiry time, and ready-to-run `approve` / `deny` command lines. Pipe through `--output json` for scripting.
+
+```text
+1 pending approval(s):
+
+  task_id:    01KN37PZ77P1W19D71DTZ15X6X
+  request_id: 01R...
+  tool:       Bash    severity: high
+  reason:     Bash command matches force-push pattern
+  rules:      force_push_any
+  preview:    git push --force origin feature/xyz
+  created:    2026-05-13T12:04:12Z
+  expires:    2026-05-13T12:09:12Z (timeout_s=300)
+  approve:    bgagent approve 01KN37PZ77P1W19D71DTZ15X6X 01R...
+  deny:       bgagent deny 01KN37PZ77P1W19D71DTZ15X6X 01R... --reason "..."
+```
+
+### Approving a gate
+
+```bash
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID>
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope tool_type:Bash
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope rule:force_push_any
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope all_session --yes
+```
+
+The `--scope` flag controls how long the approval carries forward within the running task:
+
+| Scope | Effect |
+|---|---|
+| `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
+| `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
+| `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). |
+| `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
+| `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
+| `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
+| `all_session` | Nuclear option — approves every subsequent gate in the task. Requires `--yes`. |
+
+Approvals only affect the current task; they do not persist across tasks.
+
+### Denying a gate
+
+```bash
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID>
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason "run the migration dry-run first"
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
+```
+
+The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
+
+### Discovering repo policies
+
+Before submitting a task you can list the rules that apply to the target repository:
+
+```bash
+node lib/bin/bgagent.js policies list --repo owner/repo
+node lib/bin/bgagent.js policies list --repo owner/repo --tier soft
+node lib/bin/bgagent.js policies show --repo owner/repo --rule force_push_any
+```
+
+`policies list` prints both tiers: **hard-deny** rules are absolute (even `--pre-approve` cannot bypass them), **soft-deny** rules are the approvable ones. `policies show` prints the full detail for a specific rule (severity, timeout, category, summary).
+
+### Pre-approving scopes at submit time
+
+If you trust a task to make a certain class of changes without interactive confirmation, pre-approve them up front:
+
+```bash
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
+  --pre-approve tool_type:Bash \
+  --pre-approve write_path:tests/**
+
+# Per-task timeout override (platform default is 300s)
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
+```
+
+`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+
+`--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
 
 ## Webhook integration
 
@@ -667,10 +784,12 @@ When you create a task, the platform orchestrates it through these states:
 flowchart LR
     S[SUBMITTED] --> H[HYDRATING]
     H --> R[RUNNING]
+    R <--> A[AWAITING_APPROVAL]
     R --> C[COMPLETED]
     R --> F[FAILED]
     R --> X[CANCELLED]
     R --> T[TIMED_OUT]
+    A --> X
     H --> F
     H --> X
     S --> F
@@ -684,12 +803,13 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 | `SUBMITTED` | Task accepted; orchestrator invoked asynchronously |
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
+| `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
 | `FAILED` | Something went wrong - pre-flight check failed, concurrency limit reached, guardrail blocked the content, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~9 hours) |
 
-Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`.
+Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`. `AWAITING_APPROVAL` is not terminal — a decision (or an approval-timeout) always flips it back to `RUNNING` or onto a terminal state.
 
 Task records in terminal states are automatically deleted after 90 days (configurable via `taskRetentionDays`).
 
@@ -713,6 +833,7 @@ Available events:
 - **Orchestration** - `admission_rejected`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
+- **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
 - **Output** - `pr_created`, `pr_updated`
 
 **Error classifiers** on terminal failure events provide a specific reason:

@@ -25,6 +25,7 @@ import { TERMINAL_STATUSES } from '../constructs/task-status';
 import { GuardrailScreeningError, screenWithGuardrail } from './shared/context-hydration';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
 
@@ -229,18 +230,4 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
   }
-}
-
-/**
- * Format the current minute as a `yyyymmddhhmm` UTC bucket identifier.
- * @param date - the timestamp to format.
- * @returns 12-character bucket string.
- */
-function formatMinuteBucket(date: Date): string {
-  const y = date.getUTCFullYear().toString().padStart(4, '0');
-  const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
-  const d = date.getUTCDate().toString().padStart(2, '0');
-  const h = date.getUTCHours().toString().padStart(2, '0');
-  const mi = date.getUTCMinutes().toString().padStart(2, '0');
-  return `${y}${m}${d}${h}${mi}`;
 }

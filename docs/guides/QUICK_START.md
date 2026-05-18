@@ -139,7 +139,7 @@ Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGI
 
 ## Step 5 - Create a Cognito user
 
-The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so you create a user via the AWS CLI. The password must be at least 12 characters with uppercase, lowercase, digits, and symbols.
+The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so you create a user via the AWS CLI. The pool requires the username to be a valid email address, a password of at least 12 characters mixing uppercase, lowercase, digits, and symbols, and the user's email to be pre-verified.
 
 ```bash
 USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
@@ -150,7 +150,9 @@ aws cognito-idp admin-create-user \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username you@example.com \
-  --temporary-password 'TempPass123!@'
+  --user-attributes Name=email,Value=you@example.com Name=email_verified,Value=true \
+  --temporary-password 'TempPass123!@' \
+  --message-action SUPPRESS
 
 aws cognito-idp admin-set-user-password \
   --region "$REGION" \
@@ -160,7 +162,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-The first command creates the user with a temporary password. The second sets a permanent password so you do not have to go through a password change flow on first login.
+The first command creates the user with a temporary password, pre-verifies the email (required or login fails with `User is not confirmed`), and suppresses Cognito's welcome email (which otherwise errors on accounts without SES configured). The second sets a permanent password so you do not have to go through a password change flow on first login.
 
 ## Step 6 - Configure the CLI and submit a task
 
@@ -207,6 +209,58 @@ While a task is running, you can steer the agent with a nudge:
 ```bash
 node lib/bin/bgagent.js nudge <TASK_ID> "Also add a test for the edge case"
 ```
+
+## Step 7 - See an approval gate in action
+
+If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end.
+
+First, check which rules apply to your repo:
+
+```bash
+node lib/bin/bgagent.js policies list --repo owner/repo
+```
+
+Submit a task that will plausibly trip a soft-deny rule — for example, one of the default blueprint rules guards force-pushes:
+
+```bash
+node lib/bin/bgagent.js submit --repo owner/repo \
+  --task "Force-push the feature branch so the history is linear"
+```
+
+In a second terminal, watch the task:
+
+```bash
+node lib/bin/bgagent.js watch <TASK_ID>
+```
+
+When the agent hits the guarded tool call, `watch` prints an `approval_requested` event and the task status flips to `AWAITING_APPROVAL`. List the pending approval:
+
+```bash
+node lib/bin/bgagent.js pending
+```
+
+The output includes ready-to-run approve/deny lines. Pick one:
+
+```bash
+# Approve just this call
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID>
+
+# Or deny with a reason that nudges the agent toward a safer approach
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> \
+  --reason "Don't force-push shared branches; open a revert PR instead"
+```
+
+The task transitions back to `RUNNING` immediately on a decision. The denial reason is injected into the agent's context so it can adapt rather than retry the same tool call. If no decision arrives within the rule's timeout (300 s by default), the gate is treated as a denial with `timed_out` as the reason.
+
+If you want a task to run without interactive gates (e.g. an unattended overnight job), pre-approve the scopes you trust up-front:
+
+```bash
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
+  --pre-approve tool_type:Bash \
+  --pre-approve write_path:tests/**
+```
+
+Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md).
 
 ## What happened behind the scenes
 

@@ -11,7 +11,18 @@ dependencies = [
     "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
     "aws-opentelemetry-distro==0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
     "mcp==1.27.1", #https://pypi.org/project/mcp/
-    "cedarpy==4.8.3", #https://github.com/k9securityio/cedar-py
+    # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
+    # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
+    # CDK Lambdas) are two language bindings over the same Cedar Rust core.
+    # Even patch-version drift between the bindings can produce divergent
+    # (decision, matching_rule_ids) on the same (policy, input) — a class
+    # of bug invisible to per-side unit tests. The contracts/cedar-parity/
+    # golden fixtures are how CI catches divergence; if you bump cedarpy
+    # you MUST bump @cedar-policy/cedar-wasm to a tested-compatible version
+    # in cdk/package.json AND refresh the parity fixtures, in the same
+    # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
+    # the parity-contract banner in mise.toml.
+    "cedarpy==4.8.0", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.10.0
 ]
 
 [tool.bandit]

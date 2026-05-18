@@ -23,7 +23,7 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture, type LayerVersion } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -50,6 +50,22 @@ export interface TaskApiProps {
    * `POST /tasks/{task_id}/nudge` endpoint is created.
    */
   readonly taskNudgesTable?: dynamodb.ITable;
+
+  /**
+   * Cedar HITL approvals table. When provided, POST /approve, POST
+   * /deny, and GET /pending endpoints are created. See design §7.1,
+   * §7.2, §7.7.
+   */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
+  /**
+   * Cedar-wasm Lambda layer (CedarWasmLayer.layer). Required by the
+   * handlers that parse blueprint policies (`GetPoliciesFn`,
+   * `CreateTaskFn`). Attached only when all approval-gate plumbing
+   * (TaskApprovalsTable, this layer, blueprint / cedar_policies on
+   * RepoTable) is present.
+   */
+  readonly cedarWasmLayer?: LayerVersion;
 
   /**
    * Per-task per-minute nudge rate limit.
@@ -198,6 +214,7 @@ export class TaskApi extends Construct {
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
       { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
     ]);
 
     // --- REST API ---
@@ -591,6 +608,149 @@ export class TaskApi extends Construct {
       nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn), cognitoAuthOptions);
 
       allFunctions.push(nudgeTaskFn);
+    }
+
+    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.6, §7.7) ---
+    // Activated only when the approvals table is provided. The layer
+    // attachment on GetPoliciesFn is conditional on the cedar-wasm
+    // layer being supplied — without it the handler cannot parse
+    // policies and the route is skipped.
+    if (props.taskApprovalsTable) {
+      const approvalEnv: Record<string, string> = {
+        ...commonEnv,
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      };
+
+      // ApproveTaskFn — POST /tasks/{task_id}/approve
+      const approveTaskFn = new lambda.NodejsFunction(this, 'ApproveTaskFn', {
+        entry: path.join(handlersDir, 'approve-task.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: approvalEnv,
+        bundling: commonBundling,
+        timeout: Duration.seconds(15),
+        memorySize: 256,
+      });
+      props.taskTable.grantReadWriteData(approveTaskFn);
+      props.taskApprovalsTable.grantReadWriteData(approveTaskFn);
+      props.taskEventsTable.grantReadWriteData(approveTaskFn);
+
+      // DenyTaskFn — POST /tasks/{task_id}/deny
+      const denyTaskFn = new lambda.NodejsFunction(this, 'DenyTaskFn', {
+        entry: path.join(handlersDir, 'deny-task.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: approvalEnv,
+        bundling: commonBundling,
+        timeout: Duration.seconds(15),
+        memorySize: 256,
+      });
+      props.taskTable.grantReadWriteData(denyTaskFn);
+      props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
+      props.taskEventsTable.grantReadWriteData(denyTaskFn);
+
+      // GetPendingFn — GET /pending
+      const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
+        entry: path.join(handlersDir, 'get-pending.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: approvalEnv,
+        bundling: commonBundling,
+        timeout: Duration.seconds(10),
+        memorySize: 256,
+      });
+      // Least-privilege: GetPendingFn only reads (Query on
+      // user_id-status-index for the user's pending rows) and writes
+      // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row
+      // (UpdateItem with TTL). Full grantReadWriteData would also
+      // grant PutItem, BatchWrite, and DeleteItem on every approval
+      // record — orders of magnitude broader than needed (PR review
+      // S6). Pinned to the table ARN + its GSI, not the wildcard
+      // "/*" suffix that grantReadWriteData uses.
+      getPendingFn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Query'],
+        resources: [
+          props.taskApprovalsTable.tableArn,
+          `${props.taskApprovalsTable.tableArn}/index/*`,
+        ],
+      }));
+      getPendingFn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:UpdateItem'],
+        resources: [props.taskApprovalsTable.tableArn],
+      }));
+
+      // --- Routes ---
+      const approveTask = taskById.addResource('approve');
+      approveTask.addMethod(
+        'POST',
+        new apigw.LambdaIntegration(approveTaskFn),
+        cognitoAuthOptions,
+      );
+      const denyTask = taskById.addResource('deny');
+      denyTask.addMethod(
+        'POST',
+        new apigw.LambdaIntegration(denyTaskFn),
+        cognitoAuthOptions,
+      );
+      const pending = this.api.root.addResource('pending');
+      pending.addMethod(
+        'GET',
+        new apigw.LambdaIntegration(getPendingFn),
+        cognitoAuthOptions,
+      );
+
+      allFunctions.push(approveTaskFn, denyTaskFn, getPendingFn);
+
+      // GetPoliciesFn — GET /repos/{repo_id}/policies. Requires the
+      // cedar-wasm layer to parse blueprint policy text.
+      if (props.cedarWasmLayer && props.repoTable) {
+        const getPoliciesEnv: Record<string, string> = {
+          ...approvalEnv,
+          REPO_TABLE_NAME: props.repoTable.tableName,
+        };
+        const getPoliciesFn = new lambda.NodejsFunction(this, 'GetPoliciesFn', {
+          entry: path.join(handlersDir, 'get-policies.ts'),
+          handler: 'handler',
+          runtime: Runtime.NODEJS_24_X,
+          architecture: Architecture.ARM_64,
+          environment: getPoliciesEnv,
+          bundling: {
+            ...commonBundling,
+            // Keep cedar-wasm in the layer, not the function bundle.
+            // esbuild externalizes the import at build time; the layer
+            // provides it at runtime.
+            externalModules: [
+              ...(commonBundling.externalModules ?? []),
+              '@cedar-policy/cedar-wasm',
+              '@cedar-policy/cedar-wasm/nodejs',
+            ],
+          },
+          layers: [props.cedarWasmLayer],
+          // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
+          // the wasm binary is ~4 MB which pushes init time.
+          memorySize: 512,
+          timeout: Duration.seconds(15),
+        });
+        props.taskApprovalsTable.grantReadData(getPoliciesFn);
+        props.repoTable.grantReadData(getPoliciesFn);
+        // Allow the rate-limit Update path on TaskApprovalsTable.
+        props.taskApprovalsTable.grantWriteData(getPoliciesFn);
+
+        const repos = this.api.root.addResource('repos');
+        const repoById = repos.addResource('{repo_id}');
+        const policies = repoById.addResource('policies');
+        policies.addMethod(
+          'GET',
+          new apigw.LambdaIntegration(getPoliciesFn),
+          cognitoAuthOptions,
+        );
+        allFunctions.push(getPoliciesFn);
+      }
     }
 
     // --- Webhook endpoints (only when webhookTable is provided) ---

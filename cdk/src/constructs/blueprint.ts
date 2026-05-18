@@ -17,14 +17,27 @@
  *  SOFTWARE.
  */
 
-import { Duration } from 'aws-cdk-lib';
+import { Annotations, Duration } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct, IValidation } from 'constructs';
+// Cross-language constants (S9 — see ``contracts/constants.md``). Import
+// the JSON directly rather than re-using ``handlers/shared/types.ts`` so
+// the construct layer stays decoupled from runtime-side types.
+import sharedConstants from '../../../contracts/constants.json';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+
+/**
+ * Cedar HITL — bounds on the per-task approval-gate cap (design decision #13).
+ * Single source of truth: ``contracts/constants.json``. Same JSON is read
+ * by ``agent/src/policy.py`` at import and re-exported from
+ * ``handlers/shared/types.ts``.
+ */
+const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
+const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 
 /**
  * Properties for the Blueprint construct.
@@ -105,6 +118,17 @@ export interface BlueprintProps {
      * These are appended to the default policies (deny-list model).
      */
     readonly cedarPolicies?: string[];
+
+    /**
+     * Per-task cap on total approval gates (Cedar HITL decision #13,
+     * design §4 step 5). Captured at task-submit time and persisted on
+     * the TaskRecord so the cap is frozen per-task — mid-task blueprint
+     * edits do NOT shift the cap beneath a running task.
+     *
+     * Must be in ``[1, 500]``. When omitted, submit-time resolution falls
+     * back to the platform default of 50 defined in the handler layer.
+     */
+    readonly approvalGateCap?: number;
   };
 
   /**
@@ -145,15 +169,38 @@ export class Blueprint extends Construct {
    */
   public readonly cedarPolicies: readonly string[];
 
+  /**
+   * Cedar HITL: per-task approval-gate cap from the security.approvalGateCap
+   * prop, exposed for inspection. Undefined when the blueprint did not
+   * configure an override — the submit path then falls back to the
+   * platform default of 50.
+   */
+  public readonly approvalGateCap?: number;
+
   constructor(scope: Construct, id: string, props: BlueprintProps) {
     super(scope, id);
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
+    this.approvalGateCap = props.security?.approvalGateCap;
+
+    // Chunk 7c: emit a synth-time info annotation when the blueprint did
+    // not configure an override so operators see a signal that this repo
+    // will rely on the platform-default cap (50). Without this, the only
+    // way to notice the default was in effect was to inspect the TaskRecord
+    // at runtime — the default is a silent fallback at the handler layer.
+    if (this.approvalGateCap === undefined) {
+      Annotations.of(this).addInfo(
+        `security.approvalGateCap not configured for '${props.repo}'; `
+        + 'submit-time resolution will fall back to the platform default of 50. '
+        + 'Set security.approvalGateCap on the Blueprint to override.',
+      );
+    }
 
     // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
+    this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
 
     const now = new Date().toISOString();
 
@@ -191,6 +238,9 @@ export class Blueprint extends Construct {
     }
     if (this.cedarPolicies.length > 0) {
       item.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    }
+    if (this.approvalGateCap !== undefined) {
+      item.approval_gate_cap = { N: String(this.approvalGateCap) };
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
@@ -263,6 +313,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
+    if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
     return fields.join('');
   }
 
@@ -277,6 +328,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
+    if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
     return names;
   }
 
@@ -291,6 +343,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
     return values;
   }
 }
@@ -323,5 +376,32 @@ class DomainFormatValidation implements IValidation {
       }
     }
     return errors;
+  }
+}
+
+/**
+ * Cedar HITL — validates the per-blueprint approval-gate cap is an integer
+ * inside ``[1, 500]`` (design decision #13). Out-of-bounds values fail at
+ * synth so an invalid blueprint cannot deploy and silently drift agent
+ * behavior. ``undefined`` is allowed — the submit path falls back to the
+ * platform default.
+ */
+class ApprovalGateCapValidation implements IValidation {
+  constructor(private readonly cap: number | undefined) {}
+
+  public validate(): string[] {
+    if (this.cap === undefined) {
+      return [];
+    }
+    if (!Number.isInteger(this.cap)) {
+      return [`Invalid security.approvalGateCap: ${this.cap}. Must be an integer.`];
+    }
+    if (this.cap < APPROVAL_GATE_CAP_MIN || this.cap > APPROVAL_GATE_CAP_MAX) {
+      return [
+        `Invalid security.approvalGateCap: ${this.cap}. ` +
+        `Must be between ${APPROVAL_GATE_CAP_MIN} and ${APPROVAL_GATE_CAP_MAX}.`,
+      ];
+    }
+    return [];
   }
 }

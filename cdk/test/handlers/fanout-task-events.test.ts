@@ -177,7 +177,8 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
     'session_started', // Slack lifecycle (issue #64)
     'agent_error',
     'pr_created',
-    'approval_required', // Phase 3 forward-compat
+    'approval_requested', // Cedar HITL
+    'approval_stranded', // Cedar HITL
     'status_response', // Phase 2 forward-compat
   ])('%s is fanned out (matches at least one channel default)', (t) => {
     expect(shouldFanOut(make(t))).toBe(true);
@@ -205,11 +206,12 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
 describe('fanout-task-events: per-channel filter contract (design §6.2)', () => {
   // Lock in the exact sets from the design doc so a drift in
   // CHANNEL_DEFAULTS surfaces here instead of in production telemetry.
-  test('Slack subscribes to terminal + error + approval + status_response + lifecycle (NOT pr_created)', () => {
+  test('Slack subscribes to terminal + error + approval milestones + status_response + lifecycle (NOT pr_created)', () => {
     const f = CHANNEL_DEFAULTS.slack;
     expect([...f].sort()).toEqual([
       'agent_error',
-      'approval_required',
+      'approval_requested',
+      'approval_stranded',
       'session_started',
       'status_response',
       'task_cancelled',
@@ -229,18 +231,22 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
 
   test('every Slack-default event the dispatcher actually renders today is in NOTIFIABLE_EVENTS (issue #64 review Cat 7 drift guard)', () => {
     // The router subscribes Slack to events the dispatcher must
-    // render. ``approval_required`` and ``status_response`` are
-    // forward-compat (no emitter today) so they're allowed to be in
-    // CHANNEL_DEFAULTS.slack but absent from NOTIFIABLE_EVENTS — when
-    // their emitters land, this test will start failing and force the
-    // dispatcher update at the same time. Every OTHER Slack default
-    // must be renderable, otherwise telemetry lies. Use
-    // ``requireActual`` to bypass the slack-notify mock and read the
-    // real exported NOTIFIABLE_EVENTS set.
+    // render. ``approval_requested``, ``approval_stranded``, and
+    // ``status_response`` are forward-compat (no Slack-side renderer
+    // today — the CLI surfaces approval UX; Slack is only in the
+    // channel-defaults set so a future Slack-button renderer can
+    // light up without changing the router filter). They're allowed
+    // to be in CHANNEL_DEFAULTS.slack but absent from
+    // NOTIFIABLE_EVENTS — when their emitters land, this test will
+    // start failing and force the dispatcher update at the same time.
+    // Every OTHER Slack default must be renderable, otherwise
+    // telemetry lies. Use ``requireActual`` to bypass the
+    // slack-notify mock and read the real exported NOTIFIABLE_EVENTS
+    // set.
     const real = jest.requireActual<typeof import('../../src/handlers/slack-notify')>(
       '../../src/handlers/slack-notify',
     );
-    const forwardCompat = new Set(['approval_required', 'status_response']);
+    const forwardCompat = new Set(['approval_requested', 'approval_stranded', 'status_response']);
     const expectedRenderable = [...CHANNEL_DEFAULTS.slack].filter(
       e => !forwardCompat.has(e),
     );
@@ -249,14 +255,14 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     }
   });
 
-  test('Email subscribes to task_completed + task_failed + approval_required only (minimal per §6.2)', () => {
+  test('Email subscribes to task_completed + task_failed + approval_requested only (minimal per §6.2)', () => {
     // Design §6.2 explicitly limits Email to these three types.
     // task_cancelled and task_stranded are NOT delivered via email —
     // the user already knows they cancelled; strands are an operator
     // signal handled via Slack / dashboards.
     const f = CHANNEL_DEFAULTS.email;
     expect([...f].sort()).toEqual([
-      'approval_required',
+      'approval_requested',
       'task_completed',
       'task_failed',
     ]);

@@ -76,6 +76,8 @@ Created:     2026-04-01T00:39:51.271Z
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
+| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
+| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 

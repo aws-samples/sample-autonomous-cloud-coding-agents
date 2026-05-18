@@ -36,6 +36,12 @@ export const ErrorCode = {
   REPO_NOT_ONBOARDED: 'REPO_NOT_ONBOARDED',
   SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  // Cedar HITL (§7.1 / §7.2 / §7.3). REQUEST_NOT_FOUND collapses "row
+  // missing" and "wrong caller" into a single 404 response so the API
+  // surface does not function as an existence oracle (§7.1 finding #6).
+  REQUEST_NOT_FOUND: 'REQUEST_NOT_FOUND',
+  REQUEST_ALREADY_DECIDED: 'REQUEST_ALREADY_DECIDED',
+  TASK_NOT_AWAITING_APPROVAL: 'TASK_NOT_AWAITING_APPROVAL',
 } as const;
 
 const COMMON_HEADERS = {

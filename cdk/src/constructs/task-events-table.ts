@@ -80,6 +80,17 @@ export class TaskEventsTable extends Construct {
       // email) via a Lambda subscriber. NEW_IMAGE is sufficient — consumers only
       // need the event payload, not old/new diffs. Enabling Streams on an existing
       // table is an in-place CloudFormation update (no table replacement).
+      //
+      // CONSUMER BUDGET (Chunk 8 architectural note): this stream currently
+      // has TWO consumers: `FanOutConsumer` (Slack / GitHub / email dispatch)
+      // and `ApprovalMetricsPublisherConsumer` (Cedar-HITL EMF emission for
+      // the CloudWatch dashboard widgets in §11.3). DynamoDB Streams are
+      // designed for up to 2 concurrent consumers per shard before throughput
+      // degrades. Any future third consumer should migrate this table to
+      // **Kinesis Data Streams for DynamoDB** (opt-in, different API) rather
+      // than stacking a third `DynamoEventSource` on the legacy Streams
+      // interface. Adding a third Lambda here without that migration will
+      // silently degrade fanout + metrics latency for the whole stack.
       stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });

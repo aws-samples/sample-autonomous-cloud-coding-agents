@@ -68,7 +68,9 @@ aws cognito-idp admin-create-user \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username user@example.com \
-  --temporary-password 'TempPass123!@'
+  --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
+  --temporary-password 'TempPass123!@' \
+  --message-action SUPPRESS
 
 aws cognito-idp admin-set-user-password \
   --region "$REGION" \
@@ -78,7 +80,14 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-Password requirements: minimum 12 characters, uppercase, lowercase, digits, and symbols.
+**Pool constraints** (enforced server-side; ignoring them yields cryptic Cognito errors at login):
+
+- **Username MUST be an email address.** The pool is configured with email as the sign-in alias, so `--username` has to be a valid email — short handles like `alice` are rejected at create time.
+- **Password policy**: minimum 12 characters, with at least one uppercase letter, one lowercase letter, one digit, and one symbol.
+- **`email_verified=true` attribute is required** for the account to log in. Creating a user without it leaves the account in `FORCE_CHANGE_PASSWORD` state and subsequent `initiate-auth` calls fail with `User is not confirmed`.
+- **`--message-action SUPPRESS`** stops Cognito from trying to email the temporary password. If SES isn't configured on the account, omitting this flag causes `admin-create-user` to fail with `NotAuthorizedException`. Safe for non-prod; omit only if you have a working SES sender identity.
+
+The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so you do not have to go through a password change flow on first login.
 
 ### Obtain a JWT token
 

@@ -23,7 +23,7 @@ This document describes the interactivity surfaces layered on top of that model 
 3. **Watch** — `bgagent watch <id>` polls `TaskEventsTable` with an adaptive interval (500 ms when events are arriving, back-off to 5 s when idle). Same endpoint used under the hood for foreground-block UX on `ask` and for HITL approval waits.
 4. **Nudge** — `bgagent nudge <id> "<text>"` writes a row into `TaskNudgesTable`. The agent reads pending nudges between turns, acknowledges with a `nudge_acknowledged` milestone event, and integrates the nudge on its next turn.
 5. **Ask** — `bgagent ask <id> "<question>"` (Phase 2) writes a question row. The agent answers at the next between-turns boundary; the answer surfaces as a `status_response` event. CLI default is foreground block-and-poll with a spinner; task and answer are both durable if the CLI disconnects.
-6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or a Slack button-press. Detailed design in `PHASE3_CEDAR_HITL.md`.
+6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or a Slack button-press. Detailed design in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates).
 
 ### Core architectural choices
 
@@ -226,7 +226,7 @@ Consumer: agent between-turns hook reads pending nudges, emits `nudge_acknowledg
 
 ### 3.7 TaskApprovalsTable (Phase 3)
 
-Phase 3 approval-request spine. Detailed schema in `PHASE3_CEDAR_HITL.md`. Semantics summary:
+Phase 3 approval-request spine. Detailed schema in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates). Semantics summary:
 - Agent writes an approval row with the request context.
 - Agent transitions `RUNNING → AWAITING_APPROVAL` and enters a poll loop.
 - User responds via REST (`POST /tasks/{id}/approvals/{request_id}`) or via a Slack button dispatched by the notification plane.
@@ -413,7 +413,7 @@ Flags:
 
 ### 5.6 `bgagent approve` / `deny` / `pending` / `policies` (Phase 3)
 
-HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in `PHASE3_CEDAR_HITL.md`. Summary:
+HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates). Summary:
 
 - Agent emits `approval_required` with the tool context.
 - Notification plane dispatches the event (Slack with action buttons, email, GitHub).
@@ -554,7 +554,7 @@ RUNNING ──▶ AWAITING_APPROVAL ──▶ RUNNING    (approve or deny-with-s
               └──▶ FAILED       (stranded reconciler catches abandoned approval)
 ```
 
-The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but alive). See `PHASE3_CEDAR_HITL.md` for full semantics.
+The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but alive). See [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates) for full semantics.
 
 ### 8.3 Write rules
 
@@ -737,7 +737,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 - Hard-gate approval gates with Cedar policy evaluation
 - `bgagent approve` / `deny` / `pending` / `policies`
 - `AWAITING_APPROVAL` state + orchestrator handling
-- Full design in `PHASE3_CEDAR_HITL.md`
+- Full design in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates)
 
 ### Phase 4 — Dispatcher polish
 
@@ -750,7 +750,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 ### Deferred
 
 - **LLM-synthesized status summary** — `bgagent ask` without targeting the agent; Lambda calls an LLM to narrate state. Cost + hallucination trade-offs; revisit if v1 feedback warrants.
-- **Cedar `effect: "advise"` tier** — non-blocking FYI policy tier for post-v1. Design sketch in `PHASE3_CEDAR_HITL.md`.
+- **Cedar `effect: "advise"` tier** — non-blocking FYI policy tier for post-v1. Design sketch in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates).
 - **Outbound WebSocket from agent** — only if a concrete sub-200 ms latency requirement surfaces. Agent-initiated egress avoids dual-auth problems and works on any compute.
 - **Multi-user watch** — multiple users attached to the same task's live event stream (teams).
 

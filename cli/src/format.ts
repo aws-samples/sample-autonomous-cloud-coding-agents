@@ -239,15 +239,44 @@ function formatDescriptionLines(description: string): string[] {
 
 /** Render the terminal-failure reason for the status snapshot. Returns
  *  ``null`` for COMPLETED / still-running tasks so the caller can skip
- *  the whole line. Prefers ``error_classification.{category, title}``;
- *  falls back to trimmed ``error_message``; otherwise returns ``null``. */
+ *  the whole line.
+ *
+ *  When the API's classifier matched a known pattern, show the
+ *  category + title (human-actionable summary) AND append the first
+ *  line of the raw ``error_message`` as evidence — without it,
+ *  diagnosing novel failure modes requires an out-of-band log dive.
+ *
+ *  When the classifier fell back to the catch-all UNKNOWN (``unknown:
+ *  Unexpected error``), the title is useless on its own — show the
+ *  raw ``error_message`` instead so operators see the real signal
+ *  immediately. Discovered during Chunk 10 E2E T2.2: the agent
+ *  container surfaced a concrete, actionable string
+ *  (``missing built-in hard-deny policies: /app/policies/hard_deny.cedar``)
+ *  but the CLI rendered ``unknown: Unexpected error``, hiding the
+ *  only useful diagnostic. */
 function describeReason(task: TaskDetail): string | null {
   if (task.status === 'COMPLETED') return null;
   if (!(TERMINAL_STATUSES as readonly string[]).includes(task.status)) return null;
   const cls = task.error_classification;
-  if (cls) return `${cls.category}: ${cls.title}`;
   const msg = task.error_message?.trim();
+  if (cls && cls.category !== 'unknown') {
+    // Known classification: category + title is the primary signal.
+    // Append the raw ``error_message`` first line so a misclassified
+    // novel failure is still diagnosable inline. Safe to include —
+    // the server-side ``_METRICS_REDACT_KEYS`` scrub runs on
+    // METRICS_REPORT stdout, not on the TaskRecord error_message
+    // field, so the string is already the sanitized form.
+    if (msg) {
+      const firstLine = msg.split(/\r?\n/, 1)[0];
+      return `${cls.category}: ${cls.title} — ${firstLine}`;
+    }
+    return `${cls.category}: ${cls.title}`;
+  }
+  // Classifier gap (UNKNOWN or no classification at all): the raw
+  // message is the only useful signal. Prefer it over the bland
+  // ``unknown: Unexpected error`` label.
   if (msg) return msg;
+  if (cls) return `${cls.category}: ${cls.title}`;
   return null;
 }
 

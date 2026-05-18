@@ -67,6 +67,25 @@ const TERMINAL_EVENT_TYPES = [
 ] as const;
 
 /**
+ * Cedar HITL approval milestones (design §11.1 + fan-out rules in §11.2).
+ *
+ * - ``approval_requested`` / ``approval_stranded`` go to Slack so the
+ *   user sees the gate on their phone.
+ * - ``approval_requested`` (high severity only — enforced by the
+ *   dispatcher, not the filter) goes to Email.
+ * - Granted / denied / timed_out are user-facing UX confirmations the
+ *   CLI already surfaces; routing them to Slack too would create
+ *   notification fatigue. Kept out of every channel's default.
+ *
+ * Events are milestone names from the `agent_milestone` event_type
+ * stream; the fan-out Lambda unwraps them before routing.
+ */
+const APPROVAL_NOTIFICATION_EVENTS = [
+  'approval_requested',
+  'approval_stranded',
+] as const;
+
+/**
  * Per-channel default event-type subscriptions (design §6.2).
  *
  * Channels do NOT share a single filter — Slack wants interactive
@@ -76,20 +95,26 @@ const TERMINAL_EVENT_TYPES = [
  * one user's chatty Slack settings can't spam their email, and
  * vice-versa, without any per-task config writer.
  *
- * Phase 2 event types (`status_response`) and Phase 3 event types
- * (`approval_required`) are listed here so when those writers ship,
- * routing is already correct. No current writer emits them — the
- * entries are no-ops today.
+ * Approval milestones (§11.2):
+ *   - ``approval_requested`` / ``approval_stranded`` are the two
+ *     user-facing "something needs you" signals that get fanned out.
+ *     Every other ``approval_*`` milestone is internal bookkeeping
+ *     (caps, clipping, late-wins) or a UX confirmation the CLI
+ *     already surfaces; routing those to Slack / Email would create
+ *     notification fatigue without adding value.
+ *   - Per-user rate limit of 10 approval-related messages per minute
+ *     is enforced in the dispatcher, not in this filter.
  */
 export type NotificationChannel = 'slack' | 'email' | 'github';
 
 export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> = {
   // Slack is the "on-call" channel per §6.2 — all terminal outcomes
-  // (including cancellations, strands, and timeouts) plus agent_error
-  // and the Phase 2/3 interactive signals. ``task_created`` and
-  // ``session_started`` are additionally delivered for Slack-origin
-  // tasks so the rocket/hourglass-flowing-sand message sequence lines up
-  // with the @mention thread — the Slack dispatcher itself enforces
+  // (including cancellations, strands, and timeouts) plus agent_error,
+  // the Cedar HITL approval-gate milestones, and the Phase 2/3
+  // interactive signals. ``task_created`` and ``session_started`` are
+  // additionally delivered for Slack-origin tasks so the
+  // rocket/hourglass-flowing-sand message sequence lines up with the
+  // @mention thread — the Slack dispatcher itself enforces
   // ``channel_source === 'slack'`` so the noisier early lifecycle
   // events do not reach non-Slack tasks.
   //
@@ -107,22 +132,25 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     'task_created',
     'session_started',
     'agent_error',
-    'approval_required', // Phase 3 (not yet emitted)
+    ...APPROVAL_NOTIFICATION_EVENTS,
     'status_response', // Phase 2 (not yet emitted)
   ]),
-  // Email is deliberately minimal per §6.2: only task_completed,
-  // task_failed, and approval_required. Cancellations and strands are
-  // intentionally NOT delivered — the user already knows they cancelled
-  // the task, and strands are an operator signal. Keep these in sync
-  // with the design doc's per-channel defaults table.
+  // Email is deliberately minimal per §6.2: task_completed, task_failed,
+  // and high-severity approval requests. Cancellations and strands are
+  // intentionally NOT delivered. Severity-gating happens in the
+  // dispatcher (§11.2 finding #4 — Slack approvals accept low/medium,
+  // high severity stays CLI-only for Slack buttons but is still OK
+  // for email-as-notification).
   email: new Set<string>([
     'task_completed',
     'task_failed',
-    'approval_required', // Phase 3 (not yet emitted)
+    'approval_requested',
   ]),
   // GitHub edits a single issue comment in place (§6.4) covering
   // pr_created + terminal — including cancellations and strands so
-  // the comment reflects the task's final outcome.
+  // the comment reflects the task's final outcome. Approval signals
+  // are intentionally NOT posted to GitHub: the issue comment is
+  // for progress, not synchronous gating.
   github: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
     'pr_created',

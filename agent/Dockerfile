@@ -20,14 +20,19 @@ COPY --from=gh-builder /out/gh /usr/local/bin/gh
 #   - build-essential (native compilation for some repos)
 #   - curl (downloads)
 RUN apt-get update && \
+    # Patch any base-image CVEs that have a fix available in the
+    # current Debian point release. Without this, transitive system-
+    # library CVEs (e.g. libnghttp2 CVE-2026-27135) ride the base
+    # ``python:3.13-slim`` tag until upstream rebuilds, which can be
+    # weeks. ``--no-install-recommends`` keeps the upgrade narrow and
+    # reproducible — only already-installed packages get bumped.
+    apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
         curl \
         git \
         build-essential \
         ca-certificates \
         gnupg && \
-    # Upgrade base image's CVE-2026-27135 vulnerability
-    apt-get upgrade -y --no-install-recommends libnghttp2-14 && \
     # Cleanup early to keep peak disk usage low during builds.
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
@@ -49,15 +54,28 @@ RUN npm install -g npm@latest && \
 # Install uv (fast Python package manager) — pinned for reproducibility
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 
-# Install Python dependencies via uv
-COPY pyproject.toml uv.lock /app/
+# Install Python dependencies via uv. Build context is repo root (set in
+# ``cdk/src/stacks/agent.ts``) so source paths are prefixed with ``agent/``.
+COPY agent/pyproject.toml agent/uv.lock /app/
 RUN uv sync --frozen --no-dev --directory /app
 
 # Copy agent code (ARG busts cache so file edits are always picked up)
 ARG CACHE_BUST=0
-COPY src/ /app/src/
-COPY prepare-commit-msg.sh /app/
-COPY test_sdk_smoke.py test_subprocess_threading.py /app/
+COPY agent/src/ /app/src/
+# Cedar HITL built-in policy files (hard_deny.cedar + soft_deny.cedar).
+# ``agent/src/policy.py::_POLICIES_DIR`` resolves to ``/app/policies``
+# at import time; without these files the PolicyEngine init raises
+# ``missing built-in hard-deny policies`` and every task fails at 0
+# turns before the agent even connects to the CLI. Discovered during
+# Chunk 10 E2E T2.2 — the Dockerfile previously only copied ``src/``.
+COPY agent/policies/ /app/policies/
+# Cross-language constants (S9). ``agent/src/policy.py`` reads
+# ``/app/contracts/constants.json`` at import; the same file is consumed
+# by ``cdk/src/handlers/shared/types.ts`` at synth time. See
+# ``contracts/README.md`` for the contract.
+COPY contracts/ /app/contracts/
+COPY agent/prepare-commit-msg.sh /app/
+COPY agent/test_sdk_smoke.py agent/test_subprocess_threading.py /app/
 
 # Create non-root user (Claude Code CLI refuses bypassPermissions as root)
 RUN useradd -m -s /bin/bash agent && \

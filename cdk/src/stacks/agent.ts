@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { ArnFormat, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -30,10 +30,12 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+import { Construct, IConstruct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { Blueprint } from '../constructs/blueprint';
+import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
@@ -43,6 +45,7 @@ import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { TaskApi } from '../constructs/task-api';
+import { TaskApprovalsTable } from '../constructs/task-approvals-table';
 import { TaskDashboard } from '../constructs/task-dashboard';
 import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
@@ -56,17 +59,45 @@ export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
 
-    const runnerPath = path.join(__dirname, '..', '..', '..', 'agent');
+    // Build context is repo root (not agent/) so the Dockerfile can COPY
+    // sibling trees the agent reads at runtime — currently
+    // ``contracts/constants.json`` (S9 cross-language constants — see
+    // ``contracts/README.md``). Future shared assets (parity fixtures,
+    // schema files) drop into ``contracts/`` without further build-context
+    // changes. Pattern lifted from ``merge/akw-integration``.
+    const repoRoot = path.join(__dirname, '..', '..', '..');
 
-    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, {
+      file: 'agent/Dockerfile',
+    });
 
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
+    // Cedar HITL approval-gate state (design §10.1). Agent writes PENDING
+    // rows + GSI query powers `bgagent pending`; Chunk 5 wires the
+    // Approve/Deny Lambdas + fan-out consumer.
+    //
+    // Construct id is ``TaskApprovalsTableV2`` — the original
+    // ``TaskApprovalsTable`` logical id was abandoned mid-development
+    // after the first ship of the ``user_id-status-index`` GSI. Adding
+    // ``matching_rule_ids`` to the projection required a destructive
+    // recreate (DDB rejects in-place ``nonKeyAttributes`` edits), so
+    // the construct id changed to force CloudFormation to create the
+    // new table under a fresh logical resource while tearing down the
+    // old one. Acceptable in dev; in a future prod migration the
+    // dual-index pattern is preferred (see §10.1 of the design doc).
+    const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
+
+    // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
+    // asset is in the synthed template; Chunk 5 handlers (Approve,
+    // Deny, GetPolicies, CreateTask) attach the layer via
+    // ``fn.addLayers(cedarWasmLayer.layer)``.
+    const cedarWasmLayer = new CedarWasmLayer(this, 'CedarWasmLayer');
 
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
@@ -218,6 +249,8 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
+      cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
       orchestratorFunctionArn: lazyOrchestratorArn,
@@ -240,6 +273,15 @@ export class AgentStack extends Stack {
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
+      // Cedar HITL approval gates (§6.5). Agent's task_state primitives
+      // use this to write PENDING rows + transition tasks to
+      // AWAITING_APPROVAL; absent → hook fails closed with
+      // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
+      TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
+      // Hint for the hook's remaining-maxLifetime calculation (§6.5
+      // pseudocode line 793). Kept in sync with the AgentCore
+      // lifecycle configuration below so drift is visible. 8 hours.
+      AGENTCORE_MAX_LIFETIME_S: '28800',
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
       // --trace artifact store (§10.1). The agent writes the JSONL
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
@@ -307,6 +349,12 @@ export class AgentStack extends Stack {
     taskTable.table.grantReadWriteData(runtime);
     taskEventsTable.table.grantReadWriteData(runtime);
     taskNudgesTable.table.grantReadWriteData(runtime);
+    // Cedar HITL: the agent writes PENDING rows via TransactWriteItems
+    // (cross-table with TaskTable), reads them with ConsistentRead during
+    // the poll loop, and flips status to TIMED_OUT on deadline. The
+    // grant must be RW because approve/deny Lambdas (Chunk 5) also
+    // need RW; granting twice is idempotent.
+    taskApprovalsTable.table.grantReadWriteData(runtime);
     userConcurrencyTable.table.grantReadWriteData(runtime);
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
@@ -379,6 +427,43 @@ export class AgentStack extends Stack {
       },
     ], true);
 
+    // Chunk 10 deploy-prep: the Cedar HITL additions (TaskApprovalsTable
+    // grant + extra env vars) pushed the runtime
+    // execution role past CDK's per-inline-policy size limit, causing CDK
+    // to auto-split excess statements into ``OverflowPolicy1`` / etc.
+    // Those overflow policies inherit the same wildcard
+    // ``bedrock:InvokeModel*`` / CloudWatch / cross-region-inference
+    // actions as the base policy but live at paths that any suppression
+    // placed at constructor time does NOT reach (CDK creates the
+    // overflow policies lazily during synth ``prepare()``, after the
+    // construct tree has been frozen). Use an Aspect that visits every
+    // node during synth and matches overflow-policy children of the
+    // runtime ExecutionRole so any present or future overflow is
+    // suppressed automatically without hardcoding
+    // ``OverflowPolicy<N>`` indices.
+    const overflowSuppressionAspect = {
+      visit(node: IConstruct) {
+        const nodePath = node.node.path;
+        if (
+          nodePath.includes('/Runtime/ExecutionRole/OverflowPolicy')
+          && nodePath.endsWith('/Resource')
+        ) {
+          NagSuppressions.addResourceSuppressions(node, [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason:
+                'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
+            },
+          ]);
+        }
+      },
+    };
+    // MUTATING priority: runs before cdk-nag's READONLY aspect so the
+    // suppression is in place when the nag checks visit the overflow
+    // policy. Default priority would race with cdk-nag (registered in
+    // ``main.ts``) and the suppression would arrive too late.
+    Aspects.of(this).add(overflowSuppressionAspect, { priority: AspectPriority.MUTATING });
+
     new CfnOutput(this, 'RuntimeArn', {
       value: runtime.agentRuntimeArn,
       description: 'ARN of the AgentCore runtime',
@@ -397,6 +482,16 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskNudgesTableName', {
       value: taskNudgesTable.table.tableName,
       description: 'Name of the DynamoDB task nudges table (Phase 2)',
+    });
+
+    new CfnOutput(this, 'TaskApprovalsTableName', {
+      value: taskApprovalsTable.table.tableName,
+      description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
+    });
+
+    new CfnOutput(this, 'CedarWasmLayerArn', {
+      value: cedarWasmLayer.layer.layerVersionArn,
+      description: 'ARN of the Cedar-wasm Lambda layer (consumed by Chunk 5 REST handlers)',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {
@@ -430,7 +525,8 @@ export class AgentStack extends Stack {
     // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
     //
     // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
-    //   directory: runnerPath,
+    //   directory: repoRoot,
+    //   file: 'agent/Dockerfile',
     //   platform: ecr_assets.Platform.LINUX_ARM64,
     // });
     //
@@ -512,6 +608,17 @@ export class AgentStack extends Stack {
         resourceName: 'bgagent/slack/*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
+    });
+
+    // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
+    // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
+    // Reads agent_milestone records for approval events and emits
+    // CloudWatch EMF for the dashboard widgets below. See the
+    // 2-consumer architectural note in `task-events-table.ts` —
+    // adding a third consumer here requires the Kinesis Data Streams
+    // for DynamoDB migration.
+    new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
+      taskEventsTable: taskEventsTable.table,
     });
 
     // --- Operator dashboard ---

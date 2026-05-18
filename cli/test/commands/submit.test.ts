@@ -358,4 +358,178 @@ describe('submit command', () => {
       undefined,
     );
   });
+
+  describe('Cedar HITL extensions', () => {
+    // --approval-timeout ------------------------------------------------------
+
+    test('forwards --approval-timeout as approval_timeout_s', async () => {
+      mockCreateTask.mockResolvedValue({ task_id: 't-at', status: 'SUBMITTED' });
+      const cmd = makeSubmitCommand();
+      await cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'ok',
+        '--approval-timeout', '120',
+      ]);
+      const [body] = mockCreateTask.mock.calls[0];
+      expect(body).toEqual({
+        repo: 'owner/repo',
+        task_description: 'ok',
+        approval_timeout_s: 120,
+      });
+    });
+
+    test('--approval-timeout omitted leaves approval_timeout_s off the wire', async () => {
+      mockCreateTask.mockResolvedValue({ task_id: 't-at', status: 'SUBMITTED' });
+      const cmd = makeSubmitCommand();
+      await cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'ok',
+      ]);
+      const [body] = mockCreateTask.mock.calls[0];
+      expect(body).not.toHaveProperty('approval_timeout_s');
+    });
+
+    test('--approval-timeout below floor rejected', async () => {
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      await expect(
+        cmd.parseAsync([
+          'node', 'test',
+          '--repo', 'owner/repo',
+          '--task', 'ok',
+          '--approval-timeout', '29',
+        ]),
+      ).rejects.toThrow(/between 30 and 3600/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    test('--approval-timeout above ceiling rejected', async () => {
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      await expect(
+        cmd.parseAsync([
+          'node', 'test',
+          '--repo', 'owner/repo',
+          '--task', 'ok',
+          '--approval-timeout', '3601',
+        ]),
+      ).rejects.toThrow(/between 30 and 3600/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    test('--approval-timeout non-integer rejected', async () => {
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      await expect(
+        cmd.parseAsync([
+          'node', 'test',
+          '--repo', 'owner/repo',
+          '--task', 'ok',
+          '--approval-timeout', 'nope',
+        ]),
+      ).rejects.toThrow(/between 30 and 3600/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    // --pre-approve (repeatable) ---------------------------------------------
+
+    test('--pre-approve accepts short-form scope', async () => {
+      mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });
+      const cmd = makeSubmitCommand();
+      await cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'ok',
+        '--pre-approve', 'tool_type_session',
+      ]);
+      const [body] = mockCreateTask.mock.calls[0];
+      expect(body.initial_approvals).toEqual(['tool_type_session']);
+    });
+
+    test('--pre-approve accepts prefixed scope and is repeatable', async () => {
+      mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });
+      const cmd = makeSubmitCommand();
+      await cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'ok',
+        '--pre-approve', 'rule:force_push_any',
+        '--pre-approve', 'tool_type:Read',
+      ]);
+      const [body] = mockCreateTask.mock.calls[0];
+      expect(body.initial_approvals).toEqual(['rule:force_push_any', 'tool_type:Read']);
+    });
+
+    test('--pre-approve omitted leaves initial_approvals off the wire', async () => {
+      mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });
+      const cmd = makeSubmitCommand();
+      await cmd.parseAsync([
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'ok',
+      ]);
+      const [body] = mockCreateTask.mock.calls[0];
+      expect(body).not.toHaveProperty('initial_approvals');
+    });
+
+    test('--pre-approve rejects missing prefix', async () => {
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      await expect(
+        cmd.parseAsync([
+          'node', 'test',
+          '--repo', 'owner/repo',
+          '--task', 'ok',
+          '--pre-approve', 'force_push_any',
+        ]),
+      ).rejects.toThrow(/invalid scope/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    test('--pre-approve rejects empty prefix body', async () => {
+      // ``rule:`` alone has a prefix match but no scope body — the CLI
+      // needs to reject rather than silently forward a placeholder to
+      // the server (which would also reject, just with an extra round
+      // trip).
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      await expect(
+        cmd.parseAsync([
+          'node', 'test',
+          '--repo', 'owner/repo',
+          '--task', 'ok',
+          '--pre-approve', 'rule:',
+        ]),
+      ).rejects.toThrow(/invalid scope/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    test('--pre-approve rejects over-long entry', async () => {
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      const longName = 'x'.repeat(130);
+      await expect(
+        cmd.parseAsync([
+          'node', 'test',
+          '--repo', 'owner/repo',
+          '--task', 'ok',
+          '--pre-approve', `rule:${longName}`,
+        ]),
+      ).rejects.toThrow(/exceeds 128 characters/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    test('--pre-approve rejects more than 20 entries', async () => {
+      const cmd = makeSubmitCommand();
+      cmd.exitOverride();
+      const argv: string[] = ['node', 'test', '--repo', 'owner/repo', '--task', 'ok'];
+      for (let i = 0; i < 21; i++) {
+        argv.push('--pre-approve', `rule:r${i}`);
+      }
+      await expect(cmd.parseAsync(argv)).rejects.toThrow(/exceeds 20 entries/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+  });
 });

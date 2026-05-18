@@ -1,0 +1,15 @@
+{
+  "name": "no-match-permit-read",
+  "description": "No rule matches; the base catch-all permit applies. Exercises the §6.2 step-4 default-allow branch with an empty matching_rule_ids list.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"rm_slash\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*rm -rf /*\" };\n@tier(\"soft\") @rule_id(\"force_push_any\") @approval_timeout_s(\"300\") @severity(\"medium\") @category(\"destructive\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*git push --force*\" };\n@tier(\"soft\") @rule_id(\"force_push_main\") @approval_timeout_s(\"600\") @severity(\"high\") @category(\"destructive\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*git push --force origin main*\" };\n@tier(\"soft\") @rule_id(\"write_env_files\") @approval_timeout_s(\"600\") @severity(\"high\") @category(\"filesystem\")\nforbid (principal, action == Agent::Action::\"write_file\", resource) when { context.file_path like \"*.env\" };",
+  "input": {
+    "principal": { "type": "Agent::TaskAgent", "id": "new_task" },
+    "action":    { "type": "Agent::Action",    "id": "invoke_tool" },
+    "resource":  { "type": "Agent::Tool",      "id": "Read" },
+    "context":   {}
+  },
+  "expected": {
+    "decision": "allow",
+    "matching_rule_ids": ["base_permit"]
+  }
+}
