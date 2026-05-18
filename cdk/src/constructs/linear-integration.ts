@@ -181,11 +181,13 @@ export class LinearIntegration extends Construct {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
+        LINEAR_API_TOKEN_SECRET_ARN: this.apiTokenSecret.secretArn,
       },
       bundling: commonBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
+    this.apiTokenSecret.grantRead(webhookProcessorFn);
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
     if (props.repoTable) {

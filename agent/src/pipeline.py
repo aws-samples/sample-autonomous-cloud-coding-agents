@@ -338,6 +338,11 @@ def run_task(
                 )
 
             trajectory.set_truncation_callback(_on_trace_truncated)
+        # Declared up-front so the crash handler at the bottom of this `try`
+        # can reference it via a normal name rather than ``locals().get(...)``
+        # — survives refactors and reads cleanly. Stays None until the Linear
+        # `react_task_started` call assigns the actual reaction id.
+        linear_eyes_reaction_id: str | None = None
         try:
             # Context hydration
             with task_span("task.context_hydration"):
@@ -724,13 +729,14 @@ def run_task(
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
             # No-op for non-Linear tasks; network/GraphQL failures are swallowed.
-            # `linear_eyes_reaction_id` may be unbound if we crashed before the
-            # start-reaction call — guarded with locals() to stay safe.
+            # `linear_eyes_reaction_id` is initialized to None at the top of
+            # this try block, so it's always bound here even if we crashed
+            # before the start-reaction call assigned a real id.
             react_task_finished(
                 config.channel_source,
                 config.channel_metadata,
                 success=False,
-                started_reaction_id=locals().get("linear_eyes_reaction_id"),
+                started_reaction_id=linear_eyes_reaction_id,
             )
             raise
 

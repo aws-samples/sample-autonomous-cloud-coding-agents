@@ -59,7 +59,28 @@ Back in your terminal at the paused `bgagent linear setup` prompt:
 
 Both are stored in Secrets Manager (`LinearWebhookSecret` and `LinearApiTokenSecret`). The wizard validates that the personal API key starts with `lin_api_`. Full authentication is verified the first time a webhook arrives or the agent calls the Linear MCP.
 
-As a final step, `setup` calls the Linear API with the token you just stored, looks up the token owner, and auto-links that Linear identity to the Cognito user currently logged in to the CLI. This skips the code-exchange ceremony for the common case where one person installs ABCA for their own workspace. If the auto-link fails (token invalid, not logged in, etc.) setup prints a warning and continues — you can always fall back to the manual link flow in Step 6.
+As a final step, `setup` calls the Linear API with the token you just stored, looks up the token owner, and auto-links that Linear identity to the Cognito user currently logged in to the CLI. This skips the code-exchange ceremony for the common case where one person installs ABCA for their own workspace. If the auto-link fails (token invalid, not logged in, etc.) setup prints a warning and continues.
+
+**If auto-link fails persistently** (rare — usually transient Linear API hiccups, just re-run `bgagent linear setup`), an admin can insert the mapping directly into the `LinearUserMappingTable` DynamoDB table:
+
+```bash
+aws dynamodb put-item \
+  --table-name <stack>-LinearIntegrationUserMappingTable... \
+  --item '{
+    "linear_identity": {"S": "<workspaceId>#<viewerId>"},
+    "platform_user_id": {"S": "<your Cognito sub>"},
+    "status": {"S": "active"},
+    "linked_at": {"S": "2026-05-14T00:00:00Z"}
+  }'
+```
+
+To find the right values:
+
+- **`workspaceId`**: from Linear API `viewer { organization { id } }` or the URL `https://linear.app/<workspace>/...`
+- **`viewerId`**: from Linear API `viewer { id }`
+- **`platform_user_id`**: your Cognito `sub` claim — `cat ~/.bgagent/credentials.json | jq -r .id_token | cut -d. -f2 | base64 -d 2>/dev/null | jq -r .sub`
+
+The CLI command `bgagent linear link <code>` exists in v1 but is **non-functional** without a Linear-side code generator (planned for v3 OAuth bot install). Do not rely on it.
 
 ### Step 5: Onboard a Linear project
 

@@ -711,6 +711,18 @@ export class AgentStack extends Stack {
       linearIntegration.apiTokenSecret.secretArn,
     );
 
+    // Pipe the Linear API token secret into the orchestrator Lambda so the
+    // concurrency-cap rejection path can post a Linear comment + ❌ instead
+    // of silently dropping the task. The orchestrator only uses the secret
+    // when `task.channel_source === 'linear'`, but the IAM grant is
+    // unconditional — the secret is created lazily via Secrets Manager and
+    // costs nothing if unused.
+    linearIntegration.apiTokenSecret.grantRead(orchestrator.fn);
+    orchestrator.fn.addEnvironment(
+      'LINEAR_API_TOKEN_SECRET_ARN',
+      linearIntegration.apiTokenSecret.secretArn,
+    );
+
     new CfnOutput(this, 'LinearWebhookSecretArn', {
       value: linearIntegration.webhookSecret.secretArn,
       description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',

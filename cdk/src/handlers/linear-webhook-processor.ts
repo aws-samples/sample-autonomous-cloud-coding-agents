@@ -21,13 +21,48 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
+import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
+const API_TOKEN_SECRET_ARN = process.env.LINEAR_API_TOKEN_SECRET_ARN;
 const DEFAULT_LABEL_FILTER = 'bgagent';
+
+/**
+ * Post a Linear comment + ❌ reaction without ever propagating an error.
+ *
+ * Wraps `reportIssueFailure` so each call site is one line and uniformly
+ * non-throwing. Two failure modes handled here:
+ *
+ * - `LINEAR_API_TOKEN_SECRET_ARN` env var unset (deploy misconfig) — log a
+ *   single clear diagnostic and skip, instead of letting `resolveToken` log
+ *   a cryptic "could not resolve API token" warning on every feedback call.
+ *   Mirrors the orchestrator's `notifyLinearOnConcurrencyCap` guard.
+ * - `reportIssueFailure` throws synchronously (today impossible thanks to the
+ *   helper's internal `Promise.allSettled`, but a future refactor could
+ *   break that contract). Catching here means a synchronous throw can't
+ *   bubble up and fail the Lambda — which would trigger SQS retries on a
+ *   poison message.
+ */
+async function safeReportIssueFailure(issueId: string, message: string): Promise<void> {
+  if (!API_TOKEN_SECRET_ARN) {
+    logger.warn('Skipping Linear feedback: LINEAR_API_TOKEN_SECRET_ARN not set', {
+      issue_id: issueId,
+    });
+    return;
+  }
+  try {
+    await reportIssueFailure(API_TOKEN_SECRET_ARN, issueId, message);
+  } catch (err) {
+    logger.warn('Linear feedback failed (non-fatal)', {
+      issue_id: issueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 /** Shape of Linear `Issue` webhook payloads we care about. Undocumented fields are tolerated. */
 interface LinearIssueEvent {
@@ -100,6 +135,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.info('Linear Issue has no projectId — skipping (cannot route to a repo)', {
       issue_id: issue.id,
     });
+    await safeReportIssueFailure(
+      issue.id,
+      "❌ This Linear issue isn't in a project — ABCA needs a Linear project to route the task to a repo. Move the issue into a project and re-apply the trigger label.",
+    );
     return;
   }
 
@@ -113,6 +152,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       linear_project_id: projectId,
       issue_id: issue.id,
     });
+    await safeReportIssueFailure(
+      issue.id,
+      "❌ This Linear project isn't onboarded to ABCA. An admin can onboard it with `bgagent linear onboard-project <project-uuid> --repo <owner>/<repo> --label <trigger>`.",
+    );
     return;
   }
   const repo = mapping.Item.repo as string;
@@ -145,6 +188,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       organization_id: workspaceId,
       actor_id: actorId,
     });
+    await safeReportIssueFailure(
+      issue.id,
+      "❌ Linear webhook is missing the organization or actor field — ABCA can't attribute this task to a user. This is unusual; please report it to your ABCA admin.",
+    );
     return;
   }
 
@@ -155,6 +202,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       linear_user_id: actorId,
       issue_id: issue.id,
     });
+    await safeReportIssueFailure(
+      issue.id,
+      "❌ This Linear user isn't linked to a platform user. In v1 only the API-token owner can submit tasks from Linear; multi-user OAuth support is on the v3 roadmap.",
+    );
     return;
   }
 
@@ -192,6 +243,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       body: result.body,
       issue_id: issue.id,
     });
+    await safeReportIssueFailure(
+      issue.id,
+      buildCreateTaskFailureMessage(result.statusCode, result.body),
+    );
     return;
   }
 
@@ -234,6 +289,44 @@ function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean 
   }
 
   return false;
+}
+
+/**
+ * Translate a `createTaskCore` non-201 response into a user-facing Linear comment.
+ *
+ * The CDK error envelope is `{ error: { code, message, request_id } }`. We surface
+ * the `message` because it's already user-readable (e.g. "Task description was
+ * blocked by content policy") and add a per-status prefix so the user can tell
+ * a guardrail block from a 503 from a validation error.
+ *
+ * Falls back to a generic message if the body fails to parse — best-effort, never throws.
+ */
+function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): string {
+  let detail = '';
+  try {
+    if (rawBody) {
+      const parsed = JSON.parse(rawBody) as { error?: { code?: string; message?: string } };
+      const message = parsed.error?.message;
+      if (typeof message === 'string' && message.trim()) {
+        detail = message.trim();
+      }
+    }
+  } catch {
+    // fall through to the generic message
+  }
+
+  if (statusCode === 400 && detail) {
+    // Guardrail blocks and validation errors land here; the message is already
+    // user-readable so just prefix it.
+    return `❌ ABCA couldn't accept this task: ${detail}`;
+  }
+  if (statusCode === 503) {
+    return `❌ ABCA is temporarily unavailable (status ${statusCode}). Please re-apply the trigger label in a few minutes.`;
+  }
+  if (detail) {
+    return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;
+  }
+  return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
 }
 
 function buildTaskDescription(issue: LinearIssueEvent['data']): string {

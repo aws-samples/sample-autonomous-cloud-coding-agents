@@ -20,6 +20,7 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
+import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import {
   admissionControl,
@@ -34,6 +35,7 @@ import {
   type PollState,
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
+import type { TaskRecord } from './shared/types';
 
 interface OrchestrateTaskEvent {
   readonly task_id: string;
@@ -73,6 +75,16 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     if (!result) {
       await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false);
       await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' });
+      // Linear feedback is non-fatal: a throw here would re-run failTask +
+      // emitTaskEvent on the durable-execution retry, producing duplicate events.
+      try {
+        await notifyLinearOnConcurrencyCap(task);
+      } catch (err) {
+        logger.warn('Linear concurrency-cap feedback failed (non-fatal)', {
+          task_id: taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return result;
   });
@@ -265,3 +277,39 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 };
 
 export const handler = withDurableExecution(durableHandler);
+
+/**
+ * Post a Linear comment + ❌ reaction when admission control rejects a task
+ * for the user concurrency cap. Linear-only; silently no-ops for other
+ * channels.
+ *
+ * The processor side (`linear-webhook-processor.ts`) already covers
+ * pre-`createTaskCore` rejections (unmapped project, unlinked actor, guardrail);
+ * this hook covers the post-201 case where the orchestrator rejects on
+ * admission. Without this, the only Linear-side signal would be the 👀
+ * reaction the agent never gets to add — looks like the integration silently
+ * dropped the request.
+ *
+ * Best-effort: errors inside `reportIssueFailure` are swallowed at the helper
+ * layer; we don't surface them here because Linear feedback must never block
+ * the rejection path.
+ *
+ * Exported for unit testing — the durable handler invokes it inline.
+ */
+export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<void> {
+  if (task.channel_source !== 'linear') return;
+  const issueId = task.channel_metadata?.linear_issue_id;
+  if (!issueId) return;
+  const secretArn = process.env.LINEAR_API_TOKEN_SECRET_ARN;
+  if (!secretArn) {
+    logger.warn('Skipping Linear concurrency-cap feedback: LINEAR_API_TOKEN_SECRET_ARN not set', {
+      task_id: task.task_id,
+    });
+    return;
+  }
+  await reportIssueFailure(
+    secretArn,
+    issueId,
+    '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+  );
+}
