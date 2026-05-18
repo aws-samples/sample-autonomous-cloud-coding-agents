@@ -52,8 +52,12 @@ run = "uvx bandit[toml] -c pyproject.toml -r . --severity-level=high"
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
+# Build context is repo root (..) so Dockerfile can COPY contracts/
+# alongside agent/ — matches cdk/src/stacks/agent.ts. Without -f and
+# the .. context, the build fails because COPY agent/... can't find
+# agent/ inside the agent/ directory.
 run = [
-  "docker image inspect bgagent-local:latest >/dev/null 2>&1 || (ARCH=\"$(uname -m)\"; PLATFORM=\"linux/arm64\"; if [ \"$ARCH\" = \"x86_64\" ]; then PLATFORM=\"linux/amd64\"; fi; docker build --build-arg TARGETPLATFORM=\"$PLATFORM\" --build-arg CACHE_BUST=\"$(date +%s)\" -t bgagent-local:latest .)",
+  "docker image inspect bgagent-local:latest >/dev/null 2>&1 || (ARCH=\"$(uname -m)\"; PLATFORM=\"linux/arm64\"; if [ \"$ARCH\" = \"x86_64\" ]; then PLATFORM=\"linux/amd64\"; fi; docker build --build-arg TARGETPLATFORM=\"$PLATFORM\" --build-arg CACHE_BUST=\"$(date +%s)\" -f Dockerfile -t bgagent-local:latest ..)",
   "trivy image --scanners vuln --ignore-unfixed --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 bgagent-local:latest",
 ]
 
