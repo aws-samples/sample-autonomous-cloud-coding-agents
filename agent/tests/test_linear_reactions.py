@@ -378,6 +378,39 @@ class TestSweepStaleReactions:
             # Only one viewer query across both calls.
             assert sum("Viewer" in q for q in queries) == 1
 
+    def test_sweep_preserves_just_posted_eyes_via_exclude_id(self, monkeypatch):
+        """If Linear's reactions query happens to return our just-posted 👀
+        (e.g. on a tight retry where the prior run's reaction id was reused
+        by Linear), the sweep MUST NOT delete it — exclude_id is what keeps
+        the new marker safe. Tests would otherwise pass with exclude_id=None
+        because the prior reaction ids never collide with the new one."""
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        new_rid = "r-new-eyes"
+        prior_reactions = [
+            # The just-posted 👀 — sweep must SKIP this one.
+            {"id": new_rid, "emoji": EMOJI_STARTED, "user": {"id": "viewer-bot"}},
+            # An older bgagent ❌ from a prior run — sweep MUST delete this.
+            {"id": "r-old-x", "emoji": EMOJI_FAILURE, "user": {"id": "viewer-bot"}},
+        ]
+        with patch(
+            "linear_reactions.requests.post",
+            side_effect=[
+                _ok_response(reaction_id=new_rid),
+                _viewer_response("viewer-bot"),
+                _reactions_response(prior_reactions),
+                _ok_delete_response(),  # only one delete expected
+            ],
+        ) as post:
+            react_task_started("linear", {"linear_issue_id": "issue-1"})
+            _join_sweep_thread()
+            delete_ids = [
+                call.kwargs["json"]["variables"]["id"]
+                for call in post.call_args_list
+                if "reactionDelete" in call.kwargs["json"]["query"]
+            ]
+            # The new 👀 must NOT be deleted; only the old ❌ should be.
+            assert delete_ids == ["r-old-x"]
+
 
 class TestAuthCircuitBreaker:
     """The circuit breaker in `_graphql` flips open after

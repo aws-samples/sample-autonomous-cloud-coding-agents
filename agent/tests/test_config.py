@@ -156,3 +156,22 @@ class TestResolveLinearApiToken:
             assert resolve_linear_api_token() == ""
         assert mock_log.call_count == 1
         assert mock_log.call_args[0][0] == "WARN"
+
+    def test_botocore_error_logged_at_warn(self, monkeypatch):
+        """The handler is split into ClientError + BotoCoreError branches.
+        BotoCoreError covers transient connectivity / endpoint problems —
+        log WARN and degrade gracefully rather than crashing the agent."""
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+        monkeypatch.setenv("LINEAR_API_TOKEN_SECRET_ARN", "arn:aws:sm:::secret/linear")
+
+        from botocore.exceptions import EndpointConnectionError
+
+        fake_client = MagicMock()
+        fake_client.get_secret_value.side_effect = EndpointConnectionError(
+            endpoint_url="https://secretsmanager.us-east-1.amazonaws.com",
+        )
+        with patch("boto3.client", return_value=fake_client), patch("config.log") as mock_log:
+            assert resolve_linear_api_token() == ""
+        assert mock_log.call_count == 1
+        assert mock_log.call_args[0][0] == "WARN"
+        assert "EndpointConnectionError" in mock_log.call_args[0][1]
