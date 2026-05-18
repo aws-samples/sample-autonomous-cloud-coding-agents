@@ -15,7 +15,7 @@ COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
 COPY --from=gh-builder /out/gh /usr/local/bin/gh
 
 # Install system dependencies in multiple layers:
-#   - Node.js 20 (required by Claude Code CLI)
+#   - Node.js 24 LTS (required by Claude Code CLI)
 #   - git (repo operations)
 #   - build-essential (native compilation for some repos)
 #   - curl (downloads)
@@ -32,8 +32,8 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+# Node.js 24 LTS (https://nodejs.org/en/about/previous-releases)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
@@ -42,12 +42,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.139 && \
+    npm install -g @anthropic-ai/claude-code@2.1.142 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
 
-# Install uv (fast Python package manager)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv (fast Python package manager) — pinned for reproducibility
+COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 
 # Install Python dependencies via uv
 COPY pyproject.toml uv.lock /app/

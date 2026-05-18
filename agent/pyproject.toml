@@ -4,14 +4,14 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.43.6", #https://pypi.org/project/boto3/
-    "claude-agent-sdk==0.1.81", #https://github.com/anthropics/claude-agent-sdk-python
-    "requests==2.34.0", #https://pypi.org/project/requests/
+    "boto3==1.43.9", #https://pypi.org/project/boto3/
+    "claude-agent-sdk==0.2.82", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.82
+    "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.136.1", #https://pypi.org/project/fastapi/
-    "uvicorn==0.46.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro~=0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
+    "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
+    "aws-opentelemetry-distro==0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
     "mcp==1.27.1", #https://pypi.org/project/mcp/
-    "cedarpy>=4.8.1", #https://github.com/k9securityio/cedar-py
+    "cedarpy==4.8.3", #https://github.com/k9securityio/cedar-py
 ]
 
 [tool.bandit]
