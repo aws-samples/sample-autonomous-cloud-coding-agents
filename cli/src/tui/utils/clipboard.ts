@@ -7,43 +7,51 @@
 /**
  * Cross-platform clipboard image reader.
  *
- * Strategy: spawn the platform's native clipboard tool and capture
- * raw bytes from stdout. We deliberately do NOT bundle a native
- * Node addon — every TUI tool we surveyed (Claude Code, lazygit,
- * tig) uses the same shell-spawn pattern. It's debuggable, has
- * zero install footprint, and the system tools are battle-tested
- * at the OS level.
+ * Strategy: spawn the platform's native clipboard tool to write the
+ * image to a temp file, then read it back. Temp-file approach is
+ * more robust for binary data than piping through stdout (Windows
+ * console encoding mangles non-text bytes; macOS osascript only
+ * exposes a write-to-file path for PNG via AppleScript).
  *
- * Per-platform tools:
- *   macOS    pngpaste -          (brew install pngpaste)
- *            pbpaste -Prefer png  (built-in fallback)
- *   Linux    xclip -selection clipboard -t image/png -o   (X11)
- *            wl-paste --type image/png                    (Wayland)
- *   Windows  powershell.exe + System.Windows.Forms.Clipboard
+ * No system tools require user installation:
  *
- * The user installs the tool themselves; missing tools fail
- * gracefully with a one-time install hint cached in module state.
+ *   macOS    osascript     (always present in /usr/bin/osascript)
+ *            AppleScript: `the clipboard as «class PNGf»` coerces
+ *            any image on the pasteboard into PNG bytes.
  *
- * Magic bytes:
- *   PNG  89 50 4E 47 0D 0A 1A 0A
- *   JPEG FF D8 FF
- *   GIF  47 49 46 38
+ *   Linux    xclip OR wl-paste — most distros ship one or the other.
+ *            We probe both (TARGETS query) and pick whichever is
+ *            present. SSH / headless sessions return tool_missing.
  *
- * We sniff so the caller knows the correct content_type even when
- * the tool (e.g. `pbpaste`) returns "anything" without a header.
+ *   Windows  powershell.exe + System.Windows.Forms.Clipboard.GetImage().
+ *            Built into Windows 7+. Reachable from WSL via `/mnt/c`
+ *            interop, no platform branch needed.
+ *
+ * BMP fallback (Linux/Windows clipboards sometimes only expose BMP):
+ * we read the file, sniff the magic bytes, and decode BMP → PNG via
+ * `sharp` so the wire payload is always one of the API-supported
+ * formats.
+ *
+ * Size cap: 5 MB after any decode/conversion. Oversize returns
+ * `too_large` with the actual byte count.
  */
 
 import { spawn } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import sharp from 'sharp';
 
 /** Caller-facing payload for an attached image. */
 export interface ClipboardImage {
-  /** Raw image bytes. */
+  /** Raw image bytes — always PNG/JPEG/GIF (BMP is decoded server-side). */
   readonly buffer: Buffer;
-  /** MIME type, set from magic-byte sniff. */
+  /** MIME type, set from magic-byte sniff (post-decode). */
   readonly mediaType: 'image/png' | 'image/jpeg' | 'image/gif';
   /** Convenience for the API contract — base64 of `buffer`. */
   readonly base64: string;
-  /** Byte length, surfaced so the panel can render KB hints. */
+  /** Byte length. */
   readonly sizeBytes: number;
 }
 
@@ -60,16 +68,21 @@ export type ClipboardReadResult =
   | { readonly ok: true; readonly image: ClipboardImage }
   | { readonly ok: false; readonly failure: ClipboardReadFailure };
 
-/** Default per-image cap. Matches Claude Code's documented limit. */
+/** Default per-image cap. Common API limit for vision attachments. */
 export const DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-/** Module-level cache so install hints surface once per session
- *  rather than on every Ctrl+V. Keyed on tool name. */
+/** Module-level cache so install hints (rare — e.g. headless Linux)
+ *  surface once per session rather than on every Ctrl+V. */
 const hintShownFor = new Set<string>();
 
 /** Sniff the leading bytes for a recognized image format. Returns
  *  null when the buffer doesn't match any. */
-function sniffMediaType(buf: Buffer): ClipboardImage['mediaType'] | null {
+function sniffMediaType(buf: Buffer):
+  | 'image/png'
+  | 'image/jpeg'
+  | 'image/gif'
+  | 'image/bmp'
+  | null {
   if (buf.length < 4) return null;
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
     return 'image/png';
@@ -79,6 +92,9 @@ function sniffMediaType(buf: Buffer): ClipboardImage['mediaType'] | null {
   }
   if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) {
     return 'image/gif';
+  }
+  if (buf[0] === 0x42 && buf[1] === 0x4d) {
+    return 'image/bmp';
   }
   return null;
 }
@@ -90,26 +106,23 @@ interface SpawnResult {
   readonly toolMissing: boolean;
 }
 
-/** Async wrapper around spawn that captures stdout as a Buffer.
- *  Test seam: re-export points to this so tests can stub it.
- *
- *  Buffers all stdout into memory. The caller is responsible for
- *  size-policy decisions (`toImage`'s `maxBytes` check). A 2s
- *  timeout protects against a runaway process; for clipboard
- *  tools the actual data volume is bounded by the OS clipboard
- *  contents. */
+/** Async wrapper around spawn that captures stdout. Test seam: tests
+ *  mock `node:child_process.spawn` to control return values. */
 export async function spawnAndCollect(
   cmd: string,
   args: readonly string[],
-  opts: { readonly stdin?: string; readonly timeoutMs?: number } = {},
+  opts: { readonly stdin?: string; readonly timeoutMs?: number; readonly shell?: boolean } = {},
 ): Promise<SpawnResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, [...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, [...args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: opts.shell ?? false,
+    });
     const chunks: Buffer[] = [];
     let stderr = '';
     let killed = false;
 
-    const timeoutMs = opts.timeoutMs ?? 2_000;
+    const timeoutMs = opts.timeoutMs ?? 5_000;
     const timer = setTimeout(() => {
       killed = true;
       child.kill('SIGKILL');
@@ -122,8 +135,6 @@ export async function spawnAndCollect(
 
     child.on('error', (err) => {
       clearTimeout(timer);
-      // ENOENT = tool not on PATH. We surface this distinctly so
-      // the caller can show an install hint.
       const toolMissing = (err as NodeJS.ErrnoException).code === 'ENOENT';
       resolve({
         stdout: Buffer.concat(chunks),
@@ -151,22 +162,65 @@ export async function spawnAndCollect(
   });
 }
 
-/** Convert a raw byte buffer + sniffed media type into a
- *  caller-facing ClipboardImage, applying the size cap. */
-function toImage(buf: Buffer, maxBytes: number): ClipboardReadResult {
-  if (buf.length === 0) {
+/** Generate a fresh temp file path for a clipboard read. We don't
+ *  reuse a fixed name across reads because two TUI panels (or two
+ *  fast successive pastes) could race on the same path. */
+function tempImagePath(): string {
+  const id = randomBytes(8).toString('hex');
+  return join(tmpdir(), `bgagent-tui-clipboard-${id}.png`);
+}
+
+/** Read a temp file, sniff format, decode BMP → PNG via sharp if
+ *  needed, apply the size cap, and emit the caller-facing result.
+ *  The temp file is unlinked on the way out (best-effort). */
+async function fileToImage(path: string, maxBytes: number): Promise<ClipboardReadResult> {
+  let raw: Buffer;
+  try {
+    raw = await fs.readFile(path);
+  } catch (err) {
+    return {
+      ok: false,
+      failure: { kind: 'error', message: `temp file read failed: ${(err as Error).message}` },
+    };
+  } finally {
+    fs.unlink(path).catch(() => { /* best effort */ });
+  }
+
+  if (raw.length === 0) {
     return { ok: false, failure: { kind: 'empty' } };
   }
-  const mediaType = sniffMediaType(buf);
-  if (mediaType === null) {
+
+  const sniffed = sniffMediaType(raw);
+  if (sniffed === null) {
     return { ok: false, failure: { kind: 'not_image' } };
   }
+
+  // BMP isn't always accepted by vision APIs (and the wire contract
+  // expects `image/png` / `image/jpeg` / `image/gif`). Decode BMP
+  // → PNG inline so the rest of the system never sees BMP.
+  let buf = raw;
+  let mediaType: 'image/png' | 'image/jpeg' | 'image/gif';
+  if (sniffed === 'image/bmp') {
+    try {
+      buf = await sharp(raw).png().toBuffer();
+      mediaType = 'image/png';
+    } catch (err) {
+      return {
+        ok: false,
+        failure: { kind: 'error', message: `BMP decode failed: ${(err as Error).message}` },
+      };
+    }
+  } else {
+    mediaType = sniffed;
+  }
+
   if (buf.length > maxBytes) {
     return {
       ok: false,
       failure: { kind: 'too_large', sizeBytes: buf.length, maxBytes },
     };
   }
+
   return {
     ok: true,
     image: {
@@ -180,39 +234,63 @@ function toImage(buf: Buffer, maxBytes: number): ClipboardReadResult {
 
 /* ─── Per-platform readers ───────────────────────────────────────── */
 
+/**
+ * macOS: AppleScript via `osascript`. The `«class PNGf»` coercion
+ * asks the pasteboard for its PNG representation, which the OS
+ * synthesizes from any image present (including from screenshot
+ * tools, image apps, and copies of TIFF/JPEG/etc). osascript is
+ * always at /usr/bin/osascript on macOS — no install needed.
+ */
 async function readMacOS(maxBytes: number): Promise<ClipboardReadResult> {
-  // First try `pngpaste -` — strict contract: exit 0 = bytes, exit 1
-  // = no image. If pngpaste isn't installed (ENOENT), fall back to
-  // `pbpaste -Prefer png` and rely on magic-byte sniffing because
-  // pbpaste doesn't distinguish image-vs-text via exit code.
-  const png = await spawnAndCollect('pngpaste', ['-']);
-  if (!png.toolMissing) {
-    if (png.exitCode === 0) {
-      return toImage(png.stdout, maxBytes);
-    }
-    // pngpaste ran but had no image. Don't fall through to pbpaste —
-    // pngpaste is authoritative when present.
-    return { ok: false, failure: { kind: 'empty' } };
-  }
+  const path = tempImagePath();
+  // Two-step AppleScript: coerce clipboard → PNG bytes, then write
+  // those bytes to the temp file. The `open for access` /
+  // `close access` dance is the canonical way to write binary data
+  // from AppleScript. If the clipboard has no image, the coercion
+  // throws and osascript exits non-zero.
+  const script = [
+    `set png_data to (the clipboard as «class PNGf»)`,
+    `set fp to open for access POSIX file "${path}" with write permission`,
+    `write png_data to fp`,
+    `close access fp`,
+  ].join('\n');
 
-  // pngpaste missing — try pbpaste fallback.
-  const pbp = await spawnAndCollect('pbpaste', ['-Prefer', 'png']);
-  if (pbp.toolMissing) {
-    // pbpaste is built-in to macOS. If we land here something is
-    // really wrong; surface the install hint anyway.
+  const result = await spawnAndCollect('osascript', ['-e', script]);
+  if (result.toolMissing) {
     return {
       ok: false,
       failure: {
         kind: 'tool_missing',
         platform: 'darwin',
-        hint: 'Install pngpaste for clipboard image paste:\n  brew install pngpaste',
+        hint: 'osascript is missing — this is unusual on macOS. Reinstall macOS dev tools.',
       },
     };
   }
-  if (pbp.exitCode !== 0 || pbp.stdout.length === 0) {
+  if (result.exitCode !== 0) {
+    // osascript exits non-zero when the clipboard has no image.
+    // Make sure we don't leave a partially-written temp file
+    // around if the script created one before failing.
+    fs.unlink(path).catch(() => { /* best effort */ });
     return { ok: false, failure: { kind: 'empty' } };
   }
-  return toImage(pbp.stdout, maxBytes);
+  return fileToImage(path, maxBytes);
+}
+
+/** Probe whether xclip / wl-paste exposes any image MIME type on
+ *  the clipboard. We use this as a fast pre-check so we don't write
+ *  empty temp files on text-only clipboards. */
+async function linuxHasImage(tool: 'xclip' | 'wl-paste'): Promise<boolean> {
+  if (tool === 'xclip') {
+    const r = await spawnAndCollect('xclip', ['-selection', 'clipboard', '-t', 'TARGETS', '-o']);
+    if (r.exitCode !== 0) return false;
+    const targets = r.stdout.toString('utf8');
+    return /image\/(png|jpeg|jpg|gif|webp|bmp)/.test(targets);
+  }
+  // wl-paste -l lists available types
+  const r = await spawnAndCollect('wl-paste', ['-l']);
+  if (r.exitCode !== 0) return false;
+  const targets = r.stdout.toString('utf8');
+  return /image\/(png|jpeg|jpg|gif|webp|bmp)/.test(targets);
 }
 
 async function readLinux(maxBytes: number): Promise<ClipboardReadResult> {
@@ -228,48 +306,70 @@ async function readLinux(maxBytes: number): Promise<ClipboardReadResult> {
       },
     };
   }
-  const cmd = isWayland ? 'wl-paste' : 'xclip';
-  const args = isWayland
-    ? ['--type', 'image/png']
-    : ['-selection', 'clipboard', '-t', 'image/png', '-o'];
-  const result = await spawnAndCollect(cmd, args);
+
+  const tool: 'xclip' | 'wl-paste' = isWayland ? 'wl-paste' : 'xclip';
+
+  // Pre-check: does the clipboard expose any image MIME?
+  const hasImage = await linuxHasImage(tool).catch(() => false);
+  if (!hasImage) {
+    return { ok: false, failure: { kind: 'empty' } };
+  }
+
+  // Save with format-fallback chain. Prefer PNG; fall back to BMP
+  // (some apps — notably Windows-via-WSL2 — only expose BMP). The
+  // file is written via shell redirect so we use shell:true here.
+  const path = tempImagePath();
+  const escapedPath = path.replace(/"/g, '\\"');
+  const cmd = tool === 'xclip'
+    ? [
+      `xclip -selection clipboard -t image/png -o > "${escapedPath}" 2>/dev/null`,
+      `xclip -selection clipboard -t image/bmp -o > "${escapedPath}" 2>/dev/null`,
+    ].join(' || ')
+    : [
+      `wl-paste --type image/png > "${escapedPath}" 2>/dev/null`,
+      `wl-paste --type image/bmp > "${escapedPath}" 2>/dev/null`,
+    ].join(' || ');
+
+  const result = await spawnAndCollect(cmd, [], { shell: true });
   if (result.toolMissing) {
     return {
       ok: false,
       failure: {
         kind: 'tool_missing',
         platform: 'linux',
-        hint: isWayland
-          ? 'Install wl-clipboard for image paste:\n  sudo apt install wl-clipboard'
-          : 'Install xclip for image paste:\n  sudo apt install xclip',
+        hint: tool === 'wl-paste'
+          ? 'wl-clipboard is required for clipboard paste on Wayland:\n  sudo apt install wl-clipboard'
+          : 'xclip is required for clipboard paste on X11:\n  sudo apt install xclip',
       },
     };
   }
-  if (result.exitCode !== 0 || result.stdout.length === 0) {
-    return { ok: false, failure: { kind: 'empty' } };
-  }
-  return toImage(result.stdout, maxBytes);
+  // Even if exit code is non-zero, the OR-chain may have produced a
+  // file via the BMP fallback. Just try to read it.
+  return fileToImage(path, maxBytes);
 }
 
-const WIN_PS_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$img = [System.Windows.Forms.Clipboard]::GetImage()
-if ($null -eq $img) { exit 1 }
-$ms = New-Object System.IO.MemoryStream
-$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-[Convert]::ToBase64String($ms.ToArray())
-`.trim();
-
+/**
+ * Windows: PowerShell + System.Windows.Forms.Clipboard.GetImage().
+ * Saves to a temp file. Reachable from WSL via the `/mnt/c` interop
+ * since `powershell.exe` is on PATH there too, so no platform
+ * branch.
+ */
 async function readWindows(maxBytes: number): Promise<ClipboardReadResult> {
-  // Use powershell.exe (Windows PowerShell 5.1) explicitly. Some
-  // PowerShell Core (`pwsh`) installs lack System.Windows.Forms.
-  // From WSL the same `powershell.exe` binary is reachable on PATH
-  // via /mnt/c interop, so no platform branch needed here.
+  const path = tempImagePath();
+  // Backslash-escape for PowerShell single-quoted string.
+  const psPath = path.replace(/\\/g, '\\\\').replace(/'/g, "''");
+  const script = [
+    `$ErrorActionPreference = 'Stop'`,
+    `Add-Type -AssemblyName System.Windows.Forms`,
+    `Add-Type -AssemblyName System.Drawing`,
+    `$img = [System.Windows.Forms.Clipboard]::GetImage()`,
+    `if ($null -eq $img) { exit 1 }`,
+    `$img.Save('${psPath}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+  ].join('; ');
+
   const result = await spawnAndCollect(
     'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', WIN_PS_SCRIPT],
+    ['-NoProfile', '-NonInteractive', '-Command', script],
   );
   if (result.toolMissing) {
     return {
@@ -281,21 +381,11 @@ async function readWindows(maxBytes: number): Promise<ClipboardReadResult> {
       },
     };
   }
-  if (result.exitCode !== 0 || result.stdout.length === 0) {
+  if (result.exitCode !== 0) {
+    fs.unlink(path).catch(() => { /* best effort */ });
     return { ok: false, failure: { kind: 'empty' } };
   }
-  // PowerShell's Write-Output in -Command mode emits the base64
-  // string with trailing CRLF + possible UTF-8 BOM. Strip both.
-  let raw = result.stdout.toString('utf8').replace(/^﻿/, '').trim();
-  raw = raw.replace(/\s+/g, '');
-  if (!/^[A-Za-z0-9+/=]+$/.test(raw)) {
-    return {
-      ok: false,
-      failure: { kind: 'error', message: 'PowerShell returned non-base64 output' },
-    };
-  }
-  const buf = Buffer.from(raw, 'base64');
-  return toImage(buf, maxBytes);
+  return fileToImage(path, maxBytes);
 }
 
 /** Public API. Returns a result discriminator the caller dispatches
