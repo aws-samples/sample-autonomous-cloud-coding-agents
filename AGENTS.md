@@ -22,6 +22,7 @@ Use this routing before editing so the right package and tests get updated:
 | Agent runtime (clone, tools, prompts, container) | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `policy.py`, `prompts/`, Dockerfile, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
 | Agent progress events (written to `TaskEventsTable` from the MicroVM; read by `bgagent watch`) | `agent/src/progress_writer.py`, `agent/src/pipeline.py` and `agent/src/runner.py` (integration points) | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` for the consumer side |
 | User-facing or design prose | `docs/guides/`, `docs/design/` | Run **`mise //docs:sync`** or **`mise //docs:build`** (do not edit `docs/src/content/docs/` by hand) |
+| Architecture decisions (ADRs) | `docs/decisions/` | Run **`mise //docs:sync`** after adding or editing an ADR |
 | Monorepo tasks, CI glue | Root `mise.toml`, `scripts/`, `.github/workflows/` | — |
 
 ### CDK handler tests (quick map)

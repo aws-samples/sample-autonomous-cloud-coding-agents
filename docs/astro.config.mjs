@@ -99,6 +99,11 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Decisions',
+          collapsed: true,
+          autogenerate: { directory: 'decisions' },
+        },
+        {
           label: 'Roadmap',
           autogenerate: { directory: 'roadmap' },
         },

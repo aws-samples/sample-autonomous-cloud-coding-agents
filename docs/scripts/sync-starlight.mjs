@@ -262,5 +262,8 @@ mirrorMarkdownFile(
 // AGENTS.md reference for contributors. The rename happens only at the site level.
 mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs', 'architecture'));
 
+// --- Decision records (ADRs): mirror to decisions/ ---
+mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
+
 // Guardrail: ensure target tree exists when running in a clean checkout.
 fs.mkdirSync(targetRoot, { recursive: true });
