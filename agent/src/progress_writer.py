@@ -608,3 +608,302 @@ class _ProgressWriter:
                 "message_preview": self._preview(message),
             },
         )
+
+    # -- approval-gate milestones (§11.1, Chunk 3) -----------------------------
+    #
+    # Each helper is a thin wrapper over ``_put_event("agent_milestone", ...)``
+    # carrying the structured metadata shape documented in §11.1. Centralizing
+    # the milestone name + metadata keys here keeps the agent/Lambda/CLI
+    # contract consistent — every approval_* producer goes through a named
+    # method rather than stringly-typed ``write_agent_milestone`` calls.
+    #
+    # ``approval_decision_recorded`` is NOT emitted here: it is the
+    # Lambda-side audit event (written by ApproveTaskFn / DenyTaskFn directly
+    # to TaskEventsTable in Chunk 5). See IMPL-6.
+    #
+    # ``approval_timeout_capped_at_submit`` is emitted by CreateTaskFn and
+    # also lives on the Lambda side (Chunk 5). Agent-side helpers cover the
+    # 14 events the agent runtime emits.
+
+    def _put_approval_milestone(self, milestone: str, metadata: dict) -> None:
+        """Emit an ``agent_milestone`` with ``milestone`` + extra metadata.
+
+        Mirrors the shape of ``write_agent_milestone`` but preserves the
+        structured metadata keys so consumers do not need to parse a
+        free-form ``details`` string.
+        """
+        payload: dict = {"milestone": milestone}
+        payload.update(metadata)
+        self._put_event("agent_milestone", payload)
+
+    def write_approval_pre_approvals_loaded(self, count: int, scopes: list[str]) -> None:
+        """Emit ``pre_approvals_loaded`` (agent init, §11.1)."""
+        self._put_approval_milestone(
+            "pre_approvals_loaded",
+            {"count": count, "scopes": list(scopes)},
+        )
+
+    def write_approval_requested(
+        self,
+        *,
+        request_id: str,
+        tool_name: str,
+        input_preview: str,
+        reason: str,
+        severity: str,
+        timeout_s: int,
+        matching_rule_ids: list[str],
+    ) -> None:
+        """Emit ``approval_requested`` (PENDING row written, §11.1)."""
+        self._put_approval_milestone(
+            "approval_requested",
+            {
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "input_preview": self._preview(input_preview),
+                "reason": self._preview(reason),
+                "severity": severity,
+                "timeout_s": timeout_s,
+                "matching_rule_ids": list(matching_rule_ids),
+            },
+        )
+
+    def write_approval_granted(
+        self,
+        *,
+        request_id: str,
+        scope: str,
+        decided_at: str | None,
+        created_at: str | None = None,
+    ) -> None:
+        """Emit ``approval_granted`` (user APPROVED, §11.1).
+
+        Chunk 8a: ``created_at`` propagated from the approval row so the
+        ApprovalMetricsPublisher Lambda can compute ``decided_at -
+        created_at`` latency without a round-trip GetItem. Optional with
+        default ``None`` so any legacy caller path still constructs a
+        valid event — the publisher skips the latency emit + logs a
+        ``METRICS_SCHEMA_MISMATCH`` if the field is absent, rather than
+        emitting ``latency=0`` which would poison percentile widgets.
+
+        Field is omitted (not present as ``None``) from the emitted
+        event metadata when ``created_at`` is ``None``. This keeps the
+        event stream free of ``None`` values that consumers would have
+        to re-check, and makes "absent" vs "present but null" a
+        single well-defined case downstream.
+        """
+        payload: dict = {
+            "request_id": request_id,
+            "scope": scope,
+            "decided_at": decided_at,
+        }
+        if created_at is not None:
+            payload["created_at"] = created_at
+        self._put_approval_milestone("approval_granted", payload)
+
+    def write_approval_denied(
+        self,
+        *,
+        request_id: str,
+        reason: str,
+        decided_at: str | None,
+        created_at: str | None = None,
+    ) -> None:
+        """Emit ``approval_denied`` (user DENIED, §11.1).
+
+        Chunk 8a: see ``write_approval_granted`` for the ``created_at``
+        rationale (field omitted from metadata when ``None``).
+        """
+        payload: dict = {
+            "request_id": request_id,
+            "reason": self._preview(reason),
+            "decided_at": decided_at,
+        }
+        if created_at is not None:
+            payload["created_at"] = created_at
+        self._put_approval_milestone("approval_denied", payload)
+
+    def write_approval_timed_out(
+        self,
+        *,
+        request_id: str,
+        timeout_s: int,
+        created_at: str | None = None,
+        effective_timeout_s: int | None = None,
+        matching_rule_ids: list[str] | None = None,
+    ) -> None:
+        """Emit ``approval_timed_out`` (timer expired, §11.1).
+
+        Chunk 8a additions to support the ApprovalMetricsPublisher
+        dashboard widgets (IMPL-28):
+
+        - ``created_at`` — propagated from the approval row so the
+          publisher Lambda can compute decision latency at
+          ``outcome=timed_out`` the same way it does for granted/denied.
+        - ``effective_timeout_s`` — the clipped timeout actually applied
+          (from the approval row's ``timeout_s`` field, which is the
+          post-clip value). Required by the ``ApprovalTimeoutBreakdown``
+          histogram. When absent (legacy caller), the metric emit is
+          skipped + a ``METRICS_SCHEMA_MISMATCH`` counter fires, rather
+          than polluting percentile widgets with zero-valued samples.
+        - ``matching_rule_ids`` — rule ids that matched at gate-fire
+          time, propagated from the approval row's
+          ``matching_rule_ids``. Used by the publisher Lambda to emit
+          ``TimedOutEffectiveTimeout`` with a ``rule_id`` dimension
+          (normalized against an allowlist so unknown rules collapse
+          to ``other`` — cardinality cap, H4 adversarial finding).
+
+        ``timeout_s`` is retained for backward-compat — pre-Chunk-8a
+        events and consumers that only want the raw timer value see
+        the original field. ``effective_timeout_s`` is a separate field
+        (not a rename) to keep the event schema a pure superset.
+        """
+        payload: dict = {"request_id": request_id, "timeout_s": timeout_s}
+        if created_at is not None:
+            payload["created_at"] = created_at
+        if effective_timeout_s is not None:
+            payload["effective_timeout_s"] = effective_timeout_s
+        if matching_rule_ids is not None:
+            payload["matching_rule_ids"] = list(matching_rule_ids)
+        self._put_approval_milestone("approval_timed_out", payload)
+
+    def write_approval_stranded(
+        self,
+        *,
+        request_id: str,
+        age_s: int,
+        reason: str,
+    ) -> None:
+        """Emit ``approval_stranded`` (reconciler surface, §11.1)."""
+        self._put_approval_milestone(
+            "approval_stranded",
+            {"request_id": request_id, "age_s": age_s, "reason": self._preview(reason)},
+        )
+
+    def write_approval_write_failed(self, *, request_id: str | None, error: str) -> None:
+        """Emit ``approval_write_failed`` (TransactWriteItems failure, §11.1)."""
+        self._put_approval_milestone(
+            "approval_write_failed",
+            {"request_id": request_id, "error": self._preview(error)},
+        )
+
+    def write_approval_resume_failed(self, *, request_id: str, error: str) -> None:
+        """Emit ``approval_resume_failed`` (resume transaction failure, §11.1)."""
+        self._put_approval_milestone(
+            "approval_resume_failed",
+            {"request_id": request_id, "error": self._preview(error)},
+        )
+
+    def write_approval_poll_degraded(self, *, request_id: str, consecutive_failures: int) -> None:
+        """Emit ``approval_poll_degraded`` (3+ consecutive GetItem failures)."""
+        self._put_approval_milestone(
+            "approval_poll_degraded",
+            {
+                "request_id": request_id,
+                "consecutive_failures": consecutive_failures,
+            },
+        )
+
+    def write_approval_timeout_capped(
+        self,
+        *,
+        request_id: str,
+        requested_timeout_s: int,
+        effective_timeout_s: int,
+        reason: str,
+        matching_rule_ids: list[str] | None = None,
+    ) -> None:
+        """Emit ``approval_timeout_capped`` when min-wins clips the timeout.
+
+        ``reason`` ∈ {rule_annotation, maxLifetime_ceiling, runtime_jwt_ceiling}.
+        ``matching_rule_ids`` populated when ``reason == "rule_annotation"``
+        (IMPL-26).
+        """
+        payload: dict = {
+            "request_id": request_id,
+            "requested_timeout_s": requested_timeout_s,
+            "effective_timeout_s": effective_timeout_s,
+            "reason": reason,
+        }
+        if matching_rule_ids is not None:
+            payload["matching_rule_ids"] = list(matching_rule_ids)
+        self._put_approval_milestone("approval_timeout_capped", payload)
+
+    def write_approval_ceiling_shrinking(
+        self,
+        *,
+        request_id: str,
+        max_lifetime_remaining_s: int,
+        cleanup_margin_s: int,
+        task_default_timeout_s: int,
+    ) -> None:
+        """Emit once-per-task ``approval_ceiling_shrinking`` (IMPL-26, §11.1)."""
+        self._put_approval_milestone(
+            "approval_ceiling_shrinking",
+            {
+                "request_id": request_id,
+                "maxLifetime_remaining_s": max_lifetime_remaining_s,
+                "cleanup_margin_s": cleanup_margin_s,
+                "task_default_timeout_s": task_default_timeout_s,
+            },
+        )
+
+    def write_approval_cap_exceeded(self, *, request_id: str, count: int, cap: int) -> None:
+        """Emit ``approval_cap_exceeded`` (per-task gate-cap fired)."""
+        self._put_approval_milestone(
+            "approval_cap_exceeded",
+            {"request_id": request_id, "count": count, "cap": cap},
+        )
+
+    def write_approval_rate_limit_exceeded(self, *, request_id: str, rate: int, limit: int) -> None:
+        """Emit ``approval_rate_limit_exceeded`` (per-minute rate limit hit)."""
+        self._put_approval_milestone(
+            "approval_rate_limit_exceeded",
+            {"request_id": request_id, "rate": rate, "limit": limit},
+        )
+
+    def write_approval_late_win(self, *, request_id: str, outcome: str, reason: str) -> None:
+        """Emit ``approval_late_win`` (VM-throttle race mitigation, IMPL-24)."""
+        self._put_approval_milestone(
+            "approval_late_win",
+            {
+                "request_id": request_id,
+                "outcome": outcome,
+                "reason": self._preview(reason),
+            },
+        )
+
+    def write_policy_decision_cached(
+        self,
+        *,
+        tool_name: str,
+        tool_input_sha256: str,
+        cached_decision: str,
+        cached_reason: str,
+        original_decision_ts: str,
+    ) -> None:
+        """Emit ``policy_decision`` for a recent-decision-cache hit (IMPL-23).
+
+        Event name is ``policy_decision`` (not ``approval_*``) because a
+        cache hit intentionally avoids creating a new approval row — the
+        original decision already produced the audit trail. The
+        ``decision_source`` field distinguishes cache-driven denies from
+        fresh policy evaluations so operators can correlate retry patterns
+        with container restarts (§12.8, §13.6).
+
+        Reuses ``_put_approval_milestone`` for the ``agent_milestone``
+        event shape; the ``milestone`` key is ``policy_decision`` here
+        instead of an ``approval_*`` name. No new approval row, no
+        counter increment — purely observability (§12.8 caveat).
+        """
+        self._put_approval_milestone(
+            "policy_decision",
+            {
+                "decision_source": "recent_decision_cache",
+                "tool_name": tool_name,
+                "tool_input_sha256": tool_input_sha256,
+                "cached_decision": cached_decision,
+                "cached_reason": self._preview(cached_reason),
+                "original_decision_ts": original_decision_ts,
+            },
+        )

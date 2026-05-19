@@ -358,7 +358,13 @@ export async function autoLinkTokenOwner(args: {
     organization = body.data.organization;
   } catch (err) {
     console.log(`  ⚠ Could not auto-link token owner: ${err instanceof Error ? err.message : String(err)}`);
-    console.log('    Run `bgagent linear link <code>` manually after generating a code.');
+    console.log('    The Linear API token is stored, but you are not yet linked as a platform user.');
+    console.log('    Workarounds:');
+    console.log('      • Re-run `bgagent linear setup` once Linear API is reachable (most common — transient failures).');
+    console.log('      • If the failure persists, an admin can insert your linked identity directly into the');
+    console.log(`        ${args.userMappingTable} DynamoDB table (linear_identity = "<workspaceId>#<viewerId>",`);
+    console.log('        platform_user_id = your Cognito sub). See docs/guides/LINEAR_SETUP_GUIDE.md.');
+    console.log('    `bgagent linear link <code>` is a v3 feature that requires Linear OAuth bot install (not in v1).');
     return;
   }
 

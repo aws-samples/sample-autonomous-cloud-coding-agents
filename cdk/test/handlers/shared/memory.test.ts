@@ -69,7 +69,7 @@ describe('loadMemoryContext', () => {
     expect(result!.repo_knowledge[0]).toContain('Jest');
   });
 
-  test('uses repo-based namespaces for queries', async () => {
+  test('uses namespacePath (hierarchical retrieval) for both queries', async () => {
     const { RetrieveMemoryRecordsCommand } = jest.requireMock('@aws-sdk/client-bedrock-agentcore');
     mockAgentCoreSend
       .mockResolvedValueOnce({ memoryRecordSummaries: [] })
@@ -77,23 +77,33 @@ describe('loadMemoryContext', () => {
 
     await loadMemoryContext('mem-123', 'owner/repo', 'Fix the build');
 
-    // Semantic search uses /{repo}/knowledge/ namespace
+    // Semantic search uses /{repo}/knowledge/ as namespacePath. The legacy
+    // `namespace` field switched from prefix-match to exact-match in the
+    // AgentCore Memory API; namespacePath preserves the hierarchical (prefix)
+    // semantics this code depends on for episodic per-task records nested
+    // under /{repo}/episodes/{sessionId}/.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespace: '/owner/repo/knowledge/',
+        namespacePath: '/owner/repo/knowledge/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'Fix the build',
         }),
       }),
     );
-    // Episodic search uses /{repo}/episodes/ namespace prefix
+    // Episodic search uses /{repo}/episodes/ namespacePath to scoop up records
+    // under all task sessions plus the cross-task reflection records.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespace: '/owner/repo/episodes/',
+        namespacePath: '/owner/repo/episodes/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'recent task episodes',
         }),
       }),
+    );
+    // Confirm the legacy `namespace` field is NOT being passed — we don't
+    // want to send both fields (the API rejects that) or the wrong one.
+    expect(RetrieveMemoryRecordsCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: expect.anything() }),
     );
   });
 
@@ -203,7 +213,7 @@ describe('loadMemoryContext', () => {
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
         repo: 'owner/repo',
-        namespace: '/owner/repo/knowledge/',
+        namespace_path: '/owner/repo/knowledge/',
         record_type: 'repo_knowledge',
         expected_hash: wrongHash,
         source_type: 'agent_learning',
@@ -235,7 +245,7 @@ describe('loadMemoryContext', () => {
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
         repo: 'owner/repo',
-        namespace: '/owner/repo/episodes/',
+        namespace_path: '/owner/repo/episodes/',
         record_type: 'past_episode',
         expected_hash: wrongHash,
         source_type: 'agent_episode',

@@ -40,6 +40,7 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     pr_url: null,
     error_message: null,
     error_classification: null,
+    prompt_version: null,
     channel_source: 'api',
     created_at: '2026-04-29T15:27:00Z',
     updated_at: '2026-04-29T15:30:00Z',
@@ -54,6 +55,9 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     turns_completed: null,
     trace: false,
     trace_s3_uri: null,
+    approval_gate_count: 0,
+    approval_gate_cap: 50,
+    awaiting_approval_request_id: null,
     ...overrides,
   };
 }

@@ -39,9 +39,17 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
   ApplyGuardrailCommand: jest.fn((input: unknown) => ({ _type: 'ApplyGuardrail', input })),
 }));
 
-const mockCheckRepoOnboarded = jest.fn();
+// create-task-core collapsed the prior checkRepoOnboarded +
+// loadRepoConfig pair into a single ``lookupRepo`` call (see
+// ``cdk/src/handlers/shared/repo-config.ts::lookupRepo``). The mock
+// exposes the one function the submit path now calls; the two
+// convenience wrappers are still exported on the real module but
+// create-task-core doesn't reach for them, so leaving them off the
+// mock keeps test failures load-bearing if the import surface
+// drifts.
+const mockLookupRepo = jest.fn();
 jest.mock('../../../src/handlers/shared/repo-config', () => ({
-  checkRepoOnboarded: mockCheckRepoOnboarded,
+  lookupRepo: mockLookupRepo,
 }));
 
 let ulidCounter = 0;
@@ -72,7 +80,9 @@ beforeEach(() => {
   mockSend.mockResolvedValue({});
   mockLambdaSend.mockResolvedValue({});
   mockBedrockSend.mockResolvedValue({ action: 'NONE' });
-  mockCheckRepoOnboarded.mockResolvedValue({ onboarded: true });
+  // Default: repo is onboarded, no blueprint config (submit path
+  // resolves to the platform-default approval_gate_cap of 50).
+  mockLookupRepo.mockResolvedValue({ onboarded: true, config: null });
 });
 
 describe('createTaskCore', () => {
@@ -384,7 +394,7 @@ describe('createTaskCore', () => {
   });
 
   test('returns 422 when repo is not onboarded', async () => {
-    mockCheckRepoOnboarded.mockResolvedValueOnce({ onboarded: false });
+    mockLookupRepo.mockResolvedValueOnce({ onboarded: false, config: null });
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it' },
       makeContext(),
@@ -395,7 +405,7 @@ describe('createTaskCore', () => {
   });
 
   test('creates task successfully when repo is onboarded', async () => {
-    mockCheckRepoOnboarded.mockResolvedValueOnce({ onboarded: true });
+    mockLookupRepo.mockResolvedValueOnce({ onboarded: true, config: null });
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -550,5 +560,136 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(400);
     expect(JSON.parse(result.body).error.message).toContain('trace');
+  });
+
+  // --- Chunk 7b: approval_gate_cap resolution (§4 step 5, decision #13) ---
+
+  function getPersistedTaskRecord() {
+    const putCall = mockSend.mock.calls.find(
+      (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === 'Tasks',
+    );
+    return putCall?.[0]?.input?.Item;
+  }
+
+  // Wrap the ``lookupRepo`` mock for the "onboarded + config" case
+  // used by every blueprint-cap test below. Keeps each test focused
+  // on the cap value under test rather than repeating the full
+  // RepoConfig shape.
+  function mockOnboardedWithConfig(config: Record<string, unknown>): void {
+    mockLookupRepo.mockResolvedValueOnce({
+      onboarded: true,
+      config: {
+        repo: 'org/repo',
+        status: 'active',
+        onboarded_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        ...config,
+      },
+    });
+  }
+
+  test('persists default approval_gate_cap of 50 when blueprint omits the override', async () => {
+    mockLookupRepo.mockResolvedValueOnce({ onboarded: true, config: null });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-default',
+    );
+    expect(result.statusCode).toBe(201);
+    const record = getPersistedTaskRecord();
+    expect(record.approval_gate_cap).toBe(50);
+  });
+
+  test('persists default-50 when RepoConfig exists but lacks approval_gate_cap', async () => {
+    // Legacy blueprint predating Chunk 7b: cedar_policies set, cap unset.
+    mockOnboardedWithConfig({
+      cedar_policies: ['permit (principal, action, resource);'],
+    });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-legacy',
+    );
+    expect(result.statusCode).toBe(201);
+    const record = getPersistedTaskRecord();
+    expect(record.approval_gate_cap).toBe(50);
+  });
+
+  test('persists blueprint-configured approval_gate_cap when within bounds', async () => {
+    mockOnboardedWithConfig({ approval_gate_cap: 150 });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-override',
+    );
+    expect(result.statusCode).toBe(201);
+    const record = getPersistedTaskRecord();
+    expect(record.approval_gate_cap).toBe(150);
+  });
+
+  test.each([
+    ['min (1)', 1],
+    ['max (500)', 500],
+  ])('accepts blueprint approval_gate_cap at boundary %s', async (_label, cap) => {
+    mockOnboardedWithConfig({ approval_gate_cap: cap });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      `req-cap-boundary-${cap}`,
+    );
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord().approval_gate_cap).toBe(cap);
+  });
+
+  test.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['exceeds max', 501],
+    ['exceeds max big', 10000],
+  ])('returns 503 when blueprint approval_gate_cap is %s (out-of-bounds)', async (_label, cap) => {
+    // Blueprint synth validation should catch these, but a hand-edited
+    // RepoConfig row could bypass it. Fail closed so we never persist
+    // a bad cap onto a TaskRecord. 503 SERVICE_UNAVAILABLE (not 500)
+    // because the condition is permanent platform misconfiguration,
+    // not a transient internal error — 500 would misleadingly suggest
+    // retry-will-fix.
+    mockOnboardedWithConfig({ approval_gate_cap: cap });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      `req-cap-bad-${cap}`,
+    );
+    expect(result.statusCode).toBe(503);
+    expect(JSON.parse(result.body).error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(JSON.parse(result.body).error.message).toContain('approval_gate_cap');
+  });
+
+  test.each([
+    ['string', '50'],
+    ['float', 3.14],
+    ['object', {}],
+  ])('returns 503 when blueprint approval_gate_cap is non-integer (%s)', async (_label, cap) => {
+    mockOnboardedWithConfig({ approval_gate_cap: cap });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x' },
+      makeContext(),
+      'req-cap-non-int',
+    );
+    expect(result.statusCode).toBe(503);
+    expect(JSON.parse(result.body).error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(JSON.parse(result.body).error.message).toContain('not an integer');
+  });
+
+  test('only performs one RepoTable GetItem on the submit path', async () => {
+    // Regression guard: the submit path previously issued two
+    // back-to-back GetItems on the same key (onboarding gate +
+    // blueprint cap). ``lookupRepo`` collapses them into one.
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-single-get',
+    );
+    expect(mockLookupRepo).toHaveBeenCalledTimes(1);
+    expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
   });
 });

@@ -1,0 +1,58 @@
+# Build context is repo root (see cdk/src/stacks/agent.ts) so the
+# Dockerfile can COPY contracts/ alongside agent/. Exclusions below
+# keep the context lean — without them the entire monorepo (CDK
+# cdk.out/, node_modules/, docs/dist/, etc.) gets uploaded on every
+# AgentCore deploy.
+
+# CDK output (recursive include if not excluded)
+cdk/cdk.out/
+cdk/lib/
+cdk/node_modules/
+
+# CLI and docs build artifacts
+cli/lib/
+cli/node_modules/
+docs/dist/
+docs/node_modules/
+docs/.astro/
+
+# Shared node_modules
+node_modules/
+
+# Agent venv and cache (rebuilt inside image via uv)
+agent/.venv/
+agent/__pycache__/
+agent/**/__pycache__/
+agent/**/*.pyc
+
+# Git and tooling
+.git/
+.prek/
+.claude/
+**/.DS_Store
+
+# Docs and assets not needed in image
+*.md
+*.png
+*.drawio
+*.html
+*.gif
+*.tape
+
+# Worktrees + scratch
+abca-worktrees/
+.next-session-prompt.md
+.e2e-test-plan.md
+
+# Test/coverage output
+coverage/
+**/coverage/
+.pytest_cache/
+**/.pytest_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+yarn-error.log
+yarn-debug.log
+npm-debug.log*
