@@ -1,17 +1,35 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import figures from 'figures';
 import { Box, Text, useInput, useStdout } from 'ink';
 import Spinner from 'ink-spinner';
-import figures from 'figures';
-import EventLine from '../components/EventLine.js';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { TERMINAL_STATUSES, type ApprovalScope } from '../../types.js';
 import ApprovalCard from '../components/ApprovalCard.js';
-import ScopePicker from '../components/ScopePicker.js';
 import DenyReasonInput from '../components/DenyReasonInput.js';
+import EventLine from '../components/EventLine.js';
+import ScopePicker from '../components/ScopePicker.js';
+import { fmtDuration, STATUS_COLOR, STATUS_LABEL, trunc } from '../constants.js';
 import { useApprovals, useEditing } from '../context.js';
 import { TERM_WIDTH, type TaskRowView, type TaskEvent } from '../data.js';
 import { useData } from '../hooks/useData.js';
-import type { ApprovalScope } from '../../types.js';
-import { TERMINAL_STATUSES } from '../../types.js';
-import { fmtDuration, STATUS_COLOR, STATUS_LABEL, trunc } from '../constants.js';
 import { INITIAL_POLL_CADENCE, nextCadence, type PollCadenceState } from '../utils/polling.js';
 
 /** Broaden `readonly string[]` so callers can test arbitrary strings
@@ -119,13 +137,23 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
         const sawNew = newEvents.length > 0;
         if (sawNew) {
           lastEventId = newEvents[newEvents.length - 1].event_id;
+          // Filter out `approval_decision_recorded` audit events: they
+          // are written by ApproveTaskFn / DenyTaskFn directly to
+          // TaskEventsTable and duplicate the agent-side
+          // `approval_granted` / `approval_denied` milestones the user
+          // already sees in the stream. Surfacing both is just noise
+          // from a TUI viewer's perspective; the audit row remains
+          // queryable via the API for compliance use cases.
+          const filtered = newEvents.filter(
+            (e) => e.event_type !== 'approval_decision_recorded',
+          );
           // Append to existing — dedup by event_id in case the server
           // echoes a boundary row (ULIDs are monotonic so in practice
           // this is belt-and-suspenders). Stable order is maintained
           // because `catchUpEvents` preserves ascending event_id.
           setTaskEvents((prev) => {
             const seen = new Set(prev.map(e => e.event_id));
-            const toAppend = newEvents.filter(e => !seen.has(e.event_id));
+            const toAppend = filtered.filter(e => !seen.has(e.event_id));
             return toAppend.length > 0 ? [...prev, ...toAppend] : prev;
           });
         }
@@ -182,6 +210,10 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
           input_preview: pa.tool_input_preview,
           reason: pa.reason,
           severity: pa.severity,
+          // matching_rule_ids surfaces in ApprovalCard's "Triggered"
+          // line — closes the asymmetry where Approvals.tsx detail view
+          // showed the firing rule but the Watch overlay didn't.
+          matching_rule_ids: [...pa.matching_rule_ids],
         },
       } as TaskEvent,
       timeoutRemaining: remaining,
@@ -337,8 +369,8 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
           <Text dimColor>  Approval gates: </Text>
           <Text color={
             task.approval_gate_count >= task.approval_gate_cap * 0.8 ? 'red'
-            : task.approval_gate_count >= task.approval_gate_cap * 0.5 ? 'yellow'
-            : undefined
+              : task.approval_gate_count >= task.approval_gate_cap * 0.5 ? 'yellow'
+                : undefined
           }>
             {task.approval_gate_count}/{task.approval_gate_cap}
           </Text>

@@ -1,9 +1,27 @@
-import React from 'react';
-import { Box, Text } from 'ink';
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
 import figures from 'figures';
+import { Box, Text } from 'ink';
+import React from 'react';
 import { SEVERITY_COLOR, SEVERITY_LABEL, trunc, fmtDuration } from '../constants.js';
-import { TRUNC_TOOL_INPUT, TRUNC_REASON, TRUNC_DESCRIPTION } from '../data.js';
-import type { TaskEvent } from '../data.js';
+import { TRUNC_TOOL_INPUT, TRUNC_REASON, TRUNC_DESCRIPTION, type TaskEvent } from '../data.js';
 
 interface ApprovalCardProps {
   event: TaskEvent;
@@ -19,6 +37,12 @@ interface ApprovalCardProps {
 function mstr(m: Record<string, unknown>, key: string, fallback = ''): string {
   const v = m[key];
   return typeof v === 'string' ? v : fallback;
+}
+
+function mstrlist(m: Record<string, unknown>, key: string): readonly string[] {
+  const v = m[key];
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === 'string');
 }
 
 const ApprovalCard: React.FC<ApprovalCardProps> = ({ event, taskDescription, repo, timeoutRemaining }) => {
@@ -52,6 +76,12 @@ const ApprovalCard: React.FC<ApprovalCardProps> = ({ event, taskDescription, rep
         <Text dimColor>Why:       </Text>
         <Text>{trunc(mstr(m, 'reason'), TRUNC_REASON)}</Text>
       </Box>
+      {mstrlist(m, 'matching_rule_ids').length > 0 && (
+        <Box>
+          <Text dimColor>Triggered: </Text>
+          <Text color="yellow">{mstrlist(m, 'matching_rule_ids').join(', ')}</Text>
+        </Box>
+      )}
       {timeoutRemaining != null && (
         <Box>
           <Text dimColor>Timeout:   </Text>

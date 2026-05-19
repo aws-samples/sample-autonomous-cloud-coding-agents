@@ -1,4 +1,23 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * Shared TUI constants — single source of truth for colors, icons, labels.
  * Panels import from here instead of redefining their own maps.
  */
@@ -15,7 +34,7 @@ export const STATUS_COLOR: Record<string, string> = {
   SUBMITTED: 'gray',
   HYDRATING: 'blue',
   FINALIZING: 'yellow',
-  TIMED_OUT: 'redBright',  // distinct from FAILED
+  TIMED_OUT: 'redBright', // distinct from FAILED
 };
 
 export const STATUS_ICON: Record<string, string> = {
@@ -27,7 +46,7 @@ export const STATUS_ICON: Record<string, string> = {
   SUBMITTED: figures.circle,
   HYDRATING: figures.ellipsis,
   FINALIZING: figures.arrowRight,
-  TIMED_OUT: figures.warning,  // distinct from FAILED (cross)
+  TIMED_OUT: figures.warning, // distinct from FAILED (cross)
 };
 
 export const STATUS_LABEL: Record<string, string> = {
@@ -69,12 +88,41 @@ export const EVENT_COLOR: Record<string, string> = {
   milestone: 'cyan',
   cost_update: 'yellow',
   error: 'red',
-  // Cedar HITL milestones
+  // Cedar HITL milestones — these names appear on the wire only when
+  // either (a) mock fixtures unwrap them or (b) Watch.tsx synthesizes a
+  // pending-approval event. In live mode the event_type is always
+  // `agent_milestone` and the sub-name lives in `metadata.milestone`;
+  // see MILESTONE_COLOR / MILESTONE_ICON below for the live mapping.
   approval_requested: 'magenta',
   approval_granted: 'green',
   approval_denied: 'red',
   approval_timed_out: 'redBright',
   approval_stranded: 'redBright',
+  nudge_acknowledged: 'cyan',
+};
+
+// Milestone sub-names emitted as `agent_milestone` by the agent
+// runtime (`agent/src/progress_writer.py::_put_approval_milestone`).
+// Used by EventLine when `event.event_type === 'agent_milestone'` —
+// look up the color/icon by `metadata.milestone` rather than falling
+// back to the generic cyan-star treatment that hides the severity
+// signal IMPL-26 was specifically meant to surface.
+export const MILESTONE_COLOR: Record<string, string> = {
+  pre_approvals_loaded: 'cyan',
+  approval_requested: 'magenta',
+  approval_granted: 'green',
+  approval_denied: 'red',
+  approval_timed_out: 'redBright',
+  approval_stranded: 'redBright',
+  approval_write_failed: 'red',
+  approval_resume_failed: 'red',
+  approval_poll_degraded: 'yellow',
+  approval_timeout_capped: 'yellow',
+  approval_ceiling_shrinking: 'yellow',
+  approval_cap_exceeded: 'red',
+  approval_rate_limit_exceeded: 'yellow',
+  approval_late_win: 'cyan',
+  policy_decision: 'gray',
   nudge_acknowledged: 'cyan',
 };
 
@@ -98,12 +146,32 @@ export const EVENT_ICON: Record<string, string> = {
   milestone: figures.star,
   cost_update: '$',
   error: figures.cross,
-  // Cedar HITL milestones
+  // Cedar HITL milestones — see EVENT_COLOR for live-vs-mock notes.
   approval_requested: figures.warning,
   approval_granted: figures.tick,
   approval_denied: figures.cross,
   approval_timed_out: figures.cross,
   approval_stranded: figures.cross,
+};
+
+// Companion to MILESTONE_COLOR — icon lookup by milestone sub-name.
+export const MILESTONE_ICON: Record<string, string> = {
+  pre_approvals_loaded: figures.star,
+  approval_requested: figures.warning,
+  approval_granted: figures.tick,
+  approval_denied: figures.cross,
+  approval_timed_out: figures.cross,
+  approval_stranded: figures.cross,
+  approval_write_failed: figures.cross,
+  approval_resume_failed: figures.cross,
+  approval_poll_degraded: figures.warning,
+  approval_timeout_capped: figures.warning,
+  approval_ceiling_shrinking: figures.warning,
+  approval_cap_exceeded: figures.cross,
+  approval_rate_limit_exceeded: figures.warning,
+  approval_late_win: figures.star,
+  policy_decision: figures.bullet,
+  nudge_acknowledged: figures.arrowRight,
 };
 
 // ── Severity ────────────────────────────────────────────────────────
@@ -148,15 +216,15 @@ export const CHANNEL_COLOR: Record<string, string | undefined> = {
 // the Phase 1 → Phase 3 transition.
 
 export const TIER_LABEL: Record<string, string> = {
-  hard: 'Blocked',
-  soft: 'Requires approval',
+  'hard': 'Blocked',
+  'soft': 'Requires approval',
   'hard-deny': 'Blocked',
   'hard-gate': 'Requires approval',
 };
 
 export const TIER_COLOR: Record<string, string> = {
-  hard: 'red',
-  soft: 'magenta',
+  'hard': 'red',
+  'soft': 'magenta',
   'hard-deny': 'red',
   'hard-gate': 'magenta',
 };
