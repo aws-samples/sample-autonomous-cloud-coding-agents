@@ -17,7 +17,7 @@
     "build": "MISE_EXPERIMENTAL=1 mise run build"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.8"
+    "@astrojs/check": "^0.9.9"
   },
   "resolutions": {
     "basic-ftp": "^5.2.2",
