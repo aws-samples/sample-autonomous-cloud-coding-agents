@@ -91,6 +91,18 @@ When a lower PR changes after review feedback:
 - Dependency bumps (use Dependabot grouping instead)
 - Documentation-only changes that are self-contained
 
+### 8. Merge semantics
+
+The default topology is a **classic stack** — each PR targets its predecessor's branch. When an early PR merges to `main` before later PRs are reviewed:
+
+1. **Retarget** all PRs that pointed at the merged branch to `main` (or to the next unmerged predecessor). Use `gh pr edit <N> --base main` or GitHub's "Retarget" button.
+2. **Rebase** each retargeted PR onto its new base so the diff is clean.
+3. **CI must pass** on each retargeted PR independently after rebase.
+
+After retargeting, the remaining PRs form a shorter stack rooted on `main`. This is the expected, normal path — not an exception.
+
+**When the stack diverges:** If review feedback on PR 2 invalidates assumptions in PRs 3+, prefer closing and re-opening the affected PRs over accumulating fixup commits that obscure intent. The parent issue remains the source of truth for what shipped and what remains.
+
 ## Consequences
 
 - (+) Each PR stays in the "reviewable without fatigue" window (~15–40 min)
