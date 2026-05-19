@@ -14,7 +14,7 @@ updates:
       all-actions:
         patterns: ["*"]
 
-  # Docker — base image bumps (typically 1-2 images)
+  # Docker — base image bumps (add new entries if Dockerfiles appear elsewhere)
   - package-ecosystem: "docker"
     directory: "/agent"
     schedule:
@@ -27,7 +27,7 @@ updates:
       all-docker:
         patterns: ["*"]
 
-  # Python (pip/uv) — all Python deps in a single PR
+  # Python (pip/uv) — add new entries if pyproject.toml appears elsewhere
   - package-ecosystem: "pip"
     directory: "/agent"
     schedule:
