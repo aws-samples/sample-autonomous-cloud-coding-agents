@@ -51,9 +51,11 @@ main
 
 Each PR:
 - Compiles and passes tests independently
-- Can be deployed without breaking the system
+- Can be deployed without breaking the system (see exception below)
 - Has a single clear responsibility (one concern per PR)
 - Does not leave dead code, TODOs, or broken intermediate states
+
+**Infrastructure stack exception:** For multi-PR CDK/IAM changes where intermediate slices cannot deploy independently (e.g., a policy referencing a resource added in a later PR), the validation gate is **synth + tests passing** — not a successful deploy. In this case, designate a **deploy-gate PR** in the stack position block: the specific PR where the stack becomes end-to-end deployable. Acceptable intermediate states include feature-flagged resources, no-op stubs, and constructs gated behind context variables.
 
 ### 4. Size guidelines
 
