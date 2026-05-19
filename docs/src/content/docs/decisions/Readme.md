@@ -62,6 +62,10 @@ ADRs are numbered sequentially with zero-padded three-digit prefixes: `001-slug.
 
 A decision starts as `proposed` during RFC discussion and moves to `accepted` when the implementing PR merges. To change an accepted decision, write a new ADR that supersedes it — do not edit the original.
 
+## Relationship to `docs/design/`
+
+Design documents describe system shape, interfaces, and implementation detail. ADRs capture cross-cutting choices that constrain multiple designs. When a design decision is significant enough to be "hard to reverse" or "non-obvious," extract it as an ADR and reference it from the design doc. An ADR may supersede another ADR; a design doc is simply updated in place.
+
 ## Discovery
 
 - **Agents:** `AGENTS.md` routes to this directory for understanding past design rationale.

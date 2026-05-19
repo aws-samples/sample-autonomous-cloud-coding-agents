@@ -20,7 +20,7 @@ The [Pragmatic Engineer analysis of stacked diffs](https://newsletter.pragmatice
 
 ## Decision
 
-Use **stacked pull requests** for features requiring 4+ files changed or spanning multiple concerns. Each PR in the stack follows these rules:
+Use **stacked pull requests** for features spanning multiple concerns or where review time and blast radius justify decomposition. The numeric thresholds below are guidelines — the primary signal is whether a single PR would exceed a reasonable review session, not file count alone. Each PR in the stack follows these rules:
 
 ### 1. Position statement
 
