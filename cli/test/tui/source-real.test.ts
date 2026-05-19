@@ -2,9 +2,23 @@
  *  MIT No Attribution
  *
  *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
  */
 
 import type { ApiClient } from '../../src/api-client';
+import { RealDataSource } from '../../src/tui/api/source-real';
 import type {
   GetPendingResponse,
   GetPoliciesResponse,
@@ -13,7 +27,6 @@ import type {
   TaskEvent,
   TaskSummary,
 } from '../../src/types';
-import { RealDataSource } from '../../src/tui/api/source-real';
 
 function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
   return {
@@ -228,8 +241,11 @@ describe('RealDataSource', () => {
 
   it('approve forwards scope to the API client', async () => {
     const approveTask = jest.fn(async () => ({
-      task_id: 't', request_id: 'r', status: 'APPROVED' as const,
-      scope: 'tool_type:Bash' as const, decided_at: 'x',
+      task_id: 't',
+      request_id: 'r',
+      status: 'APPROVED' as const,
+      scope: 'tool_type:Bash' as const,
+      decided_at: 'x',
     }));
     const client = fakeClient({ approveTask: approveTask as unknown as jest.Mock });
     const src = new RealDataSource(client);
@@ -239,7 +255,9 @@ describe('RealDataSource', () => {
 
   it('deny forwards reason to the API client', async () => {
     const denyTask = jest.fn(async () => ({
-      task_id: 't', request_id: 'r', status: 'DENIED' as const,
+      task_id: 't',
+      request_id: 'r',
+      status: 'DENIED' as const,
       decided_at: 'x',
     }));
     const client = fakeClient({ denyTask: denyTask as unknown as jest.Mock });

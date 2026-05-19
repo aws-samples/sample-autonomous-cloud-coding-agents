@@ -2,6 +2,19 @@
  *  MIT No Attribution
  *
  *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
  */
 
 /**
@@ -37,10 +50,10 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import sharp from 'sharp';
 
 /** Caller-facing payload for an attached image. */
@@ -249,10 +262,10 @@ async function readMacOS(maxBytes: number): Promise<ClipboardReadResult> {
   // from AppleScript. If the clipboard has no image, the coercion
   // throws and osascript exits non-zero.
   const script = [
-    `set png_data to (the clipboard as «class PNGf»)`,
+    'set png_data to (the clipboard as «class PNGf»)',
     `set fp to open for access POSIX file "${path}" with write permission`,
-    `write png_data to fp`,
-    `close access fp`,
+    'write png_data to fp',
+    'close access fp',
   ].join('\n');
 
   const result = await spawnAndCollect('osascript', ['-e', script]);
@@ -359,11 +372,11 @@ async function readWindows(maxBytes: number): Promise<ClipboardReadResult> {
   // Backslash-escape for PowerShell single-quoted string.
   const psPath = path.replace(/\\/g, '\\\\').replace(/'/g, "''");
   const script = [
-    `$ErrorActionPreference = 'Stop'`,
-    `Add-Type -AssemblyName System.Windows.Forms`,
-    `Add-Type -AssemblyName System.Drawing`,
-    `$img = [System.Windows.Forms.Clipboard]::GetImage()`,
-    `if ($null -eq $img) { exit 1 }`,
+    '$ErrorActionPreference = \'Stop\'',
+    'Add-Type -AssemblyName System.Windows.Forms',
+    'Add-Type -AssemblyName System.Drawing',
+    '$img = [System.Windows.Forms.Clipboard]::GetImage()',
+    'if ($null -eq $img) { exit 1 }',
     `$img.Save('${psPath}', [System.Drawing.Imaging.ImageFormat]::Png)`,
   ].join('; ');
 

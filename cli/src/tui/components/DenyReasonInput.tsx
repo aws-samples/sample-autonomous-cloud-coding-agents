@@ -1,12 +1,31 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * Text input for the deny reason. Caps at `DENY_REASON_MAX_LENGTH`
  * (the same limit the server enforces server-side). Returns the
  * trimmed reason on Enter, or empty string on Enter with no input.
  */
 
-import React, { useState, useCallback } from 'react';
-import { Box, Text, useInput } from 'ink';
 import figures from 'figures';
+import { Box, Text, useInput } from 'ink';
+import React, { useState, useCallback } from 'react';
 import { DENY_REASON_MAX_LENGTH } from '../../types.js';
 
 interface DenyReasonInputProps {

@@ -1,24 +1,43 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * TUI bootstrap. Exports `runTui()` for both the standalone
  * `npm run tui` dev path and the `bgagent tui` subcommand.
  */
-import React from 'react';
 import { render } from 'ink';
+import React from 'react';
+import type { DataSource } from './api/source.js';
+import App from './App.js';
+import ErrorBoundary from './components/ErrorBoundary.js';
 import { TuiProvider } from './context.js';
 import { DataProvider } from './hooks/useData.js';
-import ErrorBoundary from './components/ErrorBoundary.js';
-import App from './App.js';
-import type { DataSource } from './api/source.js';
 
 // ── Alt screen buffer ───────────────────────────────────────────
 // Like vim/htop — no scrollback, clean repaint.
 const enterAltScreen = () => {
   process.stdout.write('\x1b[?1049h'); // enter alt buffer
-  process.stdout.write('\x1b[?25l');   // hide cursor
+  process.stdout.write('\x1b[?25l'); // hide cursor
 };
 
 const leaveAltScreen = () => {
-  process.stdout.write('\x1b[?25h');   // show cursor
+  process.stdout.write('\x1b[?25h'); // show cursor
   process.stdout.write('\x1b[?1049l'); // leave alt buffer
 };
 
@@ -50,7 +69,7 @@ export async function runTui(opts: RunTuiOptions = {}): Promise<void> {
           <App />
         </TuiProvider>
       </DataProvider>
-    </ErrorBoundary>
+    </ErrorBoundary>,
   );
 
   try {

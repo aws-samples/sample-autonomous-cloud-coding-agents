@@ -1,18 +1,37 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * PeccyMini — cropped head + eyes, animated pupils.
  * Uses shared rendering from peccy-shared.
  * 4 char lines (8 pixel rows).
  */
-import React, { useState, useEffect } from 'react';
 import { Box } from 'ink';
+import React, { useState, useEffect } from 'react';
 import { O, W, K, _, type Pixel, type PupilPos, SEQUENCE, ANIM_INTERVAL, renderPixelGrid } from './peccy-shared.js';
 
 function makeGrid(pos: PupilPos): Pixel[][] {
   const top: Pixel[][] = [
-    [_, _, _, _, _, K, K, K, _, _, _, _, _],  // 0: loop
-    [_, _, _, _, _, K, _, K, _, _, _, _, _],  // 1: loop hole
-    [_, _, K, K, O, O, O, O, O, K, K, _, _],  // 2: head top
-    [_, K, O, O, O, O, O, O, O, O, O, K, _],  // 3: head wide
+    [_, _, _, _, _, K, K, K, _, _, _, _, _], // 0: loop
+    [_, _, _, _, _, K, _, K, _, _, _, _, _], // 1: loop hole
+    [_, _, K, K, O, O, O, O, O, K, K, _, _], // 2: head top
+    [_, K, O, O, O, O, O, O, O, O, O, K, _], // 3: head wide
   ];
 
   let eyeRow1: Pixel[];

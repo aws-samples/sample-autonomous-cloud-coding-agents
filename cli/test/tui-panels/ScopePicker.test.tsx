@@ -2,12 +2,25 @@
  *  MIT No Attribution
  *
  *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
  */
 
 import { render } from 'ink-testing-library';
+import { flush, KEY_DOWN, KEY_ENTER, KEY_ESC } from './_helpers';
 import ScopePicker from '../../src/tui/components/ScopePicker';
 import type { ApprovalScope } from '../../src/types';
-import { flush, KEY_DOWN, KEY_ENTER, KEY_ESC } from './_helpers';
 
 describe('ScopePicker', () => {
   it('renders all 9 scope options on mount', () => {
@@ -55,7 +68,7 @@ describe('ScopePicker', () => {
     await flush();
     stdin.write(KEY_DOWN); // ↓ → tool_type prefix
     await flush();
-    stdin.write(KEY_ENTER);       // Enter → operand step
+    stdin.write(KEY_ENTER); // Enter → operand step
     await flush();
     // Frame should now show the operand prompt.
     expect(lastFrame() ?? '').toContain('Enter operand for tool_type');

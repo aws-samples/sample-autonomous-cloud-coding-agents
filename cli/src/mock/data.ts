@@ -1,4 +1,23 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * Mock data for the TUI prototype.
  * Simulates the DynamoDB data shapes from TaskTable, TaskEventsTable,
  * and TaskApprovalsTable without any real API calls.
@@ -7,7 +26,7 @@
 // ─── Types ──────────────────────────────────────────────────────────
 
 export interface RegisteredRepo {
-  repo: string;           // "owner/repo" format
+  repo: string; // "owner/repo" format
   status: 'active' | 'removed';
   default_branch: string;
 }
@@ -148,53 +167,73 @@ function eid(): string {
 
 export const MOCK_EVENTS: TaskEvent[] = [
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'task_started', timestamp: minutesAgo(3),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'task_started',
+    timestamp: minutesAgo(3),
     metadata: {},
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'turn_start', timestamp: minutesAgo(2.9),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'turn_start',
+    timestamp: minutesAgo(2.9),
     metadata: { turn: 1 },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_call', timestamp: minutesAgo(2.8),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_call',
+    timestamp: minutesAgo(2.8),
     metadata: { tool_name: 'ReadFile', args_preview: 'src/api/users.ts' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_result', timestamp: minutesAgo(2.7),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_result',
+    timestamp: minutesAgo(2.7),
     metadata: { tool_name: 'ReadFile', status: 'success', preview: '1.2KB read' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_call', timestamp: minutesAgo(2.5),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_call',
+    timestamp: minutesAgo(2.5),
     metadata: { tool_name: 'ReadFile', args_preview: 'package.json' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_result', timestamp: minutesAgo(2.4),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_result',
+    timestamp: minutesAgo(2.4),
     metadata: { tool_name: 'ReadFile', status: 'success', preview: '0.8KB read' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'milestone', timestamp: minutesAgo(2.3),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'milestone',
+    timestamp: minutesAgo(2.3),
     metadata: { message: 'Analyzed codebase structure. Found Express + TypeScript stack.' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'turn_start', timestamp: minutesAgo(2.2),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'turn_start',
+    timestamp: minutesAgo(2.2),
     metadata: { turn: 2 },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_call', timestamp: minutesAgo(2.1),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_call',
+    timestamp: minutesAgo(2.1),
     metadata: { tool_name: 'Bash', args_preview: 'npm install zod' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'approval_requested', timestamp: minutesAgo(2.1),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'approval_requested',
+    timestamp: minutesAgo(2.1),
     metadata: {
       request_id: '01JBX7RRPK3QW9FM2JD6NX8B1T',
       tool_name: 'Bash',
@@ -206,23 +245,31 @@ export const MOCK_EVENTS: TaskEvent[] = [
     },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'approval_granted', timestamp: minutesAgo(1.8),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'approval_granted',
+    timestamp: minutesAgo(1.8),
     metadata: { request_id: '01JBX7RRPK3QW9FM2JD6NX8B1T', scope: 'this_call' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_result', timestamp: minutesAgo(1.6),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_result',
+    timestamp: minutesAgo(1.6),
     metadata: { tool_name: 'Bash', status: 'success', preview: 'added 1 package' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_call', timestamp: minutesAgo(1.5),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_call',
+    timestamp: minutesAgo(1.5),
     metadata: { tool_name: 'EditFile', args_preview: 'src/api/users.ts' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'approval_requested', timestamp: minutesAgo(1.5),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'approval_requested',
+    timestamp: minutesAgo(1.5),
     metadata: {
       request_id: '01JBX7SSPK4RW0GM3KE7OY9C2U',
       tool_name: 'EditFile',
@@ -234,23 +281,31 @@ export const MOCK_EVENTS: TaskEvent[] = [
     },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'cost_update', timestamp: minutesAgo(1.4),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'cost_update',
+    timestamp: minutesAgo(1.4),
     metadata: { total_usd: 0.1847, input_tokens: 12400, output_tokens: 3200 },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'turn_start', timestamp: minutesAgo(1.0),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'turn_start',
+    timestamp: minutesAgo(1.0),
     metadata: { turn: 3 },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_call', timestamp: minutesAgo(0.8),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_call',
+    timestamp: minutesAgo(0.8),
     metadata: { tool_name: 'ReadFile', args_preview: 'src/api/middleware/validate.ts' },
   },
   {
-    event_id: eid(), task_id: MOCK_TASKS[0].task_id,
-    event_type: 'tool_result', timestamp: minutesAgo(0.7),
+    event_id: eid(),
+    task_id: MOCK_TASKS[0].task_id,
+    event_type: 'tool_result',
+    timestamp: minutesAgo(0.7),
     metadata: { tool_name: 'ReadFile', status: 'success', preview: '0.4KB read' },
   },
 ];
@@ -333,7 +388,7 @@ export async function fetchPendingApprovals(): Promise<PendingApproval[]> {
 }
 
 export async function approveRequest(
-  taskId: string, requestId: string, scope?: string
+  taskId: string, requestId: string, scope?: string,
 ): Promise<{ success: boolean; message: string }> {
   await new Promise(r => setTimeout(r, 300));
   return {
@@ -344,7 +399,7 @@ export async function approveRequest(
 }
 
 export async function denyRequest(
-  taskId: string, requestId: string, reason: string
+  taskId: string, requestId: string, reason: string,
 ): Promise<{ success: boolean; message: string }> {
   await new Promise(r => setTimeout(r, 300));
   return {
@@ -357,59 +412,84 @@ export async function denyRequest(
 
 export const MOCK_POLICIES: CedarPolicy[] = [
   {
-    rule_id: 'rm_slash', tier: 'hard-deny',
+    rule_id: 'rm_slash',
+    tier: 'hard-deny',
     description: 'Block rm -rf / and variants',
-    action: 'execute_bash', condition_summary: 'command matches *rm -rf /*',
+    action: 'execute_bash',
+    condition_summary: 'command matches *rm -rf /*',
     category: 'destructive',
     cedar_source: '@tier("hard-deny")\n@rule_id("rm_slash")\nforbid (principal, action == Agent::Action::"execute_bash", resource)\n  when { context.command like "*rm -rf /*" };',
   },
   {
-    rule_id: 'write_git_internals', tier: 'hard-deny',
+    rule_id: 'write_git_internals',
+    tier: 'hard-deny',
     description: 'Block writes to .git/ directory',
-    action: 'write_file', condition_summary: 'file_path matches .git/*',
+    action: 'write_file',
+    condition_summary: 'file_path matches .git/*',
     category: 'filesystem',
     cedar_source: '@tier("hard-deny")\n@rule_id("write_git_internals")\nforbid (principal, action == Agent::Action::"write_file", resource)\n  when { context.file_path like ".git/*" };',
   },
   {
-    rule_id: 'drop_table', tier: 'hard-deny',
+    rule_id: 'drop_table',
+    tier: 'hard-deny',
     description: 'Block DROP TABLE commands',
-    action: 'execute_bash', condition_summary: 'command matches *DROP TABLE*',
+    action: 'execute_bash',
+    condition_summary: 'command matches *DROP TABLE*',
     category: 'destructive',
     cedar_source: '@tier("hard-deny")\n@rule_id("drop_table")\nforbid (principal, action == Agent::Action::"execute_bash", resource)\n  when { context.command like "*DROP TABLE*" };',
   },
   {
-    rule_id: 'force_push_main', tier: 'hard-deny',
+    rule_id: 'force_push_main',
+    tier: 'hard-deny',
     description: 'Block force-push to main/prod branches',
-    action: 'execute_bash', condition_summary: 'command matches *git push --force origin main*',
-    severity: 'high', category: 'destructive',
+    action: 'execute_bash',
+    condition_summary: 'command matches *git push --force origin main*',
+    severity: 'high',
+    category: 'destructive',
     cedar_source: '@tier("hard-deny")\n@rule_id("force_push_main")\n@severity("high")\nforbid (principal, action == Agent::Action::"execute_bash", resource)\n  when { context.command like "*git push --force origin main*" };',
   },
   {
-    rule_id: 'bash_exec_gate', tier: 'hard-gate',
+    rule_id: 'bash_exec_gate',
+    tier: 'hard-gate',
     description: 'Shell command execution requires approval',
-    action: 'execute_bash', condition_summary: 'all bash commands (catch-all)',
-    severity: 'high', category: 'auth', approval_timeout_s: 600,
+    action: 'execute_bash',
+    condition_summary: 'all bash commands (catch-all)',
+    severity: 'high',
+    category: 'auth',
+    approval_timeout_s: 600,
     cedar_source: '@tier("hard-gate")\n@rule_id("bash_exec_gate")\n@severity("high")\n@approval_timeout_s("600")\nforbid (principal, action == Agent::Action::"execute_bash", resource);',
   },
   {
-    rule_id: 'file_edit_gate', tier: 'hard-gate',
+    rule_id: 'file_edit_gate',
+    tier: 'hard-gate',
     description: 'File modifications require approval',
-    action: 'write_file', condition_summary: 'all file writes and edits',
-    severity: 'medium', category: 'filesystem', approval_timeout_s: 600,
+    action: 'write_file',
+    condition_summary: 'all file writes and edits',
+    severity: 'medium',
+    category: 'filesystem',
+    approval_timeout_s: 600,
     cedar_source: '@tier("hard-gate")\n@rule_id("file_edit_gate")\n@severity("medium")\n@approval_timeout_s("600")\nforbid (principal, action == Agent::Action::"write_file", resource);',
   },
   {
-    rule_id: 'deploy_staging', tier: 'hard-gate',
+    rule_id: 'deploy_staging',
+    tier: 'hard-gate',
     description: 'Terraform/CDK deploy requires approval',
-    action: 'execute_bash', condition_summary: 'command matches *terraform apply* or *cdk deploy*',
-    severity: 'high', category: 'destructive', approval_timeout_s: 900,
+    action: 'execute_bash',
+    condition_summary: 'command matches *terraform apply* or *cdk deploy*',
+    severity: 'high',
+    category: 'destructive',
+    approval_timeout_s: 900,
     cedar_source: '@tier("hard-gate")\n@rule_id("deploy_staging")\n@severity("high")\n@approval_timeout_s("900")\nforbid (principal, action == Agent::Action::"execute_bash", resource)\n  when { context.command like "*terraform apply*" };',
   },
   {
-    rule_id: 'npm_install_gate', tier: 'hard-gate',
+    rule_id: 'npm_install_gate',
+    tier: 'hard-gate',
     description: 'Package installation requires approval',
-    action: 'execute_bash', condition_summary: 'command matches *npm install* or *yarn add*',
-    severity: 'medium', category: 'auth', approval_timeout_s: 300,
+    action: 'execute_bash',
+    condition_summary: 'command matches *npm install* or *yarn add*',
+    severity: 'medium',
+    category: 'auth',
+    approval_timeout_s: 300,
     cedar_source: '@tier("hard-gate")\n@rule_id("npm_install_gate")\n@severity("medium")\n@approval_timeout_s("300")\nforbid (principal, action == Agent::Action::"execute_bash", resource)\n  when { context.command like "*npm install*" };',
   },
 ];

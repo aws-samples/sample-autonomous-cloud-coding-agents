@@ -1,10 +1,36 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * Mock `DataSource` — reads synchronously from `./mock/data.ts`
  * fixtures and resolves Promises immediately. Used by default so
  * `npm run tui` keeps working without a deployed backend.
  */
 
 import type { ApprovalScope, TaskEvent } from '../../types.js';
+import type {
+  PendingApprovalView,
+  PolicyRuleView,
+  RegisteredRepoView,
+  TaskRowView,
+} from '../data.js';
+import type { DataSource, SubmitTaskInput } from './source.js';
 import {
   MOCK_EVENTS,
   MOCK_PENDING_APPROVALS,
@@ -18,13 +44,6 @@ import {
   type RegisteredRepoFixture,
   type TaskFixture,
 } from '../mock/data.js';
-import type {
-  PendingApprovalView,
-  PolicyRuleView,
-  RegisteredRepoView,
-  TaskRowView,
-} from '../data.js';
-import type { DataSource, SubmitTaskInput } from './source.js';
 
 function normalizeSeverity(s: string | undefined): 'HIGH' | 'MEDIUM' | 'LOW' {
   const upper = String(s ?? 'MEDIUM').toUpperCase();

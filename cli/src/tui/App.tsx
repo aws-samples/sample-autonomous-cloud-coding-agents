@@ -1,20 +1,39 @@
 /**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
  * bgagent TUI — Tier 3 Full-screen tabbed application
  *
  * Splash: full-size Peccy for 2.5s, then switches to mini Peccy on all tabs.
  */
-import React, { useState, useCallback, useEffect } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
+import React, { useState, useCallback, useEffect } from 'react';
+import HelpBar from './components/HelpBar.js';
 import PeccyIcon from './components/PeccyIcon.js';
 import TabBar, { type PanelId } from './components/TabBar.js';
-import HelpBar from './components/HelpBar.js';
 import { useEditing, useApprovals } from './context.js';
 import { useData } from './hooks/useData.js';
-import TaskList from './panels/TaskList.js';
-import Watch from './panels/Watch.js';
 import Approvals from './panels/Approvals.js';
 import Policies from './panels/Policies.js';
 import Submit from './panels/Submit.js';
+import TaskList from './panels/TaskList.js';
+import Watch from './panels/Watch.js';
 
 const PANELS: PanelId[] = ['tasks', 'watch', 'approvals', 'policies', 'submit'];
 const SPLASH_DURATION = 2500; // ms
@@ -60,7 +79,7 @@ const App: React.FC = () => {
     if (input === 'q' && panel !== 'submit') { exit(); return; }
 
     const panelMap: Record<string, PanelId> = {
-      '1': 'tasks', '2': 'watch', '3': 'approvals', '4': 'policies', '5': 'submit',
+      1: 'tasks', 2: 'watch', 3: 'approvals', 4: 'policies', 5: 'submit',
     };
     if (panelMap[input] && panel !== panelMap[input]) { setPanel(panelMap[input]); return; }
     if (key.tab && !key.shift) { setPanel(PANELS[(PANELS.indexOf(panel) + 1) % PANELS.length]); return; }

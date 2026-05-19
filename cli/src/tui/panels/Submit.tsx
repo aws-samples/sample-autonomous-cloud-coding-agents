@@ -1,15 +1,25 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Box, Text, useInput } from 'ink';
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
 import figures from 'figures';
-import { useEditing } from '../context.js';
-import { useData } from '../hooks/useData.js';
-import ScopePicker from '../components/ScopePicker.js';
-import { useBracketedPaste } from '../utils/bracketed-paste.js';
-import {
-  readClipboardImage,
-  shouldShowHintOnce,
-  type ClipboardReadResult,
-} from '../utils/clipboard.js';
+import { Box, Text, useInput } from 'ink';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
@@ -18,6 +28,15 @@ import {
   type ApprovalScope,
   type Attachment,
 } from '../../types.js';
+import ScopePicker from '../components/ScopePicker.js';
+import { useEditing } from '../context.js';
+import { useData } from '../hooks/useData.js';
+import { useBracketedPaste } from '../utils/bracketed-paste.js';
+import {
+  readClipboardImage,
+  shouldShowHintOnce,
+  type ClipboardReadResult,
+} from '../utils/clipboard.js';
 
 interface SubmitProps {
   active: boolean;
@@ -326,8 +345,8 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
   const fc = (f: Field) => field === f && active ? 'cyan' : undefined;
   const toastColor =
     toast?.tone === 'ok' ? 'green'
-    : toast?.tone === 'warn' ? 'yellow'
-    : 'red';
+      : toast?.tone === 'warn' ? 'yellow'
+        : 'red';
 
   return (
     <Box flexDirection="column" paddingX={1}>

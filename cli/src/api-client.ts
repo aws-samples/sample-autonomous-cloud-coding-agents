@@ -131,7 +131,7 @@ export class ApiClient {
         const body = json as { message?: unknown; Message?: unknown };
         const raw = typeof body.message === 'string' ? body.message
           : typeof body.Message === 'string' ? body.Message
-          : JSON.stringify(json);
+            : JSON.stringify(json);
         if (raw) detail = ` — ${raw.slice(0, 200)}`;
       }
       throw new ApiError(

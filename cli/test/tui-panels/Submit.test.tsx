@@ -2,6 +2,19 @@
  *  MIT No Attribution
  *
  *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
  */
 
 import { jest } from '@jest/globals';
@@ -76,9 +89,9 @@ describe('Submit panel', () => {
     // Walk from repo down to submit — confirms focus moves
     // through prompt, timeout, approvals, submit.
     await leaveRepoStep(stdin, repoCount); // → prompt
-    stdin.write(KEY_DOWN); await flush();   // → timeout
-    stdin.write(KEY_DOWN); await flush();   // → approvals
-    stdin.write(KEY_DOWN); await flush();   // → submit
+    stdin.write(KEY_DOWN); await flush(); // → timeout
+    stdin.write(KEY_DOWN); await flush(); // → approvals
+    stdin.write(KEY_DOWN); await flush(); // → submit
     const frame = lastFrame() ?? '';
     // Submit button is rendered; the color changes when focused (and
     // the panel still renders the button label in both states).
@@ -114,8 +127,8 @@ describe('Submit panel', () => {
     );
     for (let i = 0; i < 3; i += 1) await flush();
     await leaveRepoStep(stdin, repoCount); // → prompt
-    stdin.write(KEY_DOWN); await flush();   // → timeout
-    stdin.write(KEY_DOWN); await flush();   // → approvals
+    stdin.write(KEY_DOWN); await flush(); // → timeout
+    stdin.write(KEY_DOWN); await flush(); // → approvals
     const frame = lastFrame() ?? '';
     expect(frame).toContain('a or + to add a scope');
     expect(INITIAL_APPROVALS_MAX_ENTRIES).toBeGreaterThan(0);
@@ -240,10 +253,10 @@ describe('Submit panel', () => {
       stdin.write(KEY_ENTER); await flush(); // enter prompt edit
       stdin.write('do a thing'); await flush();
       stdin.write(KEY_ENTER); await flush(); // exit prompt edit
-      stdin.write(KEY_DOWN); await flush();   // → timeout
-      stdin.write(KEY_DOWN); await flush();   // → approvals
-      stdin.write(KEY_DOWN); await flush();   // → attachments
-      stdin.write(KEY_DOWN); await flush();   // → submit
+      stdin.write(KEY_DOWN); await flush(); // → timeout
+      stdin.write(KEY_DOWN); await flush(); // → approvals
+      stdin.write(KEY_DOWN); await flush(); // → attachments
+      stdin.write(KEY_DOWN); await flush(); // → submit
       stdin.write(KEY_ENTER); await flush(); await flush();
 
       expect(submitSpy).toHaveBeenCalled();
