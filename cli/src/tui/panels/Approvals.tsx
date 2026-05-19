@@ -157,22 +157,38 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
 
   const handleApproveWithScope = useCallback((scope: ApprovalScope) => {
     const a = flatList.find(x => x.request_id === scopePickerFor);
-    if (a && scopePickerFor) {
-      approve(scopePickerFor, scope);
-      showMessage(`${figures.tick} Approved ${a.tool_name} for ..${a.task_id.slice(-4)} (${scope})`);
-    }
+    const requestId = scopePickerFor;
     setScopePickerFor(null);
     setDetailId(null);
+    if (!a || !requestId) return;
+    // Await the round-trip so the success message reflects the API's
+    // actual decision rather than the user's optimistic intent. Phase A
+    // live drive caught the silent-failure case where the toast lied
+    // and the agent stayed blocked until timeout.
+    void (async () => {
+      const result = await approve(requestId, scope);
+      if (result.ok) {
+        showMessage(`${figures.tick} Approved ${a.tool_name} for ..${a.task_id.slice(-4)} (${scope})`);
+      } else {
+        showMessage(`${figures.cross} Approve failed for ..${a.task_id.slice(-4)} — ${trunc(result.error, 60)}`);
+      }
+    })();
   }, [flatList, scopePickerFor, approve, showMessage]);
 
   const handleDenyWithReason = useCallback((reason: string) => {
     const a = flatList.find(x => x.request_id === denyReasonFor);
-    if (a && denyReasonFor) {
-      deny(denyReasonFor, reason || undefined);
-      showMessage(`${figures.cross} Denied ${a.tool_name} for ..${a.task_id.slice(-4)}${reason ? ` — "${trunc(reason, 30)}"` : ''}`);
-    }
+    const requestId = denyReasonFor;
     setDenyReasonFor(null);
     setDetailId(null);
+    if (!a || !requestId) return;
+    void (async () => {
+      const result = await deny(requestId, reason || undefined);
+      if (result.ok) {
+        showMessage(`${figures.cross} Denied ${a.tool_name} for ..${a.task_id.slice(-4)}${reason ? ` — "${trunc(reason, 30)}"` : ''}`);
+      } else {
+        showMessage(`${figures.cross} Deny failed for ..${a.task_id.slice(-4)} — ${trunc(result.error, 60)}`);
+      }
+    })();
   }, [flatList, denyReasonFor, deny, showMessage]);
 
   let renderIdx = 0;

@@ -316,19 +316,35 @@ const Watch: React.FC<WatchProps> = ({ task, active, onBack }) => {
   }, [active, nudging, confirmDeny, showScopePicker, showDenyInput, nudgeText, pendingApproval, approve, deny, onBack, showMessage, events.length]));
 
   const handleApproveWithScope = useCallback((scope: ApprovalScope) => {
-    if (pendingApproval) {
-      approve(pendingApproval.requestId, scope);
-      showMessage(`${figures.tick} Approved ${pendingApproval.toolName} (${scope})`);
-    }
     setShowScopePicker(false);
+    if (!pendingApproval) return;
+    const { requestId, toolName } = pendingApproval;
+    // Await the round-trip — see Approvals.tsx for the full rationale.
+    // Phase A live drive surfaced the silent-failure case where the
+    // optimistic toast claimed success while the API call had failed
+    // and the agent stayed blocked.
+    void (async () => {
+      const result = await approve(requestId, scope);
+      if (result.ok) {
+        showMessage(`${figures.tick} Approved ${toolName} (${scope})`);
+      } else {
+        showMessage(`${figures.cross} Approve failed — ${trunc(result.error, 60)}`);
+      }
+    })();
   }, [pendingApproval, approve, showMessage]);
 
   const handleDenyWithReason = useCallback((reason: string) => {
-    if (pendingApproval) {
-      deny(pendingApproval.requestId, reason || undefined);
-      showMessage(`${figures.cross} Denied ${pendingApproval.toolName}${reason ? ` — "${trunc(reason, 30)}"` : ''}`);
-    }
     setShowDenyInput(false);
+    if (!pendingApproval) return;
+    const { requestId, toolName } = pendingApproval;
+    void (async () => {
+      const result = await deny(requestId, reason || undefined);
+      if (result.ok) {
+        showMessage(`${figures.cross} Denied ${toolName}${reason ? ` — "${trunc(reason, 30)}"` : ''}`);
+      } else {
+        showMessage(`${figures.cross} Deny failed — ${trunc(result.error, 60)}`);
+      }
+    })();
   }, [pendingApproval, deny, showMessage]);
 
   // Mock-mode "replay animation still in flight" indicator. Irrelevant

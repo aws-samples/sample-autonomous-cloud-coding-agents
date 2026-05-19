@@ -61,6 +61,23 @@ export async function runTui(opts: RunTuiOptions = {}): Promise<void> {
     console.error(err);
     process.exit(1);
   });
+  // Phase A live drive (task 01KS18SAV6PPR4XVZPAHF2EJF5) caught the
+  // case where an async effect — specifically a rejected approve()
+  // round-trip from a fire-and-forget call site — bubbled out as an
+  // unhandled rejection and terminated the TUI under Node 20+ default
+  // behaviour. The fire-and-forget itself is now gone (see
+  // context.tsx + Approvals.tsx + Watch.tsx) but a defensive handler
+  // here means a single forgotten `void` somewhere in the future
+  // produces a logged warning rather than an exit-1 process death
+  // that drops the user out of the alt-screen mid-approval. Same
+  // restore-then-error pattern as the uncaughtException case but
+  // exits cleanly so the parent shell doesn't see a non-zero status
+  // for what is fundamentally a non-fatal background failure.
+  process.on('unhandledRejection', (reason) => {
+    cleanup();
+    console.error('Unhandled promise rejection in TUI:', reason);
+    process.exit(1);
+  });
 
   const { waitUntilExit } = render(
     <ErrorBoundary>

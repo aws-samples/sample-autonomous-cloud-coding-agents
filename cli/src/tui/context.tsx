@@ -35,16 +35,28 @@ import { useData } from './hooks/useData.js';
 
 // ── Approval state ──────────────────────────────────────────────────
 
+/**
+ * Result of an approve/deny round-trip. Callers MUST distinguish the
+ * two cases: an `ok: false` result on a human-in-the-loop safety
+ * control means the API rejected the decision (auth, validation,
+ * stale request_id, etc.) — the agent is still blocked, the user's
+ * intent did NOT take effect, and the optimistic-clear has been
+ * undone so the row reappears in the list.
+ */
+export type ApprovalResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
 interface ApprovalActions {
   approvals: PendingApprovalView[];
-  approve: (requestId: string, scope?: ApprovalScope) => void;
-  deny: (requestId: string, reason?: string) => void;
+  approve: (requestId: string, scope?: ApprovalScope) => Promise<ApprovalResult>;
+  deny: (requestId: string, reason?: string) => Promise<ApprovalResult>;
 }
 
 const ApprovalCtx = createContext<ApprovalActions>({
   approvals: [],
-  approve: () => {},
-  deny: () => {},
+  approve: async () => ({ ok: false, error: 'no provider' }),
+  deny: async () => ({ ok: false, error: 'no provider' }),
 });
 
 export const useApprovals = () => useContext(ApprovalCtx);
@@ -98,31 +110,67 @@ export const TuiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [snapshot.approvals, optimisticallyCleared],
   );
 
-  const approve = useCallback((requestId: string, scope?: ApprovalScope) => {
-    const pending = snapshot.approvals.find(a => a.request_id === requestId);
+  /**
+   * Optimistically clear the row from the visible list, then call
+   * the source. If the call rejects, undo the clear so the row
+   * reappears and the user can retry — this is the safety property
+   * that the original fire-and-forget version got wrong: the user
+   * saw `✓ Approved` even when the API call failed, and the agent
+   * stayed blocked until timeout. Phase A live drive
+   * (01KS18SAV6PPR4XVZPAHF2EJF5) caught this on the deployed env;
+   * the user's tool_type:Bash approval never landed, the row stayed
+   * PENDING server-side, and the agent timed out waiting.
+   */
+  const undoOptimisticClear = useCallback((requestId: string) => {
     setOptimisticallyCleared(prev => {
+      if (!prev.has(requestId)) return prev;
       const n = new Set(prev);
-      n.add(requestId);
+      n.delete(requestId);
       return n;
     });
-    if (pending) {
-      // Fire-and-forget — errors surface via the provider's `error`
-      // field on the next poll or on the next refresh().
-      void sourceApprove(pending.task_id, requestId, scope);
-    }
-  }, [snapshot.approvals, sourceApprove]);
+  }, []);
 
-  const deny = useCallback((requestId: string, reason?: string) => {
+  const approve = useCallback(async (
+    requestId: string,
+    scope?: ApprovalScope,
+  ): Promise<ApprovalResult> => {
     const pending = snapshot.approvals.find(a => a.request_id === requestId);
+    if (!pending) return { ok: false, error: 'approval row not found locally' };
     setOptimisticallyCleared(prev => {
       const n = new Set(prev);
       n.add(requestId);
       return n;
     });
-    if (pending) {
-      void sourceDeny(pending.task_id, requestId, reason);
+    try {
+      await sourceApprove(pending.task_id, requestId, scope);
+      return { ok: true };
+    } catch (err) {
+      undoOptimisticClear(requestId);
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
     }
-  }, [snapshot.approvals, sourceDeny]);
+  }, [snapshot.approvals, sourceApprove, undoOptimisticClear]);
+
+  const deny = useCallback(async (
+    requestId: string,
+    reason?: string,
+  ): Promise<ApprovalResult> => {
+    const pending = snapshot.approvals.find(a => a.request_id === requestId);
+    if (!pending) return { ok: false, error: 'approval row not found locally' };
+    setOptimisticallyCleared(prev => {
+      const n = new Set(prev);
+      n.add(requestId);
+      return n;
+    });
+    try {
+      await sourceDeny(pending.task_id, requestId, reason);
+      return { ok: true };
+    } catch (err) {
+      undoOptimisticClear(requestId);
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
+    }
+  }, [snapshot.approvals, sourceDeny, undoOptimisticClear]);
 
   const setEditing = useCallback((v: boolean, mode?: EditMode) => {
     setIsEditing(v);

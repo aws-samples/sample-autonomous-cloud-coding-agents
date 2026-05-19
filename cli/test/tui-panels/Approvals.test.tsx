@@ -110,4 +110,71 @@ describe('Approvals panel', () => {
     expect(frame).not.toContain('Approve EditFile');
     unmount();
   });
+
+  // ── Regression: silent-failure on rejected approve API call ──────────
+  // Phase A live drive (task 01KS18SAV6PPR4XVZPAHF2EJF5) caught a
+  // P1 bug: the panel used to render `✓ Approved Bash (tool_type:bash)`
+  // unconditionally as soon as the user picked a scope, even when the
+  // underlying `source.approve()` call rejected. The user's intent
+  // never reached the API, the agent stayed blocked AWAITING_APPROVAL,
+  // and the user had no way to know — they thought they unblocked the
+  // gate, walked away, and the approval timed out 5 minutes later.
+  //
+  // The fix awaits the round-trip and renders an explicit
+  // `✗ Approve failed for ... — <error>` toast on rejection while
+  // un-clearing the optimistic row removal so the user can retry.
+  describe('regression: rejected approve does not show success toast', () => {
+    it('renders an "Approve failed" toast when source.approve rejects', async () => {
+      const source = new MockDataSource();
+      jest.spyOn(source, 'approve').mockRejectedValue(
+        new Error('500: ApiError: backend exploded'),
+      );
+      const { lastFrame, stdin, unmount } = renderPanel(
+        <Approvals active />,
+        { source },
+      );
+      for (let i = 0; i < 4; i += 1) await flush();
+      stdin.write('a');
+      await flush();
+      stdin.write(KEY_ENTER); // pick `this_call`
+      // Two things must propagate: the awaited approve() and the
+      // setMessage call inside the .then handler. Several flushes.
+      for (let i = 0; i < 5; i += 1) await flush();
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Approve failed');
+      expect(frame).toContain('backend exploded');
+      // The success-side string must NOT appear — the user should
+      // never see a misleading green check after a rejected call.
+      expect(frame).not.toMatch(/✓ Approved/);
+      // The row must reappear in the list so the user can retry.
+      // (Optimistic clear is undone on rejection.)
+      expect(frame).toContain('Pending Approvals');
+      expect(frame).toMatch(/2 pending across 2 tasks/);
+      unmount();
+    });
+
+    it('renders a "Deny failed" toast when source.deny rejects', async () => {
+      const source = new MockDataSource();
+      jest.spyOn(source, 'deny').mockRejectedValue(
+        new Error('400: invalid request_id'),
+      );
+      const { lastFrame, stdin, unmount } = renderPanel(
+        <Approvals active />,
+        { source },
+      );
+      for (let i = 0; i < 4; i += 1) await flush();
+      stdin.write('d');
+      await flush();
+      stdin.write('y'); // confirm deny → opens reason input
+      await flush();
+      stdin.write(KEY_ENTER); // submit empty reason
+      for (let i = 0; i < 5; i += 1) await flush();
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Deny failed');
+      expect(frame).toContain('invalid request_id');
+      // No misleading red-cross-Denied message on a rejected call.
+      expect(frame).not.toMatch(/✗ Denied EditFile/);
+      unmount();
+    });
+  });
 });
