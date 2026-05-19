@@ -24,6 +24,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -135,6 +136,12 @@ export interface TaskOrchestratorProps {
     readonly taskRoleArn: string;
     readonly executionRoleArn: string;
   };
+
+  /**
+   * S3 bucket for task attachments. When provided, the orchestrator gets
+   * ReadWrite grants for URL fetch/screen/upload during hydration.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
 }
 
 /**
@@ -203,6 +210,7 @@ export class TaskOrchestrator extends Construct {
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
         }),
+        ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
       },
       bundling: {
         // Bundle `@aws-sdk/client-bedrock-agentcore` — newer commands (e.g.
@@ -227,6 +235,11 @@ export class TaskOrchestrator extends Construct {
     props.userConcurrencyTable.grantReadWriteData(this.fn);
     if (props.repoTable) {
       props.repoTable.grantReadData(this.fn);
+    }
+
+    // Attachments bucket grants (URL fetch/screen/upload during hydration)
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
     // Durable execution managed policy

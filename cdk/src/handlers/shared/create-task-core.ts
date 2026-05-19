@@ -24,15 +24,18 @@
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { PutObjectCommand, DeleteObjectsCommand, S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult } from 'aws-lambda';
+import { createHash } from 'crypto';
 import { ulid } from 'ulid';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
 import { checkRepoOnboarded } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
-import { type ChannelSource, type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { type AttachmentRecord, type ChannelSource, type CreateTaskRequest, createAttachmentRecord, type InlineAttachment, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
+import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -57,6 +60,8 @@ if (process.env.GUARDRAIL_ID && !process.env.GUARDRAIL_VERSION) {
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
+const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
+const s3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
 
 /**
  * Core task creation logic shared by the Cognito create-task handler
@@ -132,6 +137,24 @@ export async function createTaskCore(
   }
   const userTrace = body.trace === true;
 
+  // Validate attachments
+  const attachmentResult = validateAttachments(body.attachments as unknown[] | undefined);
+  if (!attachmentResult.valid) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, attachmentResult.error, requestId);
+  }
+  const validatedAttachments = attachmentResult.parsed;
+
+  // Fail-closed: reject requests with attachments when bucket is not configured
+  if (validatedAttachments.length > 0 && (!s3Client || !ATTACHMENTS_BUCKET)) {
+    logger.error('Attachments submitted but ATTACHMENTS_BUCKET_NAME is not configured', {
+      user_id: context.userId,
+      request_id: requestId,
+      attachment_count: validatedAttachments.length,
+    });
+    return errorResponse(503, ErrorCode.INTERNAL_ERROR,
+      'Attachment storage is not configured. Please contact your administrator.', requestId);
+  }
+
   // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
@@ -155,6 +178,118 @@ export async function createTaskCore(
         metric_type: 'guardrail_screening_failure',
       });
       return errorResponse(503, ErrorCode.INTERNAL_ERROR, 'Content screening is temporarily unavailable. Please try again later.', requestId);
+    }
+  }
+
+  // Generate task ID early so attachment S3 keys use the correct task ID
+  const taskId = ulid();
+
+  // 2b. Process inline attachments: screen, upload to S3, build records
+  const attachmentRecords: AttachmentRecord[] = [];
+  const uploadedS3Keys: string[] = [];
+  if (validatedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+    for (const att of validatedAttachments) {
+      if (att.delivery !== 'inline') continue;
+      const inlineAtt = att as InlineAttachment;
+
+      // Validate base64 encoding before decode
+      if (!isValidBase64(inlineAtt.data)) {
+        return errorResponse(400, ErrorCode.ATTACHMENT_INVALID_CONTENT,
+          `Attachment '${inlineAtt.filename}' has invalid base64 encoding.`, requestId);
+      }
+
+      const decoded = Buffer.from(inlineAtt.data, 'base64');
+      const attachmentId = ulid();
+
+      // Screen inline attachment content via Bedrock Guardrail (fail-closed)
+      if (!bedrockClient) {
+        await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+        logger.error('Inline attachment submitted but guardrail is not configured (fail-closed)', {
+          request_id: requestId,
+          attachment_filename: inlineAtt.filename,
+        });
+        return errorResponse(503, ErrorCode.ATTACHMENT_SCREENING_UNAVAILABLE,
+          'Attachment content screening is not configured. Please contact your administrator.', requestId);
+      }
+      {
+        try {
+          const isImage = inlineAtt.type === 'image';
+          const guardrailContent = isImage
+            ? [{ image: { format: mimeToGuardrailFormat(inlineAtt.content_type), source: { bytes: decoded } } }]
+            : [{ text: { text: decoded.toString('utf-8') } }];
+
+          const screenResult = await bedrockClient.send(new ApplyGuardrailCommand({
+            guardrailIdentifier: process.env.GUARDRAIL_ID!,
+            guardrailVersion: process.env.GUARDRAIL_VERSION!,
+            source: 'INPUT',
+            content: guardrailContent,
+          }));
+
+          if (screenResult.action === 'GUARDRAIL_INTERVENED') {
+            // Clean up any already-uploaded attachments
+            await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+            return errorResponse(400, ErrorCode.ATTACHMENT_BLOCKED,
+              `Attachment '${inlineAtt.filename}' was blocked by content policy.`, requestId);
+          }
+        } catch (screenErr) {
+          await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+          logger.error('Attachment screening failed (fail-closed)', {
+            error: String(screenErr),
+            attachment_filename: inlineAtt.filename,
+            request_id: requestId,
+          });
+          return errorResponse(503, ErrorCode.ATTACHMENT_SCREENING_UNAVAILABLE,
+            'Attachment content screening is temporarily unavailable. Please try again later.', requestId);
+        }
+      }
+
+      // Upload to S3
+      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${context.userId}/${taskId}/${attachmentId}/${inlineAtt.filename}`;
+      try {
+        const putResult = await s3Client.send(new PutObjectCommand({
+          Bucket: ATTACHMENTS_BUCKET,
+          Key: s3Key,
+          Body: decoded,
+          ContentType: inlineAtt.content_type,
+        }));
+
+        uploadedS3Keys.push(s3Key);
+        const checksum = createHash('sha256').update(decoded).digest('hex');
+
+        attachmentRecords.push(createAttachmentRecord({
+          attachment_id: attachmentId,
+          type: inlineAtt.type,
+          content_type: inlineAtt.content_type,
+          filename: inlineAtt.filename,
+          s3_key: s3Key,
+          s3_version_id: putResult.VersionId ?? 'unversioned',
+          size_bytes: decoded.length,
+          screening: { status: 'passed', screened_at: new Date().toISOString() },
+          checksum_sha256: checksum,
+        }));
+      } catch (s3Err) {
+        await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+        logger.error('S3 upload failed for inline attachment', {
+          error: String(s3Err),
+          attachment_filename: inlineAtt.filename,
+          request_id: requestId,
+        });
+        return errorResponse(500, ErrorCode.INTERNAL_ERROR,
+          `Failed to upload attachment '${inlineAtt.filename}'.`, requestId);
+      }
+    }
+
+    // URL attachments get pending records (resolved during hydration)
+    for (const att of validatedAttachments) {
+      if (att.delivery !== 'url_fetch') continue;
+      attachmentRecords.push(createAttachmentRecord({
+        attachment_id: ulid(),
+        type: att.type,
+        content_type: att.content_type,
+        filename: att.filename,
+        screening: { status: 'pending' },
+        source_url: att.url,
+      }));
     }
   }
 
@@ -213,7 +348,6 @@ export async function createTaskCore(
   }
 
   // 4. Generate identifiers and timestamps
-  const taskId = ulid();
   const now = new Date().toISOString();
   const branchName = isPrTask
     ? 'pending:pr_resolution'
@@ -236,6 +370,7 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
+    ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${TaskStatus.SUBMITTED}#${now}`,
     created_at: now,
     updated_at: now,
@@ -306,4 +441,49 @@ export async function createTaskCore(
 
   // 9. Return created task
   return successResponse(201, toTaskDetail(taskRecord), requestId);
+}
+
+/**
+ * Map MIME type to Bedrock GuardrailImageFormat.
+ * The SDK currently supports 'png' | 'jpeg' — GIF and WebP are mapped
+ * to 'png' (lossless container) since the guardrail inspects visual
+ * content, not codec fidelity.
+ */
+function mimeToGuardrailFormat(contentType: string): 'png' | 'jpeg' {
+  if (contentType === 'image/jpeg') return 'jpeg';
+  return 'png';
+}
+
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Validate that a string is well-formed base64. */
+function isValidBase64(data: string): boolean {
+  if (data.length === 0) return false;
+  if (data.length % 4 !== 0) return false;
+  return BASE64_PATTERN.test(data);
+}
+
+/**
+ * Clean up S3 objects from a partially-failed inline upload.
+ * Best-effort — the 90-day lifecycle is the safety net if cleanup fails.
+ */
+async function cleanupOrphanedAttachments(client: S3Client, keys: string[]): Promise<void> {
+  if (keys.length === 0 || !ATTACHMENTS_BUCKET) return;
+  try {
+    const result = await client.send(new DeleteObjectsCommand({
+      Bucket: ATTACHMENTS_BUCKET,
+      Delete: { Objects: keys.map(Key => ({ Key })) },
+    }));
+    if (result.Errors && result.Errors.length > 0) {
+      logger.error('Partial cleanup failure — some orphaned objects remain', {
+        failedKeys: result.Errors.map(e => e.Key),
+        errorCodes: result.Errors.map(e => e.Code),
+      });
+    }
+  } catch (err) {
+    logger.error('Cleanup failed entirely — all objects orphaned (90-day lifecycle is safety net)', {
+      keys,
+      error: String(err),
+    });
+  }
 }

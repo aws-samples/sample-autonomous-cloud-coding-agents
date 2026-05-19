@@ -26,6 +26,12 @@ import type { TaskStatusType } from '../../constructs/task-status';
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
+/** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
+export type AttachmentType = 'image' | 'file' | 'url';
+
+/** Delivery mechanism — discriminant for the three upload paths. */
+export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
+
 /**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
@@ -124,6 +130,7 @@ export interface TaskRecord {
    * dispatch fires successfully.
    */
   readonly github_comment_id?: number;
+  readonly attachments?: AttachmentRecord[];
 }
 
 /** Per-channel override for one notification channel. See
@@ -198,6 +205,7 @@ export interface TaskDetail {
    *  the field being present; CLI download resolves this via the
    *  ``get-trace-url`` handler rather than hitting S3 directly. */
   readonly trace_s3_uri: string | null;
+  readonly attachments: AttachmentSummary[] | null;
 }
 
 /**
@@ -278,14 +286,140 @@ export interface CreateTaskRequest {
 }
 
 /**
- * Attachment in create task request.
+ * Wire format — parsed from untrusted JSON. Validate before use.
  */
 export interface Attachment {
-  readonly type: 'image' | 'file' | 'url';
+  readonly type: AttachmentType;
   readonly content_type?: string;
   readonly data?: string;
   readonly url?: string;
   readonly filename?: string;
+  readonly expected_size_bytes?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Validated attachment types (post-validation discriminated union)
+// ---------------------------------------------------------------------------
+
+interface BaseValidatedAttachment {
+  readonly filename: string;
+  readonly content_type: string;
+}
+
+/** Inline image/file: data present, validated, decoded, magic-bytes checked. */
+export interface InlineAttachment extends BaseValidatedAttachment {
+  readonly delivery: 'inline';
+  readonly type: 'image' | 'file';
+  readonly data: string;
+  readonly url?: never;
+  readonly decoded_size_bytes: number;
+}
+
+/** Presigned upload: metadata only, no data, no url. */
+export interface PresignedAttachment extends BaseValidatedAttachment {
+  readonly delivery: 'presigned';
+  readonly type: 'image' | 'file';
+  readonly data?: never;
+  readonly url?: never;
+  readonly expected_size_bytes: number;
+}
+
+/** URL to fetch during hydration. */
+export interface UrlAttachment extends BaseValidatedAttachment {
+  readonly delivery: 'url_fetch';
+  readonly type: 'url';
+  readonly url: string;
+  readonly data?: never;
+}
+
+/** Output of validateAttachments() — illegal combinations are unrepresentable. */
+export type ValidatedAttachment = InlineAttachment | PresignedAttachment | UrlAttachment;
+
+// ---------------------------------------------------------------------------
+// Screening result (persisted in DynamoDB as part of AttachmentRecord)
+// ---------------------------------------------------------------------------
+
+/** Screening outcome — discriminated union prevents invalid combinations. */
+export type ScreeningResult =
+  | { readonly status: 'pending' }
+  | { readonly status: 'passed'; readonly screened_at: string }
+  | { readonly status: 'blocked'; readonly screened_at: string; readonly categories: [string, ...string[]] };
+
+// ---------------------------------------------------------------------------
+// Attachment record (persisted metadata in TaskRecord)
+// ---------------------------------------------------------------------------
+
+export interface AttachmentRecord {
+  readonly attachment_id: string;
+  readonly type: AttachmentType;
+  readonly content_type: string;
+  readonly filename: string;
+  readonly s3_key?: string;
+  readonly s3_version_id?: string;
+  readonly size_bytes?: number;
+  readonly screening: ScreeningResult;
+  readonly source_url?: string;
+  readonly checksum_sha256?: string;
+  readonly token_estimate?: number;
+}
+
+/** Parameters for creating an AttachmentRecord with cross-field invariant validation. */
+export type CreateAttachmentRecordParams = AttachmentRecord;
+
+/**
+ * Factory function enforcing cross-field invariants on AttachmentRecord construction.
+ * Validates that required fields are present based on screening status and type.
+ */
+export function createAttachmentRecord(params: CreateAttachmentRecordParams): AttachmentRecord {
+  if (params.screening.status === 'passed') {
+    if (!params.s3_key || !params.s3_version_id || !params.checksum_sha256 || !params.size_bytes) {
+      throw new Error('Passed screening requires s3_key, s3_version_id, checksum_sha256, and size_bytes');
+    }
+  }
+  return params;
+}
+
+// ---------------------------------------------------------------------------
+// Attachment summary (API response — metadata only, no binary content)
+// ---------------------------------------------------------------------------
+
+export interface AttachmentSummary {
+  readonly attachment_id: string;
+  readonly type: AttachmentType;
+  readonly filename: string;
+  readonly content_type: string;
+  readonly size_bytes: number;
+  readonly screening_status: 'passed' | 'blocked' | 'pending';
+}
+
+// ---------------------------------------------------------------------------
+// Presigned upload response (returned on PENDING_UPLOADS creation)
+// ---------------------------------------------------------------------------
+
+export interface AttachmentUploadInstruction {
+  readonly attachment_id: string;
+  readonly filename: string;
+  readonly upload_url: string;
+  readonly upload_fields: Record<string, string>;
+  readonly upload_expires_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Agent attachment payload (orchestrator → agent runtime)
+// ---------------------------------------------------------------------------
+
+/** Attachment descriptor sent to the agent runtime. Exported for test assertions. */
+export interface AgentAttachmentPayload {
+  readonly attachment_id: string;
+  readonly type: AttachmentType;
+  readonly content_type: string;
+  readonly filename: string;
+  readonly s3_uri: string;
+  readonly s3_version_id: string;
+  readonly size_bytes: number;
+  readonly source_url?: string;
+  readonly token_estimate?: number;
+  readonly checksum_sha256: string;
 }
 
 /**
@@ -333,6 +467,16 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,
+    attachments: record.attachments
+      ? record.attachments.map(a => ({
+        attachment_id: a.attachment_id,
+        type: a.type,
+        filename: a.filename,
+        content_type: a.content_type,
+        size_bytes: a.size_bytes ?? 0,  // 0 for pending attachments (size unknown until resolved)
+        screening_status: a.screening.status,
+      }))
+      : null,
   };
 }
 

@@ -20,6 +20,9 @@
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
+/** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
+export type AttachmentType = 'image' | 'file' | 'url';
+
 /**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
@@ -96,6 +99,7 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  readonly attachments: AttachmentSummary[] | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
@@ -148,6 +152,35 @@ export interface GetTaskEventsQuery {
   readonly desc?: string;
 }
 
+/** Wire format — parsed from untrusted JSON. Validate before use. */
+export interface Attachment {
+  readonly type: AttachmentType;
+  readonly content_type?: string;
+  readonly data?: string;
+  readonly url?: string;
+  readonly filename?: string;
+  readonly expected_size_bytes?: number;
+}
+
+/** Attachment metadata in task detail responses. */
+export interface AttachmentSummary {
+  readonly attachment_id: string;
+  readonly type: AttachmentType;
+  readonly filename: string;
+  readonly content_type: string;
+  readonly size_bytes: number;
+  readonly screening_status: 'passed' | 'blocked' | 'pending';
+}
+
+/** Presigned upload instruction returned on PENDING_UPLOADS creation. */
+export interface AttachmentUploadInstruction {
+  readonly attachment_id: string;
+  readonly filename: string;
+  readonly upload_url: string;
+  readonly upload_fields: Record<string, string>;
+  readonly upload_expires_at: string;
+}
+
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -157,6 +190,7 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
+  readonly attachments?: Attachment[];
   /**
    * Enable the ``--trace`` debug path (design §10.1). When true, the
    * agent's ProgressWriter raises its preview-truncation cap from 200

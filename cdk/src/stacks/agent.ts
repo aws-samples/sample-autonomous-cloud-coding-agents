@@ -33,15 +33,16 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import { Blueprint } from '../constructs/blueprint';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
+// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
-// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { TaskApi } from '../constructs/task-api';
 import { TaskDashboard } from '../constructs/task-dashboard';
 import { TaskEventsTable } from '../constructs/task-events-table';
@@ -71,6 +72,16 @@ export class AgentStack extends Stack {
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
     const traceArtifactsBucket = new TraceArtifactsBucket(this, 'TraceArtifactsBucket');
+
+    // Attachment storage — images, files, and URL-fetched content for tasks.
+    const attachmentsBucket = new AttachmentsBucket(this, 'AttachmentsBucket');
+
+    NagSuppressions.addResourceSuppressions(attachmentsBucket.bucket, [
+      {
+        id: 'AwsSolutions-S1',
+        reason: 'Task attachments: writes from create-task and orchestrator Lambdas only; reads by agent via IAM role. 90-day lifecycle; versioning + screening prevent TOCTOU. Access logging not justified for this use case.',
+      },
+    ]);
 
     // Server access logging intentionally disabled. Rationale:
     //  - writes: only the agent runtime IAM role (``grantPut`` below).
@@ -225,6 +236,7 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
       agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
       traceArtifactsBucket: traceArtifactsBucket.bucket,
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -455,6 +467,7 @@ export class AgentStack extends Stack {
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      attachmentsBucket: attachmentsBucket.bucket,
       // To wire ECS, uncomment the ecsCluster block above and add:
       // ecsConfig: {
       //   clusterArn: ecsCluster.cluster.clusterArn,

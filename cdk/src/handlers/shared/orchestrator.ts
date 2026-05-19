@@ -624,17 +624,24 @@ export async function failTask(
   userId: string,
   releaseConcurrency: boolean,
 ): Promise<void> {
+  let transitioned = false;
   try {
     await transitionTask(taskId, fromStatus, TaskStatus.FAILED, {
       completed_at: new Date().toISOString(),
       error_message: errorMessage,
     });
+    transitioned = true;
   } catch (err) {
     logger.warn('Failed to transition task to FAILED', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
   }
-  await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage });
-  if (releaseConcurrency) {
-    await decrementConcurrency(userId);
+  // Only emit / release concurrency after a successful transition. Callers such as
+  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
+  // would otherwise re-run emit + decrement while the task is already FAILED.
+  if (transitioned) {
+    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage });
+    if (releaseConcurrency) {
+      await decrementConcurrency(userId);
+    }
   }
 }
 

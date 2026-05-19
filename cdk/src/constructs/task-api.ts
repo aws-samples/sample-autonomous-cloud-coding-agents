@@ -127,6 +127,12 @@ export interface TaskApiProps {
    * When provided, the cancel Lambda gets `ECS_CLUSTER_ARN` env var and `ecs:StopTask` permission.
    */
   readonly ecsClusterArn?: string;
+
+  /**
+   * S3 bucket for task attachments. When provided, the create-task Lambda
+   * gets PutObject/DeleteObject grants and the bucket name as env var.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
 }
 
 /**
@@ -363,6 +369,9 @@ export class TaskApi extends Construct {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+    }
 
     const createTaskFn = new lambda.NodejsFunction(this, 'CreateTaskFn', {
       entry: path.join(handlersDir, 'create-task.ts'),
@@ -371,6 +380,8 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
       bundling: commonBundling,
+      memorySize: 256,
+      timeout: Duration.seconds(15),
     });
 
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
@@ -481,6 +492,12 @@ export class TaskApi extends Construct {
           }),
         ],
       }));
+    }
+
+    // Grant create-task Lambda put/delete on attachments bucket for inline upload + cleanup
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantPut(createTaskFn);
+      props.attachmentsBucket.grantDelete(createTaskFn);
     }
 
     // Collect all Lambda functions for cdk-nag suppressions
