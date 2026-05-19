@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { createAttachmentRecord } from '../../../src/handlers/shared/types';
 import {
   computeTtlEpoch,
   decodePaginationToken,
@@ -41,8 +42,6 @@ import {
   validateMaxTurns,
   validatePrNumber,
 } from '../../../src/handlers/shared/validation';
-
-import { createAttachmentRecord } from '../../../src/handlers/shared/types';
 
 describe('parseBody', () => {
   test('parses valid JSON', () => {
@@ -514,8 +513,11 @@ describe('validateAttachments', () => {
 
   test('rejects data + url together', () => {
     const result = validateAttachments([{
-      type: 'image', data: pngBase64, url: 'https://example.com/x.png',
-      content_type: 'image/png', filename: 'x.png',
+      type: 'image',
+      data: pngBase64,
+      url: 'https://example.com/x.png',
+      content_type: 'image/png',
+      filename: 'x.png',
     }]);
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.error).toContain('not both');
@@ -540,7 +542,9 @@ describe('validateAttachments', () => {
 
   test('rejects presigned upload exceeding 10 MB', () => {
     const result = validateAttachments([{
-      type: 'image', content_type: 'image/png', filename: 'huge.png',
+      type: 'image',
+      content_type: 'image/png',
+      filename: 'huge.png',
       expected_size_bytes: 11 * 1024 * 1024,
     }]);
     expect(result.valid).toBe(false);

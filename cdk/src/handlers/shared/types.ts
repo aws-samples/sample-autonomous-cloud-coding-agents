@@ -473,7 +473,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
         type: a.type,
         filename: a.filename,
         content_type: a.content_type,
-        size_bytes: a.size_bytes ?? 0,  // 0 for pending attachments (size unknown until resolved)
+        size_bytes: a.size_bytes ?? 0, // 0 for pending attachments (size unknown until resolved)
         screening_status: a.screening.status,
       }))
       : null,

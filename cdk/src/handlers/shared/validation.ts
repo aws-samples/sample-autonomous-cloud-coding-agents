@@ -294,8 +294,8 @@ const ALLOWED_FILE_MIME_TYPES = new Set([
 const MAGIC_BYTES: ReadonlyArray<{ readonly mime: string; readonly bytes: readonly number[]; readonly offset?: number }> = [
   { mime: 'image/png', bytes: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
   { mime: 'image/jpeg', bytes: [0xFF, 0xD8, 0xFF] },
-  { mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] },  // GIF8 (covers GIF87a and GIF89a)
-  { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2D] },  // %PDF-
+  { mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] }, // GIF8 (covers GIF87a and GIF89a)
+  { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2D] }, // %PDF-
 ];
 
 // RIFF....WEBP requires checking bytes 0-3 (RIFF) and 8-11 (WEBP)
