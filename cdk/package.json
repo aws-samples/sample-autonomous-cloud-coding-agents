@@ -31,6 +31,8 @@
     "aws-cdk-lib": "^2.238.0",
     "cdk-nag": "^2.37.55",
     "constructs": "^10.3.0",
+    "pdf-parse": "^1.1.1",
+    "sharp": "^0.33.5",
     "ulid": "^3.0.2"
   },
   "devDependencies": {
@@ -39,6 +41,7 @@
     "@types/aws-lambda": "^8.10.161",
     "@types/jest": "^30.0.0",
     "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.4",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "aws-cdk": "^2",

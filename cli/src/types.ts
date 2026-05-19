@@ -30,6 +30,7 @@ export type AttachmentType = 'image' | 'file' | 'url';
  * surface stays portable.
  */
 export type TaskStatusType =
+  | 'PENDING_UPLOADS'
   | 'SUBMITTED'
   | 'HYDRATING'
   | 'RUNNING'

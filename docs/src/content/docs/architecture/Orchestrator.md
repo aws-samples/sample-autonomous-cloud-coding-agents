@@ -56,9 +56,11 @@ Every task moves through a finite set of states from creation to a terminal outc
 
 | State | Description | Duration |
 |---|---|---|
+| `PENDING_UPLOADS` | Presigned-upload task awaiting client file uploads | Minutes (30-min auto-cancel) |
 | `SUBMITTED` | Task accepted, awaiting orchestration | Milliseconds |
 | `HYDRATING` | Fetching GitHub data, querying memory, assembling prompt | Seconds |
 | `RUNNING` | Agent session active in compute environment | Minutes to hours |
+| `AWAITING_APPROVAL` | Cedar HITL soft-deny gate fired; paused on human decision | Minutes to hours |
 | `FINALIZING` | Result inference and cleanup in progress | Seconds |
 | `COMPLETED` | Terminal. Task finished successfully | - |
 | `FAILED` | Terminal. Task could not complete | - |
@@ -69,19 +71,30 @@ Every task moves through a finite set of states from creation to a terminal outc
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SUBMITTED
+    [*] --> PENDING_UPLOADS : Presigned upload task
+    [*] --> SUBMITTED : Inline/no-attachment task
+    PENDING_UPLOADS --> SUBMITTED : confirm-uploads succeeds
+    PENDING_UPLOADS --> FAILED : Screening blocked
+    PENDING_UPLOADS --> CANCELLED : User cancels or 30-min auto-cancel
+
     SUBMITTED --> HYDRATING : Admission passes
     SUBMITTED --> FAILED : Admission rejected
     SUBMITTED --> CANCELLED : User cancels
 
     HYDRATING --> RUNNING : Session started
+    HYDRATING --> AWAITING_APPROVAL : Cedar soft-deny gate
     HYDRATING --> FAILED : Hydration error
     HYDRATING --> CANCELLED : User cancels
 
+    RUNNING --> AWAITING_APPROVAL : Cedar soft-deny gate
     RUNNING --> FINALIZING : Session ends
     RUNNING --> CANCELLED : User cancels
     RUNNING --> TIMED_OUT : Duration exceeded
     RUNNING --> FAILED : Session crash
+
+    AWAITING_APPROVAL --> RUNNING : Approved or denied (resume)
+    AWAITING_APPROVAL --> CANCELLED : User cancels mid-approval
+    AWAITING_APPROVAL --> FAILED : Stranded-approval reconciler
 
     FINALIZING --> COMPLETED : PR or commits found
     FINALIZING --> FAILED : No useful work
@@ -92,13 +105,21 @@ stateDiagram-v2
 
 | From | To | Trigger | Condition |
 |---|---|---|---|
+| `PENDING_UPLOADS` | `SUBMITTED` | `confirm-uploads` succeeds | All attachments screened and passed |
+| `PENDING_UPLOADS` | `FAILED` | Screening blocked | Any attachment fails security screening |
+| `PENDING_UPLOADS` | `CANCELLED` | User cancels or auto-cancel | Upload window expired (30 min) or explicit cancel |
 | `SUBMITTED` | `HYDRATING` | Admission passes | Concurrency slot acquired |
 | `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, rate/concurrency limit, validation error |
 | `HYDRATING` | `RUNNING` | Hydration complete | `invoke_agent_runtime` returns session ID |
+| `HYDRATING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during hydration |
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
+| `RUNNING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during execution |
 | `RUNNING` | `FINALIZING` | Session ends | Response received or session terminated |
 | `RUNNING` | `TIMED_OUT` | Max duration exceeded | Wall-clock timer (default 8h, matching AgentCore max) |
 | `RUNNING` | `FAILED` | Session crash | Heartbeat lost (see Liveness monitoring) |
+| `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received; agent resumes |
+| `AWAITING_APPROVAL` | `CANCELLED` | User cancels | Explicit cancel while awaiting approval |
+| `AWAITING_APPROVAL` | `FAILED` | Stranded reconciler | Approval request orphaned (agent died mid-wait) |
 | `FINALIZING` | `COMPLETED` | Success inferred | PR exists or commits on branch |
 | `FINALIZING` | `FAILED` | Failure inferred | No commits, no PR, or agent reported error |
 
@@ -108,9 +129,11 @@ Users can cancel a task at any point. The orchestrator's response depends on how
 
 | State when cancel arrives | Action |
 |---|---|
+| `PENDING_UPLOADS` | Transition to `CANCELLED`. Clean up S3 objects under the task's attachment prefix. No concurrency slot to release. |
 | `SUBMITTED` | Transition to `CANCELLED`. No cleanup needed. |
 | `HYDRATING` | Abort hydration, release concurrency slot, transition to `CANCELLED`. |
 | `RUNNING` | Call `stop_runtime_session`, wait for confirmation, release concurrency, transition to `CANCELLED`. Partial work on GitHub remains for the user to inspect. |
+| `AWAITING_APPROVAL` | Call `stop_runtime_session`, release concurrency slot, transition to `CANCELLED`. The pending approval row transitions to `STRANDED`. |
 | `FINALIZING` | Let finalization complete. Mark `CANCELLED` only if the terminal state was not yet written. |
 | Terminal | Reject the cancel request. |
 
