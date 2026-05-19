@@ -231,6 +231,9 @@ export class RealDataSource implements DataSource {
       ...(input.initial_approvals && input.initial_approvals.length > 0 && {
         initial_approvals: input.initial_approvals,
       }),
+      ...(input.attachments && input.attachments.length > 0 && {
+        attachments: input.attachments,
+      }),
     });
     return toTaskRowView(detail);
   }

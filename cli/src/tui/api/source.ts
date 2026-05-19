@@ -11,6 +11,7 @@
 
 import type {
   ApprovalScope,
+  Attachment,
   PendingApprovalSummary,
   TaskEvent,
 } from '../../types.js';
@@ -32,6 +33,10 @@ export interface SubmitTaskInput {
   readonly max_budget_usd?: number;
   readonly approval_timeout_s?: number;
   readonly initial_approvals?: readonly ApprovalScope[];
+  /** Optional attachments forwarded to the create-task endpoint.
+   *  Mirrors `CreateTaskRequest.attachments`; the TUI populates this
+   *  from clipboard image paste. */
+  readonly attachments?: readonly Attachment[];
 }
 
 /** A source of TUI data — either mock or real. Query methods return

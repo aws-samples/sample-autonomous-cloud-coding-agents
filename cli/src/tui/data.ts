@@ -8,10 +8,10 @@
  * `DataSource` interface in `./api/source.ts`.
  */
 
-import type { ChannelSource, TaskEvent } from '../types.js';
+import type { ChannelSource, TaskEvent, TaskStatusType } from '../types.js';
 
 // Re-export so components can import from './data.js' exclusively.
-export type { ChannelSource, TaskEvent };
+export type { ChannelSource, TaskEvent, TaskStatusType };
 
 // ─── View shapes panels bind to ─────────────────────────────────────
 
@@ -20,7 +20,7 @@ export type { ChannelSource, TaskEvent };
  *  derived fields (`turn` = `turns_completed ?? turns_attempted`). */
 export interface TaskRowView {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: string;
@@ -86,18 +86,10 @@ export interface RegisteredRepoView {
   readonly default_branch: string;
 }
 
-// ─── Status union (rendering-only) ──────────────────────────────────
-
-export type TaskStatus =
-  | 'RUNNING'
-  | 'AWAITING_APPROVAL'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'CANCELLED'
-  | 'SUBMITTED'
-  | 'HYDRATING'
-  | 'FINALIZING'
-  | 'TIMED_OUT';
+// `TaskStatusType` is re-exported above — it now serves as the
+// single source of truth for the rendering union too. The previous
+// local `TaskStatus` alias was a leftover from before upstream
+// extracted the literal union into the shared types contract.
 
 // ─── Layout constants ───────────────────────────────────────────────
 

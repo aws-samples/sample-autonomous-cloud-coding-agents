@@ -4,12 +4,19 @@ import figures from 'figures';
 import { useEditing } from '../context.js';
 import { useData } from '../hooks/useData.js';
 import ScopePicker from '../components/ScopePicker.js';
+import { useBracketedPaste } from '../utils/bracketed-paste.js';
+import {
+  readClipboardImage,
+  shouldShowHintOnce,
+  type ClipboardReadResult,
+} from '../utils/clipboard.js';
 import {
   APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
   INITIAL_APPROVALS_MAX_ENTRIES,
   type ApprovalScope,
+  type Attachment,
 } from '../../types.js';
 
 interface SubmitProps {
@@ -17,8 +24,26 @@ interface SubmitProps {
   onSubmitted: (taskId: string) => void;
 }
 
-type Field = 'repo' | 'prompt' | 'timeout' | 'approvals' | 'submit';
-const FIELDS: Field[] = ['repo', 'prompt', 'timeout', 'approvals', 'submit'];
+type Field = 'repo' | 'prompt' | 'timeout' | 'approvals' | 'attachments' | 'submit';
+const FIELDS: Field[] = ['repo', 'prompt', 'timeout', 'approvals', 'attachments', 'submit'];
+
+/** UX cap on number of attachments. Server has no documented cap;
+ *  this is a guard against UI-driven runaway pastes. */
+const MAX_ATTACHMENTS = 10;
+
+/** Local-only attachment row that pairs the wire shape with a
+ *  display-friendly size hint. The wire shape (`Attachment`) is
+ *  what we forward on submit. */
+interface AttachmentRow {
+  readonly attachment: Attachment;
+  readonly sizeBytes: number;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
   const { setEditing } = useEditing();
@@ -30,11 +55,17 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
   const [prompt, setPrompt] = useState('');
   const [timeoutText, setTimeoutText] = useState(String(APPROVAL_TIMEOUT_S_DEFAULT));
   const [preApprovals, setPreApprovals] = useState<ApprovalScope[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentRow[]>([]);
   const [showScopePicker, setShowScopePicker] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [editingText, setEditingText] = useState<'prompt' | 'timeout' | null>(null);
+  /** Transient one-line message under the attachments row. Cleared
+   *  after `TOAST_DURATION_MS`. Used for both success and failure
+   *  signals so the user always gets feedback for a paste action. */
+  const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'warn' | 'err' } | null>(null);
   const submitTimer = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const toastTimer = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
 
   const fieldIdx = FIELDS.indexOf(field);
   const selectedRepo = repos[repoCursor]?.repo ?? '';
@@ -50,7 +81,98 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
     return () => setEditing(false);
   }, [editingText, showScopePicker, setEditing]);
 
-  useEffect(() => () => { if (submitTimer.current) clearTimeout(submitTimer.current); }, []);
+  useEffect(() => () => {
+    if (submitTimer.current) clearTimeout(submitTimer.current);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
+
+  const showToast = useCallback((text: string, tone: 'ok' | 'warn' | 'err') => {
+    setToast({ text, tone });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = globalThis.setTimeout(() => setToast(null), 4000);
+  }, []);
+
+  /** Try to grab an image from the clipboard and append it. Used by
+   *  both the Ctrl+V keybind (manual fallback) and the
+   *  bracketed-paste hook (Cmd+V on macOS). */
+  const tryPasteFromClipboard = useCallback(async () => {
+    if (!active || submitted || showScopePicker) return;
+    if (attachments.length >= MAX_ATTACHMENTS) {
+      showToast(`Attachment cap reached (${MAX_ATTACHMENTS})`, 'warn');
+      return;
+    }
+    let result: ClipboardReadResult;
+    try {
+      result = await readClipboardImage();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Clipboard read failed: ${msg}`, 'err');
+      return;
+    }
+    if (result.ok) {
+      const ext = result.image.mediaType.split('/')[1];
+      const filename = `pasted-${Date.now()}.${ext}`;
+      const att: AttachmentRow = {
+        attachment: {
+          type: 'image',
+          content_type: result.image.mediaType,
+          data: result.image.base64,
+          filename,
+        },
+        sizeBytes: result.image.sizeBytes,
+      };
+      setAttachments(prev => [...prev, att]);
+      showToast(
+        `${figures.tick} Pasted image (${formatBytes(result.image.sizeBytes)})`,
+        'ok',
+      );
+      return;
+    }
+    // Failure dispatch — keep messages concise + actionable.
+    const f = result.failure;
+    switch (f.kind) {
+      case 'empty':
+        showToast('Clipboard is empty', 'warn');
+        break;
+      case 'not_image':
+        showToast('Clipboard does not contain an image', 'warn');
+        break;
+      case 'too_large':
+        showToast(
+          `Image too large: ${formatBytes(f.sizeBytes)} > ${formatBytes(f.maxBytes)}`,
+          'err',
+        );
+        break;
+      case 'tool_missing':
+        // Hint cap: only show the multi-line install hint once per
+        // session so a user with a missing tool isn't drowned in
+        // identical toasts. The shorter "press paste failed" toast
+        // still fires every time so they know the action did
+        // something.
+        if (shouldShowHintOnce(`tool-missing-${f.platform}`)) {
+          showToast(f.hint, 'err');
+        } else {
+          showToast('Clipboard tool missing — see earlier hint', 'err');
+        }
+        break;
+      case 'unsupported_platform':
+        showToast(`Clipboard paste not yet supported on ${f.platform}`, 'err');
+        break;
+      case 'error':
+        showToast(`Clipboard read error: ${f.message}`, 'err');
+        break;
+    }
+  }, [active, submitted, showScopePicker, attachments.length, showToast]);
+
+  // Bracketed-paste hook: Cmd+V (macOS native paste action) goes
+  // through this path. The terminal's paste action emits the
+  // bracketed-paste start marker; we read the OS clipboard right
+  // away while it still holds the image. Disabled when the panel
+  // is inactive so other panels' input isn't intercepted.
+  useBracketedPaste({
+    enabled: active && !submitted,
+    onPaste: () => { void tryPasteFromClipboard(); },
+  });
 
   const parsedTimeout = Number(timeoutText);
   const timeoutValid =
@@ -62,6 +184,14 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
     if (!active || submitted) return;
     // The scope picker owns input while mounted.
     if (showScopePicker) return;
+
+    // Ctrl+V — manual paste trigger that works anywhere in the form,
+    // independently of bracketed-paste support. Useful for terminals
+    // without bracketed paste, and as a belt-and-suspenders backup.
+    if (key.ctrl && (input === 'v' || input === 'V')) {
+      void tryPasteFromClipboard();
+      return;
+    }
 
     // ── Text editing mode ──
     if (editingText === 'prompt') {
@@ -111,6 +241,23 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
       // fall through to field navigation
     }
 
+    // ── Attachments list ──
+    if (field === 'attachments') {
+      // `-` or `d` removes last; `r` clears all. `Ctrl+V` (handled
+      // earlier in the function) adds. Plain `v` does NOT add — the
+      // user might be trying to type "v" elsewhere, and we've already
+      // taught them Ctrl+V from the help bar.
+      if (input === '-' || input === 'd' || key.delete || key.backspace) {
+        setAttachments(prev => prev.slice(0, -1));
+        return;
+      }
+      if (input === 'r' || input === 'R') {
+        setAttachments([]);
+        return;
+      }
+      // fall through to field navigation
+    }
+
     // ── General field navigation ──
     if (key.downArrow) {
       const next = Math.min(fieldIdx + 1, FIELDS.length - 1);
@@ -137,11 +284,13 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
       setSubmitError(null);
       void (async () => {
         try {
+          const wireAttachments: readonly Attachment[] = attachments.map(a => a.attachment);
           const row = await submitTask({
             repo: selectedRepo,
             task_description: prompt,
             approval_timeout_s: parsedTimeout,
             ...(preApprovals.length > 0 && { initial_approvals: preApprovals }),
+            ...(wireAttachments.length > 0 && { attachments: wireAttachments }),
           });
           submitTimer.current = globalThis.setTimeout(() => onSubmitted(row.task_id), 500);
         } catch (err) {
@@ -152,7 +301,12 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
       })();
       return;
     }
-  }, [active, submitted, editingText, showScopePicker, field, fieldIdx, repoCursor, repos, prompt, timeoutText, timeoutValid, parsedTimeout, preApprovals, selectedRepo, submitTask, onSubmitted]));
+  }, [
+    active, submitted, editingText, showScopePicker, field, fieldIdx,
+    repoCursor, repos, prompt, timeoutText, timeoutValid, parsedTimeout,
+    preApprovals, attachments, selectedRepo, submitTask, onSubmitted,
+    tryPasteFromClipboard,
+  ]));
 
   const handleAddScope = useCallback((scope: ApprovalScope) => {
     setPreApprovals(p => (p.includes(scope) ? p : [...p, scope]));
@@ -170,12 +324,16 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
 
   const cur = (f: Field) => field === f && active ? figures.pointer + ' ' : '  ';
   const fc = (f: Field) => field === f && active ? 'cyan' : undefined;
+  const toastColor =
+    toast?.tone === 'ok' ? 'green'
+    : toast?.tone === 'warn' ? 'yellow'
+    : 'red';
 
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
         <Text bold>New Task</Text>
-        <Text dimColor>  {figures.arrowUp}/{figures.arrowDown} navigate, Enter to edit/select, a/+ add scope</Text>
+        <Text dimColor>  {figures.arrowUp}/{figures.arrowDown} navigate · Enter edit/select · a/+ scope · Ctrl+V paste image</Text>
       </Box>
 
       {/* Repo selector */}
@@ -251,6 +409,49 @@ const Submit: React.FC<SubmitProps> = ({ active, onSubmitted }) => {
           </Box>
         )}
       </Box>
+
+      {/* Attachments */}
+      <Box flexDirection="column">
+        <Box>
+          <Text color={fc('attachments')}>{cur('attachments')}</Text>
+          <Text dimColor>Attachments:      </Text>
+          {attachments.length === 0 ? (
+            <Text dimColor>(none — Ctrl+V or Cmd+V to paste a screenshot)</Text>
+          ) : (
+            <Text>{attachments.length}/{MAX_ATTACHMENTS}</Text>
+          )}
+        </Box>
+        {field === 'attachments' && attachments.length > 0 && (
+          <Box marginLeft={4} flexDirection="column">
+            {attachments.map((a, i) => (
+              <Box key={i}>
+                <Text color="green">  {figures.tick} </Text>
+                <Text dimColor>{a.attachment.content_type ?? a.attachment.type}</Text>
+                <Text>  {formatBytes(a.sizeBytes)}</Text>
+                {a.attachment.filename && (
+                  <Text dimColor>  {a.attachment.filename}</Text>
+                )}
+              </Box>
+            ))}
+            <Text dimColor>  Ctrl+V add  |  d/- remove last  |  r reset  |  {attachments.length}/{MAX_ATTACHMENTS}</Text>
+          </Box>
+        )}
+        {field === 'attachments' && attachments.length === 0 && (
+          <Box marginLeft={4} flexDirection="column">
+            <Text dimColor>  Ctrl+V (or Cmd+V on macOS) to paste an image from clipboard</Text>
+          </Box>
+        )}
+      </Box>
+
+      {toast && (
+        <Box marginTop={1} flexDirection="column">
+          {toast.text.split('\n').map((line, i) => (
+            <Box key={i}>
+              <Text color={toastColor}>{line}</Text>
+            </Box>
+          ))}
+        </Box>
+      )}
 
       <Text> </Text>
 
