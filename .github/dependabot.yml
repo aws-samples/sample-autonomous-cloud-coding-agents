@@ -1,0 +1,60 @@
+version: 2
+
+updates:
+  # GitHub Actions — SHA-pinned actions get digest bumps with tag comments
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor:
+        update-types: ["minor", "patch"]
+
+  # Docker — base image tags and digests in agent/Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/agent"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(agent)"
+    open-pull-requests-limit: 3
+
+  # Python (pip/uv) — agent/pyproject.toml and agent/uv.lock
+  - package-ecosystem: "pip"
+    directory: "/agent"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(agent)"
+    open-pull-requests-limit: 5
+    groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
+      aws-sdk:
+        patterns: ["boto3", "botocore", "aiobotocore"]
+
+  # npm — root yarn workspace (cdk, cli, docs)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 10
+    groups:
+      aws-cdk:
+        patterns: ["aws-cdk-lib", "@aws-cdk/*", "constructs"]
+      eslint:
+        patterns: ["eslint", "eslint-*", "@eslint/*"]
+      jest:
+        patterns: ["jest", "@jest/*", "ts-jest", "@types/jest"]
+      types:
+        patterns: ["@types/*"]
+        update-types: ["minor", "patch"]
