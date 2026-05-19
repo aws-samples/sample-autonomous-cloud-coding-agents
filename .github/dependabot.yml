@@ -1,7 +1,7 @@
 version: 2
 
 updates:
-  # GitHub Actions — SHA-pinned actions get digest bumps with tag comments
+  # GitHub Actions — all action bumps in a single PR
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -9,12 +9,12 @@ updates:
       day: "saturday"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     groups:
-      actions-minor:
-        update-types: ["minor", "patch"]
+      all-actions:
+        patterns: ["*"]
 
-  # Docker — base image tags and digests in agent/Dockerfile
+  # Docker — base image bumps (typically 1-2 images)
   - package-ecosystem: "docker"
     directory: "/agent"
     schedule:
@@ -22,9 +22,12 @@ updates:
       day: "saturday"
     commit-message:
       prefix: "chore(agent)"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 2
+    groups:
+      all-docker:
+        patterns: ["*"]
 
-  # Python (pip/uv) — agent/pyproject.toml and agent/uv.lock
+  # Python (pip/uv) — all Python deps in a single PR
   - package-ecosystem: "pip"
     directory: "/agent"
     schedule:
@@ -32,14 +35,12 @@ updates:
       day: "saturday"
     commit-message:
       prefix: "chore(agent)"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      opentelemetry:
-        patterns: ["opentelemetry-*"]
-      aws-sdk:
-        patterns: ["boto3", "botocore", "aiobotocore"]
+      all-python:
+        patterns: ["*"]
 
-  # npm — root yarn workspace (cdk, cli, docs)
+  # npm — all JS deps in a single PR (CI catches incompatibilities)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -47,14 +48,7 @@ updates:
       day: "saturday"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 2
     groups:
-      aws-cdk:
-        patterns: ["aws-cdk-lib", "@aws-cdk/*", "constructs"]
-      eslint:
-        patterns: ["eslint", "eslint-*", "@eslint/*"]
-      jest:
-        patterns: ["jest", "@jest/*", "ts-jest", "@types/jest"]
-      types:
-        patterns: ["@types/*"]
-        update-types: ["minor", "patch"]
+      all-npm:
+        patterns: ["*"]
