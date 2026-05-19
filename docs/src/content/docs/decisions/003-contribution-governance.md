@@ -31,9 +31,9 @@ Issues align to the [product roadmap](https://github.com/aws-samples/sample-auto
 
 Only permitted users can mark an issue `approved` — a GitHub Actions workflow validates that the label applicant is authorized. An issue is not workable until it is both approved and assigned. After approval, the issue is considered scope-frozen: further revisions that change deliverables require re-approval.
 
-### Self-assignment on start
+### Assignments
 
-Unassigned means available. On starting work, self-assign. Multiple assignees (>1) require intentionality verification.
+Unassigned means available. Assignment may happen via self-assignment, directed assignment by another agent/human, or priority-based pickup (inspect open tasks for highest priority + earliest predecessor). Multiple assignees (>1) require intentionality verification.
 
 ### Issue body as primary directive
 
@@ -51,9 +51,15 @@ Before implementation, the assigned contributor must:
 
 **Priority evaluation:** Identify priority (`p0`/`p1`/`p2`). If asked to work a lower-priority item while higher-priority items are unassigned, challenge: "Should I work on #X (p0) instead?"
 
-**Predecessor validation:** If predecessors are incomplete, unassigned, and not in a stacked PR — challenge: "Steps 1-3 are incomplete. Starting step 4 may cause rework."
+**Predecessor validation (GraphQL dependency graph is authoritative):**
+- Query the issue's `blockedBy` field via GraphQL — if any blocking issue is open, this issue is **not ready** (hard gate)
+- Check `parent`/`subIssues` ordering — verify prior siblings are complete or in-flight
+- Reconcile graph vs. prose — graph is authoritative for enforcement; prose explains rationale
+- If predecessors are incomplete, unassigned, and not in a stacked PR — challenge: "Steps 1-3 are incomplete. Starting step 4 may cause rework."
 
 **Cross-reference audit:** Search open issues for duplicates. Search open PRs (including drafts) for conflicts. Flag overlaps. Check the full dependency graph. Forward-look into downstream actions to ensure alignment.
+
+**Dependency graph maintenance:** When creating/modifying issues with dependencies, use GraphQL mutations (`addBlockedBy`, `addSubIssue`) to maintain the machine-enforceable graph. Update prose to explain rationale. If they diverge, fix the wrong one (usually prose — graph is set programmatically).
 
 **Final gate:** If all checks pass, comment "Starting implementation."
 
