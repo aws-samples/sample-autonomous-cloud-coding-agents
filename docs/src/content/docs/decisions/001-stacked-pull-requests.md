@@ -29,14 +29,14 @@ Every PR description states its position:
 ```markdown
 ## Stack position
 
-PR {N} of {M} for #{parent-issue} — {overall goal one-liner}
+PR {N} for #{parent-issue} — {overall goal one-liner}
 
-### Prior (PR {N-1}): {what was delivered}
+### Prior: {what the previous PR delivered}
 ### This PR: {what this adds}
-### Remaining ({M-N} PRs): {what comes next}
+### Next (optional): {what comes next, if scope is known}
 ```
 
-This gives reviewers and agents immediate orientation without reading the parent issue.
+This gives reviewers and agents immediate orientation. The "Next" section is optional — include it when the remaining scope is fixed and known; omit it when scope is still evolving. The parent issue is the source of truth for overall progress.
 
 ### 2. Branch targeting
 
@@ -82,6 +82,7 @@ When a lower PR changes after review feedback:
 - Each sub-issue references the parent and its position in the stack
 - GitHub's task list in the parent tracks completion
 - Estimated review time is listed per sub-issue to help reviewers plan
+- Sub-issues use `blocked by #NNN` / `blocking #NNN` relationships to express dependency order — agents and reviewers can identify which issues are unblocked and ready for pickup
 
 ### 7. When NOT to use stacked PRs
 
