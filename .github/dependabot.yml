@@ -1,7 +1,6 @@
 version: 2
 
 updates:
-  # GitHub Actions — all action bumps in a single PR
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -14,9 +13,9 @@ updates:
       all-actions:
         patterns: ["*"]
 
-  # Docker — base image bumps (add new entries if Dockerfiles appear elsewhere)
   - package-ecosystem: "docker"
-    directory: "/agent"
+    directories:
+      - "**/*"
     schedule:
       interval: "weekly"
       day: "saturday"
@@ -27,22 +26,22 @@ updates:
       all-docker:
         patterns: ["*"]
 
-  # Python (pip/uv) — add new entries if pyproject.toml appears elsewhere
-  - package-ecosystem: "pip"
-    directory: "/agent"
+  - package-ecosystem: "uv"
+    directories:
+      - "**/*"
     schedule:
       interval: "weekly"
       day: "saturday"
     commit-message:
-      prefix: "chore(deps): pip"
+      prefix: "chore(deps): uv"
     open-pull-requests-limit: 1
     groups:
       all-python:
         patterns: ["*"]
 
-  # npm — all JS deps in a single PR (CI catches incompatibilities)
   - package-ecosystem: "npm"
-    directory: "/"
+    directories:
+      - "**/*"
     schedule:
       interval: "weekly"
       day: "saturday"
