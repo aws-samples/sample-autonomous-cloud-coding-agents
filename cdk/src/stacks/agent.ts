@@ -39,6 +39,7 @@ import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
+import { CliWorkloadIdentity } from '../constructs/cli-workload-identity';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
@@ -690,6 +691,12 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Slack user mapping table',
     });
 
+    // --- CLI workload identity for outbound OAuth flows (Linear today, more later) ---
+    // The CLI calls GetWorkloadAccessTokenForUserId against this workload to mint
+    // user-scoped tokens for the OAuth dance. Distinct from the AgentCore runtime's
+    // workload identity (which is service-linked and cannot mint user-scoped tokens).
+    const cliWorkloadIdentity = new CliWorkloadIdentity(this, 'CliWorkloadIdentity');
+
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
     const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
       api: taskApi.api,
@@ -773,6 +780,16 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearUserMappingTableName', {
       value: linearIntegration.userMappingTable.tableName,
       description: 'Name of the DynamoDB Linear user mapping table',
+    });
+
+    new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
+      value: linearIntegration.workspaceRegistryTable.tableName,
+      description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    new CfnOutput(this, 'CliWorkloadIdentityName', {
+      value: cliWorkloadIdentity.workloadName,
+      description: 'AgentCore Identity workload name the bgagent CLI uses to mint user-scoped workload access tokens (Phase 2.0b)',
     });
 
     // --- Bedrock model invocation logging (account-level) ---
