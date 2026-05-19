@@ -8,7 +8,7 @@ FROM --platform=$TARGETPLATFORM golang:1.26.3-bookworm AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
-FROM --platform=$TARGETPLATFORM python:3.13-slim
+FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
