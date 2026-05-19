@@ -8,8 +8,8 @@ updates:
       interval: "weekly"
       day: "saturday"
     commit-message:
-      prefix: "chore(deps)"
-    open-pull-requests-limit: 3
+      prefix: "chore(deps): github-actions"
+    open-pull-requests-limit: 1
     groups:
       all-actions:
         patterns: ["*"]
@@ -21,8 +21,8 @@ updates:
       interval: "weekly"
       day: "saturday"
     commit-message:
-      prefix: "chore(agent)"
-    open-pull-requests-limit: 2
+      prefix: "chore(deps): docker"
+    open-pull-requests-limit: 1
     groups:
       all-docker:
         patterns: ["*"]
@@ -34,8 +34,8 @@ updates:
       interval: "weekly"
       day: "saturday"
     commit-message:
-      prefix: "chore(agent)"
-    open-pull-requests-limit: 2
+      prefix: "chore(deps): pip"
+    open-pull-requests-limit: 1
     groups:
       all-python:
         patterns: ["*"]
@@ -47,8 +47,8 @@ updates:
       interval: "weekly"
       day: "saturday"
     commit-message:
-      prefix: "chore(deps)"
-    open-pull-requests-limit: 2
+      prefix: "chore(deps): npm"
+    open-pull-requests-limit: 1
     groups:
       all-npm:
         patterns: ["*"]
