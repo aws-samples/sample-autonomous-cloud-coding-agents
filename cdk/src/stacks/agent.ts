@@ -59,9 +59,17 @@ export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
 
-    const runnerPath = path.join(__dirname, '..', '..', '..', 'agent');
+    // Build context is repo root (not agent/) so the Dockerfile can COPY
+    // sibling trees the agent reads at runtime — currently
+    // ``contracts/constants.json`` (S9 cross-language constants — see
+    // ``contracts/README.md``). Future shared assets (parity fixtures,
+    // schema files) drop into ``contracts/`` without further build-context
+    // changes. Pattern lifted from ``merge/akw-integration``.
+    const repoRoot = path.join(__dirname, '..', '..', '..');
 
-    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, {
+      file: 'agent/Dockerfile',
+    });
 
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
@@ -517,7 +525,8 @@ export class AgentStack extends Stack {
     // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
     //
     // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
-    //   directory: runnerPath,
+    //   directory: repoRoot,
+    //   file: 'agent/Dockerfile',
     //   platform: ecr_assets.Platform.LINUX_ARM64,
     // });
     //
@@ -699,6 +708,18 @@ export class AgentStack extends Stack {
     linearIntegration.apiTokenSecret.grantRead(runtime);
     cfnRuntime.addPropertyOverride(
       'EnvironmentVariables.LINEAR_API_TOKEN_SECRET_ARN',
+      linearIntegration.apiTokenSecret.secretArn,
+    );
+
+    // Pipe the Linear API token secret into the orchestrator Lambda so the
+    // concurrency-cap rejection path can post a Linear comment + ❌ instead
+    // of silently dropping the task. The orchestrator only uses the secret
+    // when `task.channel_source === 'linear'`, but the IAM grant is
+    // unconditional — the secret is created lazily via Secrets Manager and
+    // costs nothing if unused.
+    linearIntegration.apiTokenSecret.grantRead(orchestrator.fn);
+    orchestrator.fn.addEnvironment(
+      'LINEAR_API_TOKEN_SECRET_ARN',
       linearIntegration.apiTokenSecret.secretArn,
     );
 

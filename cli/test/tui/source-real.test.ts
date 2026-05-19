@@ -29,6 +29,7 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
     pr_url: null,
     error_message: null,
     error_classification: null,
+    prompt_version: null,
     channel_source: 'api',
     created_at: '2026-05-12T00:00:00Z',
     updated_at: '2026-05-12T00:00:00Z',

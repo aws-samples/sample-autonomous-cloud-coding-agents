@@ -7,6 +7,38 @@ operations are no-ops.
 
 import os
 import time
+from typing import TypedDict
+
+from shell import log, log_error_cw
+
+
+class ApprovalRow(TypedDict):
+    """Schema for the approval row written by ``transact_write_approval_request``.
+
+    Mirrors the DDB column layout described in design §10.1 and the
+    TypeScript ``ApprovalRecord`` discriminated union in
+    ``cdk/src/handlers/shared/types.ts``. Used as the typed contract
+    between the PreToolUse hook (which builds the row) and the
+    transactional writer (which serializes it to DDB attributes).
+    Pre-S7 the function accepted a bare ``dict`` so missing or
+    misspelled fields would fail at runtime, not at the call site.
+    """
+
+    task_id: str
+    request_id: str
+    tool_name: str
+    tool_input_preview: str
+    tool_input_sha256: str
+    reason: str
+    severity: str  # 'low' | 'medium' | 'high' — matches TS Severity literal.
+    matching_rule_ids: list[str]
+    status: str  # always 'PENDING' on initial write.
+    created_at: str
+    timeout_s: int
+    ttl: int
+    user_id: str
+    repo: str
+
 
 _table = None
 
@@ -69,7 +101,7 @@ def write_submitted(
             item["task_description"] = task_description
         table.put_item(Item=item)
     except Exception as e:
-        print(f"[task_state] write_submitted failed (best-effort): {e}")
+        log("WARN", f"[task_state] write_submitted failed (best-effort): {e}")
 
 
 def write_heartbeat(task_id: str) -> None:
@@ -93,7 +125,7 @@ def write_heartbeat(task_id: str) -> None:
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
             return
-        print(f"[task_state] write_heartbeat failed (best-effort): {type(e).__name__}: {e}")
+        log("WARN", f"[task_state] write_heartbeat failed (best-effort): {type(e).__name__}: {e}")
 
 
 def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) -> None:
@@ -147,7 +179,10 @@ def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) ->
         ):
             # Task already advanced — concurrent legitimate transition wins.
             return
-        print(f"[task_state] write_session_info failed (best-effort): {type(e).__name__}: {e}")
+        log(
+            "WARN",
+            f"[task_state] write_session_info failed (best-effort): {type(e).__name__}: {e}",
+        )
 
 
 def write_running(task_id: str) -> None:
@@ -194,9 +229,9 @@ def write_running(task_id: str) -> None:
             isinstance(e, ClientError)
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
-            print("[task_state] write_running skipped: status precondition not met")
+            log("INFO", "[task_state] write_running skipped: status precondition not met")
             return
-        print(f"[task_state] write_running failed (best-effort): {type(e).__name__}")
+        log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
 
 
 def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:
@@ -218,6 +253,14 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             ":running": "RUNNING",
             ":hydrating": "HYDRATING",
             ":finalizing": "FINALIZING",
+            # AWAITING_APPROVAL is included so a container shutdown
+            # mid-gate can still record the terminal transition. Without
+            # it, a crash while the user is deciding leaves the task
+            # stuck until the stranded-task reconciler catches it (~2h).
+            # Cedar HITL state machine (design §9): RUNNING ↔
+            # AWAITING_APPROVAL, both can transition straight to a
+            # terminal state.
+            ":awaiting_approval": "AWAITING_APPROVAL",
         }
         update_parts = ["#s = :s", "completed_at = :t", "status_created_at = :sca"]
 
@@ -262,7 +305,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
         table.update_item(
             Key={"task_id": task_id},
             UpdateExpression="SET " + ", ".join(update_parts),
-            ConditionExpression="#s IN (:running, :hydrating, :finalizing)",
+            ConditionExpression="#s IN (:running, :hydrating, :finalizing, :awaiting_approval)",
             ExpressionAttributeNames=expr_names,
             ExpressionAttributeValues=expr_values,
         )
@@ -273,9 +316,10 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             isinstance(e, ClientError)
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
-            print(
+            log(
+                "INFO",
                 "[task_state] write_terminal skipped: "
-                "status precondition not met (task may have been cancelled)"
+                "status precondition not met (task may have been cancelled)",
             )
             # K2 final review SIG-1: ConditionalCheckFailed on the
             # happy path after a successful S3 trace upload orphans
@@ -293,7 +337,10 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             # back on the record and the orphan log below documents
             # the original race for operators.
             if result and result.get("trace_s3_uri"):
-                print(
+                # ERROR severity: a real orphan is operator-actionable.
+                # Routed via log_error_cw so it shows up in the
+                # APPLICATION_LOGS group that TaskDashboard reads.
+                log_error_cw(
                     f"[task_state] trace_s3_uri orphaned by "
                     f"ConditionalCheckFailed: task_id={task_id!r} "
                     f"trace_s3_uri={result['trace_s3_uri']!r}. "
@@ -301,18 +348,18 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                     f"updated; presigned-URL endpoint will 404 for "
                     f"this task. Object will be reaped by the 7-day "
                     f"lifecycle.",
-                    flush=True,
+                    task_id=task_id,
                 )
                 healed = write_trace_uri_conditional(task_id, result["trace_s3_uri"])
                 if healed:
-                    print(
+                    log(
+                        "INFO",
                         f"[task_state] trace_s3_uri self-healed for "
                         f"task_id={task_id!r} after ConditionalCheckFailed "
                         f"(terminal-state race).",
-                        flush=True,
                     )
             return
-        print(f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
+        log("WARN", f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
 
 
 def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
@@ -357,17 +404,17 @@ def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
             # Benign: URI was already persisted, or status isn't terminal yet.
-            print(
+            log(
+                "INFO",
                 f"[task_state] write_trace_uri_conditional skipped for "
                 f"task_id={task_id!r}: precondition not met "
                 f"(trace_s3_uri already set or status not terminal).",
-                flush=True,
             )
             return False
-        print(
+        log(
+            "WARN",
             f"[task_state] write_trace_uri_conditional failed for "
             f"task_id={task_id!r}: {type(e).__name__}: {e}",
-            flush=True,
         )
         return False
 
@@ -405,7 +452,7 @@ def get_task(task_id: str) -> dict | None:
     try:
         resp = table.get_item(Key={"task_id": task_id})
     except Exception as e:
-        print(f"[task_state] get_task failed: {type(e).__name__}: {e}")
+        log("WARN", f"[task_state] get_task failed: {type(e).__name__}: {e}")
         raise TaskFetchError(f"{type(e).__name__}: {e}") from e
     return resp.get("Item")
 
@@ -570,7 +617,7 @@ def _ddb_attr_to_py(attr):
 def transact_write_approval_request(
     task_id: str,
     request_id: str,
-    approval_row: dict,
+    approval_row: ApprovalRow,
     *,
     client=None,
 ) -> None:
@@ -806,9 +853,10 @@ def increment_approval_gate_count_in_ddb(
     try:
         task_table, _ = _require_tables()
     except ApprovalTablesUnavailable as exc:
-        print(
+        log(
+            "WARN",
             f"[task_state] increment_approval_gate_count_in_ddb: tables unavailable, "
-            f"skipping counter persistence: {exc}"
+            f"skipping counter persistence: {exc}",
         )
         return False
 
@@ -824,9 +872,10 @@ def increment_approval_gate_count_in_ddb(
         # Best-effort: do not raise. Log at WARN with the error code so
         # operators can spot IAM drift / throttle / misconfigured tables.
         code = _extract_error_code(exc) or type(exc).__name__
-        print(
+        log(
+            "WARN",
             f"[task_state] increment_approval_gate_count_in_ddb failed for task_id={task_id}: "
-            f"{code}: {exc}"
+            f"{code}: {exc}",
         )
         return False
     return True

@@ -32,7 +32,7 @@ from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, Outcome
 from progress_writer import _generate_ulid
-from shell import log
+from shell import log, log_error_cw
 
 if TYPE_CHECKING:
     from policy import PolicyEngine
@@ -424,7 +424,15 @@ async def _handle_require_approval(
             )
         except Exception as exc:
             log("WARN", f"approval TIMED_OUT write raised: {type(exc).__name__}: {exc}")
-            wrote = True  # fall through with original TIMED_OUT
+            # Fall into the IMPL-24 re-read path. A transient DDB write
+            # error MUST NOT bypass the late-approval check — the user's
+            # APPROVED decision may already be on the row, and skipping
+            # the re-read would falsely deny their tool call. Setting
+            # ``wrote = False`` triggers the ConsistentRead below; if
+            # the row still says PENDING the re-read is a no-op and we
+            # keep the TIMED_OUT outcome. If it says APPROVED/DENIED,
+            # ``_reconcile_late_decision`` honors the user's choice.
+            wrote = False
         if not wrote:
             # User's decision beat our timer; re-read with ConsistentRead.
             try:
@@ -829,12 +837,31 @@ def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# S10: per-method consecutive-failure counters for ``_try_progress``.
+# Progress writes are best-effort, but a hard infrastructure failure
+# (DDB throttle, IAM regression, missing table) would otherwise be
+# masked as a stream of WARN lines with no escalation. After
+# ``_TRY_PROGRESS_ESCALATE_AFTER`` consecutive failures of the same
+# method the next failure is logged at ERROR via ``log_error_cw`` so
+# it lands in APPLICATION_LOGS / TaskDashboard, and the counter
+# resets so escalations don't spam. Per-method state because a
+# single failing method shouldn't suppress visibility into other
+# kinds of progress writes that might still be working.
+_TRY_PROGRESS_ESCALATE_AFTER = 5
+_try_progress_consecutive_failures: dict[str, int] = {}
+
+
 def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     """Call a progress-writer method, swallowing errors.
 
     Progress is best-effort observability; a throttled DDB write must not
     break the approval flow. ``_emit_nudge_milestone`` uses a similar
     pattern for the Phase 2 nudges.
+
+    S10 escalation: repeated consecutive failures of the same
+    ``method_name`` are tracked per-process and escalated to ERROR
+    after ``_TRY_PROGRESS_ESCALATE_AFTER`` so a silent live-stream
+    outage becomes operator-visible.
     """
     if getattr(progress, "_disabled", False) is True:
         log("WARN", f"progress {method_name!r} skipped: circuit breaker open")
@@ -846,7 +873,21 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     try:
         method(**kwargs)
     except Exception as exc:  # pragma: no cover — defensive
-        log("WARN", f"progress {method_name!r} raised: {type(exc).__name__}: {exc}")
+        prev = _try_progress_consecutive_failures.get(method_name, 0)
+        count = prev + 1
+        if count >= _TRY_PROGRESS_ESCALATE_AFTER:
+            log_error_cw(
+                f"progress {method_name!r} has failed {count} consecutive times; "
+                f"latest: {type(exc).__name__}: {exc}",
+            )
+            _try_progress_consecutive_failures[method_name] = 0  # reset to avoid spam
+        else:
+            log("WARN", f"progress {method_name!r} raised: {type(exc).__name__}: {exc}")
+            _try_progress_consecutive_failures[method_name] = count
+        return
+    # Success path — reset the consecutive-failure count.
+    if _try_progress_consecutive_failures.get(method_name):
+        _try_progress_consecutive_failures[method_name] = 0
 
 
 async def post_tool_use_hook(
@@ -1296,16 +1337,36 @@ def build_hook_matchers(
     async def _pre(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
-        result = await pre_tool_use_hook(
-            hook_input,
-            tool_use_id,
-            ctx,
-            engine=engine,
-            trajectory=trajectory,
-            task_id=task_id or None,
-            user_id=user_id or None,
-            progress=progress,
-        )
+        # Fail-closed wrapper (mirrors _post and _stop). If the inner hook
+        # or its dispatch path raises an unexpected exception (asyncio
+        # cancellation, TypeError from a malformed payload, etc.), the
+        # SDK's default behaviour for an unhandled hook exception is
+        # undefined — we MUST NOT trust it to fail closed. Mapping every
+        # uncaught exception to a DENY here makes the security posture
+        # explicit at the SDK boundary.
+        try:
+            result = await pre_tool_use_hook(
+                hook_input,
+                tool_use_id,
+                ctx,
+                engine=engine,
+                trajectory=trajectory,
+                task_id=task_id or None,
+                user_id=user_id or None,
+                progress=progress,
+            )
+        except Exception as exc:
+            log(
+                "ERROR",
+                f"PreToolUse wrapper crashed (task_id={task_id}): {type(exc).__name__}: {exc}",
+            )
+            log_error_cw(
+                f"PreToolUse wrapper crashed: {type(exc).__name__}: {exc}",
+                task_id=task_id or None,
+            )
+            return SyncHookJSONOutput(
+                **_deny_response("Hook error — fail-closed deny"),
+            )
         return SyncHookJSONOutput(**result)
 
     async def _post(

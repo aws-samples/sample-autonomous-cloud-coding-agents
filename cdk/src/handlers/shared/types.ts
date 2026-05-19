@@ -21,7 +21,18 @@ import { classifyError, type ErrorClassification } from './error-classifier';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
+// Cross-language constants — see ``contracts/constants.md``. Imported at
+// TypeScript compile time (resolveJsonModule); esbuild inlines the values
+// into the bundled Lambda artifact, so no runtime FS read is needed.
+import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+
+/**
+ * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
+ * check sees a single declaration site for the API status union. The
+ * canonical source remains ``cdk/src/constructs/task-status.ts``.
+ */
+export type { TaskStatusType };
 
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
@@ -325,14 +336,17 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
-  readonly attachments?: Attachment[];
+  readonly attachments?: readonly Attachment[];
   /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
   readonly trace?: boolean;
   /** Cedar HITL: per-task approval timeout (§7.3). Bounded by
    *  ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
   readonly approval_timeout_s?: number;
-  /** Cedar HITL: pre-approved scopes that skip the gate (§7.3 step 4). */
-  readonly initial_approvals?: readonly string[];
+  /** Cedar HITL: pre-approved scopes that skip the gate (§7.3 step 4).
+   *  Typed as ``ApprovalScope[]`` (the strict union accepted by the
+   *  agent's ``parse_approval_scope``); CDK validates the parse result
+   *  before forwarding. */
+  readonly initial_approvals?: readonly ApprovalScope[];
 }
 
 /**
@@ -590,7 +604,18 @@ export type ApprovalStatus =
   | 'STRANDED';
 
 /**
- * Full approval row as stored in `TaskApprovalsTable` (design §10.1).
+ * Cedar HITL severity, surfaced in the CLI approval prompt and used
+ * for severity-gated channel routing (§11.2: high-severity rules
+ * skip Slack-button auto-approval). Shared alias so the same literal
+ * union is not redefined inline in `ApprovalRecord`,
+ * `PendingApprovalSummary`, `PolicyRuleSummary`, etc.
+ */
+export type Severity = 'low' | 'medium' | 'high';
+
+/**
+ * Fields shared by every approval row regardless of status. Internal
+ * type — callers should consume the discriminated {@link ApprovalRecord}
+ * so `status` narrows the optional fields below.
  *
  * PK = `task_id`, SK = `request_id` (ULID minted by the agent). GSI
  * `user_id-status-index` powers `GET /v1/pending` without a Scan.
@@ -599,25 +624,69 @@ export type ApprovalStatus =
  * cannot be empty and pathological no-match soft-deny hits would fail
  * to persist (§10.1).
  */
-export interface ApprovalRecord {
+interface ApprovalRecordBase {
   readonly task_id: string;
   readonly request_id: string;
   readonly tool_name: string;
   readonly tool_input_preview: string;
   readonly tool_input_sha256: string;
   readonly reason: string;
-  readonly severity: 'low' | 'medium' | 'high';
+  readonly severity: Severity;
   readonly matching_rule_ids: readonly string[];
-  readonly status: ApprovalStatus;
   readonly created_at: string;
-  readonly decided_at?: string;
-  readonly scope?: ApprovalScope;
-  readonly deny_reason?: string;
   readonly timeout_s: number;
   readonly ttl: number;
   readonly user_id: string;
   readonly repo: string;
 }
+
+/** PENDING approval row — no decision recorded yet. */
+export interface PendingApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'PENDING';
+}
+
+/** APPROVED approval row — decided_at + scope are required. */
+export interface ApprovedApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'APPROVED';
+  readonly decided_at: string;
+  readonly scope: ApprovalScope;
+}
+
+/** DENIED approval row — decided_at required, deny_reason optional. */
+export interface DeniedApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'DENIED';
+  readonly decided_at: string;
+  readonly deny_reason?: string;
+}
+
+/** TIMED_OUT approval row — decided_at required (server-set). */
+export interface TimedOutApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'TIMED_OUT';
+  readonly decided_at: string;
+}
+
+/** STRANDED approval row — decided_at required (set by the
+ *  stranded-task reconciler). No user decision was ever recorded. */
+export interface StrandedApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'STRANDED';
+  readonly decided_at: string;
+}
+
+/**
+ * Full approval row as stored in `TaskApprovalsTable` (design §10.1).
+ *
+ * Discriminated union on ``status`` so callers can narrow on the
+ * status field and get exhaustiveness checking on the optional
+ * decision fields. Pre-S3 this was a single interface with every
+ * decision-time field optional, which let illegal combinations
+ * type-check (e.g. an APPROVED record without a `scope`).
+ */
+export type ApprovalRecord =
+  | PendingApprovalRecord
+  | ApprovedApprovalRecord
+  | DeniedApprovalRecord
+  | TimedOutApprovalRecord
+  | StrandedApprovalRecord;
 
 /**
  * Pending approval summary returned by `GET /v1/pending` (§7.7).
@@ -630,7 +699,7 @@ export interface PendingApprovalSummary {
   readonly request_id: string;
   readonly tool_name: string;
   readonly tool_input_preview: string;
-  readonly severity: 'low' | 'medium' | 'high';
+  readonly severity: Severity;
   readonly reason: string;
   readonly created_at: string;
   readonly timeout_s: number;
@@ -706,7 +775,7 @@ export const DENY_REASON_MAX_LENGTH = 2000;
 export interface PolicyRuleSummary {
   readonly rule_id: string;
   readonly category?: string;
-  readonly severity?: 'low' | 'medium' | 'high';
+  readonly severity?: Severity;
   readonly approval_timeout_s?: number;
   readonly summary: string;
 }
@@ -780,9 +849,14 @@ export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
  * (design decision #13, §4 step 5). Blueprints may override via
  * ``security.approvalGateCap``; the submit path bounds-checks the
  * resolved value against these constants so an out-of-bounds blueprint
- * never persists a bad cap onto a TaskRecord. MUST stay in lock-step
- * with ``APPROVAL_GATE_CAP_MIN / MAX`` in ``agent/src/policy.py``.
+ * never persists a bad cap onto a TaskRecord.
+ *
+ * Sourced from ``contracts/constants.json`` (S9 — see
+ * ``contracts/constants.md``). The same JSON is read by
+ * ``agent/src/policy.py`` at import; the drift check
+ * (``scripts/check-types-sync.ts``) verifies no other site declares
+ * these constants as literals.
  */
-export const APPROVAL_GATE_CAP_MIN = 1;
-export const APPROVAL_GATE_CAP_MAX = 500;
-export const APPROVAL_GATE_CAP_DEFAULT = 50;
+export const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
+export const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
+export const APPROVAL_GATE_CAP_DEFAULT = sharedConstants.approval_gate_cap.default;

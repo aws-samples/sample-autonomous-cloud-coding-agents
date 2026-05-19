@@ -40,6 +40,7 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     pr_url: null,
     error_message: null,
     error_classification: null,
+    prompt_version: null,
     channel_source: 'api',
     created_at: '2026-04-29T15:27:00Z',
     updated_at: '2026-04-29T15:30:00Z',

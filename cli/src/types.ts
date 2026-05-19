@@ -21,6 +21,23 @@
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
 /**
+ * Task status literal union. Mirrors ``cdk/src/constructs/task-status.ts``
+ * — the values returned by the API are exactly these. Defined inline
+ * here (rather than imported from the CDK construct) so the CLI type
+ * surface stays portable.
+ */
+export type TaskStatusType =
+  | 'SUBMITTED'
+  | 'HYDRATING'
+  | 'RUNNING'
+  | 'AWAITING_APPROVAL'
+  | 'FINALIZING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'TIMED_OUT';
+
+/**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
@@ -48,7 +65,7 @@ export interface ErrorClassification {
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: TaskType;
@@ -59,6 +76,10 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
+  /** Prompt-template version applied during context hydration. Null on
+   *  pre-versioned records. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly prompt_version: string | null;
   /** Provenance of the task's submission — ``api`` for CLI / Cognito
    *  submissions, ``webhook`` for HMAC-signed inbound webhooks.
    *  Mirrors ``cdk/src/handlers/shared/types.ts::TaskDetail``; kept
@@ -119,7 +140,7 @@ export interface TraceUrlResponse {
 /** Task summary returned by GET /v1/tasks list responses. */
 export interface TaskSummary {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: TaskType;
@@ -158,6 +179,18 @@ export interface GetTaskEventsQuery {
   readonly desc?: string;
 }
 
+/**
+ * Attachment in a create-task request. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::Attachment``.
+ */
+export interface Attachment {
+  readonly type: 'image' | 'file' | 'url';
+  readonly content_type?: string;
+  readonly data?: string;
+  readonly url?: string;
+  readonly filename?: string;
+}
+
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -167,6 +200,7 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
+  readonly attachments?: readonly Attachment[];
   /**
    * Enable the ``--trace`` debug path (design §10.1). When true, the
    * agent's ProgressWriter raises its preview-truncation cap from 200
@@ -212,7 +246,7 @@ export interface NudgeResponse {
 /** Cancel task response from DELETE /v1/tasks/{task_id}. */
 export interface CancelTaskResponse {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly cancelled_at: string;
 }
 
@@ -360,13 +394,20 @@ export interface DenyResponse {
   readonly decided_at: string;
 }
 
+/**
+ * Cedar HITL severity literal. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::Severity``. Shared alias so
+ * the same union is not redefined inline across types.
+ */
+export type Severity = 'low' | 'medium' | 'high';
+
 /** Pending approval summary returned by `GET /v1/pending`. */
 export interface PendingApprovalSummary {
   readonly task_id: string;
   readonly request_id: string;
   readonly tool_name: string;
   readonly tool_input_preview: string;
-  readonly severity: 'low' | 'medium' | 'high';
+  readonly severity: Severity;
   readonly reason: string;
   readonly created_at: string;
   readonly timeout_s: number;
@@ -386,7 +427,7 @@ export interface GetPendingResponse {
 export interface PolicyRuleSummary {
   readonly rule_id: string;
   readonly category?: string;
-  readonly severity?: 'low' | 'medium' | 'high';
+  readonly severity?: Severity;
   readonly approval_timeout_s?: number;
   readonly summary: string;
 }

@@ -24,6 +24,7 @@ import { ulid } from 'ulid';
 import { VALID_APPROVAL_SCOPE_PREFIXES, parseApprovalScope } from './shared/approval-scope';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { ApprovalRequest, ApprovalResponse, ApprovalScope } from './shared/types';
 
@@ -98,6 +99,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const scope: ApprovalScope = rawScope ?? 'this_call';
     const scopeCheck = parseApprovalScope(scope);
     if (!scopeCheck.ok) {
+      // Security-relevant: malformed scopes can indicate probing,
+      // CLI version mismatches, or downstream contract drift. Logged
+      // with the structured fields a CloudWatch Insights query needs
+      // to triage (task_id + user_id + raw_scope + parser-error).
+      logger.warn('Approval scope validation failed', {
+        task_id: taskId,
+        user_id: callerUserId,
+        raw_scope: scope,
+        error: scopeCheck.message,
+        request_id: requestId,
+      });
       return errorResponse(
         400,
         ErrorCode.VALIDATION_ERROR,
@@ -308,13 +320,4 @@ function classifyCancel(
     'Approval transaction cancelled for unknown reason.',
     requestId,
   );
-}
-
-function formatMinuteBucket(date: Date): string {
-  const y = date.getUTCFullYear().toString().padStart(4, '0');
-  const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
-  const d = date.getUTCDate().toString().padStart(2, '0');
-  const h = date.getUTCHours().toString().padStart(2, '0');
-  const mi = date.getUTCMinutes().toString().padStart(2, '0');
-  return `${y}${m}${d}${h}${mi}`;
 }

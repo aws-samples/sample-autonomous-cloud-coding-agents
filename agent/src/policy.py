@@ -78,9 +78,37 @@ if TYPE_CHECKING:
 FLOOR_TIMEOUT_S: int = 30  # §6 decision #6: rejected below this at load
 WARN_TIMEOUT_S: int = 120  # IMPL-25: sub-120s emits WARN on blueprint load
 DEFAULT_TASK_TIMEOUT_S: int = 300  # §6 decision #6 default
-DEFAULT_APPROVAL_GATE_CAP: int = 50  # decision #13 default; bounded [1, 500]
-APPROVAL_GATE_CAP_MIN: int = 1
-APPROVAL_GATE_CAP_MAX: int = 500
+
+
+def _load_shared_constants() -> dict:
+    """Read ``contracts/constants.json`` (S9 — see ``contracts/constants.md``).
+
+    Two candidate paths cover both the deployed image
+    (``/app/contracts/constants.json`` — Dockerfile copies ``contracts/``
+    to ``/app/contracts``) and the local repo layout
+    (``<repo>/contracts/constants.json`` — for tests + dev). Fail-fast on
+    missing: a missing contract should crash import, not silently fall
+    back to literals that would re-introduce the drift the contract is
+    designed to prevent.
+    """
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / "contracts" / "constants.json",  # /app/contracts/
+        here.parent.parent.parent / "contracts" / "constants.json",  # <repo>/contracts/
+    ]
+    for path in candidates:
+        if path.is_file():
+            return json.loads(path.read_text())
+    raise FileNotFoundError(
+        "contracts/constants.json not found; checked: " + ", ".join(str(p) for p in candidates),
+    )
+
+
+_SHARED_CONSTANTS = _load_shared_constants()
+_AGC = _SHARED_CONSTANTS["approval_gate_cap"]
+DEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"])  # decision #13 default
+APPROVAL_GATE_CAP_MIN: int = int(_AGC["min"])
+APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
 CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
 CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
 POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB

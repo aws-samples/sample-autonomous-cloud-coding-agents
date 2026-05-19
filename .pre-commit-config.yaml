@@ -71,6 +71,22 @@ repos:
         exclude: ^docs/node_modules/
         stages: [pre-commit]
 
+      - id: types-sync-cdk-cli
+        name: type sync drift (CDK ↔ CLI)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:types-sync'
+        language: system
+        pass_filenames: false
+        files: ^(cdk/src/handlers/shared/types\.ts$|cli/src/types\.ts$|scripts/check-types-sync\.ts$)
+        stages: [pre-commit]
+
+      - id: constants-sync
+        name: cross-language constants drift (contracts/constants.json)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:constants-sync'
+        language: system
+        pass_filenames: false
+        files: ^(contracts/constants\.json$|agent/src/policy\.py$|cdk/src/handlers/shared/types\.ts$|cdk/src/constructs/blueprint\.ts$|scripts/check-constants-sync\.ts$)
+        stages: [pre-commit]
+
       - id: monorepo-security-pre-push
         name: security scans (pre-push)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:security'

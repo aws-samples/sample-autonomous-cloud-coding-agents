@@ -28,6 +28,7 @@ import {
 import { CedarPolicyParseError, concatPolicies, parseRules } from './shared/cedar-policy';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { formatMinuteBucket } from './shared/rate-limit';
 import { checkRepoOnboarded, loadRepoConfig } from './shared/repo-config';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPoliciesResponse, PolicyRuleSummary } from './shared/types';
@@ -221,15 +222,6 @@ function toSummary(rule: ReturnType<typeof parseRules>[number]): PolicyRuleSumma
   if (rule.severity) out.severity = rule.severity;
   if (rule.approval_timeout_s) out.approval_timeout_s = rule.approval_timeout_s;
   return out as PolicyRuleSummary;
-}
-
-function formatMinuteBucket(date: Date): string {
-  const y = date.getUTCFullYear().toString().padStart(4, '0');
-  const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
-  const d = date.getUTCDate().toString().padStart(2, '0');
-  const h = date.getUTCHours().toString().padStart(2, '0');
-  const mi = date.getUTCMinutes().toString().padStart(2, '0');
-  return `${y}${m}${d}${h}${mi}`;
 }
 
 /** Test-only cache reset — exposed for unit tests. */

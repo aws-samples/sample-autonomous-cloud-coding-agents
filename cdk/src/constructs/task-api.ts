@@ -214,6 +214,7 @@ export class TaskApi extends Construct {
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
       { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
     ]);
 
     // --- REST API ---
@@ -661,7 +662,27 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(10),
         memorySize: 256,
       });
-      props.taskApprovalsTable.grantReadWriteData(getPendingFn);
+      // Least-privilege: GetPendingFn only reads (Query on
+      // user_id-status-index for the user's pending rows) and writes
+      // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row
+      // (UpdateItem with TTL). Full grantReadWriteData would also
+      // grant PutItem, BatchWrite, and DeleteItem on every approval
+      // record — orders of magnitude broader than needed (PR review
+      // S6). Pinned to the table ARN + its GSI, not the wildcard
+      // "/*" suffix that grantReadWriteData uses.
+      getPendingFn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Query'],
+        resources: [
+          props.taskApprovalsTable.tableArn,
+          `${props.taskApprovalsTable.tableArn}/index/*`,
+        ],
+      }));
+      getPendingFn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:UpdateItem'],
+        resources: [props.taskApprovalsTable.tableArn],
+      }));
 
       // --- Routes ---
       const approveTask = taskById.addResource('approve');

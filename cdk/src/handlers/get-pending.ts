@@ -23,8 +23,9 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import type { GetPendingResponse, PendingApprovalSummary } from './shared/types';
+import type { GetPendingResponse, PendingApprovalSummary, Severity } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
@@ -147,7 +148,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 }
 
-function coerceSeverity(value: unknown): 'low' | 'medium' | 'high' {
+function coerceSeverity(value: unknown): Severity {
   if (value === 'low' || value === 'medium' || value === 'high') {
     return value;
   }
@@ -168,13 +169,4 @@ function computeExpiresAt(createdAt: string, timeoutS: number): string {
     return createdAt;
   }
   return new Date(created + timeoutS * 1000).toISOString();
-}
-
-function formatMinuteBucket(date: Date): string {
-  const y = date.getUTCFullYear().toString().padStart(4, '0');
-  const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
-  const d = date.getUTCDate().toString().padStart(2, '0');
-  const h = date.getUTCHours().toString().padStart(2, '0');
-  const mi = date.getUTCMinutes().toString().padStart(2, '0');
-  return `${y}${m}${d}${h}${mi}`;
 }
