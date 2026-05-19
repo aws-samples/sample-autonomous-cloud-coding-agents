@@ -19,6 +19,7 @@
 
 import { Box, Text } from 'ink';
 import React from 'react';
+import { formatMilestone } from '../../format-milestones.js';
 import { EVENT_COLOR, EVENT_ICON, MILESTONE_COLOR, MILESTONE_ICON, trunc } from '../constants.js';
 import { TRUNC_TOOL_INPUT, type TaskEvent } from '../data.js';
 
@@ -38,94 +39,10 @@ function mbool(m: Record<string, unknown>, key: string): boolean {
   return m[key] === true;
 }
 
-function mstrlist(m: Record<string, unknown>, key: string): readonly string[] {
-  const v = m[key];
-  if (!Array.isArray(v)) return [];
-  return v.filter((x): x is string => typeof x === 'string');
-}
-
-/**
- * Format an `agent_milestone` event by its `metadata.milestone` sub-name.
- * The agent runtime emits every approval-* event as event_type
- * `agent_milestone` (see `agent/src/progress_writer.py::_put_approval_milestone`),
- * so the live-mode rendering MUST demux on the sub-name — the outer
- * switch in `fmt()` handles the unwrapped names emitted by mock
- * fixtures and the Watch-synthesized pending-approval event.
- *
- * Returning `null` means "let the caller fall back to its default
- * milestone rendering" (sub-name + optional details), which is what
- * older TUI builds did before IMPL-26 surface promotion.
- */
-function fmtMilestone(m: Record<string, unknown>): string | null {
-  const sub = mstr(m, 'milestone');
-  switch (sub) {
-    case 'pre_approvals_loaded': {
-      const count = mnum(m, 'count') ?? 0;
-      const scopes = mstrlist(m, 'scopes');
-      if (count === 0) return 'No pre-approvals loaded';
-      const head = scopes.slice(0, 3).join(', ');
-      const tail = scopes.length > 3 ? `, +${scopes.length - 3} more` : '';
-      return `Pre-approvals loaded: ${count} scope${count === 1 ? '' : 's'}${head ? ` — ${head}${tail}` : ''}`;
-    }
-    case 'approval_requested':
-      return `APPROVAL NEEDED: ${mstr(m, 'tool_name')} — ${trunc(mstr(m, 'input_preview') || mstr(m, 'tool_input_preview'), TRUNC_TOOL_INPUT)}`;
-    case 'approval_granted':
-      return `Approved (..${mstr(m, 'request_id').slice(-4)})${mstr(m, 'scope') ? ` scope=${mstr(m, 'scope')}` : ''}`;
-    case 'approval_denied': {
-      const reason = mstr(m, 'reason');
-      return `Denied (..${mstr(m, 'request_id').slice(-4)})${reason ? ` — ${trunc(reason, 40)}` : ''}`;
-    }
-    case 'approval_timed_out': {
-      const eff = mnum(m, 'effective_timeout_s') ?? mnum(m, 'timeout_s');
-      return `Timed out (..${mstr(m, 'request_id').slice(-4)})${eff != null ? ` after ${eff}s` : ''}`;
-    }
-    case 'approval_stranded':
-      return `Stranded (..${mstr(m, 'request_id').slice(-4)}) — reconciler: ${mstr(m, 'reason') || 'task evicted'}`;
-    case 'approval_timeout_capped': {
-      const req = mnum(m, 'requested_timeout_s');
-      const eff = mnum(m, 'effective_timeout_s');
-      const reason = mstr(m, 'reason');
-      const rules = mstrlist(m, 'matching_rule_ids');
-      const ruleSuffix = rules.length > 0 ? ` (${rules.join(', ')})` : '';
-      return `Timeout capped: ${req ?? '?'}s → ${eff ?? '?'}s${reason ? ` (${reason}${ruleSuffix})` : ''}`;
-    }
-    case 'approval_ceiling_shrinking': {
-      const remaining = mnum(m, 'maxLifetime_remaining_s');
-      const margin = mnum(m, 'cleanup_margin_s');
-      const usable = remaining != null && margin != null ? remaining - margin : null;
-      return `Approval window shrinking — ~${usable ?? remaining ?? '?'}s of task lifetime left`;
-    }
-    case 'approval_cap_exceeded': {
-      const count = mnum(m, 'count') ?? 0;
-      const cap = mnum(m, 'cap') ?? 0;
-      return `Approval cap reached: ${count}/${cap} — task halted`;
-    }
-    case 'approval_rate_limit_exceeded': {
-      const rate = mnum(m, 'rate') ?? 0;
-      const limit = mnum(m, 'limit') ?? 0;
-      return `Approval rate limit: ${rate}/min > ${limit}/min`;
-    }
-    case 'approval_write_failed':
-      return `Approval write failed: ${trunc(mstr(m, 'error'), 60)}`;
-    case 'approval_resume_failed':
-      return `Approval resume failed (..${mstr(m, 'request_id').slice(-4)}): ${trunc(mstr(m, 'error'), 60)}`;
-    case 'approval_poll_degraded': {
-      const fails = mnum(m, 'consecutive_failures') ?? 0;
-      return `Approval polling degraded — ${fails} consecutive failures`;
-    }
-    case 'approval_late_win':
-      return `Late decision won: ${mstr(m, 'outcome')} (..${mstr(m, 'request_id').slice(-4)}) — ${mstr(m, 'reason')}`;
-    case 'policy_decision': {
-      // Recent-decision-cache hit (IMPL-23) — surface as a low-key
-      // info line so operators can correlate retry patterns.
-      const tool = mstr(m, 'tool_name');
-      const decision = mstr(m, 'cached_decision');
-      return `Policy cache hit: ${tool} → ${decision}`;
-    }
-    default:
-      return null;
-  }
-}
+// Cedar HITL milestone formatter is shared with `commands/watch.ts`
+// — see `cli/src/format-milestones.ts`. Single source of truth so
+// the TUI Watch panel and the plain CLI `bgagent watch` never drift
+// on user-visible payloads (`approval_timeout_capped`, etc.).
 
 /**
  * Format a task event for the Watch stream.
@@ -180,7 +97,7 @@ function fmt(e: TaskEvent): string {
       // back to the generic sub:details rendering if it returns null
       // (covers any future milestone the formatter hasn't been
       // taught about yet).
-      const formatted = fmtMilestone(m);
+      const formatted = formatMilestone(m);
       if (formatted !== null) return formatted;
       const sub = mstr(m, 'milestone');
       const details = mstr(m, 'details');
@@ -238,7 +155,7 @@ function fmt(e: TaskEvent): string {
       // that already includes the sub-name. Keeps the unwrapped path
       // and the wrapped path identical in output.
       const synth: Record<string, unknown> = { ...m, milestone: e.event_type };
-      const formatted = fmtMilestone(synth);
+      const formatted = formatMilestone(synth);
       return formatted ?? e.event_type;
     }
 

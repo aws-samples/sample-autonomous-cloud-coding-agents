@@ -22,6 +22,7 @@ import { ApiClient } from '../api-client';
 import { debug, isVerbose } from '../debug';
 import { ApiError } from '../errors';
 import { formatJson } from '../format';
+import { formatMilestone } from '../format-milestones';
 import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
 
 /**
@@ -200,6 +201,14 @@ export function renderEvent(event: TaskEvent): string {
       return `[${time}]   ◀ ${tool}${isError}: ${preview}`;
     }
     case 'agent_milestone': {
+      // Cedar HITL §11.1 milestones — share the formatter with the
+      // TUI so CLI watch and TUI Watch panel never drift on
+      // user-visible payloads (`approval_timeout_capped`, etc.). The
+      // formatter returns null for unknown sub-names; in that case we
+      // fall back to the legacy `<sub>: <details>` rendering so a
+      // future agent-side milestone never disappears from the stream.
+      const formatted = formatMilestone(meta);
+      if (formatted !== null) return `[${time}] ★ ${formatted}`;
       const milestone = meta.milestone ?? '';
       const details = meta.details ?? '';
       return `[${time}] ★ ${milestone}${details ? ': ' + details : ''}`;
