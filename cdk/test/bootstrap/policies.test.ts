@@ -20,6 +20,7 @@
 import { Stack } from 'aws-cdk-lib';
 import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
+import { observabilityPolicy } from '../../src/bootstrap/policies/observability';
 
 describe('infrastructurePolicy', () => {
   const stack = new Stack();
@@ -136,6 +137,74 @@ describe('IaCRole-ABCA-Application', () => {
         'lambda',
         'secretsmanager',
         'wafv2',
+      ]),
+    );
+  });
+});
+
+describe('IaCRole-ABCA-Observability', () => {
+  const stack = new Stack();
+  const doc = observabilityPolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+
+    expect(sids).toEqual([
+      'BedrockAgentCore',
+      'BedrockGuardrailsAndLogging',
+      'CloudWatchLogsAndDashboards',
+      'S3CDKAssets',
+      'KMSForCDKAssets',
+      'ECRForDockerAssets',
+      'ECRAuthToken',
+      'XRay',
+      'SSMParameterStoreForCDK',
+      'STSForCDK',
+    ]);
+  });
+
+  it('has unique SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+    const unique = new Set(sids);
+
+    expect(unique.size).toBe(sids.length);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    expect(prefixes).toEqual(
+      new Set([
+        'bedrock',
+        'bedrock-agentcore',
+        'cloudwatch',
+        'ecr',
+        'kms',
+        'logs',
+        's3',
+        'ssm',
+        'sts',
+        'xray',
       ]),
     );
   });
