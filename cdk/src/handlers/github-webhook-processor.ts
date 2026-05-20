@@ -26,8 +26,12 @@ import { logger } from './shared/logger';
 const s3 = new S3Client({});
 
 const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
+// CloudFront distribution domain — `<dist>.cloudfront.net`. Used as
+// the public host for the screenshot URL embedded in PR comments.
+// The bucket is private; CloudFront with OAC reads on the agent's
+// behalf.
+const SCREENSHOT_PUBLIC_HOST = process.env.SCREENSHOT_PUBLIC_HOST!;
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN!;
-const REGION = process.env.AWS_REGION ?? 'us-east-1';
 
 interface GitHubDeploymentStatusPayload {
   readonly action?: string;
@@ -156,7 +160,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const publicUrl = buildPublicUrl(SCREENSHOT_BUCKET, key);
+  const publicUrl = `https://${SCREENSHOT_PUBLIC_HOST}/${key}`;
   const commentBody = renderCommentBody(publicUrl, previewUrl);
 
   try {
@@ -237,11 +241,6 @@ function buildScreenshotKey(repo: string, sha: string, deploymentId: number | un
   const repoSlug = repo.replace('/', '_');
   const id = deploymentId !== undefined ? `-${deploymentId}` : '';
   return `screenshots/${repoSlug}/${sha}${id}.png`;
-}
-
-/** Build the public-readable HTTPS URL for an S3 object in the screenshot bucket. */
-function buildPublicUrl(bucket: string, key: string): string {
-  return `https://${bucket}.s3.${REGION}.amazonaws.com/${key}`;
 }
 
 /** Render the PR comment body. */
