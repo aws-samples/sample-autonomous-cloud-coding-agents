@@ -288,6 +288,7 @@ export function makeLinearCommand(): Command {
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else prompted; prefer interactive)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--rotate-webhook-secret', 'Re-prompt for the webhook signing secret even if one is already configured')
+      .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -357,12 +358,19 @@ export function makeLinearCommand(): Command {
         // ─── Step 1: Generate PKCE + open browser to Linear consent ────
         const pkce = generatePkce();
         const state = randomState();
+        // `opts.actorApp` is true by default; --no-actor-app sets it false.
+        // Commander populates `opts.actorApp = false` when --no-actor-app is passed.
+        const useActorApp = opts.actorApp !== false;
         const authorizationUrl = buildAuthorizationUrl({
           clientId,
           redirectUri: CALLBACK_URL,
           state,
           codeChallenge: pkce.codeChallenge,
+          actorApp: useActorApp,
         });
+        if (!useActorApp) {
+          console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
+        }
 
         // The localhost callback server starts BEFORE we open the browser
         // so it's listening when Linear's redirect arrives.

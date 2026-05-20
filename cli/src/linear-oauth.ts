@@ -141,7 +141,10 @@ export function buildAuthorizationUrl(opts: {
     client_id: opts.clientId,
     redirect_uri: opts.redirectUri,
     response_type: 'code',
-    scope: (opts.scopes ?? LINEAR_OAUTH_SCOPES).join(','),
+    // RFC 6749 §3.3: scope is a space-separated list. Linear rejects
+    // comma-separated scopes with "Invalid redirect_uri" — the error
+    // is misleading; verified by 2.0b smoke test 2026-05-19.
+    scope: (opts.scopes ?? LINEAR_OAUTH_SCOPES).join(' '),
     state: opts.state,
     code_challenge: opts.codeChallenge,
     code_challenge_method: 'S256',

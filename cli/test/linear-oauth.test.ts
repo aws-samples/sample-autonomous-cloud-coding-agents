@@ -88,7 +88,9 @@ describe('buildAuthorizationUrl', () => {
     expect(parsed.searchParams.get('code_challenge')).toBe('challenge-base64url');
     expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
     expect(parsed.searchParams.get('actor')).toBe('app');
-    expect(parsed.searchParams.get('scope')).toBe('read,write,app:assignable,app:mentionable');
+    // Space-separated per RFC 6749 §3.3. Comma-separated triggers Linear's
+    // misleading "Invalid redirect_uri" — caught during smoke test 2026-05-19.
+    expect(parsed.searchParams.get('scope')).toBe('read write app:assignable app:mentionable');
   });
 
   test('actorApp:false drops the actor param entirely (regression OAuth fallback)', () => {
