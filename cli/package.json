@@ -15,6 +15,7 @@
     "security:retire": "retire --path . --severity high"
   },
   "devDependencies": {
+    "@jest/globals": "^30.3.0",
     "@stylistic/eslint-plugin": "^2",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",

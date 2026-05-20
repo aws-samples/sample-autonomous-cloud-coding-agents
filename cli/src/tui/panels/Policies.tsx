@@ -187,12 +187,17 @@ const Policies: React.FC<PoliciesProps> = ({ active }) => {
           {selected.summary && !selected.condition_summary && (
             <Box><Text dimColor>Summary:      </Text><Text>{selected.summary}</Text></Box>
           )}
-          {selected.severity && (
-            <Box>
-              <Text dimColor>Risk level:   </Text>
-              <Text color={SEVERITY_COLOR[selected.severity.toUpperCase()]}>{SEVERITY_LABEL[selected.severity.toUpperCase()] ?? selected.severity}</Text>
-            </Box>
-          )}
+          {selected.severity && (() => {
+            const sevKey = selected.severity.toUpperCase();
+            return (
+              <Box>
+                <Text dimColor>Risk level:   </Text>
+                <Text color={SEVERITY_COLOR[sevKey]}>
+                  {SEVERITY_LABEL[sevKey] ?? selected.severity}
+                </Text>
+              </Box>
+            );
+          })()}
           {selected.approval_timeout_s && (
             <Box><Text dimColor>Timeout:      </Text><Text>{selected.approval_timeout_s}s — auto-denied if no response</Text></Box>
           )}

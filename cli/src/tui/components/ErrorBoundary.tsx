@@ -25,11 +25,11 @@ interface Props { children: React.ReactNode }
 interface State { error: Error | null }
 
 class ErrorBoundary extends React.Component<Props, State> {
-  state: State = { error: null };
-
   static getDerivedStateFromError(error: Error): State {
     return { error };
   }
+
+  state: State = { error: null };
 
   render() {
     if (this.state.error) {

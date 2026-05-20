@@ -58,8 +58,7 @@ import type {
   RegisteredRepoView,
   TaskRowView,
 } from '../data.js';
-import type { DataSource, SubmitTaskInput } from './source.js';
-import { enrichPendingApproval } from './source.js';
+import { enrichPendingApproval, type DataSource, type SubmitTaskInput } from './source.js';
 
 function toTaskRowView(t: TaskDetail): TaskRowView {
   return {

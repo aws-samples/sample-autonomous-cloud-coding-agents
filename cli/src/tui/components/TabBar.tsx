@@ -21,8 +21,7 @@ import figures from 'figures';
 import { Box, Text } from 'ink';
 import React from 'react';
 import { useApprovals } from '../context.js';
-import { SEPARATOR_WIDTH } from '../data.js';
-import type { TaskRowView } from '../data.js';
+import { SEPARATOR_WIDTH, type TaskRowView } from '../data.js';
 import PeccyMini from './PeccyMini.js';
 
 export type PanelId = 'tasks' | 'watch' | 'approvals' | 'policies' | 'submit';

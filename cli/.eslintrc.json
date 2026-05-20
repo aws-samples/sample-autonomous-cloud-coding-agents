@@ -150,6 +150,7 @@
     "import/no-extraneous-dependencies": [
       "error",
       {
+        "packageDir": "./",
         "devDependencies": [
           "**/test/**",
           "**/build-tools/**"
@@ -373,6 +374,14 @@
       ],
       "rules": {
         "no-console": "off"
+      }
+    },
+    {
+      "files": [
+        "src/bin/**/*.ts"
+      ],
+      "rules": {
+        "license-header/header": "off"
       }
     }
   ]

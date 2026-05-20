@@ -21,6 +21,7 @@
  * TUI bootstrap. Exports `runTui()` for both the standalone
  * `npm run tui` dev path and the `bgagent tui` subcommand.
  */
+import { pathToFileURL } from 'node:url';
 import { render } from 'ink';
 import React from 'react';
 import type { DataSource } from './api/source.js';
@@ -58,6 +59,7 @@ export async function runTui(opts: RunTuiOptions = {}): Promise<void> {
   process.on('SIGTERM', onSigint);
   process.on('uncaughtException', (err) => {
     cleanup();
+    // eslint-disable-next-line no-console -- crash handler intentionally writes to stderr after restoring the terminal
     console.error(err);
     process.exit(1);
   });
@@ -75,6 +77,7 @@ export async function runTui(opts: RunTuiOptions = {}): Promise<void> {
   // for what is fundamentally a non-fatal background failure.
   process.on('unhandledRejection', (reason) => {
     cleanup();
+    // eslint-disable-next-line no-console -- crash handler intentionally writes to stderr after restoring the terminal
     console.error('Unhandled promise rejection in TUI:', reason);
     process.exit(1);
   });
@@ -102,12 +105,12 @@ export async function runTui(opts: RunTuiOptions = {}): Promise<void> {
 // Works in ESM (TUI is compiled with `module: Node16` + `type: module`
 // in the emitted package.json) via `import.meta.url` comparison.
 // `require.main === module` would ReferenceError here.
-import { pathToFileURL } from 'node:url';
 const invokedDirectly = typeof process !== 'undefined'
   && process.argv[1]
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   runTui().catch((err) => {
+    // eslint-disable-next-line no-console -- standalone-launch crash logger; alt-screen already torn down
     console.error(err);
     process.exit(1);
   });

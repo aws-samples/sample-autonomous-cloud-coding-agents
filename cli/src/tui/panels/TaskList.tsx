@@ -21,8 +21,7 @@ import figures from 'figures';
 import { Box, Text, useInput } from 'ink';
 import React, { useState, useCallback } from 'react';
 import { CHANNEL_COLOR, CHANNEL_LABEL, STATUS_COLOR, STATUS_ICON, STATUS_LABEL, timeAgo, trunc } from '../constants.js';
-import type { TaskRowView } from '../data.js';
-import { TRUNC_DESCRIPTION, TRUNC_REPO } from '../data.js';
+import { TRUNC_DESCRIPTION, TRUNC_REPO, type TaskRowView } from '../data.js';
 
 interface TaskListProps {
   tasks: TaskRowView[];

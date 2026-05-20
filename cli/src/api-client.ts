@@ -128,9 +128,9 @@ export class ApiClient {
       let detail = '';
       if (jsonParseOk) {
         // Prefer common body shapes (API Gateway uses `message`).
-        const body = json as { message?: unknown; Message?: unknown };
-        const raw = typeof body.message === 'string' ? body.message
-          : typeof body.Message === 'string' ? body.Message
+        const errorBody = json as { message?: unknown; Message?: unknown };
+        const raw = typeof errorBody.message === 'string' ? errorBody.message
+          : typeof errorBody.Message === 'string' ? errorBody.Message
             : JSON.stringify(json);
         if (raw) detail = ` — ${raw.slice(0, 200)}`;
       }

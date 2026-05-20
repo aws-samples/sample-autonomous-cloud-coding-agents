@@ -2,6 +2,19 @@
  *  MIT No Attribution
  *
  *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
  */
 
 /**
@@ -17,13 +30,13 @@
  * panel resets the pending cadence to fast.
  */
 
+import { jest } from '@jest/globals';
 import { Box, Text } from 'ink';
 import { render } from 'ink-testing-library';
-import { jest } from '@jest/globals';
 import React, { useEffect } from 'react';
+import { flush } from './_helpers';
 import { MockDataSource } from '../../src/tui/api/source-mock';
 import { DataProvider, useData } from '../../src/tui/hooks/useData';
-import { flush } from './_helpers';
 
 /** Tiny harness component that exposes the data context to the
  *  surrounding test by reading and rendering a counter for each

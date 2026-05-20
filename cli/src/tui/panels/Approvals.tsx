@@ -69,13 +69,13 @@ const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
   }, []);
 
   const { byTask, flatList } = useMemo(() => {
-    const byTask = new Map<string, typeof approvals>();
+    const grouped = new Map<string, typeof approvals>();
     for (const a of approvals) {
-      const arr = byTask.get(a.task_id) ?? [];
+      const arr = grouped.get(a.task_id) ?? [];
       arr.push(a);
-      byTask.set(a.task_id, arr);
+      grouped.set(a.task_id, arr);
     }
-    return { byTask, flatList: Array.from(byTask.values()).flat() };
+    return { byTask: grouped, flatList: Array.from(grouped.values()).flat() };
   }, [approvals]);
 
   useEffect(() => {
