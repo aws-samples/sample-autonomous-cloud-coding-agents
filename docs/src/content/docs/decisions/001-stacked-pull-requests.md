@@ -98,8 +98,11 @@ When a lower PR changes after review feedback:
 The default topology is a **classic stack** — each PR targets its predecessor's branch. When an early PR merges to `main` before later PRs are reviewed:
 
 1. **Retarget** all PRs that pointed at the merged branch to `main` (or to the next unmerged predecessor). Use `gh pr edit <N> --base main` or GitHub's "Retarget" button.
-2. **Rebase** each retargeted PR onto its new base so the diff is clean.
-3. **CI must pass** on each retargeted PR independently after rebase.
+2. **Rebase** each retargeted PR onto its new base so the diff is clean — use `git rebase --skip` for commits whose content is already in main via the merged predecessor.
+3. **Force-push with lease** (`--force-with-lease`) so the PR diff on GitHub shows only net-new changes, not already-merged content.
+4. **CI must pass** on each retargeted PR independently after rebase.
+
+**This sequence is mandatory, not optional.** Until it completes, GitHub shows already-merged commits in the child PR's diff — reviewers cannot distinguish new work from old, defeating the purpose of stacking. A merge is not complete until all child PRs are rebased clean.
 
 After retargeting, the remaining PRs form a shorter stack rooted on `main`. This is the expected, normal path — not an exception.
 
