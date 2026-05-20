@@ -26,6 +26,7 @@ import ScopePicker from '../components/ScopePicker.js';
 import { SEVERITY_COLOR, SEVERITY_LABEL, trunc, fmtDuration } from '../constants.js';
 import { useApprovals, useEditing } from '../context.js';
 import { SEPARATOR_WIDTH, TRUNC_TOOL_INPUT, TRUNC_REASON, TRUNC_DESCRIPTION_LONG } from '../data.js';
+import { useData } from '../hooks/useData.js';
 
 interface ApprovalsProps {
   active: boolean;
@@ -34,7 +35,17 @@ interface ApprovalsProps {
 
 const Approvals: React.FC<ApprovalsProps> = ({ active, onDetailChange }) => {
   const { approvals, approve, deny } = useApprovals();
+  const { resetPendingCadence } = useData();
   const { setEditing } = useEditing();
+
+  // When the panel becomes active, reset the /v1/pending cadence to
+  // fast (3 s) and trigger an immediate refresh. Without this, after
+  // sitting idle on Tasks for a while the pending ladder will have
+  // backed off to 30 s, and the user would see stale approvals on
+  // entry. This is the targeted-Option-4 piece of the cadence fix.
+  useEffect(() => {
+    if (active) resetPendingCadence();
+  }, [active, resetPendingCadence]);
   const [cursor, setCursor] = useState(0);
   const [message, setMessage] = useState('');
   const [confirmDeny, setConfirmDeny] = useState<string | null>(null);

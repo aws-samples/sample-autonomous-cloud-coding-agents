@@ -74,6 +74,23 @@ export interface TaskApiProps {
   readonly nudgeRateLimitPerMinute?: number;
 
   /**
+   * Per-user per-minute `GET /v1/pending` rate limit.
+   *
+   * The default of 10 was sized for the original CLI-only `bgagent pending`
+   * workflow where users polled by hand. The TUI's adaptive ladder polls
+   * `/v1/pending` on a 2-30s cadence and a fast first poll naturally lands
+   * 20-30 calls in the first minute — comfortably above 10. The handler's
+   * default (`get-pending.ts::PENDING_RATE_LIMIT_PER_MINUTE`) is also 10,
+   * so omitting this prop preserves the historical behaviour.
+   *
+   * Sized for: a single TUI session at 2s sustained cadence (30/min) plus
+   * room for concurrent CLI `bgagent pending` checks during testing.
+   *
+   * @default 60
+   */
+  readonly pendingRateLimitPerMinute?: number;
+
+  /**
    * The DynamoDB repo config table. When provided, task creation checks
    * that the target repository is onboarded before accepting the task.
    */
@@ -652,12 +669,21 @@ export class TaskApi extends Construct {
       props.taskEventsTable.grantReadWriteData(denyTaskFn);
 
       // GetPendingFn — GET /pending
+      // Adds `PENDING_RATE_LIMIT_PER_MINUTE` on top of the shared
+      // approval env so the per-user rate limit is configurable from
+      // the construct prop (default 60/min — sized to support a
+      // single TUI session at 2s sustained cadence with headroom for
+      // concurrent CLI `bgagent pending` calls). Approve/deny don't
+      // need this var so it stays out of `approvalEnv`.
       const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
         entry: path.join(handlersDir, 'get-pending.ts'),
         handler: 'handler',
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
-        environment: approvalEnv,
+        environment: {
+          ...approvalEnv,
+          PENDING_RATE_LIMIT_PER_MINUTE: String(props.pendingRateLimitPerMinute ?? 60),
+        },
         bundling: commonBundling,
         timeout: Duration.seconds(10),
         memorySize: 256,

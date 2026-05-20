@@ -134,6 +134,25 @@ const App: React.FC = () => {
         {panel === 'policies' && <Policies active />}
         {panel === 'submit' && <Submit active onSubmitted={handleSubmitted} />}
       </Box>
+      {/* Provider error banner — surfaces rate-limit and other
+          DataProvider failures to the user rather than swallowing
+          them silently. Phase A live drive caught the case where a
+          429 on /v1/pending was invisible to the TUI; the user kept
+          opening Approvals expecting fresh data while the provider
+          was actually getting throttled. */}
+      {snapshot.error && (
+        <Box paddingX={1}>
+          <Text color={snapshot.rateLimited ? 'yellow' : 'red'}>
+            {snapshot.rateLimited ? '⚠ ' : '✗ '}
+            {snapshot.error}
+          </Text>
+          {snapshot.rateLimited && (
+            <Text dimColor>
+              {' '}— next retry in ~{Math.round(snapshot.pollIntervalMs / 1000)}s
+            </Text>
+          )}
+        </Box>
+      )}
       <HelpBar panel={panel} hasApproval={hasApproval} isEditing={isEditing} editMode={editMode} inDetail={approvalsInDetail} />
     </Box>
   );
