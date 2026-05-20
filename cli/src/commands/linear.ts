@@ -381,8 +381,7 @@ export function makeLinearCommand(): Command {
           const opened = await openBrowser(authorizationUrl);
           if (opened) {
             console.log('  → Opened your browser to the Linear consent screen.');
-            console.log('    Your browser will warn about a self-signed cert on the localhost callback —');
-            console.log('    click through (Advanced → Proceed). The cert is local-only.');
+            console.log('    The browser will redirect to a localhost page after you Authorize — that\'s expected.');
           } else {
             console.log('  → Could not open browser automatically. Open this URL manually:');
             console.log(`    ${authorizationUrl}`);

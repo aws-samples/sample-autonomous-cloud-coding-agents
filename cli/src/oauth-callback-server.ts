@@ -17,23 +17,27 @@
  *  SOFTWARE.
  */
 
-import { execFileSync } from 'child_process';
-import * as fs from 'fs';
-import * as https from 'https';
-import * as os from 'os';
-import * as path from 'path';
+import * as http from 'http';
 import { URL } from 'url';
 import { CliError } from './errors';
 
 /**
  * Localhost OAuth callback URL used during `bgagent linear setup`.
- * Must match the URL allowlisted on the CLI workload identity in CDK
- * (cdk/src/constructs/cli-workload-identity.ts).
+ *
+ * HTTP (not HTTPS) is intentional. Per RFC 8252 §7.3 (OAuth 2.0 for
+ * Native Apps) and Linear's docs, providers MUST treat http://localhost
+ * URLs as a special case and not require TLS — the connection never
+ * leaves the host. Using HTTP here removes the self-signed-cert browser
+ * warning that scared early testers during the Phase 2.0b smoke.
+ *
+ * The redirect_uri value sent to Linear MUST byte-match what's configured
+ * in Linear's app — keep this constant in sync with the LINEAR_SETUP_GUIDE
+ * playbook entry.
  */
 export const CALLBACK_HOST = 'localhost';
-export const CALLBACK_PORT = 8443;
+export const CALLBACK_PORT = 8080;
 export const CALLBACK_PATH = '/oauth/callback';
-export const CALLBACK_URL = `https://${CALLBACK_HOST}:${CALLBACK_PORT}${CALLBACK_PATH}`;
+export const CALLBACK_URL = `http://${CALLBACK_HOST}:${CALLBACK_PORT}${CALLBACK_PATH}`;
 
 const SUCCESS_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>bgagent setup</title>
@@ -44,60 +48,6 @@ const FAILURE_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>bgagent setup</title>
 <style>body{font-family:system-ui,sans-serif;max-width:480px;margin:8em auto;text-align:center;color:#222}h1{color:#c00}p{color:#666}</style></head>
 <body><h1>✗ Authorization not captured</h1><p>The callback URL did not include a session_id. Re-run <code>bgagent linear setup</code> and try again.</p></body></html>`;
-
-/**
- * Generate a self-signed cert + key pair for localhost using openssl.
- *
- * The cert is created in a temp dir and removed on close; the user's
- * browser will warn ("connection not private") on the redirect because
- * it's self-signed. This is acceptable: the cert is only used between
- * the user's browser and `localhost`, never traverses the network.
- *
- * Why openssl shell-out instead of node-forge or selfsigned: avoids a
- * runtime dependency for a one-off setup-time operation. openssl ships
- * with macOS and most Linux distros; if it's missing, fail loudly with
- * a remediation hint rather than silently falling back.
- */
-export function generateSelfSignedCert(): { certPath: string; keyPath: string; cleanup: () => void } {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-oauth-'));
-  const keyPath = path.join(tmpDir, 'key.pem');
-  const certPath = path.join(tmpDir, 'cert.pem');
-
-  try {
-    // -batch suppresses the interactive subject prompt; -subj sets a minimal
-    // subject. Localhost cert with 1-day validity (we only need it for the
-    // setup session — if you don't finish in 24h, regenerate).
-    execFileSync('openssl', [
-      'req',
-      '-x509',
-      '-newkey', 'rsa:2048',
-      '-keyout', keyPath,
-      '-out', certPath,
-      '-days', '1',
-      '-nodes',
-      '-subj', '/CN=localhost',
-      '-batch',
-    ], { stdio: 'pipe' });
-  } catch (err) {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    throw new CliError(
-      `Failed to generate localhost cert via openssl: ${err instanceof Error ? err.message : String(err)}. `
-      + `Confirm \`openssl\` is installed and on PATH (ships with macOS and most Linux distros).`,
-    );
-  }
-
-  return {
-    certPath,
-    keyPath,
-    cleanup: () => {
-      try {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-      } catch {
-        // Best effort — leftover certs in /tmp are harmless.
-      }
-    },
-  };
-}
 
 export interface CallbackResult {
   /**
@@ -157,7 +107,6 @@ export async function awaitOauthCallback(
   options: CallbackServerOptions = {},
 ): Promise<CallbackResult> {
   const timeoutMs = options.timeoutMs ?? 700_000;
-  const cert = generateSelfSignedCert();
 
   return new Promise<CallbackResult>((resolve, reject) => {
     let settled = false;
@@ -167,7 +116,6 @@ export async function awaitOauthCallback(
       try {
         fn();
       } finally {
-        cert.cleanup();
         clearTimeout(timer);
         // .close() shuts down the listener; in-flight responses still complete.
         try {
@@ -178,11 +126,7 @@ export async function awaitOauthCallback(
       }
     };
 
-    const server = https.createServer(
-      {
-        key: fs.readFileSync(cert.keyPath),
-        cert: fs.readFileSync(cert.certPath),
-      },
+    const server = http.createServer(
       (req, res) => {
         // Defensive: if we somehow get a request after settling, just close it.
         if (settled || !req.url) {

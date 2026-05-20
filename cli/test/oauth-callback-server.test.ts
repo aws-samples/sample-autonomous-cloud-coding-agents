@@ -17,28 +17,24 @@
  *  SOFTWARE.
  */
 
-import * as fs from 'fs';
-import * as https from 'https';
+import * as http from 'http';
 import {
   awaitOauthCallback,
   CALLBACK_PORT,
   CALLBACK_URL,
-  generateSelfSignedCert,
 } from '../src/oauth-callback-server';
 
 /**
- * Make a self-signed-cert-tolerant HTTPS GET request to localhost.
- * Returns the response status + body. Closes the connection cleanly so
- * the server can finish settling without hanging the test.
+ * Make a plain HTTP GET request to localhost. Returns the response
+ * status + body. Closes the connection cleanly so the server can
+ * finish settling without hanging the test.
  */
 function localGet(urlSuffix: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = https.get({
+    const req = http.get({
       host: 'localhost',
       port: CALLBACK_PORT,
       path: urlSuffix,
-      // We're testing our own self-signed cert, so accept it.
-      rejectUnauthorized: false,
     }, (res) => {
       let body = '';
       res.on('data', (chunk) => { body += chunk; });
@@ -48,25 +44,11 @@ function localGet(urlSuffix: string): Promise<{ status: number; body: string }> 
   });
 }
 
-describe('generateSelfSignedCert', () => {
-  test('produces readable cert + key files and a working cleanup', () => {
-    const cert = generateSelfSignedCert();
-    expect(fs.existsSync(cert.certPath)).toBe(true);
-    expect(fs.existsSync(cert.keyPath)).toBe(true);
-    // Cert PEM has the standard header — quick sanity check.
-    expect(fs.readFileSync(cert.certPath, 'utf-8')).toContain('-----BEGIN CERTIFICATE-----');
-    expect(fs.readFileSync(cert.keyPath, 'utf-8')).toContain('-----BEGIN PRIVATE KEY-----');
-    cert.cleanup();
-    expect(fs.existsSync(cert.certPath)).toBe(false);
-    expect(fs.existsSync(cert.keyPath)).toBe(false);
-  });
-});
-
 describe('awaitOauthCallback', () => {
-  // The real OAuth flow waits on Linear/AWS — to avoid binding port 8443 in
-  // CI (which may be in use), these tests run sequentially via Jest's default
-  // test isolation per file. The 8443 port must be free for these tests; if
-  // a developer has another bgagent setup running locally, expect EADDRINUSE.
+  // The real OAuth flow waits on Linear — to avoid binding the callback port
+  // (8080) in CI when it might be in use, these tests run sequentially via
+  // Jest's default test isolation per file. If a developer has another
+  // bgagent setup running locally, expect EADDRINUSE.
 
   test('captures session_id from the first valid request and resolves', async () => {
     // Fire the server + the request in parallel; the server resolves once it
@@ -158,6 +140,8 @@ describe('awaitOauthCallback', () => {
     // Regression-lock: the URL is also baked into the CDK construct's
     // allowlist (cdk/src/constructs/cli-workload-identity.ts default).
     // Drift here = silent OAuth failure at runtime ("redirect_uri not allowlisted").
-    expect(CALLBACK_URL).toBe('https://localhost:8443/oauth/callback');
+    // RFC 8252 §7.3: http://localhost is the right shape for native-app OAuth
+    // callbacks (no TLS required, no cert warnings). Port 8080 is conventional.
+    expect(CALLBACK_URL).toBe('http://localhost:8080/oauth/callback');
   });
 });
