@@ -2,6 +2,7 @@
 
 **Status:** accepted
 **Date:** 2026-05-19
+**Implementation:** Tracked in RFC #120; artifacts referenced below land progressively across the 8-PR stack and are not yet present on `main`.
 
 ## Context
 
@@ -18,7 +19,7 @@ The ABCA project documented three scoped policies in `docs/design/DEPLOYMENT_ROL
 
 ## Decision
 
-### Policies as typed TypeScript code in `cdk/src/bootstrap/`
+### Policies as typed TypeScript code in `cdk/src/bootstrap/` *(lands in #122)*
 
 Rationale for location:
 - **Agent routing** — `AGENTS.md` routes CDK/IAM changes to `cdk/`. An agent modifying a construct that adds a DynamoDB table naturally looks here for the policy it must update.
@@ -38,12 +39,12 @@ Semver and hash are emitted as CloudFormation outputs on the CDKToolkit stack, e
 
 ### Two-layer preflight validation
 
-1. **CDK Aspect (synth-time)** — runs during `mise //cdk:synth`, visits every `CfnResource`, looks up required actions in a resource-action-map, compares against declared policy. Catches issues at dev time.
-2. **Live-account validator (deploy-time)** — `mise //cdk:preflight` reads CDKToolkit stack outputs, compares version/hash against requirements. Fails fast with an actionable "re-bootstrap required" message before CloudFormation starts.
+1. **CDK Aspect (synth-time)** *(lands in #125)* — will run during `mise //cdk:synth`, visiting every `CfnResource`, looking up required actions in a resource-action-map (#124), and comparing against declared policy. Catches issues at dev time.
+2. **Live-account validator (deploy-time)** *(lands in #126)* — `mise //cdk:preflight` will read CDKToolkit stack outputs, compare version/hash against requirements, and fail fast with an actionable "re-bootstrap required" message before CloudFormation starts.
 
 ### Custom bootstrap template
 
-Generated from the policy source code (not hand-maintained). Operators run `mise //cdk:bootstrap` to provision least-privilege roles in a single command. The template replaces `AdministratorAccess` with the three managed policies while retaining all other default bootstrap resources.
+*(Lands in #123)* — will be generated from the policy source code (not hand-maintained). Operators will run `mise //cdk:bootstrap` to provision least-privilege roles in a single command. The template replaces `AdministratorAccess` with the three managed policies while retaining all other default bootstrap resources.
 
 ### Delivery via stacked PRs (ADR-001)
 
@@ -63,7 +64,7 @@ The implementation is decomposed into 8 sub-issues, each independently reviewabl
 
 ## References
 
-- ADR-001 — delivery methodology (stacked PRs)
+- [ADR-001](./001-stacked-pull-requests.md) — delivery methodology (stacked PRs)
 - RFC #120 — parent issue with full design and sub-issue breakdown
 - `docs/design/DEPLOYMENT_ROLES.md` — current documentation (will become generated)
 - PR #46 — original policy derivation and validation methodology
