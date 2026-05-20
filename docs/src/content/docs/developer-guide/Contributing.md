@@ -32,6 +32,7 @@ Guidelines:
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match.
 - If you change docs sources (`docs/guides/`, `docs/design/`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
+- For cross-cutting or hard-to-reverse decisions, add an ADR to `docs/decisions/` (see [ADR README](/architecture/readme)).
 
 ### 4. Commit
 
