@@ -18,6 +18,7 @@
  */
 
 import { Stack } from 'aws-cdk-lib';
+import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
 
 describe('infrastructurePolicy', () => {
@@ -72,6 +73,69 @@ describe('infrastructurePolicy', () => {
         'iam',
         'ec2',
         'route53resolver',
+      ]),
+    );
+  });
+});
+
+describe('IaCRole-ABCA-Application', () => {
+  const stack = new Stack();
+  const doc = applicationPolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+
+    expect(sids).toEqual([
+      'DynamoDB',
+      'Lambda',
+      'APIGateway',
+      'Cognito',
+      'WAFv2',
+      'EventBridge',
+      'SecretsManager',
+      'SecretsManagerAccountLevel',
+    ]);
+  });
+
+  it('has unique SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+    const unique = new Set(sids);
+
+    expect(unique.size).toBe(sids.length);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    expect(prefixes).toEqual(
+      new Set([
+        'apigateway',
+        'cognito-idp',
+        'dynamodb',
+        'events',
+        'lambda',
+        'secretsmanager',
+        'wafv2',
       ]),
     );
   });
