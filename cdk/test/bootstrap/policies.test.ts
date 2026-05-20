@@ -18,6 +18,7 @@
  */
 
 import { Stack } from 'aws-cdk-lib';
+import { allPolicies } from '../../src/bootstrap/policies';
 import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
 import { observabilityPolicy } from '../../src/bootstrap/policies/observability';
@@ -207,5 +208,34 @@ describe('IaCRole-ABCA-Observability', () => {
         'xray',
       ]),
     );
+  });
+});
+
+describe('Cross-policy validation', () => {
+  const stack = new Stack();
+  const policies = allPolicies();
+
+  it('all SIDs are globally unique across all three policies', () => {
+    const allSids: string[] = [];
+
+    for (const policy of policies) {
+      const resolved = stack.resolve(policy);
+      const statements = resolved.Statement as Array<{ Sid: string }>;
+      allSids.push(...statements.map((s) => s.Sid));
+    }
+
+    const unique = new Set(allSids);
+    expect(unique.size).toBe(allSids.length);
+  });
+
+  it('returns exactly 3 policies', () => {
+    expect(policies).toHaveLength(3);
+  });
+
+  it('every policy is under 6144 character limit', () => {
+    for (const policy of policies) {
+      const rendered = JSON.stringify(policy.toJSON());
+      expect(rendered.length).toBeLessThan(6144);
+    }
   });
 });
