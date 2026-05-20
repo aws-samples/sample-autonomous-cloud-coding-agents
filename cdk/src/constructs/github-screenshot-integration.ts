@@ -140,6 +140,7 @@ export class GitHubScreenshotIntegration extends Construct {
       memorySize: 512,
       environment: {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
+        SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       },
       bundling: commonBundling,

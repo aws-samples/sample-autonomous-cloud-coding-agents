@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
-import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
-import * as iam from 'aws-cdk-lib/aws-iam';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -28,29 +29,18 @@ export const SCREENSHOT_TTL_DAYS = 30;
 
 /**
  * Object-key prefix for all screenshots. Key layout:
- * ``screenshots/<task_id>.png``. The bucket policy grants public
- * ``s3:GetObject`` on this prefix only — anything written outside is
- * invisible to anonymous readers.
+ * ``screenshots/<repo>/<sha>.png``. The CloudFront distribution serves
+ * the entire bucket, but the processor only ever writes under this
+ * prefix.
  */
 export const SCREENSHOT_KEY_PREFIX = 'screenshots/';
-
-/**
- * Build the public HTTPS URL for a screenshot object. Path-style URL is
- * intentional — virtual-hosted style breaks for buckets with dots in
- * the name (CDK auto-generated names sometimes include dots when the
- * region is appended).
- */
-export function screenshotPublicUrl(bucket: s3.IBucket, key: string): string {
-  const region = Stack.of(bucket).region;
-  return `https://${bucket.bucketName}.s3.${region}.amazonaws.com/${key}`;
-}
 
 /**
  * Properties for ScreenshotBucket construct.
  */
 export interface ScreenshotBucketProps {
   /**
-   * Removal policy for the bucket.
+   * Removal policy for the bucket + distribution.
    * @default RemovalPolicy.DESTROY
    */
   readonly removalPolicy?: RemovalPolicy;
@@ -63,40 +53,37 @@ export interface ScreenshotBucketProps {
 }
 
 /**
- * S3 bucket hosting screenshot PNGs that the agent embeds in GitHub PR
- * + Linear issue comments.
+ * Private S3 bucket fronted by a CloudFront distribution that serves
+ * screenshot PNGs to GitHub Markdown / Linear render pipelines.
  *
- * The agent writes ``screenshots/<task_id>.png`` after AgentCore Browser
- * captures the deployed GitHub Pages URL. Both GitHub Markdown rendering
- * and Linear's image previews fetch the URL anonymously, so the prefix
- * is configured for unauthenticated reads.
+ * Why CloudFront and not a public-read bucket: the AWS account-level
+ * Block Public Access is on (S3 control plane refuses to attach any
+ * public bucket policy), and disabling it would change the security
+ * posture of the whole account. CloudFront with Origin Access Control
+ * is the AWS-recommended path for "S3 object served anonymously over
+ * HTTPS." Bucket stays fully private; only the distribution principal
+ * has GetObject.
  *
- * Security shape:
- *  - ``blockPublicAcls`` and ``ignorePublicAcls`` true — no per-object ACLs
- *    can grant access; only the bucket policy decides.
- *  - ``blockPublicPolicy`` and ``restrictPublicBuckets`` false — the policy
- *    intentionally grants public read on ``screenshots/*``.
- *  - Bucket policy: anonymous ``s3:GetObject`` limited to the
- *    ``screenshots/*`` key prefix and TLS-only transport. Writes still
- *    require IAM (the agent's runtime role).
- *  - SSE-S3 at rest, ``enforceSSL`` true.
- *  - 30-day lifecycle so screenshots don't accumulate forever.
+ * Layout:
+ *   s3://<bucket>/screenshots/<repo>/<sha>.png   (private)
+ *   https://<dist>.cloudfront.net/screenshots/<repo>/<sha>.png   (anon)
+ *
+ * The 30-day lifecycle on the bucket is the source of truth for
+ * expiry — CloudFront's edge caches will see 403s after the TTL
+ * lapses, which is fine for stale PR comments.
  */
 export class ScreenshotBucket extends Construct {
-  /** The underlying S3 bucket. */
+  /** The underlying private S3 bucket. */
   public readonly bucket: s3.Bucket;
+
+  /** CloudFront distribution serving the bucket anonymously. */
+  public readonly distribution: cloudfront.Distribution;
 
   constructor(scope: Construct, id: string, props: ScreenshotBucketProps = {}) {
     super(scope, id);
 
     this.bucket = new s3.Bucket(this, 'Bucket', {
-      // Allow public bucket policy (the next statement); deny public ACLs.
-      blockPublicAccess: new s3.BlockPublicAccess({
-        blockPublicAcls: true,
-        ignorePublicAcls: true,
-        blockPublicPolicy: false,
-        restrictPublicBuckets: false,
-      }),
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
       lifecycleRules: [
@@ -111,34 +98,54 @@ export class ScreenshotBucket extends Construct {
       autoDeleteObjects: props.autoDeleteObjects ?? true,
     });
 
-    // Public read on the screenshots/ prefix only. Both GitHub markdown
-    // and Linear's `imageUploadFromUrl` need to GET the URL anonymously.
-    this.bucket.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'AllowAnonymousReadOfScreenshotsPrefix',
-      effect: iam.Effect.ALLOW,
-      principals: [new iam.AnyPrincipal()],
-      actions: ['s3:GetObject'],
-      resources: [`${this.bucket.bucketArn}/${SCREENSHOT_KEY_PREFIX}*`],
-      conditions: {
-        Bool: { 'aws:SecureTransport': 'true' },
+    // CloudFront → S3 via Origin Access Control. The bucket policy is
+    // generated automatically by `S3BucketOrigin.withOriginAccessControl`
+    // and grants `s3:GetObject` to the distribution's CF service principal
+    // only — no anonymous principal in the policy, so account-level BPA
+    // doesn't reject it.
+    this.distribution = new cloudfront.Distribution(this, 'Distribution', {
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        // Screenshots are immutable per (repo, sha) — long TTL is safe
+        // and minimizes origin S3 requests on hot PRs.
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
       },
-    }));
+      // No alternate domain or ACM cert — the default
+      // *.cloudfront.net hostname is fine for a backend artifact host.
+      enableLogging: false,
+      comment: 'ABCA screenshot artifacts (private S3 + OAC)',
+    });
 
     NagSuppressions.addResourceSuppressions(this.bucket, [
       {
         id: 'AwsSolutions-S1',
         reason:
-          'Server access logs are not enabled for this bucket; screenshots are ephemeral artifacts (30-day TTL) embedded in GitHub PR comments and Linear issues. Adding access logging would generate substantial log volume for a low-value security signal — public reads are by design and the prefix is scoped to PNG renders only.',
+          'Server access logs are not enabled for this bucket; screenshots are ephemeral artifacts (30-day TTL) embedded in GitHub PR comments. Adding access logging would generate substantial log volume for a low-value security signal.',
+      },
+    ], true);
+
+    NagSuppressions.addResourceSuppressions(this.distribution, [
+      {
+        id: 'AwsSolutions-CFR1',
+        reason: 'No geo restrictions are needed — screenshots are referenced from GitHub.com which is global; restricting origins would break cross-region PR reviewers.',
       },
       {
-        id: 'AwsSolutions-S2',
-        reason:
-          'Public-read on screenshots/* is intentional — GitHub markdown renderers and Linear `imageUploadFromUrl` both fetch the URL anonymously. The bucket policy is prefix-scoped (only `screenshots/*` is readable), and `blockPublicAcls`+`ignorePublicAcls` are still on so per-object ACLs can never override.',
+        id: 'AwsSolutions-CFR2',
+        reason: 'AWS WAF is not attached to this distribution. The content is read-only PNGs of preview deploys; no app logic, no input handling, no auth — WAF would only add cost without reducing risk.',
       },
       {
-        id: 'AwsSolutions-S5',
-        reason:
-          'Public-read on screenshots/* is intentional — GitHub markdown renderers and Linear imageUploadFromUrl both require anonymous GET on the embedded image URL. Followup #79 will move to CloudFront with signed URLs once the feature stabilizes.',
+        id: 'AwsSolutions-CFR3',
+        reason: 'Access logs are not enabled on the distribution for the same reason as the bucket — low-value high-volume signal for ephemeral artifacts.',
+      },
+      {
+        id: 'AwsSolutions-CFR4',
+        reason: 'Distribution uses the default *.cloudfront.net certificate (TLSv1+ enforced by AWS). No custom domain, so no minimum-TLS-version override needed.',
+      },
+      {
+        id: 'AwsSolutions-CFR7',
+        reason: 'OAC is in use (the construct calls `S3BucketOrigin.withOriginAccessControl`). cdk-nag misclassifies the L2 helper as an OAI deployment.',
       },
     ], true);
   }
