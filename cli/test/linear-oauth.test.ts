@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { CliError } from '../src/errors';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -29,7 +30,6 @@ import {
   linearOauthSecretName,
   refreshAccessToken,
 } from '../src/linear-oauth';
-import { CliError } from '../src/errors';
 
 describe('linearOauthSecretName', () => {
   test('prefixes with bgagent-linear-oauth-', () => {

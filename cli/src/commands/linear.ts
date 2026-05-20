@@ -33,6 +33,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
+import { formatJson } from '../format';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -42,7 +43,6 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
-import { formatJson } from '../format';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -85,7 +85,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     'Open https://linear.app/settings/api/applications/new and paste:',
     '',
-    `  Application name:    bgagent`,
+    '  Application name:    bgagent',
     `  Developer name:      ${developerName}`,
     `  Developer URL:       ${developerUrl}`,
     `  Description:         ${description}`,
@@ -97,7 +97,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '  Public:              OFF',
     '  Client credentials:  OFF',
     '  Webhooks:            ON              ← REQUIRED for actor=app',
-    `    Webhook URL:       https://example.com/placeholder  ← any HTTPS URL`,
+    '    Webhook URL:       https://example.com/placeholder  ← any HTTPS URL',
     '    (You do NOT need to subscribe to any events for the OAuth flow itself)',
     '',
     'Click Save, copy the Client ID and Client Secret, then return here.',
@@ -243,7 +243,7 @@ export function makeLinearCommand(): Command {
       .action((opts) => {
         if (opts.botName && !/\[bot\]$/.test(opts.botName)) {
           console.error(
-            `Error: --bot-name must end with the literal "[bot]" suffix `
+            'Error: --bot-name must end with the literal "[bot]" suffix '
             + `(Linear requires this for actor=app). Got: ${opts.botName}`,
           );
           process.exit(1);
@@ -293,7 +293,7 @@ export function makeLinearCommand(): Command {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
             `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + `This is the Linear urlKey, e.g. 'acme' from linear.app/acme/...`,
+            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
           );
         }
         const config = loadConfig();
@@ -318,7 +318,7 @@ export function makeLinearCommand(): Command {
         if (missing.length > 0) {
           throw new CliError(
             `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + `Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).`,
+            + 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).',
           );
         }
 
@@ -333,7 +333,7 @@ export function makeLinearCommand(): Command {
         } catch (err) {
           throw new CliError(
             `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + `Run \`bgagent login\` to refresh credentials.`,
+            + 'Run `bgagent login` to refresh credentials.',
           );
         }
 
@@ -415,14 +415,14 @@ export function makeLinearCommand(): Command {
         // is updated separately to expose both shapes.
         if (!callback.code || !callback.state) {
           throw new CliError(
-            `Localhost callback did not surface code/state. This indicates the callback `
-            + `server module is in legacy AgentCore-only mode; rebuild the CLI.`,
+            'Localhost callback did not surface code/state. This indicates the callback '
+            + 'server module is in legacy AgentCore-only mode; rebuild the CLI.',
           );
         }
         if (callback.state !== state) {
           throw new CliError(
             `OAuth state mismatch (expected '${state}', got '${callback.state}'). `
-            + `Possible CSRF attack or stale tab — re-run setup.`,
+            + 'Possible CSRF attack or stale tab — re-run setup.',
           );
         }
 
@@ -442,8 +442,8 @@ export function makeLinearCommand(): Command {
         const identity = await queryLinearIdentity(`Bearer ${tokenResponse.access_token}`);
         if (!identity) {
           throw new CliError(
-            `Linear viewer query rejected the access token. This is unexpected — token was just issued. `
-            + `Re-run \`bgagent linear setup\` if Linear's API is recovering from a transient outage.`,
+            'Linear viewer query rejected the access token. This is unexpected — token was just issued. '
+            + 'Re-run `bgagent linear setup` if Linear\'s API is recovering from a transient outage.',
           );
         }
         console.log(` ✓ (${identity.organization.name ?? identity.organization.urlKey ?? identity.organization.id})`);
@@ -451,7 +451,7 @@ export function makeLinearCommand(): Command {
         if (identity.organization.urlKey && identity.organization.urlKey !== slug) {
           console.log(
             `  ⚠ Slug '${slug}' does not match Linear's urlKey '${identity.organization.urlKey}'. `
-            + `Re-run with the correct slug to keep the registry key aligned with Linear.`,
+            + 'Re-run with the correct slug to keep the registry key aligned with Linear.',
           );
         }
 
@@ -535,7 +535,7 @@ export function makeLinearCommand(): Command {
           }
           if (!webhookSecret.startsWith('lin_wh_')) {
             throw new CliError(
-              `Webhook signing secrets start with 'lin_wh_'. Got something different — re-check the Linear webhook detail page.`,
+              'Webhook signing secrets start with \'lin_wh_\'. Got something different — re-check the Linear webhook detail page.',
             );
           }
           await sm.send(new PutSecretValueCommand({

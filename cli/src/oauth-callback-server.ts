@@ -170,8 +170,8 @@ export async function awaitOauthCallback(
           res.once('finish', () => {
             settle(() => reject(new CliError(
               `OAuth callback received without session_id or code/state. Got URL: ${req.url}. `
-              + `If you saw an error on Linear's consent screen, that's likely the root cause; `
-              + `re-run \`bgagent linear setup\` after fixing the Linear app config.`,
+              + 'If you saw an error on Linear\'s consent screen, that\'s likely the root cause; '
+              + 're-run `bgagent linear setup` after fixing the Linear app config.',
             )));
           });
           res.end(FAILURE_HTML);
@@ -190,7 +190,7 @@ export async function awaitOauthCallback(
       if ('code' in err && err.code === 'EADDRINUSE') {
         settle(() => reject(new CliError(
           `Port ${CALLBACK_PORT} is in use. Another bgagent setup may be running, `
-          + `or another local service has bound it. Stop it and re-run \`bgagent linear setup\`.`,
+          + 'or another local service has bound it. Stop it and re-run `bgagent linear setup`.',
         )));
       } else {
         settle(() => reject(err));
@@ -200,8 +200,8 @@ export async function awaitOauthCallback(
     const timer = setTimeout(() => {
       settle(() => reject(new CliError(
         `Timed out waiting ${Math.round(timeoutMs / 1000)}s for OAuth callback. `
-        + `Either you closed the browser before authorizing, or Linear's consent flow `
-        + `couldn't complete. Re-run \`bgagent linear setup\`.`,
+        + 'Either you closed the browser before authorizing, or Linear\'s consent flow '
+        + 'couldn\'t complete. Re-run `bgagent linear setup`.',
       )));
     }, timeoutMs);
     timer.unref();

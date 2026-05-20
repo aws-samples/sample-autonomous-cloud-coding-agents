@@ -17,12 +17,12 @@
  *  SOFTWARE.
  */
 
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 
