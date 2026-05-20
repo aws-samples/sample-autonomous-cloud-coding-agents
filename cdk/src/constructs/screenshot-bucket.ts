@@ -131,6 +131,11 @@ export class ScreenshotBucket extends Construct {
           'Server access logs are not enabled for this bucket; screenshots are ephemeral artifacts (30-day TTL) embedded in GitHub PR comments and Linear issues. Adding access logging would generate substantial log volume for a low-value security signal — public reads are by design and the prefix is scoped to PNG renders only.',
       },
       {
+        id: 'AwsSolutions-S2',
+        reason:
+          'Public-read on screenshots/* is intentional — GitHub markdown renderers and Linear `imageUploadFromUrl` both fetch the URL anonymously. The bucket policy is prefix-scoped (only `screenshots/*` is readable), and `blockPublicAcls`+`ignorePublicAcls` are still on so per-object ACLs can never override.',
+      },
+      {
         id: 'AwsSolutions-S5',
         reason:
           'Public-read on screenshots/* is intentional — GitHub markdown renderers and Linear imageUploadFromUrl both require anonymous GET on the embedded image URL. Followup #79 will move to CloudFront with signed URLs once the feature stabilizes.',
