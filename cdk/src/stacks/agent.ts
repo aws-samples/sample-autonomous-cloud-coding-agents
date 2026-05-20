@@ -827,7 +827,12 @@ export class AgentStack extends Stack {
 
     new CfnOutput(this, 'ScreenshotBucketName', {
       value: githubScreenshot.screenshotBucket.bucket.bucketName,
-      description: 'S3 bucket hosting Vercel-preview screenshots (public read on screenshots/* prefix)',
+      description: 'Private S3 bucket hosting Vercel-preview screenshots (served via CloudFront)',
+    });
+
+    new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
+      value: githubScreenshot.screenshotBucket.distribution.domainName,
+      description: 'CloudFront domain that serves the screenshot bucket anonymously to GitHub PR / Linear renders',
     });
 
     // --- Bedrock model invocation logging (account-level) ---
