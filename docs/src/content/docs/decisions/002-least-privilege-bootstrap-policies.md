@@ -6,7 +6,6 @@ title: 002 least privilege bootstrap policies
 
 **Status:** accepted
 **Date:** 2026-05-19
-**References:** ADR-001 (delivery methodology)
 
 ## Context
 
@@ -68,6 +67,7 @@ The implementation is decomposed into 8 sub-issues, each independently reviewabl
 
 ## References
 
+- ADR-001 — delivery methodology (stacked PRs)
 - RFC #120 — parent issue with full design and sub-issue breakdown
 - `docs/design/DEPLOYMENT_ROLES.md` — current documentation (will become generated)
 - PR #46 — original policy derivation and validation methodology
