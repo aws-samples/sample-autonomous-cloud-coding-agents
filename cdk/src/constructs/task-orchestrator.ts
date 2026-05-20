@@ -218,6 +218,21 @@ export class TaskOrchestrator extends Construct {
           '@aws-sdk/lib-dynamodb',
           '@aws-sdk/util-dynamodb',
         ],
+        // `@aws/durable-execution-sdk-js@1.1.3` ships an ESM build at
+        // `dist/index.mjs` that uses `fileURLToPath(import.meta.url)` to
+        // compute __dirname. When esbuild bundles ESM-into-CJS for Lambda,
+        // it stubs `import.meta = {}` so `import.meta.url` is undefined
+        // and `fileURLToPath(undefined)` crashes at module-load. Upstream
+        // issue: aws/aws-durable-execution-sdk-js#543. Discovered via
+        // 2.0b-O2 deploy 2026-05-20.
+        //
+        // Substitute `import.meta.url` with a banner-defined identifier
+        // that holds the file:// URL form of the bundled file's path.
+        // `fileURLToPath` rejects plain paths — it requires file:// URLs.
+        // The SDK uses the result for `dirname()` + `createRequire()`,
+        // both of which work fine against the bundled file's location.
+        define: { 'import.meta.url': '__bundled_import_meta_url' },
+        banner: 'const __bundled_import_meta_url = require("url").pathToFileURL(__filename).href;',
       },
     });
 
