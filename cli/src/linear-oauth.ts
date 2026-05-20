@@ -59,6 +59,11 @@ export interface LinearTokenResponse {
  * `expires_at` is computed at write time as ISO-8601, so consumers can
  * compare against `new Date()` without depending on Linear's
  * `expires_in` (relative to issuance) being correct on the wall clock.
+ *
+ * `client_id` and `client_secret` are co-located so Lambda-side refresh
+ * can hit Linear's `/oauth/token` without needing additional environment
+ * variables — one secret per workspace contains everything the runtime
+ * needs to renew the access token autonomously.
  */
 export interface StoredLinearOauthToken {
   readonly access_token: string;
@@ -67,6 +72,10 @@ export interface StoredLinearOauthToken {
   readonly expires_at: string;
   /** Space-separated scope string Linear returned (e.g. "read write app:..."). */
   readonly scope: string;
+  /** Linear OAuth app Client ID — needed for refresh. */
+  readonly client_id: string;
+  /** Linear OAuth app Client Secret — needed for refresh. */
+  readonly client_secret: string;
   /** Linear organization UUID; webhook payloads carry this. */
   readonly workspace_id: string;
   /** Linear urlKey; matches the suffix on the secret name. */

@@ -73,13 +73,13 @@ describe('LinearIntegration construct', () => {
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'link' });
   });
 
-  test('creates two Secrets Manager secrets (webhook + API token)', () => {
-    template.resourceCountIs('AWS::SecretsManager::Secret', 2);
+  test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {
+    // Phase 2.0b-O2: per-workspace OAuth tokens live in
+    // `bgagent-linear-oauth-<slug>` secrets created by `bgagent linear setup`,
+    // NOT by CDK. Only the webhook signing secret is CDK-managed.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 1);
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       Description: Match.stringLikeRegexp('Linear webhook signing secret'),
-    });
-    template.hasResourceProperties('AWS::SecretsManager::Secret', {
-      Description: Match.stringLikeRegexp('Linear personal API token'),
     });
   });
 

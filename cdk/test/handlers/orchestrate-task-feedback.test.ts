@@ -50,7 +50,7 @@ jest.mock('../../src/handlers/shared/compute-strategy', () => ({
   resolveComputeStrategy: jest.fn(),
 }));
 
-process.env.LINEAR_API_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent/linear/api-token-XYZ';
+process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
 import { notifyLinearOnConcurrencyCap } from '../../src/handlers/orchestrate-task';
 import type { TaskRecord } from '../../src/handlers/shared/types';
@@ -77,15 +77,21 @@ describe('notifyLinearOnConcurrencyCap', () => {
     reportIssueFailureMock.mockResolvedValue(undefined);
   });
 
-  test('posts Linear comment + ❌ when channel_source is linear and issue id is set', async () => {
+  test('posts Linear comment + ❌ when channel_source is linear and issue id + workspace are set', async () => {
     await notifyLinearOnConcurrencyCap(task({
       channel_source: 'linear',
-      channel_metadata: { linear_issue_id: 'lin-issue-1' },
+      channel_metadata: {
+        linear_issue_id: 'lin-issue-1',
+        linear_workspace_id: 'lin-org-1',
+      },
     }));
 
     expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-    const [secretArn, issueId, message] = reportIssueFailureMock.mock.calls[0];
-    expect(secretArn).toBe(process.env.LINEAR_API_TOKEN_SECRET_ARN);
+    const [ctx, issueId, message] = reportIssueFailureMock.mock.calls[0];
+    expect(ctx).toEqual({
+      linearWorkspaceId: 'lin-org-1',
+      registryTableName: process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME,
+    });
     expect(issueId).toBe('lin-issue-1');
     expect(message).toContain('concurrency limit');
   });
@@ -115,17 +121,20 @@ describe('notifyLinearOnConcurrencyCap', () => {
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
   });
 
-  test('no-ops when LINEAR_API_TOKEN_SECRET_ARN env is not set (logs warn)', async () => {
-    const saved = process.env.LINEAR_API_TOKEN_SECRET_ARN;
-    delete process.env.LINEAR_API_TOKEN_SECRET_ARN;
+  test('no-ops when LINEAR_WORKSPACE_REGISTRY_TABLE_NAME env is not set (logs warn)', async () => {
+    const saved = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+    delete process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
     try {
       await notifyLinearOnConcurrencyCap(task({
         channel_source: 'linear',
-        channel_metadata: { linear_issue_id: 'lin-issue-1' },
+        channel_metadata: {
+          linear_issue_id: 'lin-issue-1',
+          linear_workspace_id: 'lin-org-1',
+        },
       }));
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
     } finally {
-      process.env.LINEAR_API_TOKEN_SECRET_ARN = saved;
+      process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = saved;
     }
   });
 
@@ -139,7 +148,10 @@ describe('notifyLinearOnConcurrencyCap', () => {
     await expect(
       notifyLinearOnConcurrencyCap(task({
         channel_source: 'linear',
-        channel_metadata: { linear_issue_id: 'lin-issue-1' },
+        channel_metadata: {
+          linear_issue_id: 'lin-issue-1',
+          linear_workspace_id: 'lin-org-1',
+        },
       })),
     ).rejects.toThrow('boom');
   });

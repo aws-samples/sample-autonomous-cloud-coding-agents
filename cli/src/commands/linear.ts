@@ -465,6 +465,10 @@ export function makeLinearCommand(): Command {
           refresh_token: tokenResponse.refresh_token ?? '',
           expires_at: computeExpiresAt(tokenResponse.expires_in),
           scope: tokenResponse.scope,
+          // Co-located so Lambda-side refresh works without per-Lambda
+          // env vars — one secret holds everything needed to renew.
+          client_id: clientId,
+          client_secret: clientSecret,
           workspace_id: identity.organization.id,
           workspace_slug: slug,
           installed_at: now,

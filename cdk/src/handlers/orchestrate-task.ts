@@ -304,16 +304,17 @@ export const handler = withDurableExecution(durableHandler);
 export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<void> {
   if (task.channel_source !== 'linear') return;
   const issueId = task.channel_metadata?.linear_issue_id;
-  if (!issueId) return;
-  const secretArn = process.env.LINEAR_API_TOKEN_SECRET_ARN;
-  if (!secretArn) {
-    logger.warn('Skipping Linear concurrency-cap feedback: LINEAR_API_TOKEN_SECRET_ARN not set', {
+  const linearWorkspaceId = task.channel_metadata?.linear_workspace_id;
+  if (!issueId || !linearWorkspaceId) return;
+  const registryTableName = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (!registryTableName) {
+    logger.warn('Skipping Linear concurrency-cap feedback: LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set', {
       task_id: task.task_id,
     });
     return;
   }
   await reportIssueFailure(
-    secretArn,
+    { linearWorkspaceId, registryTableName },
     issueId,
     '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
   );

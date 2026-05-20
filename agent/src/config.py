@@ -38,104 +38,149 @@ def resolve_github_token() -> str:
     return ""
 
 
-def resolve_linear_api_token() -> str:
-    """Resolve the Linear personal API token via AgentCore Identity.
+def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
+    """Resolve the Linear OAuth access token from Secrets Manager.
 
-    In deployed mode, ``LINEAR_API_KEY_PROVIDER_NAME`` names a credential
-    provider in AgentCore Identity (the token vault). The agent runtime
-    auto-injects a workload access token into ``BedrockAgentCoreContext``;
-    we exchange that for the API key value and cache it in
+    Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
+    into the task record's ``channel_metadata`` at task-creation time.
+    Pass that dict in via ``channel_metadata`` (the pipeline does this
+    automatically). We fetch the per-workspace secret, parse the token
+    JSON, refresh if expiring, and cache the access_token in
     ``LINEAR_API_TOKEN`` so downstream consumers (the Linear MCP's
     ``${LINEAR_API_TOKEN}`` placeholder in ``.mcp.json`` and
     ``linear_reactions.py``'s GraphQL Authorization header) keep working
     unchanged.
 
-    For local development, falls back to a pre-set ``LINEAR_API_TOKEN``
-    env var so the agent can run outside AgentCore Runtime.
+    For local development, a pre-set ``LINEAR_API_TOKEN`` env var
+    short-circuits the lookup so the agent can run outside the runtime.
 
-    Returns an empty string if the credential is absent — the agent-side
-    MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}`` env
-    placeholder, and the Linear MCP will reject the request (fail-closed).
-    This function is only called when ``channel_source == 'linear'``.
+    Returns an empty string when the credential is absent — the agent-side
+    MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}``
+    placeholder and the Linear MCP fails closed. This function is only
+    called when ``channel_source == 'linear'``.
 
-    Phase 2.0a: replaces the prior Secrets Manager path. Phase 2.0b will
-    swap this function entirely for the ``@requires_access_token`` OAuth
-    decorator pattern; this imperative shape exists because API keys
-    don't need refresh and the MCP config expects a static token.
+    Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads
+    Secrets Manager directly because AgentCore Identity's USER_FEDERATION
+    flow has an open service-side bug (see memory/project_oauth_2_0b.md).
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
     if cached:
         return cached
 
-    provider_name = os.environ.get("LINEAR_API_KEY_PROVIDER_NAME")
-    if not provider_name:
+    # Prefer the per-task channel_metadata; fall back to env var so the
+    # function can be called early (e.g. before pipeline construction)
+    # via LINEAR_OAUTH_SECRET_ARN if the orchestrator set it that way.
+    secret_arn = ""
+    if channel_metadata:
+        secret_arn = channel_metadata.get("linear_oauth_secret_arn", "")
+    if not secret_arn:
+        secret_arn = os.environ.get("LINEAR_OAUTH_SECRET_ARN", "")
+    if not secret_arn:
         return ""
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     if not region:
-        log("WARN", "resolve_linear_api_token: AWS_REGION not set; cannot resolve API key")
+        log("WARN", "resolve_linear_api_token: AWS_REGION not set; cannot resolve token")
         return ""
 
     try:
-        import asyncio
+        import json
+        from datetime import datetime, timezone
 
-        from bedrock_agentcore.runtime import BedrockAgentCoreContext
-        from bedrock_agentcore.services.identity import IdentityClient
+        import boto3
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:
-        # bedrock_agentcore SDK missing from the container image — degrade
-        # gracefully rather than hard-crashing the agent. The Linear MCP
-        # will fail on first call with a clear auth error.
-        log("WARN", f"resolve_linear_api_token: bedrock_agentcore unavailable ({e}); skipping")
+        log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
         return ""
+
+    sm = boto3.client("secretsmanager", region_name=region)
+
+    def _fetch_token() -> dict:
+        resp = sm.get_secret_value(SecretId=secret_arn)
+        return json.loads(resp["SecretString"])
+
+    def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
+        try:
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return (expiry - datetime.now(timezone.utc)).total_seconds() < threshold_seconds
+
+    def _refresh(current: dict) -> dict | None:
+        try:
+            import urllib.parse
+            import urllib.request
+        except ImportError:
+            return None
+
+        body = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": current["refresh_token"],
+            "client_id": current["client_id"],
+            "client_secret": current["client_secret"],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.linear.app/oauth/token",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            log("WARN", f"resolve_linear_api_token refresh failed: {type(e).__name__}: {e}")
+            return None
+
+        if "access_token" not in payload:
+            return None
+
+        now = datetime.now(timezone.utc)
+        next_token = {
+            **current,
+            "access_token": payload["access_token"],
+            "refresh_token": payload.get("refresh_token", current["refresh_token"]),
+            "expires_at": (
+                now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                if "expires_in" not in payload
+                else (now.replace(microsecond=0)).isoformat().replace("+00:00", "Z")
+                # below replaces the simple form above with the real computation
+            ),
+            "scope": payload.get("scope", current["scope"]),
+            "updated_at": now.isoformat().replace("+00:00", "Z"),
+        }
+        # Recompute expires_at properly.
+        if "expires_in" in payload:
+            from datetime import timedelta
+            future = now + timedelta(seconds=int(payload["expires_in"]))
+            next_token["expires_at"] = future.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+        try:
+            sm.put_secret_value(SecretId=secret_arn, SecretString=json.dumps(next_token))
+        except (ClientError, BotoCoreError) as e:
+            log("WARN", f"resolve_linear_api_token: failed to persist refreshed token: {e}")
+            # Even without persistence the in-memory token works for THIS run.
+        return next_token
 
     try:
-        workload_token = BedrockAgentCoreContext.get_workload_access_token()
-        if workload_token is None:
-            # Outside the AgentCore Runtime container (e.g. local dev). The
-            # SDK's `_set_up_local_auth` fallback writes `.agentcore.json`
-            # which doesn't fit our flow; bail out and let the caller see
-            # an empty token so the MCP config fails closed.
-            log(
-                "WARN",
-                "resolve_linear_api_token: workload access token not in context "
-                "(agent must run inside AgentCore Runtime, or set LINEAR_API_TOKEN "
-                "directly for local dev)",
-            )
-            return ""
-
-        client = IdentityClient(region=region)
-        token = (
-            asyncio.run(
-                client.get_api_key(
-                    provider_name=provider_name,
-                    agent_identity_token=workload_token,
-                )
-            )
-            or ""
-        )
-        if token:
-            os.environ["LINEAR_API_TOKEN"] = token
-        return token
-    except ClientError as e:
-        # Narrowed from a broader `except` per #63 review. AccessDenied is
-        # logged at ERROR because it's a persistent IAM misconfig (likely
-        # the runtime role missing bedrock-agentcore:GetResourceApiKey or
-        # GetWorkloadAccessToken) that should page someone, not a transient
-        # blip. ResourceNotFound (provider name unknown) is also persistent
-        # — same severity. Other ClientErrors are likely transient (throttle,
-        # network blip) and stay at WARN.
-        code = e.response.get("Error", {}).get("Code", "")
-        severity = (
-            "ERROR" if code in ("AccessDeniedException", "ResourceNotFoundException") else "WARN"
-        )
+        token_obj = _fetch_token()
+    except (ClientError, BotoCoreError) as e:
+        code = ""
+        if hasattr(e, "response"):
+            code = getattr(e, "response", {}).get("Error", {}).get("Code", "") or ""
+        severity = "ERROR" if code in ("AccessDeniedException", "ResourceNotFoundException") else "WARN"
         log(severity, f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
         return ""
-    except BotoCoreError as e:
-        # Never let an Identity outage crash the agent. The Linear MCP will
-        # fail on first call with a clear auth error.
-        log("WARN", f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
-        return ""
+
+    if _is_expiring(token_obj.get("expires_at", "")):
+        refreshed = _refresh(token_obj)
+        if refreshed:
+            token_obj = refreshed
+
+    access = token_obj.get("access_token", "")
+    if access:
+        os.environ["LINEAR_API_TOKEN"] = access
+    return access
 
 
 def build_config(

@@ -702,67 +702,52 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
     });
 
-    // Phase 2.0a: agent runtime resolves the Linear API token via AgentCore
-    // Identity, not Secrets Manager. The credential lives in an Identity
-    // api-key provider; the runtime container's resolve_linear_api_token()
-    // exchanges its auto-injected workload access token for the API key
-    // value. Phase 2.0b will swap this for an OAuth provider + Gateway.
-    //
-    // Lambdas (orchestrator + processor) are intentionally NOT migrated
-    // here — the bedrock_agentcore Python SDK has no Node.js equivalent;
-    // they keep using Secrets Manager via `linearIntegration.apiTokenSecret`
-    // until 2.0b's full cutover.
-    const linearApiKeyProviderName = 'linear-api-key';
-    cfnRuntime.addPropertyOverride(
-      'EnvironmentVariables.LINEAR_API_KEY_PROVIDER_NAME',
-      linearApiKeyProviderName,
-    );
+    // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
+    // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
+    // creates `bgagent-linear-oauth-<slug>` secrets at install time;
+    // the secret JSON contains access_token, refresh_token, expires_at,
+    // and the OAuth client_id/client_secret needed for in-place refresh.
+    // The orchestrator passes `linear_oauth_secret_arn` to the agent via
+    // task.channel_metadata, so the agent looks up the exact ARN — no
+    // discovery needed at runtime.
     runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock-agentcore:GetResourceApiKey',
-        'bedrock-agentcore:GetWorkloadAccessToken',
-      ],
-      // AgentCore Identity ARN format isn't fully standardized in public
-      // docs as of 2026-05-14; scope to all bedrock-agentcore resources in
-      // this account/region. Tighten to specific provider/workload ARNs in
-      // 2.0b once OAuth migration documents the canonical resource shape.
-      resources: ['*'],
-    }));
-    // AgentCore Identity stores credential-vault payloads in Secrets Manager
-    // under the reserved prefix `bedrock-agentcore-identity!*`. The
-    // `GetResourceApiKey` API call surfaces the underlying secret value to
-    // the caller, and AWS verifies the caller (our runtime role) has
-    // GetSecretValue on the actual secret resource — empirically confirmed
-    // 2026-05-18 against an api-key provider in us-east-1. This grant is
-    // tightly scoped to the Identity-managed prefix; it does NOT grant read
-    // access to any other Secrets Manager resources in the account.
-    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
       resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!*`,
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
       ],
     }));
 
-    // Pipe the Linear API token secret into the orchestrator Lambda so the
-    // concurrency-cap rejection path can post a Linear comment + ❌ instead
-    // of silently dropping the task. The orchestrator only uses the secret
-    // when `task.channel_source === 'linear'`, but the IAM grant is
-    // unconditional — the secret is created lazily via Secrets Manager and
-    // costs nothing if unused.
-    linearIntegration.apiTokenSecret.grantRead(orchestrator.fn);
+    // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
+    // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
+    // rejection path can post a Linear comment + ❌. The orchestrator only
+    // resolves a token when `task.channel_source === 'linear'`, but the
+    // IAM grant is unconditional (per-workspace secrets are created lazily
+    // by `bgagent linear setup`).
+    linearIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
     orchestrator.fn.addEnvironment(
-      'LINEAR_API_TOKEN_SECRET_ARN',
-      linearIntegration.apiTokenSecret.secretArn,
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
     );
+    orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
 
     new CfnOutput(this, 'LinearWebhookSecretArn', {
       value: linearIntegration.webhookSecret.secretArn,
       description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',
-    });
-
-    new CfnOutput(this, 'LinearApiTokenSecretArn', {
-      value: linearIntegration.apiTokenSecret.secretArn,
-      description: 'Secrets Manager ARN for the Linear personal API token (agent-side MCP) — populate via `bgagent linear setup`',
     });
 
     new CfnOutput(this, 'LinearProjectMappingTableName', {

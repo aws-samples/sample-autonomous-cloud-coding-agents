@@ -91,269 +91,104 @@ class TestBuildConfig:
 
 
 class TestResolveLinearApiToken:
-    """Phase 2.0a: token resolves via AgentCore Identity, not Secrets Manager.
+    """Phase 2.0b-O2: token resolves from per-workspace Secrets Manager.
 
-    Pins the contract that `LINEAR_API_TOKEN` env var is the public surface
-    (consumed by `channel_mcp.py`'s `${LINEAR_API_TOKEN}` MCP placeholder
-    and `linear_reactions.py`'s GraphQL Authorization header). Only the
-    *source* of the value changed: previously boto3 secretsmanager, now
-    bedrock_agentcore Identity.
+    The orchestrator stamps `linear_oauth_secret_arn` into the task's
+    channel_metadata at creation time. resolve_linear_api_token reads
+    the secret JSON via boto3, refreshes it if expiring, and caches the
+    access_token in `LINEAR_API_TOKEN` for the Linear MCP placeholder.
     """
 
-    def test_returns_cached_value_without_calling_identity(self, monkeypatch):
+    def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
         """Fast-path: if LINEAR_API_TOKEN is already set, no SDK call fires."""
-        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_cached")
-        with patch("bedrock_agentcore.services.identity.IdentityClient") as mock_client:
-            assert resolve_linear_api_token() == "lin_api_cached"
-            mock_client.assert_not_called()
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_oauth_cached")
+        with patch("boto3.client") as mock_boto:
+            assert resolve_linear_api_token() == "lin_oauth_cached"
+            mock_boto.assert_not_called()
 
-    def test_returns_empty_when_provider_name_missing(self, monkeypatch):
-        """Without LINEAR_API_KEY_PROVIDER_NAME, no source — return empty cleanly."""
+    def test_returns_empty_when_secret_arn_missing(self, monkeypatch):
+        """Without channel_metadata.linear_oauth_secret_arn or env, no source — empty."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.delenv("LINEAR_API_KEY_PROVIDER_NAME", raising=False)
-        with patch("bedrock_agentcore.services.identity.IdentityClient") as mock_client:
+        monkeypatch.delenv("LINEAR_OAUTH_SECRET_ARN", raising=False)
+        with patch("boto3.client") as mock_boto:
             assert resolve_linear_api_token() == ""
-            mock_client.assert_not_called()
+            mock_boto.assert_not_called()
 
     def test_returns_empty_when_region_missing(self, monkeypatch):
-        """No region → can't construct IdentityClient → empty + WARN, no SDK call."""
+        """No region → can't construct boto3 client → empty + WARN, no SDK call."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-        with patch("bedrock_agentcore.services.identity.IdentityClient") as mock_client:
-            assert resolve_linear_api_token() == ""
-            mock_client.assert_not_called()
+        with patch("boto3.client") as mock_boto:
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == ""
+            mock_boto.assert_not_called()
 
-    def test_returns_empty_when_workload_token_not_in_context(self, monkeypatch):
-        """Outside AgentCore Runtime, BedrockAgentCoreContext returns None.
-        Don't try the local-auth fallback (writes .agentcore.json which
-        doesn't fit our flow) — just return empty so MCP fails closed."""
+    def test_resolves_from_secrets_manager_and_caches_in_env(self, monkeypatch):
+        """Happy path: channel_metadata carries the ARN, secret has access_token + future expiry."""
+        from datetime import datetime, timedelta, timezone
+
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
-        with patch(
-            "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-            return_value=None,
-        ):
-            assert resolve_linear_api_token() == ""
+        future = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        token_payload = {
+            "access_token": "lin_oauth_fresh",
+            "refresh_token": "lin_refresh_xyz",
+            "expires_at": future,
+            "scope": "read write app:assignable app:mentionable",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "workspace_id": "ws-uuid",
+            "workspace_slug": "acme",
+            "installed_at": "2026-05-19T08:00:00Z",
+            "updated_at": "2026-05-19T08:00:00Z",
+            "installed_by_platform_user_id": "cog-sub",
+        }
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(token_payload),
+        }
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == "lin_oauth_fresh"
 
-    def test_resolves_from_identity_and_caches_in_env(self, monkeypatch):
-        """Happy path: workload token in context → IdentityClient.get_api_key
-        returns the API key → set LINEAR_API_TOKEN env var → return token."""
+        # Cached for subsequent reads.
+        import os as _os
+        assert _os.environ.get("LINEAR_API_TOKEN") == "lin_oauth_fresh"
+        # Reset for other tests.
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        mock_instance = MagicMock()
-
-        async def _get_key(provider_name, agent_identity_token):
-            return "lin_api_resolved"
-
-        mock_instance.get_api_key = _get_key
-
-        with (
-            patch(
-                "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-                return_value="workload-token-abc",
-            ),
-            patch(
-                "bedrock_agentcore.services.identity.IdentityClient",
-                return_value=mock_instance,
-            ) as mock_client_class,
-        ):
-            result = resolve_linear_api_token()
-
-        assert result == "lin_api_resolved"
-        # Construction passed the resolved region.
-        mock_client_class.assert_called_once_with(region="us-east-1")
-        # Side effect: env var populated for downstream consumers.
-        import os
-
-        assert os.environ.get("LINEAR_API_TOKEN") == "lin_api_resolved"
-
-    def test_swallows_botocore_errors_and_logs_warn(self, monkeypatch):
-        """Identity outages must NEVER crash the agent. Return empty + WARN;
-        the Linear MCP will then fail on first call with a clear auth error."""
+    def test_returns_empty_on_secrets_manager_access_denied(self, monkeypatch):
+        """ClientError surfaces as empty + ERROR log, never crashes the agent."""
         from botocore.exceptions import ClientError
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        mock_instance = MagicMock()
-
-        async def _raise(provider_name, agent_identity_token):
-            raise ClientError(
-                {"Error": {"Code": "AccessDenied", "Message": "denied"}},
-                "GetResourceApiKey",
-            )
-
-        mock_instance.get_api_key = _raise
-
-        with (
-            patch(
-                "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-                return_value="workload-token-abc",
-            ),
-            patch(
-                "bedrock_agentcore.services.identity.IdentityClient",
-                return_value=mock_instance,
-            ),
-        ):
-            # Must not raise.
-            assert resolve_linear_api_token() == ""
-
-    def test_returns_empty_when_get_api_key_returns_none(self, monkeypatch):
-        """Defensive: if the SDK returns None (provider exists but no value),
-        return empty rather than coercing to the string 'None'."""
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        mock_instance = MagicMock()
-
-        async def _get_none(provider_name, agent_identity_token):
-            return None
-
-        mock_instance.get_api_key = _get_none
-
-        with (
-            patch(
-                "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-                return_value="workload-token-abc",
-            ),
-            patch(
-                "bedrock_agentcore.services.identity.IdentityClient",
-                return_value=mock_instance,
-            ),
-        ):
-            assert resolve_linear_api_token() == ""
-
-    def test_import_error_degrades_gracefully(self, monkeypatch):
-        """If bedrock_agentcore SDK is missing from the container image, log
-        WARN and return '' rather than crashing the agent. Adapted from PR #87
-        nice-to-have improvement (the boto3 ImportError version) for the
-        AgentCore SDK migration."""
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-        # Force `import bedrock_agentcore.services.identity` to raise ImportError.
-        monkeypatch.setitem(sys.modules, "bedrock_agentcore.services.identity", None)
-        with patch("config.log") as mock_log:
-            assert resolve_linear_api_token() == ""
-        # WARN logged, no exception escaped.
-        assert mock_log.call_count >= 1
-        assert any(call.args[0] == "WARN" for call in mock_log.call_args_list)
-        assert any(
-            "bedrock_agentcore unavailable" in call.args[1] for call in mock_log.call_args_list
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no perms"}},
+            "GetSecretValue",
         )
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == ""
 
-    def test_access_denied_logged_at_error(self, monkeypatch):
-        """Persistent IAM misconfig should page someone — escalate from WARN
-        to ERROR so alerts fire. Adapted from PR #87 nice-to-have
-        improvement; the AgentCore equivalent is a missing
-        `bedrock-agentcore:GetResourceApiKey` IAM permission."""
+    def test_falls_back_to_env_var_when_channel_metadata_omits_arn(self, monkeypatch):
+        """LINEAR_OAUTH_SECRET_ARN env var is the back-compat fallback."""
+        from datetime import datetime, timedelta, timezone
+
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        from botocore.exceptions import ClientError
-
-        mock_instance = MagicMock()
-
-        async def _raise_access_denied(provider_name, agent_identity_token):
-            raise ClientError(
-                {"Error": {"Code": "AccessDeniedException", "Message": "no access"}},
-                "GetResourceApiKey",
-            )
-
-        mock_instance.get_api_key = _raise_access_denied
-
-        with (
-            patch(
-                "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-                return_value="workload-token-abc",
-            ),
-            patch(
-                "bedrock_agentcore.services.identity.IdentityClient",
-                return_value=mock_instance,
-            ),
-            patch("config.log") as mock_log,
-        ):
-            assert resolve_linear_api_token() == ""
-        assert mock_log.call_count == 1
-        assert mock_log.call_args[0][0] == "ERROR"
-
-    def test_resource_not_found_logged_at_error(self, monkeypatch):
-        """Provider name typo / missing credential is also persistent — page
-        someone rather than warn forever. Both AccessDeniedException and
-        ResourceNotFoundException take the ERROR path; everything else stays
-        at WARN (transient throttle, network blip)."""
+        monkeypatch.setenv("LINEAR_OAUTH_SECRET_ARN", "arn:from-env")
+        future = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps({
+                "access_token": "lin_oauth_envpath",
+                "refresh_token": "rt", "expires_at": future, "scope": "read",
+                "client_id": "c", "client_secret": "s",
+                "workspace_id": "w", "workspace_slug": "s",
+                "installed_at": "x", "updated_at": "x",
+                "installed_by_platform_user_id": "u",
+            }),
+        }
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_linear_api_token() == "lin_oauth_envpath"
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        from botocore.exceptions import ClientError
-
-        mock_instance = MagicMock()
-
-        async def _raise_not_found(provider_name, agent_identity_token):
-            raise ClientError(
-                {"Error": {"Code": "ResourceNotFoundException", "Message": "missing provider"}},
-                "GetResourceApiKey",
-            )
-
-        mock_instance.get_api_key = _raise_not_found
-
-        with (
-            patch(
-                "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-                return_value="workload-token-abc",
-            ),
-            patch(
-                "bedrock_agentcore.services.identity.IdentityClient",
-                return_value=mock_instance,
-            ),
-            patch("config.log") as mock_log,
-        ):
-            assert resolve_linear_api_token() == ""
-        assert mock_log.call_count == 1
-        assert mock_log.call_args[0][0] == "ERROR"
-
-    def test_botocore_error_logged_at_warn(self, monkeypatch):
-        """The handler splits the except into ClientError + BotoCoreError
-        branches. BotoCoreError covers transient connectivity / endpoint
-        problems — log WARN and degrade gracefully rather than crashing
-        the agent. (Adapted from PR #87's Secrets Manager equivalent for
-        the AgentCore Identity SDK call.)"""
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("LINEAR_API_KEY_PROVIDER_NAME", "linear-api-key")
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        from botocore.exceptions import EndpointConnectionError
-
-        mock_instance = MagicMock()
-
-        async def _raise_endpoint(provider_name, agent_identity_token):
-            raise EndpointConnectionError(
-                endpoint_url="https://bedrock-agentcore.us-east-1.amazonaws.com",
-            )
-
-        mock_instance.get_api_key = _raise_endpoint
-
-        with (
-            patch(
-                "bedrock_agentcore.runtime.BedrockAgentCoreContext.get_workload_access_token",
-                return_value="workload-token-abc",
-            ),
-            patch(
-                "bedrock_agentcore.services.identity.IdentityClient",
-                return_value=mock_instance,
-            ),
-            patch("config.log") as mock_log,
-        ):
-            assert resolve_linear_api_token() == ""
-        assert mock_log.call_count == 1
-        assert mock_log.call_args[0][0] == "WARN"
-        assert "EndpointConnectionError" in mock_log.call_args[0][1]
