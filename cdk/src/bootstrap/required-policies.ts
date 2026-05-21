@@ -17,6 +17,20 @@
  *  SOFTWARE.
  */
 
-export { infrastructurePolicy, applicationPolicy, observabilityPolicy, allPolicies } from './policies';
-export { BOOTSTRAP_VERSION, computeBootstrapHash } from './version';
-export { getRequiredBootstrapPolicies } from './required-policies';
+const CORE_POLICIES = [
+  'infrastructure',
+  'application',
+  'observability',
+  'compute-agentcore',
+] as const;
+
+const COMPUTE_VARIANT_POLICIES: Record<string, string[]> = {
+  ecs: ['compute-ecs'],
+};
+
+export function getRequiredBootstrapPolicies(computeType: string): string[] {
+  const base: string[] = [...CORE_POLICIES];
+  const variants = COMPUTE_VARIANT_POLICIES[computeType];
+  if (variants) base.push(...variants);
+  return base;
+}
