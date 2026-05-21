@@ -1,0 +1,11 @@
+{
+  "Statement": [
+    {
+      "Action": "bedrock-agentcore:*",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "BedrockAgentCore"
+    }
+  ],
+  "Version": "2012-10-17"
+}
