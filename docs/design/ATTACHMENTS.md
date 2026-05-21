@@ -137,18 +137,16 @@ The `TaskRecord` gains an `attachments?: AttachmentRecord[]` field. This stores 
 ```typescript
 function createAttachmentRecord(params: CreateAttachmentRecordParams): AttachmentRecord {
   // Validates invariants:
-  // - token_estimate required when type === 'image'
   // - s3_key and s3_version_id required when screening.status === 'passed'
   // - checksum_sha256 required when screening.status === 'passed'
   // - size_bytes required when screening.status === 'passed'
   // - categories non-empty when screening.status === 'blocked'
+  // Note: token_estimate is best-effort for images (sharp may fail on unusual formats),
+  // so it is NOT enforced here. The budget check uses a conservative fallback when absent.
   if (params.screening.status === 'passed') {
     if (!params.s3_key || !params.s3_version_id || !params.checksum_sha256 || !params.size_bytes) {
       throw new Error('Passed screening requires s3_key, s3_version_id, checksum_sha256, and size_bytes');
     }
-  }
-  if (params.type === 'image' && params.screening.status === 'passed' && !params.token_estimate) {
-    throw new Error('Image attachments with passed screening must have token_estimate');
   }
   return params as AttachmentRecord;
 }
@@ -757,9 +755,9 @@ function estimateImageTokens(width: number, height: number): number {
   w = Math.ceil(w / TILE_SIZE) * TILE_SIZE;
   h = Math.ceil(h / TILE_SIZE) * TILE_SIZE;
 
-  // Step 3: Token calculation with safety margin, capped
-  const rawTokens = Math.min(Math.ceil((w * h) / 750), MAX_IMAGE_TOKENS);
-  return Math.ceil(rawTokens * TOKEN_SAFETY_MARGIN);
+  // Step 3: Token calculation with safety margin, then capped to hard ceiling
+  const rawTokens = Math.ceil((w * h) / 750);
+  return Math.min(Math.ceil(rawTokens * TOKEN_SAFETY_MARGIN), MAX_IMAGE_TOKENS);
 }
 ```
 
@@ -767,12 +765,12 @@ For standard image sizes (after resizing):
 
 | Original dimensions | Resized to (pre-pad) | Padded to | Estimated tokens (with margin) |
 |---|---|---|---|
-| 1920x1080 (full screenshot) | 1568x882 | 1568x896 | ~1,882 (capped) |
-| 3840x2160 (4K screenshot) | 1568x882 | 1568x896 | ~1,882 (capped) |
+| 1920x1080 (full screenshot) | 1568x882 | 1568x896 | ~1,568 (capped) |
+| 3840x2160 (4K screenshot) | 1568x882 | 1568x896 | ~1,568 (capped) |
 | 800x600 (cropped screenshot) | 800x600 (no resize) | 812x616 | ~800 |
-| 4096x4096 (max-size design) | 1568x1568 | 1568x1568 | ~1,882 (capped) |
+| 4096x4096 (max-size design) | 1568x1568 | 1568x1568 | ~1,568 (capped) |
 
-**Note:** The 4K screenshot and full HD screenshot produce the **same** token cost after resizing — both scale down to the same dimensions. The token cap at 1568 (+ safety margin) means very large or square images plateau rather than growing linearly.
+**Note:** The 4K screenshot and full HD screenshot produce the **same** token cost after resizing — both scale down to the same dimensions. The hard cap at MAX_IMAGE_TOKENS (1568) means very large or square images plateau rather than growing linearly.
 
 **Budget enforcement in attachment resolution:**
 
@@ -843,26 +841,26 @@ async def prepare_attachments(
 
     prepared = []
     for att in attachments:
-        local_path = attachments_dir / f"{att.attachment_id}_{att.filename}"
+        # Unique subdirectory per attachment to avoid filename collisions
+        dest_dir = attachments_dir / att.attachment_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        local_path = dest_dir / att.filename
+
         bucket, key = parse_s3_uri(att.s3_uri)
-        try:
-            # Download the pinned version — prevents TOCTOU between screening and download
-            await s3_client.download_file(
-                bucket, key, str(local_path),
-                ExtraArgs={"VersionId": att.s3_version_id},
-            )
-        except ClientError as e:
-            raise AttachmentDownloadError(
-                f"Failed to download attachment {att.filename}: {e}"
-            ) from e
+        # Download the pinned version — prevents TOCTOU between screening and download
+        response = s3_client.get_object(
+            Bucket=bucket, Key=key, VersionId=att.s3_version_id,
+        )
+        content = response["Body"].read()
 
         # Verify integrity via SHA-256 checksum (always present — required by factory)
         # hexdigest() returns lowercase hex, matching the format enforced by AttachmentConfig validator
-        actual_hash = hashlib.sha256(local_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(content).hexdigest()
         if actual_hash != att.checksum_sha256:
-            raise AttachmentIntegrityError(
-                f"Checksum mismatch for {att.filename}: "
-                f"expected {att.checksum_sha256}, got {actual_hash}"
+            raise RuntimeError(
+                f"Attachment '{att.filename}' integrity check failed: "
+                f"expected SHA-256 {att.checksum_sha256}, got {actual_hash}. "
+                f"The file may have been tampered with."
             )
 
         prepared.append(PreparedAttachment(

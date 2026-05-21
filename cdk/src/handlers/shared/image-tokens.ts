@@ -18,7 +18,6 @@
  */
 
 // Image token estimation matching Anthropic's documented resize rules.
-// Shared by create-task-core.ts and confirm-uploads.ts.
 
 import sharp from 'sharp';
 import { logger } from './logger';

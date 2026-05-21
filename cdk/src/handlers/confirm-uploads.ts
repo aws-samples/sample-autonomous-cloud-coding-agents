@@ -335,21 +335,10 @@ async function screenSingleAttachment(
     ContentType: att.content_type,
   }));
 
-  // Estimate token cost for images
+  // Estimate token cost for images (using shared utility)
   let tokenEstimate: number | undefined;
   if (isImage) {
-    try {
-      const sharp = (await import('sharp')).default;
-      const metadata = await sharp(screenResult.content).metadata();
-      if (metadata.width && metadata.height) {
-        tokenEstimate = estimateImageTokens(metadata.width, metadata.height);
-      }
-    } catch (err) {
-      logger.warn('Failed to estimate image tokens in confirm-uploads (non-fatal)', {
-        error: err instanceof Error ? err.message : String(err),
-        attachment_id: att.attachment_id,
-      });
-    }
+    tokenEstimate = await estimateImageTokensFromBuffer(screenResult.content);
   }
 
   return createAttachmentRecord({
@@ -494,10 +483,11 @@ async function transitionToSubmitted(
         request_id: requestId,
       });
     } catch (orchErr) {
-      logger.error('Failed to invoke orchestrator after confirm-uploads', {
-        error: String(orchErr),
+      logger.error('Failed to invoke orchestrator after confirm-uploads — task may be stuck in SUBMITTED until EventBridge retry', {
+        error: orchErr instanceof Error ? orchErr.message : String(orchErr),
         task_id: taskId,
         request_id: requestId,
+        metric_type: 'orchestrator_invoke_failure',
       });
     }
   }
@@ -729,24 +719,4 @@ async function decrementConcurrency(userId: string): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-}
-
-const MAX_IMAGE_SIDE = 1568;
-const MAX_IMAGE_TOKENS = 1568;
-const TOKEN_SAFETY_MARGIN = 1.2;
-const TILE_SIZE = 28;
-
-function estimateImageTokens(width: number, height: number): number {
-  let w = width;
-  let h = height;
-  const maxSide = Math.max(w, h);
-  if (maxSide > MAX_IMAGE_SIDE) {
-    const scale = MAX_IMAGE_SIDE / maxSide;
-    w = Math.round(w * scale);
-    h = Math.round(h * scale);
-  }
-  w = Math.ceil(w / TILE_SIZE) * TILE_SIZE;
-  h = Math.ceil(h / TILE_SIZE) * TILE_SIZE;
-  const rawTokens = Math.ceil((w * h) / 750);
-  return Math.min(Math.ceil(rawTokens * TOKEN_SAFETY_MARGIN), MAX_IMAGE_TOKENS);
 }

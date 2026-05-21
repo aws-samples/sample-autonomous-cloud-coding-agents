@@ -180,6 +180,14 @@ export class AttachmentBudgetExceededError extends AttachmentError {
   }
 }
 
+/** Attachment infrastructure is misconfigured (e.g. missing guardrail env vars). */
+export class AttachmentConfigurationError extends AttachmentError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'AttachmentConfigurationError';
+  }
+}
+
 /** Mapping from policy response keys to assessment detail extraction rules. */
 const POLICY_EXTRACTORS: ReadonlyArray<{
   readonly policyKey: string;

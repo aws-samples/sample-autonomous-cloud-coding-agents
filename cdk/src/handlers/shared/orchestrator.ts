@@ -21,7 +21,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
-import { AttachmentBudgetExceededError, hydrateContext, resolveGitHubToken } from './context-hydration';
+import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
@@ -42,6 +42,9 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const MEMORY_ID = process.env.MEMORY_ID;
 const ATTACHMENTS_BUCKET_NAME = process.env.ATTACHMENTS_BUCKET_NAME;
+
+/** Conservative fallback token count for images where metadata could not be read. */
+const MAX_IMAGE_TOKENS_FALLBACK = 1568;
 
 /**
  * State tracked across waitForCondition poll cycles.
@@ -263,14 +266,17 @@ function resolveAttachmentPayloads(
   for (const att of attachments) {
     if (att.screening.status !== 'passed') continue;
     if (!att.s3_key || !att.s3_version_id || !att.checksum_sha256 || !att.size_bytes) {
-      logger.warn('Skipping attachment with passed screening but missing S3 fields', {
-        attachment_id: att.attachment_id,
-      });
-      continue;
+      throw new AttachmentResolutionError(
+        `Attachment '${att.filename}' (${att.attachment_id}) has passed screening but is missing required ` +
+        'storage metadata (s3_key, s3_version_id, checksum_sha256, or size_bytes). ' +
+        'This is an internal data integrity error — please re-submit the task.',
+      );
     }
 
-    if (att.type === 'image' && att.token_estimate) {
-      totalImageTokens += att.token_estimate;
+    if (att.type === 'image') {
+      // Use actual estimate if available, otherwise apply a conservative default
+      // to prevent images with unreadable metadata from bypassing the budget check.
+      totalImageTokens += att.token_estimate ?? MAX_IMAGE_TOKENS_FALLBACK;
     }
 
     payloads.push({
@@ -428,7 +434,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       : undefined;
 
     if (!screeningConfig) {
-      throw new AttachmentBudgetExceededError(
+      throw new AttachmentConfigurationError(
         'URL attachments require content screening (Bedrock Guardrail) but screening is not configured. ' +
         'Set GUARDRAIL_ID and GUARDRAIL_VERSION environment variables.',
       );
@@ -441,7 +447,27 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       try {
         githubToken = await resolveGitHubToken(githubTokenSecretArn);
       } catch (err) {
-        logger.warn('Failed to resolve GitHub token for URL attachment fetch', {
+        // Check if any pending URL attachments target GitHub — if so, fail clearly
+        // rather than proceeding to get an opaque 401/403 on fetch.
+        const githubHosts = ['github.com', 'raw.githubusercontent.com', 'api.github.com'];
+        const pendingUrlAtts = resolvedAttachments.filter(a => a.type === 'url' && a.screening.status === 'pending');
+        const hasGitHubUrl = pendingUrlAtts.some(a => {
+          try {
+            const hostname = new URL(a.source_url ?? '').hostname.toLowerCase();
+            return githubHosts.some(h => hostname === h || hostname.endsWith(`.${h}`));
+          } catch { return false; }
+        });
+
+        if (hasGitHubUrl) {
+          throw new AttachmentResolutionError(
+            'Failed to retrieve GitHub credentials needed to fetch URL attachment(s). ' +
+            `Ensure the GitHub token secret (${githubTokenSecretArn}) is accessible. ` +
+            `Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          );
+        }
+
+        logger.warn('Failed to resolve GitHub token for URL attachment fetch (no GitHub URLs in batch — proceeding)', {
           task_id: task.task_id,
           error: err instanceof Error ? err.message : String(err),
         });

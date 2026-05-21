@@ -51,7 +51,7 @@ const URL_FETCH_TIMEOUT_MS = 10_000;
 const MAX_FETCH_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_REDIRECTS = 2;
 
-/** RFC 1918 + link-local + loopback + IPv6 equivalents. */
+/** RFC 1918 + link-local + loopback + CGN + IPv6 equivalents + IPv4-mapped IPv6. */
 const PRIVATE_IP_RANGES = [
   // IPv4
   { prefix: '10.', mask: null },
@@ -66,11 +66,16 @@ const PRIVATE_IP_RANGES = [
   { prefix: '169.254.', mask: null },
   { prefix: '127.', mask: null },
   { prefix: '0.', mask: null },
+  { prefix: '100.64.', mask: null }, // CGN / Shared Address Space (RFC 6598)
   // IPv6
   { prefix: '::1', mask: null },
   { prefix: 'fc', mask: null },
   { prefix: 'fd', mask: null },
   { prefix: 'fe80:', mask: null },
+  // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — prevents SSRF bypass
+  // by attackers returning mapped addresses from DNS that embed private IPv4.
+  { prefix: '::ffff:', mask: null },
+  { prefix: '0:0:0:0:0:ffff:', mask: null },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -124,13 +129,13 @@ async function resolveAndValidate(hostname: string): Promise<string> {
   try {
     // Try IPv4 first (more common for HTTP endpoints)
     addresses = await dns.resolve4(hostname);
-  } catch {
+  } catch (ipv4Err) {
     try {
       addresses = await dns.resolve6(hostname);
-    } catch (err) {
+    } catch (ipv6Err) {
       throw new AttachmentResolutionError(
         `DNS resolution failed for '${hostname}'. Check that the URL is correct and the server is reachable.`,
-        { cause: err },
+        { cause: new AggregateError([ipv4Err, ipv6Err], `Both IPv4 and IPv6 resolution failed for '${hostname}'`) },
       );
     }
   }

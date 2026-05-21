@@ -1,4 +1,4 @@
-"""Attachment download and integrity verification (Phase 3).
+"""Attachment download and integrity verification.
 
 Downloads attachments from S3 using version-pinned reads and verifies
 SHA-256 checksums against the orchestrator-provided values. Files are
