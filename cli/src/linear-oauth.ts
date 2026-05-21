@@ -89,12 +89,20 @@ export interface StoredLinearOauthToken {
 }
 
 /**
+ * Common prefix for all per-workspace Linear OAuth secrets. The full
+ * secret name is `${LINEAR_OAUTH_SECRET_PREFIX}<slug>`. Use this when
+ * scanning Secrets Manager for every workspace install (e.g. the CLI's
+ * `list-projects` command queries every workspace it can find).
+ */
+export const LINEAR_OAUTH_SECRET_PREFIX = 'bgagent-linear-oauth-';
+
+/**
  * Build the secret name for a given Linear workspace slug. Matches the
  * naming convention encoded in the runtime's IAM policy resource pattern,
  * so changes here MUST be matched by the IAM resource pattern in CDK.
  */
 export function linearOauthSecretName(workspaceSlug: string): string {
-  return `bgagent-linear-oauth-${workspaceSlug}`;
+  return `${LINEAR_OAUTH_SECRET_PREFIX}${workspaceSlug}`;
 }
 
 /**
