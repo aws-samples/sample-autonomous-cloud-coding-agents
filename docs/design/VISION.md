@@ -9,17 +9,17 @@ This document states the long-term direction of **ABCA (Autonomous Background Co
 
 ABCA is a **reference sample** of a self-hosted **software dark factory** on AWS: a platform that accepts high-level engineering intent, runs autonomous coding work in isolated cloud environments, and returns **reviewable outcomes** (pull requests, review comments, validation evidence) under human governance — not a chat session that happens to edit files.
 
-We are building toward **lights-sparse**, **graduated** autonomy: the default experience is **fire-and-forget** (submit, walk away, review the outcome), while the platform can **escalate to humans** when policy or risk requires it — without turning every task into a live pair-programming session. Customers should be able to **start conservative and loosen over time** (per repo, per policy, per task) as trust in outcomes grows. The platform’s job is to surround the agent with a **durable control plane** — admission, orchestration, memory, policy, HITL gates, cost limits, and observability — so that background agents are **reliable, bounded, and improvable** at organizational scale.
+We are building toward **lights-sparse**, **graduated** autonomy — the implementation loop is increasingly unattended while governance and release stay supervised (see the [dark factory introduction](../src/content/docs/index.md)): the default experience is **fire-and-forget** (submit, walk away, review the outcome), while the platform can **escalate to humans** when policy or risk requires it — without turning every task into a live pair-programming session. Customers should be able to **start conservative and loosen over time** (per repo, per policy, per task) as trust in outcomes grows. The platform’s job is to surround the agent with a **durable control plane** — admission, orchestration, memory, policy, HITL gates, cost limits, and observability — so that background agents are **reliable, bounded, and improvable** at organizational scale.
 
 Success looks like teams that can **submit work and walk away**, trust that doomed work fails fast and cheaply, inspect every important decision in an audit trail, and see **measurable improvement** over time (fewer revision cycles, higher first-review merge rates, predictable cost).
 
 ## Tenets
 
-Tenets are durable preferences. They can conflict; resolving conflict is a design choice that should be written down (ADR or RFC), not smuggled through in code.
+Tenets are durable preferences. They can conflict; resolving conflict is a design choice that should be written down (ADR or RFC), not only embedded in code.
 
 ### 1. Fire-and-forget default; escalate when required
 
-**The normal path is asynchronous and unattended** — submit a task, leave, and come back to a PR, review, or failure reason. Human involvement during a run is **exceptional and policy-driven**, not the default way to “drive” the agent.
+**The normal path is asynchronous and unattended** — submit a task, leave, and come back to a PR, review, or failure reason. Human involvement during a run is **by exception and policy-driven**, not the default way to “drive” the agent.
 
 - Progress and outcomes surface through **status, events, and notifications** (GitHub comment, Slack, email) — the platform reaches the human; the human does not babysit a terminal.
 - **Human-in-the-loop (HITL)** is how we escalate when autonomy must pause: Cedar **soft-deny** rules become approval gates; **hard-deny** rules still fail closed; **`--pre-approve`** scopes let trusted work proceed without repeated gates. See [CEDAR_HITL_GATES.md](./CEDAR_HITL_GATES.md) and [INTERACTIVE_AGENTS.md](./INTERACTIVE_AGENTS.md).
