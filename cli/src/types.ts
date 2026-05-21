@@ -30,6 +30,7 @@ export type AttachmentType = 'image' | 'file' | 'url';
  * surface stays portable.
  */
 export type TaskStatusType =
+  | 'PENDING_UPLOADS'
   | 'SUBMITTED'
   | 'HYDRATING'
   | 'RUNNING'
@@ -210,6 +211,12 @@ export interface AttachmentUploadInstruction {
   readonly upload_url: string;
   readonly upload_fields: Record<string, string>;
   readonly upload_expires_at: string;
+}
+
+/** Response from POST /v1/tasks when presigned uploads are required. */
+export interface CreateTaskResponse extends TaskDetail {
+  readonly upload_instructions?: readonly AttachmentUploadInstruction[];
+  readonly task_expires_at?: string;
 }
 
 /** Create task request body for POST /v1/tasks. */

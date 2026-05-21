@@ -1293,7 +1293,7 @@ export const VALID_TRANSITIONS: Record<TaskStatusType, TaskStatusType[]> = {
 ```typescript
 export const ACTIVE_STATUSES: TaskStatusType[] = [
   // PENDING_UPLOADS is NOT here — does not count against concurrency
-  'SUBMITTED', 'HYDRATING', 'RUNNING', 'FINALIZING',
+  'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING',
 ];
 
 export const PRE_ACTIVE_STATUSES: TaskStatusType[] = [
@@ -1316,10 +1316,15 @@ stateDiagram-v2
     PENDING_UPLOADS --> CANCELLED : User cancels or 30-min auto-cancel
     SUBMITTED --> HYDRATING : Admission passes
     HYDRATING --> RUNNING : Context assembled
+    HYDRATING --> AWAITING_APPROVAL : Cedar soft-deny gate
+    RUNNING --> AWAITING_APPROVAL : Cedar soft-deny gate
+    AWAITING_APPROVAL --> RUNNING : Approved / denied (resume)
     RUNNING --> FINALIZING : Session ends
     FINALIZING --> COMPLETED : Success
     FINALIZING --> FAILED : Agent failure
 ```
+
+**Relationship to AWAITING_APPROVAL:** `PENDING_UPLOADS` and `AWAITING_APPROVAL` (Cedar HITL) are independent lifecycle stages with no transition path between them. `PENDING_UPLOADS` is pre-pipeline (no compute allocated, no concurrency slot consumed). `AWAITING_APPROVAL` is mid-pipeline (container alive, concurrency slot held, paused on a human decision). A task with presigned attachments may later hit an approval gate: `PENDING_UPLOADS → SUBMITTED → ... → RUNNING → AWAITING_APPROVAL → RUNNING → ...`. The agent's IAM-based attachment downloads are unaffected by approval wait time (no presigned URL expiry).
 
 ### Auto-cancel mechanism
 

@@ -362,4 +362,78 @@ describe('linear-webhook-processor handler', () => {
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     });
   });
+
+  // ─── Image URL extraction from issue description ─────────────────────────────
+
+  describe('image URL attachment extraction', () => {
+    beforeEach(() => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+    });
+
+    test('extracts markdown image URLs from issue description', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = 'See this bug:\n\n![screenshot](https://linear.app/uploads/img1.png)\n\nAnd also ![diagram](https://linear.app/uploads/arch.png)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(2);
+      expect(reqBody.attachments[0]).toEqual({ type: 'url', url: 'https://linear.app/uploads/img1.png' });
+      expect(reqBody.attachments[1]).toEqual({ type: 'url', url: 'https://linear.app/uploads/arch.png' });
+    });
+
+    test('does not extract HTTP (non-HTTPS) URLs', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = '![unsafe](http://evil.com/img.png)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
+
+    test('caps image extraction at 10 URLs', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      const lines = Array.from({ length: 15 }, (_, i) => `![img${i}](https://cdn.linear.app/img${i}.png)`);
+      data.description = lines.join('\n');
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(10);
+    });
+
+    test('no attachments when description has no images', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = 'Just text, no images here.';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
+
+    test('no attachments when description is undefined', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      delete data.description;
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
+  });
 });

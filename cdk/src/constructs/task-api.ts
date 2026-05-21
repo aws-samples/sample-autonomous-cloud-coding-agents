@@ -149,6 +149,12 @@ export interface TaskApiProps {
    * gets PutObject/DeleteObject grants and the bucket name as env var.
    */
   readonly attachmentsBucket?: s3.IBucket;
+
+  /**
+   * User concurrency table for admission control during confirm-uploads.
+   * Required when attachmentsBucket is provided.
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
 }
 
 /**
@@ -517,8 +523,62 @@ export class TaskApi extends Construct {
       props.attachmentsBucket.grantDelete(createTaskFn);
     }
 
+    // --- Confirm-uploads Lambda (presigned upload flow) ---
+    let confirmUploadsFn: lambda.NodejsFunction | undefined;
+    if (props.attachmentsBucket && props.userConcurrencyTable) {
+      const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
+      confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+      confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      if (props.orchestratorFunctionArn) {
+        confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
+      }
+      if (props.guardrailId && props.guardrailVersion) {
+        confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
+        confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+      }
+
+      confirmUploadsFn = new lambda.NodejsFunction(this, 'ConfirmUploadsFn', {
+        entry: path.join(handlersDir, 'confirm-uploads.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: confirmUploadsEnv,
+        bundling: commonBundling,
+        memorySize: 2048,
+        timeout: Duration.seconds(180),
+      });
+
+      // Grants: DDB read-write, S3 read-write-delete, orchestrator invoke, guardrail
+      props.taskTable.grantReadWriteData(confirmUploadsFn);
+      props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
+      props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
+      props.attachmentsBucket.grantDelete(confirmUploadsFn);
+      props.userConcurrencyTable.grantReadWriteData(confirmUploadsFn);
+
+      if (props.orchestratorFunctionArn) {
+        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [props.orchestratorFunctionArn],
+        }));
+      }
+
+      if (props.guardrailId) {
+        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['bedrock:ApplyGuardrail'],
+          resources: [
+            Stack.of(this).formatArn({
+              service: 'bedrock',
+              resource: 'guardrail',
+              resourceName: props.guardrailId,
+            }),
+          ],
+        }));
+      }
+    }
+
     // Collect all Lambda functions for cdk-nag suppressions
     const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn];
+    if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
@@ -531,6 +591,12 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // --- Confirm-uploads endpoint: POST /tasks/{task_id}/confirm-uploads ---
+    if (confirmUploadsFn) {
+      const confirmUploads = taskById.addResource('confirm-uploads');
+      confirmUploads.addMethod('POST', new apigw.LambdaIntegration(confirmUploadsFn), cognitoAuthOptions);
+    }
 
     // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
     if (props.traceArtifactsBucket) {

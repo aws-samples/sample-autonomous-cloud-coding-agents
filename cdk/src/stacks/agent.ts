@@ -42,6 +42,7 @@ import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
@@ -270,6 +271,7 @@ export class AgentStack extends Stack {
       agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
+      userConcurrencyTable: userConcurrencyTable.table,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -598,6 +600,16 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+    });
+
+    // --- Pending-upload cleanup rule ---
+    // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
+    // 30 minutes (client crash, abandoned session, network failure).
+    // Cleans up orphaned S3 objects under the task's attachment prefix.
+    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // --- Fan-out plane consumer ---

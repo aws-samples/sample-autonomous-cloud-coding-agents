@@ -476,6 +476,12 @@ export interface AttachmentUploadInstruction {
   readonly upload_expires_at: string;
 }
 
+/** Response from POST /v1/tasks when presigned uploads are required. */
+export interface CreateTaskResponse extends TaskDetail {
+  readonly upload_instructions?: readonly AttachmentUploadInstruction[];
+  readonly task_expires_at?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Agent attachment payload (orchestrator → agent runtime)
 // ---------------------------------------------------------------------------
