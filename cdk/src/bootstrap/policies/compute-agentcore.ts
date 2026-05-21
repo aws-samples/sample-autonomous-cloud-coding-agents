@@ -17,24 +17,23 @@
  *  SOFTWARE.
  */
 
-import { createHash } from 'node:crypto';
-
-import { allPolicies } from './policies';
-
-/** Semantic version of the bootstrap policy bundle. */
-export const BOOTSTRAP_VERSION = '1.1.0';
+import { aws_iam as iam } from 'aws-cdk-lib';
 
 /**
- * Computes a SHA-256 hash over all bootstrap policies.
- * The hash is deterministic: policies are serialized with sorted keys
- * so that object property ordering does not affect the digest.
+ * Returns the IAM PolicyDocument for the IaCRole-ABCA-Compute-AgentCore role.
+ *
+ * Covers: Bedrock AgentCore permissions (extracted from Observability policy
+ * to enable per-compute-variant bootstrap configuration).
  */
-export function computeBootstrapHash(): string {
-  const policies = allPolicies();
-  const normalized = policies.map((p) => {
-    const json = p.toJSON();
-    return JSON.stringify(json, Object.keys(json).sort());
+export function computeAgentcorePolicy(): iam.PolicyDocument {
+  return new iam.PolicyDocument({
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'BedrockAgentCore',
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock-agentcore:*'],
+        resources: ['*'],
+      }),
+    ],
   });
-  const payload = JSON.stringify(normalized);
-  return createHash('sha256').update(payload).digest('hex');
 }
