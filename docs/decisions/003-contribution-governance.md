@@ -21,11 +21,11 @@ An issue is "ready for work" when the body, together with its linked context —
 
 ### Roadmap alignment
 
-Issues align to the [product roadmap](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/guides/ROADMAP.md). Issues that do not align require explicit admin approval.
+Issues align to the [product roadmap](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/guides/ROADMAP.md). Issues that do not align require explicit approval from a permitted user.
 
-### Admin approval gate
+### Gated approval
 
-Only `admin` users can mark an issue `approved`. Unapproved and unassigned issues are not workable. A GitHub Actions workflow prevents non-admins from adding the `approved` label.
+Only permitted users can mark an issue `approved` — a GitHub Actions workflow validates that the label applicant is authorized. An issue is not workable until it is both approved and assigned. After approval, the issue is considered scope-frozen: further revisions that change deliverables require re-approval.
 
 ### Self-assignment on start
 
@@ -75,6 +75,7 @@ CI passes before requesting review. After merge, verify acceptance criteria and 
 - (-) Pre-start overhead for small tasks
 - (-) Requires discipline to fold threads into body
 - (!) Assumes priority labels exist and are maintained
+- (!) Self-assignment is not atomic — concurrent agents may race; mitigate by verifying assignment after claiming via refresh
 
 ## References
 
