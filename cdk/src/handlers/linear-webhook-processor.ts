@@ -31,7 +31,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
-const DEFAULT_LABEL_FILTER = 'bgagent';
+const DEFAULT_LABEL_FILTER = 'abca';
 
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
@@ -150,6 +150,48 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 
   const issue = payload.data;
   const projectId = issue.projectId;
+
+  // Resolve the per-project label override (if any) BEFORE the label gate so
+  // a workspace using a non-default label name still triggers correctly. The
+  // lookup runs on every Issue webhook (one extra GetItem vs. lookup-after-
+  // projectId-check), which is the price of having the silent label gate
+  // come first — see comment on the `shouldTrigger` block below.
+  let mappingItem: Record<string, unknown> | undefined;
+  if (projectId) {
+    const mapping = await ddb.send(new GetCommand({
+      TableName: PROJECT_MAPPING_TABLE,
+      Key: { linear_project_id: projectId },
+    }));
+    if (mapping.Item && mapping.Item.status === 'active') {
+      mappingItem = mapping.Item;
+    }
+  }
+  const labelFilter = (mappingItem?.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
+
+  // Silent kill-switch: an issue without the trigger label is not for us.
+  // This MUST run before any user-facing comment path. Previously the
+  // projectId-missing and not-onboarded paths ran first and posted
+  // "❌ project isn't onboarded" comments on every Issue event in every
+  // unmapped team — workspace webhooks fire workspace-wide, so a single
+  // un-onboarded team produced dozens of comments per issue change.
+  // Moving the label check first means an unlabeled issue is a true no-op:
+  // no comment, no reaction, no task creation, no DDB writes.
+  if (!shouldTrigger(payload, labelFilter)) {
+    logger.info('Linear webhook does not match trigger criteria — skipping silently', {
+      action: payload.action,
+      issue_id: issue.id,
+      label_filter: labelFilter,
+      has_project_mapping: Boolean(mappingItem),
+      current_labels: issue.labels?.map((l) => l?.name),
+      updated_from_keys: Object.keys(payload.updatedFrom ?? {}),
+      updated_from_label_ids: payload.updatedFrom?.labelIds,
+      current_label_ids: issue.labels?.map((l) => l?.id),
+    });
+    return;
+  }
+
+  // From here on the issue is labeled for ABCA, so user-facing failure
+  // comments are appropriate — the user explicitly asked for our attention.
   if (!projectId) {
     logger.info('Linear Issue has no projectId — skipping (cannot route to a repo)', {
       issue_id: issue.id,
@@ -162,12 +204,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // Look up project → repo mapping.
-  const mapping = await ddb.send(new GetCommand({
-    TableName: PROJECT_MAPPING_TABLE,
-    Key: { linear_project_id: projectId },
-  }));
-  if (!mapping.Item || mapping.Item.status !== 'active') {
+  if (!mappingItem) {
     logger.info('Linear project is not onboarded or is removed — skipping', {
       linear_project_id: projectId,
       issue_id: issue.id,
@@ -179,24 +216,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     );
     return;
   }
-  const repo = mapping.Item.repo as string;
-  const labelFilter = (mapping.Item.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
-
-  // Only trigger when the configured label is present AND this event is a transition
-  // that meaningfully added/asserts the label — `create` with the label on it, or
-  // `update` that newly added it.
-  if (!shouldTrigger(payload, labelFilter)) {
-    logger.info('Linear webhook does not match trigger criteria', {
-      action: payload.action,
-      issue_id: issue.id,
-      label_filter: labelFilter,
-      current_labels: issue.labels?.map((l) => l?.name),
-      updated_from_keys: Object.keys(payload.updatedFrom ?? {}),
-      updated_from_label_ids: payload.updatedFrom?.labelIds,
-      current_label_ids: issue.labels?.map((l) => l?.id),
-    });
-    return;
-  }
+  const repo = mappingItem.repo as string;
 
   // Resolve the actor → platform user. Fall back to creator if the actor is missing
   // (e.g. automation that set the label). If neither resolves, we cannot attribute

@@ -62,7 +62,7 @@ function issue(overrides: Record<string, unknown> = {}): Record<string, unknown>
       description: 'Users cannot log in.',
       projectId: 'project-1',
       teamId: 'team-1',
-      labels: [{ id: 'lbl-bg', name: 'bgagent' }],
+      labels: [{ id: 'lbl-abca', name: 'abca' }],
     },
     ...overrides,
   };
@@ -134,7 +134,7 @@ describe('linear-webhook-processor handler', () => {
     ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } });
     const payload = issue({
       action: 'update',
-      updatedFrom: { labelIds: ['lbl-bg', 'lbl-other'] },
+      updatedFrom: { labelIds: ['lbl-abca', 'lbl-other'] },
     });
     await handler(eventWith(payload));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
@@ -150,7 +150,7 @@ describe('linear-webhook-processor handler', () => {
 
   test('creates task with channel_source=linear and linear_* metadata', async () => {
     ddbSend
-      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } })
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
       .mockResolvedValueOnce({
         Item: {
           linear_identity: 'org-1#user-1',
@@ -344,6 +344,36 @@ describe('linear-webhook-processor handler', () => {
 
       // Filter rejection is intentional UX (not every Linear event triggers ABCA);
       // dropping a comment/❌ here would be noisy and misleading.
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('unlabeled issue in a NON-onboarded project is a silent no-op (regression: comment-spam)', async () => {
+      // Workspace webhooks fire workspace-wide — issues in teams that ABCA
+      // was never onboarded into still reach this Lambda. Previously, every
+      // such event posted a "❌ project isn't onboarded" comment, producing
+      // 47 identical comments in 5min on a single GRO issue. The label gate
+      // now runs FIRST, so an unlabeled issue produces zero side effects no
+      // matter what state the project mapping is in.
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      const payload = issue();
+      (payload.data as Record<string, unknown>).labels = [{ id: 'l2', name: 'other' }];
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('unlabeled issue with no projectId is a silent no-op', async () => {
+      const payload = issue();
+      const data = { ...(payload.data as Record<string, unknown>) };
+      delete data.projectId;
+      data.labels = [{ id: 'l2', name: 'other' }];
+      payload.data = data;
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
