@@ -21,6 +21,8 @@ import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
+import { postIssueComment } from './shared/linear-feedback';
+import { extractLinearIdentifier, findLinearIssueByIdentifier } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
 
 const s3 = new S3Client({});
@@ -32,6 +34,11 @@ const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
 // behalf.
 const SCREENSHOT_PUBLIC_HOST = process.env.SCREENSHOT_PUBLIC_HOST!;
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN!;
+// Optional — when set, the processor also tries to post the
+// screenshot comment onto a linked Linear issue. Resolved from the
+// GitHub PR title/body via a Linear-identifier regex (e.g. `ABCA-42`),
+// then looked up across all active workspaces in the registry.
+const LINEAR_WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
 interface GitHubDeploymentStatusPayload {
   readonly action?: string;
@@ -122,8 +129,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const prNumber = await findPullRequestForSha(repo, sha, token);
-  if (!prNumber) {
+  const pr = await findPullRequestForSha(repo, sha, token);
+  if (!pr) {
     logger.info('No open PR found for SHA — skipping screenshot post', { repo, sha });
     return;
   }
@@ -169,7 +176,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   try {
     const result = await upsertTaskComment({
       repo,
-      issueOrPrNumber: prNumber,
+      issueOrPrNumber: pr.number,
       body: commentBody,
       token,
       // Always POST fresh — a single PR can have multiple preview screenshots
@@ -179,17 +186,67 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     logger.info('Posted screenshot comment to PR', {
       repo,
-      pr_number: prNumber,
+      pr_number: pr.number,
       comment_id: result.commentId,
       public_url: publicUrl,
     });
   } catch (err) {
     logger.warn('Failed to post screenshot PR comment (non-fatal)', {
       repo,
-      pr_number: prNumber,
+      pr_number: pr.number,
       error: err instanceof Error ? err.message : String(err),
     });
   }
+
+  // Best-effort Linear comment. The GitHub PR comment above is the
+  // load-bearing artifact; the Linear comment is bonus surface for
+  // reviewers who live in Linear. Only fires when the registry table
+  // is configured AND the PR title/body carries a Linear identifier.
+  if (LINEAR_WORKSPACE_REGISTRY_TABLE) {
+    const identifier = extractLinearIdentifier(pr.title) ?? extractLinearIdentifier(pr.body);
+    if (identifier) {
+      const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
+      if (linearIssue) {
+        const ok = await postIssueComment(
+          {
+            linearWorkspaceId: linearIssue.linearWorkspaceId,
+            registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
+          },
+          linearIssue.issueId,
+          renderLinearCommentBody(publicUrl, previewUrl),
+        );
+        if (ok) {
+          logger.info('Posted screenshot comment to Linear issue', {
+            identifier,
+            linear_issue_id: linearIssue.issueId,
+            workspace_slug: linearIssue.workspaceSlug,
+          });
+        } else {
+          logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
+            identifier,
+            linear_issue_id: linearIssue.issueId,
+          });
+        }
+      } else {
+        logger.info('Linear identifier did not resolve to an issue — skipping Linear post', {
+          identifier,
+          repo,
+          pr_number: pr.number,
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Open PR shape we extract from the GitHub commit-pulls API. Title +
+ * body are used downstream by the Linear issue lookup; the others go
+ * into log lines for debugging.
+ */
+interface OpenPr {
+  readonly number: number;
+  readonly title: string;
+  readonly body: string;
 }
 
 /**
@@ -197,14 +254,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
  * "List pull requests associated with a commit" GitHub API
  * (https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit).
  *
- * Returns the first OPEN PR's number, or null if none. Closed/merged
- * PRs are filtered out — v1 only screenshots active reviews.
+ * Returns the first OPEN PR (with title/body), or null if none.
+ * Closed/merged PRs are filtered out — v1 only screenshots active
+ * reviews.
  */
 async function findPullRequestForSha(
   repo: string,
   sha: string,
   token: string,
-): Promise<number | null> {
+): Promise<OpenPr | null> {
   const url = `https://api.github.com/repos/${repo}/commits/${sha}/pulls`;
   let res: Response;
   try {
@@ -234,9 +292,19 @@ async function findPullRequestForSha(
     return null;
   }
 
-  const pulls = (await res.json()) as Array<{ number?: number; state?: string }>;
+  const pulls = (await res.json()) as Array<{
+    number?: number;
+    state?: string;
+    title?: string;
+    body?: string | null;
+  }>;
   const open = pulls.find((p) => p.state === 'open' && typeof p.number === 'number');
-  return open?.number ?? null;
+  if (!open) return null;
+  return {
+    number: open.number!,
+    title: open.title ?? '',
+    body: open.body ?? '',
+  };
 }
 
 /** Build the S3 key for a screenshot. */
@@ -254,5 +322,23 @@ function renderCommentBody(publicUrl: string, previewUrl: string): string {
     `[![preview](${publicUrl})](${previewUrl})`,
     '',
     `_From [${previewUrl}](${previewUrl}) — captured automatically by ABCA after the deploy finished._`,
+  ].join('\n');
+}
+
+/**
+ * Linear comment body. Linear's markdown renders image embeds the
+ * same way GitHub does, but Linear collapses linked-image syntax —
+ * use the simpler `![alt](url)` form so it renders inline rather than
+ * as a clickable link with a tiny preview.
+ */
+function renderLinearCommentBody(publicUrl: string, previewUrl: string): string {
+  return [
+    '🖼️ **Preview screenshot**',
+    '',
+    `![preview](${publicUrl})`,
+    '',
+    `Live preview: [${previewUrl}](${previewUrl})`,
+    '',
+    '_Captured automatically by ABCA after the Vercel preview deploy finished._',
   ].join('\n');
 }
