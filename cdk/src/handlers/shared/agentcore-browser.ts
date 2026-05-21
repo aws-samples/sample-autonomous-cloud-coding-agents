@@ -132,14 +132,14 @@ export async function captureScreenshot(url: string, opts: { timeoutMs?: number 
  * responsible for the StartBrowserSession + StopBrowserSession lifecycle.
  */
 async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number): Promise<Uint8Array> {
-  const headers = await sigV4WsHeaders(wssUrl);
-
-  // Use `ws` (the standard Node WebSocket client) — its constructor accepts
-  // custom HTTP headers on the upgrade GET via `options.headers`. Node 24's
-  // global `WebSocket` (from undici) does NOT accept arbitrary headers, and
-  // AgentCore Browser's WSS handshake requires SigV4-signed `Authorization`
-  // + `X-Amz-*` headers, so we have to inject them somehow.
-  const ws = new WebSocket(wssUrl, { headers });
+  // AgentCore Browser's WSS endpoint accepts SigV4 in two forms: signed
+  // `Authorization` headers OR signed query parameters (presigned URL).
+  // We use the presigned-URL form because the `Host` header sent by the
+  // WS upgrade (handled inside `ws`) doesn't always match what we signed
+  // when using header-based auth, leading to 403s. Query-param signing
+  // sidesteps the Host-header reconciliation entirely.
+  const signedUrl = await sigV4PresignWss(wssUrl);
+  const ws = new WebSocket(signedUrl);
 
   const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(0, deadline - Date.now());
@@ -308,27 +308,46 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
 }
 
 /**
- * Build SigV4-signed headers for the WebSocket upgrade request. AgentCore
- * Browser's WSS endpoint expects the same SigV4 envelope as a regular
- * `bedrock-agentcore` HTTPS call.
+ * Presign the WSS URL with SigV4 query parameters. AgentCore Browser
+ * accepts auth either as headers on the upgrade GET or as query params
+ * on the URL itself; the latter is more robust through WebSocket
+ * clients that rewrite Host headers (e.g. `ws`).
+ *
+ * Returns a `wss://...?X-Amz-Algorithm=...&X-Amz-Credential=...&...`
+ * URL ready to pass straight to `new WebSocket(...)`.
  */
-async function sigV4WsHeaders(wssUrl: string): Promise<Record<string, string>> {
+async function sigV4PresignWss(wssUrl: string): Promise<string> {
   const u = new URL(wssUrl);
   const signer = new SignatureV4({
     service: 'bedrock-agentcore',
     region: REGION,
     credentials: defaultProvider(),
     sha256: Sha256,
+    applyChecksum: false,
   });
+
+  // Convert wss:// → https:// for the signing request (SigV4 doesn't
+  // know about wss). The signature is over the path + query, so the
+  // protocol on the signed request is irrelevant — we paste the auth
+  // params back onto the original wss:// URL.
+  const queryEntries = Array.from(u.searchParams.entries());
+  const query: Record<string, string> = {};
+  for (const [k, v] of queryEntries) query[k] = v;
+
   const req = new HttpRequest({
     method: 'GET',
     protocol: 'https:',
     hostname: u.hostname,
-    path: u.pathname + u.search,
-    headers: {
-      host: u.hostname,
-    },
+    path: u.pathname,
+    query,
+    headers: { host: u.hostname },
   });
-  const signed = await signer.sign(req);
-  return signed.headers;
+
+  // 60s expiry is fine — we open the socket immediately after signing.
+  const presigned = await signer.presign(req, { expiresIn: 60 });
+  const out = new URL(wssUrl);
+  for (const [k, v] of Object.entries(presigned.query ?? {})) {
+    out.searchParams.set(k, Array.isArray(v) ? v[0] : (v as string));
+  }
+  return out.toString();
 }
