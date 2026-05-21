@@ -1,0 +1,15 @@
+{
+  "name": "single-match-deny-force-push",
+  "description": "Single soft-deny rule matches a generic force-push command; exercises the happy-path REQUIRE_APPROVAL branch of the three-outcome engine.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"rm_slash\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*rm -rf /*\" };\n@tier(\"soft\") @rule_id(\"force_push_any\") @approval_timeout_s(\"300\") @severity(\"medium\") @category(\"destructive\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*git push --force*\" };\n@tier(\"soft\") @rule_id(\"force_push_main\") @approval_timeout_s(\"600\") @severity(\"high\") @category(\"destructive\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*git push --force origin main*\" };\n@tier(\"soft\") @rule_id(\"write_env_files\") @approval_timeout_s(\"600\") @severity(\"high\") @category(\"filesystem\")\nforbid (principal, action == Agent::Action::\"write_file\", resource) when { context.file_path like \"*.env\" };",
+  "input": {
+    "principal": { "type": "Agent::TaskAgent", "id": "new_task" },
+    "action":    { "type": "Agent::Action",    "id": "execute_bash" },
+    "resource":  { "type": "Agent::BashCommand", "id": "command" },
+    "context":   { "command": "git push --force origin feature" }
+  },
+  "expected": {
+    "decision": "deny",
+    "matching_rule_ids": ["force_push_any"]
+  }
+}

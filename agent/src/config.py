@@ -5,6 +5,7 @@ import sys
 import uuid
 
 from models import TaskConfig, TaskType
+from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 
@@ -58,7 +59,15 @@ def resolve_linear_api_token() -> str:
         return ""
     try:
         import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:
+        # boto3 missing from the container image — degrade gracefully rather
+        # than hard-crashing the agent. The Linear MCP will fail on first
+        # call with a clear auth error.
+        log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
+        return ""
 
+    try:
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = boto3.client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=secret_arn)
@@ -66,10 +75,19 @@ def resolve_linear_api_token() -> str:
         if token:
             os.environ["LINEAR_API_TOKEN"] = token
         return token
-    except Exception as e:
+    except ClientError as e:
+        # Narrowed from a broader `except` per #63 review — broader catches
+        # hid genuine bugs in the Secrets Manager call shape. AccessDenied
+        # is logged at ERROR because it's a persistent IAM misconfig that
+        # should page someone, not a transient blip.
+        code = e.response.get("Error", {}).get("Code", "")
+        severity = "ERROR" if code == "AccessDeniedException" else "WARN"
+        log(severity, f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
+        return ""
+    except BotoCoreError as e:
         # Never let a Secrets Manager outage crash the agent. The Linear MCP
         # will simply fail on first call with a clear auth error.
-        print(f"[config] resolve_linear_api_token failed: {type(e).__name__}: {e}", flush=True)
+        log("WARN", f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
         return ""
 
 
@@ -92,6 +110,10 @@ def build_config(
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
+    initial_approval_gate_count: int = 0,
+    approval_gate_cap: int | None = None,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -146,6 +168,10 @@ def build_config(
         channel_metadata=channel_metadata or {},
         trace=trace,
         user_id=user_id,
+        approval_timeout_s=approval_timeout_s,
+        initial_approvals=initial_approvals or [],
+        initial_approval_gate_count=initial_approval_gate_count,
+        approval_gate_cap=approval_gate_cap,
     )
 
 

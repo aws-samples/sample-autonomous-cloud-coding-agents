@@ -28,7 +28,16 @@
  *
  * RUNNING / FINALIZING tasks are handled separately by `pollTaskStatus`
  * in `orchestrator.ts` via the `agent_heartbeat_at` timeout path — this
- * reconciler only targets `SUBMITTED` and `HYDRATING`.
+ * reconciler targets `SUBMITTED`, `HYDRATING`, and `AWAITING_APPROVAL`.
+ *
+ * AWAITING_APPROVAL reconciliation (§13.6):
+ *   If the agent container evicts mid-approval, neither the poll loop
+ *   nor the resume transaction ever fires; the task sits in
+ *   AWAITING_APPROVAL indefinitely while its approval row's TTL
+ *   eventually reaps the row. This reconciler sweeps any
+ *   AWAITING_APPROVAL task whose age exceeds the stranded timeout and
+ *   transitions it to FAILED with a specific reason so the user sees
+ *   a clear failure rather than a silent hang.
  */
 
 import {
@@ -54,6 +63,20 @@ const STRANDED_TIMEOUT_SECONDS = Number(
 
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 
+/**
+ * Separate (longer) timeout for AWAITING_APPROVAL tasks — approvals
+ * legitimately sit for an hour (the §7.3 ceiling for per-task approval
+ * timeout). A task's approval row carries its own per-row TTL; this
+ * sweep is the backstop for the case where the row gets reaped by DDB
+ * TTL but the TaskTable row never gets unstuck.
+ *
+ * Default: 7200s (2 hours) — double the §7.3 1-hour ceiling + an hour
+ * grace so this reconciler never races the happy-path timer.
+ */
+const APPROVAL_STRANDED_TIMEOUT_SECONDS = Number(
+  process.env.APPROVAL_STRANDED_TIMEOUT_SECONDS ?? '7200',
+);
+
 interface StrandedCandidate {
   readonly task_id: string;
   readonly user_id: string;
@@ -70,10 +93,13 @@ interface StrandedCandidate {
  * `created_at < :cutoff`.
  */
 async function findStrandedCandidates(
-  status: 'SUBMITTED' | 'HYDRATING',
+  status: 'SUBMITTED' | 'HYDRATING' | 'AWAITING_APPROVAL',
   now: Date,
 ): Promise<StrandedCandidate[]> {
-  const cutoff = new Date(now.getTime() - STRANDED_TIMEOUT_SECONDS * 1000);
+  const timeoutSeconds = status === 'AWAITING_APPROVAL'
+    ? APPROVAL_STRANDED_TIMEOUT_SECONDS
+    : STRANDED_TIMEOUT_SECONDS;
+  const cutoff = new Date(now.getTime() - timeoutSeconds * 1000);
 
   const matches: StrandedCandidate[] = [];
   let lastKey: Record<string, unknown> | undefined;
@@ -122,10 +148,14 @@ async function findStrandedCandidates(
  */
 async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
   const now = new Date().toISOString();
-  const errorMessage = `Stranded: ${task.status} for ${task.age_seconds}s — `
-    + 'no pipeline attached before the stranded-task timeout. '
-    + 'This usually means the orchestrator Lambda crashed before invoking '
-    + 'the runtime, or the agent container crashed during startup.';
+  const errorMessage = task.status === 'AWAITING_APPROVAL'
+    ? `Approval stranded: task paused for approval for ${task.age_seconds}s with `
+      + 'no resume transition. Typically caused by the agent container being '
+      + 'evicted mid-approval. Resubmit the task if the work is still needed.'
+    : `Stranded: ${task.status} for ${task.age_seconds}s — `
+      + 'no pipeline attached before the stranded-task timeout. '
+      + 'This usually means the orchestrator Lambda crashed before invoking '
+      + 'the runtime, or the agent container crashed during startup.';
 
   // 1. Conditional status transition — only if still in the stranded state.
   try {
@@ -205,6 +235,42 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     });
   }
 
+  // Chunk 10 (full-branch review B2): when the stranded task was
+  // AWAITING_APPROVAL, also emit an ``agent_milestone`` with
+  // ``milestone: "approval_stranded"`` so the ApprovalMetricsPublisher
+  // Lambda picks it up (the publisher's event-source filter is keyed
+  // on ``event_type: agent_milestone`` — ``task_stranded`` events
+  // never reach it). Without this branch, a 100 %-eviction scenario
+  // looks identical to "no approval traffic" on the dashboard —
+  // invisible failure mode. Design §11.1 labels ``approval_stranded``
+  // as Reconciler-sourced, this wiring fulfills that.
+  if (task.status === 'AWAITING_APPROVAL') {
+    try {
+      await ddb.send(new PutItemCommand({
+        TableName: EVENTS_TABLE,
+        Item: {
+          task_id: { S: task.task_id },
+          event_id: { S: ulid() },
+          event_type: { S: 'agent_milestone' },
+          timestamp: { S: now },
+          ttl: { N: String(ttl) },
+          metadata: {
+            M: {
+              milestone: { S: 'approval_stranded' },
+              age_s: { N: String(task.age_seconds) },
+              reason: { S: 'STRANDED_NO_HEARTBEAT' },
+            },
+          },
+        },
+      }));
+    } catch (eventErr) {
+      logger.warn('Failed to write approval_stranded milestone (best-effort)', {
+        task_id: task.task_id,
+        error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+      });
+    }
+  }
+
   // 3. Release the concurrency slot. Best-effort; drift is later corrected
   //    by the concurrency reconciler.
   try {
@@ -241,7 +307,11 @@ export async function handler(): Promise<void> {
   });
 
   const now = new Date();
-  const statuses: ('SUBMITTED' | 'HYDRATING')[] = ['SUBMITTED', 'HYDRATING'];
+  const statuses: ('SUBMITTED' | 'HYDRATING' | 'AWAITING_APPROVAL')[] = [
+    'SUBMITTED',
+    'HYDRATING',
+    'AWAITING_APPROVAL',
+  ];
   let totalStranded = 0;
   let totalFailed = 0;
   let totalSkipped = 0;

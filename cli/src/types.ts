@@ -21,6 +21,23 @@
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
 /**
+ * Task status literal union. Mirrors ``cdk/src/constructs/task-status.ts``
+ * — the values returned by the API are exactly these. Defined inline
+ * here (rather than imported from the CDK construct) so the CLI type
+ * surface stays portable.
+ */
+export type TaskStatusType =
+  | 'SUBMITTED'
+  | 'HYDRATING'
+  | 'RUNNING'
+  | 'AWAITING_APPROVAL'
+  | 'FINALIZING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'TIMED_OUT';
+
+/**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
@@ -48,7 +65,7 @@ export interface ErrorClassification {
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: TaskType;
@@ -59,6 +76,10 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
+  /** Prompt-template version applied during context hydration. Null on
+   *  pre-versioned records. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly prompt_version: string | null;
   /** Provenance of the task's submission — ``api`` for CLI / Cognito
    *  submissions, ``webhook`` for HMAC-signed inbound webhooks.
    *  Mirrors ``cdk/src/handlers/shared/types.ts::TaskDetail``; kept
@@ -96,6 +117,16 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  /** Cedar HITL: running counter of approval gates fired on this
+   *  task. Null only on pre-Cedar-HITL records. */
+  readonly approval_gate_count: number | null;
+  /** Cedar HITL: per-task cap on total approval gates, captured at
+   *  submit time from the blueprint (default 50). Null only on
+   *  pre-Cedar-HITL records. */
+  readonly approval_gate_cap: number | null;
+  /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
+   *  ``request_id`` of the pending approval row. Null otherwise. */
+  readonly awaiting_approval_request_id: string | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
@@ -109,7 +140,7 @@ export interface TraceUrlResponse {
 /** Task summary returned by GET /v1/tasks list responses. */
 export interface TaskSummary {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
   readonly task_type: TaskType;
@@ -148,6 +179,18 @@ export interface GetTaskEventsQuery {
   readonly desc?: string;
 }
 
+/**
+ * Attachment in a create-task request. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::Attachment``.
+ */
+export interface Attachment {
+  readonly type: 'image' | 'file' | 'url';
+  readonly content_type?: string;
+  readonly data?: string;
+  readonly url?: string;
+  readonly filename?: string;
+}
+
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
   readonly repo: string;
@@ -157,6 +200,7 @@ export interface CreateTaskRequest {
   readonly max_budget_usd?: number;
   readonly task_type?: TaskType;
   readonly pr_number?: number;
+  readonly attachments?: readonly Attachment[];
   /**
    * Enable the ``--trace`` debug path (design §10.1). When true, the
    * agent's ProgressWriter raises its preview-truncation cap from 200
@@ -165,6 +209,12 @@ export interface CreateTaskRequest {
    * ``bgagent watch`` / notifications.
    */
   readonly trace?: boolean;
+  /** Cedar HITL per-task default approval timeout (design §7.3 step 5).
+   *  Valid range ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
+  readonly approval_timeout_s?: number;
+  /** Cedar HITL pre-approval allowlist seeded at task start (§7.3 step 4).
+   *  Each entry must be a valid ``ApprovalScope``. */
+  readonly initial_approvals?: readonly ApprovalScope[];
 }
 
 /**
@@ -196,7 +246,7 @@ export interface NudgeResponse {
 /** Cancel task response from DELETE /v1/tasks/{task_id}. */
 export interface CancelTaskResponse {
   readonly task_id: string;
-  readonly status: string;
+  readonly status: TaskStatusType;
   readonly cancelled_at: string;
 }
 
@@ -285,3 +335,126 @@ export interface Credentials {
 
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+// ---------------------------------------------------------------------------
+// Cedar HITL approval types — mirrored from
+// ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+// ---------------------------------------------------------------------------
+
+/** Approval scope — matches the `ApprovalScope` discriminated-union on
+ *  the server side. Narrowed so `bgagent approve --scope ...` gets
+ *  exhaustive type-checking on the CLI side. */
+export type ApprovalScope =
+  | 'this_call'
+  | 'tool_type_session'
+  | 'tool_group_session'
+  | 'all_session'
+  | `tool_type:${string}`
+  | `tool_group:${string}`
+  | `bash_pattern:${string}`
+  | `write_path:${string}`
+  | `rule:${string}`;
+
+/** Approval row terminal / pending status. */
+export type ApprovalStatus =
+  | 'PENDING'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'TIMED_OUT'
+  | 'STRANDED';
+
+/** POST /v1/tasks/{task_id}/approve request body. */
+export interface ApprovalRequest {
+  readonly request_id: string;
+  readonly decision: 'approve';
+  readonly scope?: ApprovalScope;
+}
+
+/** POST /v1/tasks/{task_id}/approve response body. */
+export interface ApprovalResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: 'APPROVED';
+  readonly scope: ApprovalScope;
+  readonly decided_at: string;
+}
+
+/** POST /v1/tasks/{task_id}/deny request body. */
+export interface DenyRequest {
+  readonly request_id: string;
+  readonly decision: 'deny';
+  readonly reason?: string;
+}
+
+/** POST /v1/tasks/{task_id}/deny response body. */
+export interface DenyResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: 'DENIED';
+  readonly decided_at: string;
+}
+
+/**
+ * Cedar HITL severity literal. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::Severity``. Shared alias so
+ * the same union is not redefined inline across types.
+ */
+export type Severity = 'low' | 'medium' | 'high';
+
+/** Pending approval summary returned by `GET /v1/pending`. */
+export interface PendingApprovalSummary {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly tool_name: string;
+  readonly tool_input_preview: string;
+  readonly severity: Severity;
+  readonly reason: string;
+  readonly created_at: string;
+  readonly timeout_s: number;
+  readonly expires_at: string;
+  /** Cedar rule ids that matched this request — shown by
+   *  ``bgagent pending`` so users can see which rule fired without
+   *  spelunking TaskEventsTable. */
+  readonly matching_rule_ids: readonly string[];
+}
+
+/** GET /v1/pending response body. */
+export interface GetPendingResponse {
+  readonly pending: readonly PendingApprovalSummary[];
+}
+
+/** Rule metadata returned by `GET /v1/repos/{repo_id}/policies`. */
+export interface PolicyRuleSummary {
+  readonly rule_id: string;
+  readonly category?: string;
+  readonly severity?: Severity;
+  readonly approval_timeout_s?: number;
+  readonly summary: string;
+}
+
+/** GET /v1/repos/{repo_id}/policies response body. */
+export interface GetPoliciesResponse {
+  readonly repo_id: string;
+  readonly policies: {
+    readonly hard: readonly PolicyRuleSummary[];
+    readonly soft: readonly PolicyRuleSummary[];
+  };
+}
+
+/** Maximum deny reason length after server-side sanitization. */
+export const DENY_REASON_MAX_LENGTH = 2000;
+
+/** Maximum initial_approvals entries on POST /v1/tasks. */
+export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
+
+/** Maximum per-entry length for an initial_approvals scope string. */
+export const INITIAL_APPROVALS_MAX_ENTRY_LENGTH = 128;
+
+/** Lower bound on approval_timeout_s submission. */
+export const APPROVAL_TIMEOUT_S_MIN = 30;
+
+/** Upper bound on approval_timeout_s submission (before maxLifetime clip). */
+export const APPROVAL_TIMEOUT_S_MAX = 3600;
+
+/** Default approval_timeout_s when the submit payload omits it. */
+export const APPROVAL_TIMEOUT_S_DEFAULT = 300;

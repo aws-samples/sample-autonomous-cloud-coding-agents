@@ -288,6 +288,168 @@ describe('hydrateAndTransition', () => {
   });
 });
 
+describe('hydrateAndTransition — Cedar HITL payload threading', () => {
+  const mockHydratedContext = {
+    version: 1,
+    user_prompt: 'Task ID: TASK001\nRepository: org/repo\n\n## Task\n\nFix the bug',
+    sources: ['task_description'],
+    token_estimate: 20,
+    truncated: false,
+    content_trust: { task_description: 'trusted' },
+  };
+
+  test('threads approval_timeout_s when present on task record', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithTimeout = { ...baseTask, approval_timeout_s: 600 };
+    const payload = await hydrateAndTransition(taskWithTimeout as any);
+    expect(payload.approval_timeout_s).toBe(600);
+  });
+
+  test('omits approval_timeout_s when undefined (keeps wire slim)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload).not.toHaveProperty('approval_timeout_s');
+  });
+
+  test('threads initial_approvals when non-empty', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithApprovals = {
+      ...baseTask,
+      initial_approvals: ['tool_type:Read', 'rule:force_push_any'],
+    };
+    const payload = await hydrateAndTransition(taskWithApprovals as any);
+    expect(payload.initial_approvals).toEqual(['tool_type:Read', 'rule:force_push_any']);
+  });
+
+  test('omits initial_approvals when empty list (avoid no-op list on the wire)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithEmpty = { ...baseTask, initial_approvals: [] };
+    const payload = await hydrateAndTransition(taskWithEmpty as any);
+    expect(payload).not.toHaveProperty('initial_approvals');
+  });
+
+  test('Chunk 7 §13.6: threads initial_approval_gate_count when approval_gate_count > 0', async () => {
+    // Container-restart scenario: TaskTable has a non-zero counter
+    // from a prior container. Orchestrator must seed the agent's
+    // PolicyEngine so the cap stays enforced across restarts.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskRestart = { ...baseTask, approval_gate_count: 17 };
+    const payload = await hydrateAndTransition(taskRestart as any);
+    expect(payload.initial_approval_gate_count).toBe(17);
+  });
+
+  test('Chunk 7: omits initial_approval_gate_count when approval_gate_count is zero (fresh task)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const freshTask = { ...baseTask, approval_gate_count: 0 };
+    const payload = await hydrateAndTransition(freshTask as any);
+    // Fresh task — no need to thread 0; the agent's default of 0
+    // preserves the existing path without an explicit field on the
+    // wire payload.
+    expect(payload).not.toHaveProperty('initial_approval_gate_count');
+  });
+
+  test('Chunk 7: omits initial_approval_gate_count when approval_gate_count undefined (legacy task)', async () => {
+    // Legacy task records predating the Chunk 1 TaskRecord change
+    // don't have the attribute at all.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload).not.toHaveProperty('initial_approval_gate_count');
+  });
+
+  test('Chunk 7: ignores non-numeric approval_gate_count defensively', async () => {
+    // DynamoDB schema enforces N for this attribute, but a corrupted
+    // record (e.g. manual edit) should NOT explode the orchestrator.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const corruptTask = { ...baseTask, approval_gate_count: 'not-a-number' };
+    const payload = await hydrateAndTransition(corruptTask as any);
+    expect(payload).not.toHaveProperty('initial_approval_gate_count');
+  });
+
+  test('Chunk 7b §4 step 5: threads approval_gate_cap into payload when present', async () => {
+    // TaskRecord carries the cap that was resolved and persisted at
+    // submit-time. The orchestrator must forward it unconditionally
+    // (unlike the counter, which only threads when non-zero) so the
+    // agent adopts the blueprint-configured cap rather than its
+    // compile-time fallback.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithCap = { ...baseTask, approval_gate_cap: 200 };
+    const payload = await hydrateAndTransition(taskWithCap as any);
+    expect(payload.approval_gate_cap).toBe(200);
+  });
+
+  test('Chunk 7b: threads default-50 cap into payload', async () => {
+    // Fresh task from Chunk 7b deploys carries approval_gate_cap=50
+    // (the platform default frozen at submit-time). Must be threaded
+    // even though 50 happens to equal the agent's compile-time
+    // DEFAULT_APPROVAL_GATE_CAP — the semantic distinction is that
+    // "50 from TaskRecord" means "submit-time decision" and behaves
+    // correctly under mid-task blueprint edits.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const taskWithDefault = { ...baseTask, approval_gate_cap: 50 };
+    const payload = await hydrateAndTransition(taskWithDefault as any);
+    expect(payload.approval_gate_cap).toBe(50);
+  });
+
+  test('Chunk 7b: omits approval_gate_cap when task record predates Chunk 7b', async () => {
+    // Legacy tasks submitted before Chunk 7b landed don't have the
+    // attribute. Orchestrator must omit it so the agent falls back to
+    // its own DEFAULT_APPROVAL_GATE_CAP and behavior matches the
+    // pre-Chunk-7b deploy.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload).not.toHaveProperty('approval_gate_cap');
+  });
+
+  test('Chunk 7b: ignores non-numeric approval_gate_cap defensively', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const corruptTask = { ...baseTask, approval_gate_cap: 'not-a-number' };
+    const payload = await hydrateAndTransition(corruptTask as any);
+    expect(payload).not.toHaveProperty('approval_gate_cap');
+  });
+
+  test.each([
+    ['NaN', NaN],
+    ['negative', -1],
+    ['zero', 0],
+    ['above max', 501],
+    ['non-integer', 3.14],
+    ['Infinity', Infinity],
+  ])('Chunk 7b: rejects corrupted approval_gate_cap value (%s) and omits from payload', async (_label, badValue) => {
+    // Submit-path bounds-checks the blueprint value before persisting,
+    // so these branches only fire on schema drift / hand-edited rows.
+    // Omitting keeps the container starting (agent falls back to
+    // engine default-50) instead of crashing PolicyEngine.__init__.
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const corruptTask = { ...baseTask, approval_gate_cap: badValue };
+    const payload = await hydrateAndTransition(corruptTask as any);
+    expect(payload).not.toHaveProperty('approval_gate_cap');
+  });
+
+  test.each([
+    ['min (1)', 1],
+    ['max (500)', 500],
+  ])('Chunk 7b: accepts boundary approval_gate_cap %s', async (_label, goodValue) => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const task = { ...baseTask, approval_gate_cap: goodValue };
+    const payload = await hydrateAndTransition(task as any);
+    expect(payload.approval_gate_cap).toBe(goodValue);
+  });
+});
+
 describe('pollTaskStatus', () => {
   test('increments attempt count and reads status', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });

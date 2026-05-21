@@ -27,11 +27,26 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { generateBranchName } from './gateway';
 import { logger } from './logger';
-import { checkRepoOnboarded } from './repo-config';
+import { lookupRepo } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
-import { type ChannelSource, type CreateTaskRequest, isPrTaskType, type TaskRecord, type TaskType, toTaskDetail } from './types';
+import {
+  APPROVAL_GATE_CAP_DEFAULT,
+  APPROVAL_GATE_CAP_MAX,
+  APPROVAL_GATE_CAP_MIN,
+  APPROVAL_TIMEOUT_S_DEFAULT,
+  APPROVAL_TIMEOUT_S_MAX,
+  APPROVAL_TIMEOUT_S_MIN,
+  type ChannelSource,
+  type CreateTaskRequest,
+  INITIAL_APPROVALS_MAX_ENTRIES,
+  isPrTaskType,
+  type TaskRecord,
+  type TaskType,
+  toTaskDetail,
+} from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_TASK_DESCRIPTION_LENGTH, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -76,10 +91,58 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
   }
 
-  // 1b. Check repo is onboarded (conditional — skipped when REPO_TABLE_NAME is not set)
-  const onboardingResult = await checkRepoOnboarded(body.repo);
-  if (!onboardingResult.onboarded) {
+  // 1b. Single RepoTable GetItem covers BOTH the onboarding gate AND
+  //     the Cedar HITL blueprint-cap resolution (§4 step 5, decision
+  //     #13). Capturing the cap at submit-time means mid-task blueprint
+  //     edits cannot shift the cap beneath a running task. Previously
+  //     this path issued two back-to-back GetItems for the same key;
+  //     ``lookupRepo`` consolidates them.
+  const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
+  if (!onboarded) {
     return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
+  }
+  const blueprintCap = repoConfig?.approval_gate_cap;
+  let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
+  if (blueprintCap !== undefined) {
+    if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
+      // Blueprint construct's synth-time validation should have caught
+      // this, but a hand-edited RepoConfig row could bypass it. Fail
+      // closed rather than persisting junk onto the TaskRecord.
+      // 503 (not 500) — the condition is permanent until the blueprint
+      // is re-deployed, but from the user's perspective this is "platform
+      // can't accept this right now"; 500 would misleadingly suggest a
+      // transient internal glitch worth retrying.
+      logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
+        repo: body.repo,
+        blueprint_cap: blueprintCap,
+        request_id: requestId,
+      });
+      return errorResponse(
+        503,
+        ErrorCode.SERVICE_UNAVAILABLE,
+        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is not an integer. `
+          + 'Ask the platform admin to re-deploy the blueprint with a valid cap.',
+        requestId,
+      );
+    }
+    if (blueprintCap < APPROVAL_GATE_CAP_MIN || blueprintCap > APPROVAL_GATE_CAP_MAX) {
+      logger.error('Blueprint misconfiguration — approval_gate_cap out of bounds', {
+        repo: body.repo,
+        blueprint_cap: blueprintCap,
+        min: APPROVAL_GATE_CAP_MIN,
+        max: APPROVAL_GATE_CAP_MAX,
+        request_id: requestId,
+      });
+      return errorResponse(
+        503,
+        ErrorCode.SERVICE_UNAVAILABLE,
+        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is `
+          + `${blueprintCap}; must be between ${APPROVAL_GATE_CAP_MIN} and `
+          + `${APPROVAL_GATE_CAP_MAX}. Ask the platform admin to re-deploy the blueprint.`,
+        requestId,
+      );
+    }
+    resolvedApprovalGateCap = blueprintCap;
   }
 
   if (!hasTaskSpec(body)) {
@@ -131,6 +194,88 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid trace. Must be a boolean.', requestId);
   }
   const userTrace = body.trace === true;
+
+  // Cedar HITL — validate approval_timeout_s if supplied (§7.3 step 5).
+  // maxLifetime-based ceiling clip is applied at orchestrator
+  // invocation time; at submit time we only enforce the `[floor, cap]`
+  // envelope.
+  let approvalTimeoutS: number | undefined;
+  if (body.approval_timeout_s !== undefined) {
+    if (typeof body.approval_timeout_s !== 'number'
+        || !Number.isInteger(body.approval_timeout_s)) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid approval_timeout_s. Must be an integer.',
+        requestId,
+      );
+    }
+    if (body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN
+        || body.approval_timeout_s > APPROVAL_TIMEOUT_S_MAX) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        `Invalid approval_timeout_s. Must be between ${APPROVAL_TIMEOUT_S_MIN}s `
+          + `and ${APPROVAL_TIMEOUT_S_MAX}s.`,
+        requestId,
+      );
+    }
+    approvalTimeoutS = body.approval_timeout_s;
+  }
+
+  // Cedar HITL — validate initial_approvals if supplied (§7.3 step 4).
+  let initialApprovals: string[] | undefined;
+  if (body.initial_approvals !== undefined) {
+    if (!Array.isArray(body.initial_approvals)) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid initial_approvals. Must be an array of scope strings.',
+        requestId,
+      );
+    }
+    if (body.initial_approvals.length > INITIAL_APPROVALS_MAX_ENTRIES) {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        `initial_approvals exceeds ${INITIAL_APPROVALS_MAX_ENTRIES} entries.`,
+        requestId,
+      );
+    }
+    const normalized: string[] = [];
+    for (const entry of body.initial_approvals) {
+      const parseResult = parseApprovalScope(String(entry));
+      if (!parseResult.ok) {
+        return errorResponse(
+          400,
+          ErrorCode.VALIDATION_ERROR,
+          `Invalid initial_approvals entry "${String(entry)}": ${parseResult.message}.`,
+          requestId,
+        );
+      }
+      // Degenerate-pattern guard for bash_pattern:/write_path: scopes
+      // (§7.4). Rejecting at submit is kinder than silently letting a
+      // degenerate pattern through and having it match every tool call.
+      if (
+        parseResult.scope.startsWith('bash_pattern:')
+        || parseResult.scope.startsWith('write_path:')
+      ) {
+        const value = parseResult.scope.split(':', 2)[1] ?? '';
+        if (isDegeneratePattern(value)) {
+          return errorResponse(
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            `Invalid initial_approvals entry "${parseResult.scope}": `
+              + 'pattern is too broad. Use a more specific pattern, or '
+              + '"all_session" if you intend to allow everything.',
+            requestId,
+          );
+        }
+      }
+      normalized.push(parseResult.scope);
+    }
+    initialApprovals = normalized;
+  }
 
   // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
@@ -239,6 +384,19 @@ export async function createTaskCore(
     status_created_at: `${TaskStatus.SUBMITTED}#${now}`,
     created_at: now,
     updated_at: now,
+    // Cedar HITL extensions (§10.2). Only written when the submit
+    // payload supplied them; ``approval_timeout_s`` defaults to the
+    // engine default at agent runtime when absent here.
+    ...(approvalTimeoutS !== undefined && { approval_timeout_s: approvalTimeoutS }),
+    ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
+    // Persisted counter the stranded-approval reconciler + agent
+    // counter both read (§13.6). Seeded to 0 at task-create time.
+    approval_gate_count: 0,
+    // Cedar HITL (§4 step 5, decision #13): per-task cap captured at
+    // submit-time. Blueprint override wins when within bounds; otherwise
+    // platform default of 50. Persisted so a container restart or a
+    // mid-task blueprint edit cannot shift the cap beneath the task.
+    approval_gate_cap: resolvedApprovalGateCap,
   };
 
   // 6. Write task record
@@ -280,6 +438,13 @@ export async function createTaskCore(
     repo: body.repo,
     channel_source: context.channelSource,
     request_id: requestId,
+    // Chunk 7b: surface the resolved cap + its source so operators can
+    // detect a broken blueprint-plumbing deploy (all four fallback
+    // layers in the resolution cascade converge here). ``source`` is
+    // "blueprint" when the blueprint explicitly configured the value,
+    // "platform_default" when it fell through to 50.
+    approval_gate_cap: resolvedApprovalGateCap,
+    approval_gate_cap_source: blueprintCap !== undefined ? 'blueprint' : 'platform_default',
   });
 
   // 8. Async-invoke the orchestrator (fire-and-forget)

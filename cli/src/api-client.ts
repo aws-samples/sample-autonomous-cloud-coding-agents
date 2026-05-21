@@ -22,11 +22,18 @@ import { loadConfig } from './config';
 import { debug } from './debug';
 import { ApiError, CliError } from './errors';
 import {
+  ApprovalRequest,
+  ApprovalResponse,
+  ApprovalScope,
   CancelTaskResponse,
   CreateTaskRequest,
   CreateWebhookRequest,
   CreateWebhookResponse,
+  DenyRequest,
+  DenyResponse,
   ErrorResponse,
+  GetPendingResponse,
+  GetPoliciesResponse,
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
@@ -188,6 +195,79 @@ export class ApiClient {
       'POST',
       `/tasks/${encodeURIComponent(taskId)}/nudge`,
       body,
+    );
+    return res.data;
+  }
+
+  /**
+   * POST /tasks/{task_id}/approve — approve a pending Cedar HITL gate.
+   *
+   * `scope` defaults to `this_call` on the server when omitted;
+   * callers pass it explicitly to extend the allowlist
+   * (`tool_type_session`, `rule:<id>`, etc.). Returns 202 with the
+   * decided timestamp + scope echoed back.
+   */
+  async approveTask(
+    taskId: string,
+    requestId: string,
+    scope?: ApprovalScope,
+  ): Promise<ApprovalResponse> {
+    const body: ApprovalRequest = {
+      request_id: requestId,
+      decision: 'approve',
+      ...(scope && { scope }),
+    };
+    const res = await this.request<SuccessResponse<ApprovalResponse>>(
+      'POST',
+      `/tasks/${encodeURIComponent(taskId)}/approve`,
+      body,
+    );
+    return res.data;
+  }
+
+  /**
+   * POST /tasks/{task_id}/deny — deny a pending Cedar HITL gate.
+   *
+   * `reason` is sanitized + truncated server-side before reaching the
+   * agent. Returns 202.
+   */
+  async denyTask(
+    taskId: string,
+    requestId: string,
+    reason?: string,
+  ): Promise<DenyResponse> {
+    const body: DenyRequest = {
+      request_id: requestId,
+      decision: 'deny',
+      ...(reason && { reason }),
+    };
+    const res = await this.request<SuccessResponse<DenyResponse>>(
+      'POST',
+      `/tasks/${encodeURIComponent(taskId)}/deny`,
+      body,
+    );
+    return res.data;
+  }
+
+  /** GET /pending — list pending approvals owned by the caller. */
+  async listPending(): Promise<GetPendingResponse> {
+    const res = await this.request<SuccessResponse<GetPendingResponse>>(
+      'GET',
+      '/pending',
+    );
+    return res.data;
+  }
+
+  /**
+   * GET /repos/{repo_id}/policies — list Cedar rules for a repo.
+   *
+   * The server encodes the repo_id itself; this client URL-encodes the
+   * path segment so callers can pass `owner/repo` as-is.
+   */
+  async listPolicies(repoId: string): Promise<GetPoliciesResponse> {
+    const res = await this.request<SuccessResponse<GetPoliciesResponse>>(
+      'GET',
+      `/repos/${encodeURIComponent(repoId)}/policies`,
     );
     return res.data;
   }

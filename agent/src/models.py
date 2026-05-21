@@ -129,6 +129,25 @@ class TaskConfig(BaseModel):
     trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
+    # Cedar HITL (§7.3, §10.2). Per-task approval defaults threaded
+    # from the orchestrator payload; consumed by PolicyEngine at
+    # construction so the engine seeds ApprovalAllowlist and adopts
+    # the per-task timeout default.
+    approval_timeout_s: int | None = None
+    initial_approvals: list[str] = []
+    # Chunk 7: TaskTable-persisted ``approval_gate_count`` seeded into
+    # the session counter so container restarts (§13.6) resume the
+    # cumulative gate budget without resetting to 0. Threaded from the
+    # orchestrator payload; zero default preserves legacy callers.
+    initial_approval_gate_count: int = 0
+    # Chunk 7b (§4 step 5, decision #13): per-task approval-gate cap
+    # resolved at task submit-time from ``Blueprint.security.approvalGateCap``
+    # (or the platform default of 50). Persisted on the TaskRecord so
+    # it survives container restarts and mid-task blueprint edits do
+    # not shift the cap beneath a running task. ``None`` when the
+    # orchestrator payload did not include the field (legacy tasks);
+    # PolicyEngine falls back to its own default of 50 in that case.
+    approval_gate_cap: int | None = None
     issue: GitHubIssue | None = None
     base_branch: str | None = None
 

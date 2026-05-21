@@ -34,6 +34,7 @@ describe('format', () => {
     pr_url: 'https://github.com/owner/repo/pull/1',
     error_message: null,
     error_classification: null,
+    prompt_version: null,
     channel_source: 'api',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T01:00:00Z',
@@ -48,6 +49,9 @@ describe('format', () => {
     turns_completed: null,
     trace: false,
     trace_s3_uri: null,
+    approval_gate_count: 0,
+    approval_gate_cap: 50,
+    awaiting_approval_request_id: null,
   };
 
   describe('formatTaskDetail', () => {
