@@ -17,7 +17,7 @@ Every PR references an issue. The issue provides rationale, sufficient context f
 
 ### Issue quality bar
 
-An issue is "ready for work" when a contributor can read the body alone — without comments, related issues, or clarifying questions — and know exactly what to build.
+An issue is "ready for work" when the body, together with its linked context — comments, replies, predecessor issues, related PRs (open and merged), and downstream goals — gives the implementer enough to proceed without ambiguity. The body is the primary directive; comments and threads add solution-space context; predecessors establish environmental architecture; downstream issues inform alignment.
 
 ### Roadmap alignment
 
@@ -31,9 +31,11 @@ Only `admin` users can mark an issue `approved`. Unapproved and unassigned issue
 
 Unassigned means available. On starting work, self-assign. Multiple assignees (>1) require intentionality verification.
 
-### Issue body is source of truth
+### Issue body as primary directive
 
-Discussion threads are folded back into the body. Unresolved conflicts are marked explicitly:
+The issue body provides the primary directive for implementation. Comments, replies, and clarifying answers add context to the solution space. Ideally the body is sufficient, but it need not be the exclusive source — the reviewer for implementation readiness should synthesize comments and replies with the body to surface inconsistencies and resolve ambiguities before commencing work.
+
+Unresolved conflicts are marked explicitly:
 - `**UNRESOLVED:** <question>` — blocks implementation
 - `**DEFERRED:** <question> — tracked in #N` — does not block
 
@@ -41,13 +43,13 @@ Discussion threads are folded back into the body. Unresolved conflicts are marke
 
 Before implementation, the assigned contributor must:
 
-**Read and verify:** All comments read, no unresolved conflicts.
+**Synthesize context:** Read all comments and replies. Review predecessor issues and PRs (both merged and in-flight). Consider downstream goals and adjacent state (other open PRs, recent merges, dependency changes). Surface inconsistencies between body and thread before proceeding.
 
 **Priority evaluation:** Identify priority (`p0`/`p1`/`p2`). If asked to work a lower-priority item while higher-priority items are unassigned, challenge: "Should I work on #X (p0) instead?"
 
 **Predecessor validation:** If predecessors are incomplete, unassigned, and not in a stacked PR — challenge: "Steps 1-3 are incomplete. Starting step 4 may cause rework."
 
-**Cross-reference audit:** Search open issues for duplicates. Search open PRs (including drafts) for conflicts. Flag overlaps. Check the full dependency graph.
+**Cross-reference audit:** Search open issues for duplicates. Search open PRs (including drafts) for conflicts. Flag overlaps. Check the full dependency graph. Forward-look into downstream actions to ensure alignment.
 
 **Final gate:** If all checks pass, comment "Starting implementation."
 
@@ -57,7 +59,7 @@ Agents use identifiable credentials. The prompting user and acting agent must be
 
 ### Work-in-progress discipline
 
-Provide progress signals at checkpoints. If blocked or abandoning, comment and unassign. Do not start multiple issues simultaneously unless explicitly parallelizable.
+Provide progress signals at checkpoints. If blocked or abandoning, comment and unassign. Do not start multiple issues simultaneously unless explicitly parallelizable or serializable with declared ordering (where context from one directly informs the next).
 
 ### Completion and handoff
 
