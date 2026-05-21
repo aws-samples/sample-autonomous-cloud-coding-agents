@@ -1,0 +1,165 @@
+{
+  "Statement": [
+    {
+      "Action": "bedrock-agentcore:*",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "BedrockAgentCore"
+    },
+    {
+      "Action": [
+        "bedrock:CreateGuardrail",
+        "bedrock:DeleteGuardrail",
+        "bedrock:GetGuardrail",
+        "bedrock:UpdateGuardrail",
+        "bedrock:CreateGuardrailVersion",
+        "bedrock:ListGuardrails",
+        "bedrock:TagResource",
+        "bedrock:UntagResource",
+        "bedrock:ListTagsForResource",
+        "bedrock:PutModelInvocationLoggingConfiguration",
+        "bedrock:DeleteModelInvocationLoggingConfiguration",
+        "bedrock:GetModelInvocationLoggingConfiguration"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "BedrockGuardrailsAndLogging"
+    },
+    {
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy",
+        "logs:TagLogGroup",
+        "logs:UntagLogGroup",
+        "logs:TagResource",
+        "logs:UntagResource",
+        "logs:ListTagsForResource",
+        "logs:ListTagsLogGroup",
+        "logs:PutResourcePolicy",
+        "logs:DeleteResourcePolicy",
+        "logs:DescribeResourcePolicies",
+        "cloudwatch:PutDashboard",
+        "cloudwatch:DeleteDashboards",
+        "cloudwatch:GetDashboard",
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource",
+        "logs:CreateDelivery",
+        "logs:DescribeDeliveries",
+        "logs:GetDelivery",
+        "logs:GetDeliveryDestination",
+        "logs:GetDeliveryDestinationPolicy",
+        "logs:GetDeliverySource",
+        "logs:PutDeliveryDestination",
+        "logs:PutDeliverySource",
+        "logs:DescribeIndexPolicies",
+        "cloudwatch:ListTagsForResource",
+        "logs:CreateLogDelivery",
+        "logs:DeleteLogDelivery",
+        "logs:GetLogDelivery",
+        "logs:UpdateLogDelivery",
+        "logs:ListLogDeliveries",
+        "logs:DeleteDelivery",
+        "logs:DeleteDeliverySource",
+        "logs:DeleteDeliveryDestination"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "CloudWatchLogsAndDashboards"
+    },
+    {
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::cdk-hnb659fds-assets-*",
+        "arn:aws:s3:::cdk-hnb659fds-assets-*/*"
+      ],
+      "Sid": "S3CDKAssets"
+    },
+    {
+      "Action": [
+        "kms:CreateGrant",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSForCDKAssets"
+    },
+    {
+      "Action": [
+        "ecr:CreateRepository",
+        "ecr:DescribeRepositories",
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:SetRepositoryPolicy",
+        "ecr:GetRepositoryPolicy",
+        "ecr:DeleteRepository",
+        "ecr:ListTagsForResource",
+        "ecr:TagResource"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:ecr:*:*:repository/cdk-hnb659fds-container-assets-*",
+        "arn:aws:ecr:*:*:repository/backgroundagent-*"
+      ],
+      "Sid": "ECRForDockerAssets"
+    },
+    {
+      "Action": "ecr:GetAuthorizationToken",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "ECRAuthToken"
+    },
+    {
+      "Action": [
+        "xray:UpdateTraceSegmentDestination",
+        "xray:GetTraceSegmentDestination",
+        "xray:ListResourcePolicies",
+        "xray:PutResourcePolicy"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "XRay"
+    },
+    {
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*",
+      "Sid": "SSMParameterStoreForCDK"
+    },
+    {
+      "Action": [
+        "sts:AssumeRole",
+        "sts:GetCallerIdentity"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::*:role/cdk-hnb659fds-*",
+      "Sid": "STSForCDK"
+    }
+  ],
+  "Version": "2012-10-17"
+}
