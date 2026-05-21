@@ -43,11 +43,14 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * (and any GitHub-Deployments-API-aware deploy backend) posts this when
  * a preview / production deploy finishes. The interesting fields:
  *  - `deployment_status.state`: `success` | `failure` | `error` | `pending` | `in_progress`
+ *  - `deployment_status.environment_url`: the deployed URL — lives on the
+ *    *status* object, not the deployment itself. (The deployment object
+ *    only has the immutable SHA + environment name; URL changes per
+ *    status update — first `pending` has no URL, then `success` fills
+ *    it in.)
  *  - `deployment.environment`: `Preview` | `Production`
- *  - `deployment.environment_url`: the deployed URL (used by the agent
- *    as the screenshot target — no extra round-trip needed)
  *  - `deployment.sha`: the commit SHA the deploy is for (used to map
- *    back to an ABCA task via the RepoCommitIndex GSI)
+ *    back to a PR via the GitHub commit-pulls API)
  *
  * Full payload is forwarded to the processor without re-serialization
  * risk — the processor parses its own copy from the raw body.
@@ -57,12 +60,12 @@ interface GitHubDeploymentStatusEnvelope {
   readonly deployment_status?: {
     readonly id?: number;
     readonly state?: string;
+    readonly environment_url?: string;
   };
   readonly deployment?: {
     readonly id?: number;
     readonly sha?: string;
     readonly environment?: string;
-    readonly environment_url?: string;
   };
   readonly repository?: {
     readonly full_name?: string;
@@ -164,7 +167,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Missing repo, deployment id, or status id' });
     }
 
-    if (!payload.deployment?.environment_url) {
+    if (!payload.deployment_status?.environment_url) {
       logger.warn('GitHub deployment_status webhook missing environment_url; cannot screenshot', {
         repo,
         deployment_id: deploymentId,
