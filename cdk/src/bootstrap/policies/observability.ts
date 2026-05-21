@@ -26,20 +26,13 @@ import { aws_iam as iam } from 'aws-cdk-lib';
 /**
  * Returns the IAM PolicyDocument for the IaCRole-ABCA-Observability role.
  *
- * Covers: Bedrock AgentCore, Bedrock guardrails/logging, CloudWatch Logs
- * and Dashboards, CDK asset buckets (S3), KMS for CDK assets, ECR for
- * Docker assets, X-Ray, SSM Parameter Store, and STS for CDK.
+ * Covers: Bedrock guardrails/logging, CloudWatch Logs and Dashboards,
+ * CDK asset buckets (S3), KMS for CDK assets, ECR for Docker assets,
+ * X-Ray, SSM Parameter Store, and STS for CDK.
  */
 export function observabilityPolicy(): iam.PolicyDocument {
   return new iam.PolicyDocument({
     statements: [
-      new iam.PolicyStatement({
-        sid: 'BedrockAgentCore',
-        effect: iam.Effect.ALLOW,
-        actions: ['bedrock-agentcore:*'],
-        resources: ['*'],
-      }),
-
       new iam.PolicyStatement({
         sid: 'BedrockGuardrailsAndLogging',
         effect: iam.Effect.ALLOW,

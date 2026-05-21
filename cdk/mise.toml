@@ -32,9 +32,14 @@ description = "cdk deploy (pass args after --)"
 run = "npx cdk deploy"
 
 [tasks.bootstrap]
-description = "Bootstrap CDK in the current AWS account/region (one-time)"
+description = "Bootstrap CDK with least-privilege policies (pass -- --context ComputeTypes=agentcore,ecs for ECS)"
+depends = [":install", ":bootstrap:generate"]
+run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml"
+
+[tasks."bootstrap:generate"]
+description = "Regenerate all bootstrap artifacts (policies JSON, template YAML, version/hash files)"
 depends = [":install"]
-run = "npx cdk bootstrap"
+run = "npx tsx scripts/generate-bootstrap-artifacts.ts && npx tsx scripts/generate-bootstrap-template.ts"
 
 [tasks.destroy]
 description = "cdk destroy"

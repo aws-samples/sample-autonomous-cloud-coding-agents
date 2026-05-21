@@ -1,0 +1,26 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:DeleteCluster",
+        "ecs:DescribeClusters",
+        "ecs:UpdateCluster",
+        "ecs:UpdateClusterSettings",
+        "ecs:PutClusterCapacityProviders",
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:ListTaskDefinitions",
+        "ecs:TagResource",
+        "ecs:UntagResource",
+        "ecs:ListTagsForResource",
+        "ecs:PutAccountSetting"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "ECS"
+    }
+  ],
+  "Version": "2012-10-17"
+}

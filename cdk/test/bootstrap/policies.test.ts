@@ -20,6 +20,8 @@
 import { Stack } from 'aws-cdk-lib';
 import { allPolicies } from '../../src/bootstrap/policies';
 import { applicationPolicy } from '../../src/bootstrap/policies/application';
+import { computeAgentcorePolicy } from '../../src/bootstrap/policies/compute-agentcore';
+import { computeEcsPolicy } from '../../src/bootstrap/policies/compute-ecs';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
 import { observabilityPolicy } from '../../src/bootstrap/policies/observability';
 
@@ -164,7 +166,6 @@ describe('IaCRole-ABCA-Observability', () => {
     const sids = statements.map((s) => s.Sid);
 
     expect(sids).toEqual([
-      'BedrockAgentCore',
       'BedrockGuardrailsAndLogging',
       'CloudWatchLogsAndDashboards',
       'S3CDKAssets',
@@ -197,7 +198,6 @@ describe('IaCRole-ABCA-Observability', () => {
     expect(prefixes).toEqual(
       new Set([
         'bedrock',
-        'bedrock-agentcore',
         'cloudwatch',
         'ecr',
         'kms',
@@ -211,11 +211,99 @@ describe('IaCRole-ABCA-Observability', () => {
   });
 });
 
+describe('IaCRole-ABCA-Compute-AgentCore', () => {
+  const stack = new Stack();
+  const doc = computeAgentcorePolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+
+    expect(sids).toEqual(['BedrockAgentCore']);
+  });
+
+  it('has unique SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+    const unique = new Set(sids);
+
+    expect(unique.size).toBe(sids.length);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    expect(prefixes).toEqual(new Set(['bedrock-agentcore']));
+  });
+});
+
+describe('IaCRole-ABCA-Compute-ECS', () => {
+  const stack = new Stack();
+  const doc = computeEcsPolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+
+    expect(sids).toEqual(['ECS']);
+  });
+
+  it('has unique SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+    const sids = statements.map((s) => s.Sid);
+    const unique = new Set(sids);
+
+    expect(unique.size).toBe(sids.length);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    expect(prefixes).toEqual(new Set(['ecs']));
+  });
+});
+
 describe('Cross-policy validation', () => {
   const stack = new Stack();
   const policies = allPolicies();
 
-  it('all SIDs are globally unique across all three policies', () => {
+  it('all SIDs are globally unique across all policies', () => {
     const allSids: string[] = [];
 
     for (const policy of policies) {
@@ -228,8 +316,8 @@ describe('Cross-policy validation', () => {
     expect(unique.size).toBe(allSids.length);
   });
 
-  it('returns exactly 3 policies', () => {
-    expect(policies).toHaveLength(3);
+  it('returns exactly 5 policies', () => {
+    expect(policies).toHaveLength(5);
   });
 
   it('every policy is under 6144 character limit', () => {

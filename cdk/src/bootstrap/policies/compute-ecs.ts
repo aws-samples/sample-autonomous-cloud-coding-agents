@@ -19,27 +19,36 @@
 
 import { aws_iam as iam } from 'aws-cdk-lib';
 
-import { applicationPolicy } from './application';
-import { computeAgentcorePolicy } from './compute-agentcore';
-import { computeEcsPolicy } from './compute-ecs';
-import { infrastructurePolicy } from './infrastructure';
-import { observabilityPolicy } from './observability';
-
-export { applicationPolicy } from './application';
-export { computeAgentcorePolicy } from './compute-agentcore';
-export { computeEcsPolicy } from './compute-ecs';
-export { infrastructurePolicy } from './infrastructure';
-export { observabilityPolicy } from './observability';
-
 /**
- * Returns all bootstrap IAM PolicyDocuments as an array.
+ * Returns the IAM PolicyDocument for the IaCRole-ABCA-Compute-ECS role.
+ *
+ * Covers: ECS cluster and task definition management for the Fargate
+ * compute backend.
  */
-export function allPolicies(): iam.PolicyDocument[] {
-  return [
-    infrastructurePolicy(),
-    applicationPolicy(),
-    observabilityPolicy(),
-    computeAgentcorePolicy(),
-    computeEcsPolicy(),
-  ];
+export function computeEcsPolicy(): iam.PolicyDocument {
+  return new iam.PolicyDocument({
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'ECS',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ecs:CreateCluster',
+          'ecs:DeleteCluster',
+          'ecs:DescribeClusters',
+          'ecs:UpdateCluster',
+          'ecs:UpdateClusterSettings',
+          'ecs:PutClusterCapacityProviders',
+          'ecs:RegisterTaskDefinition',
+          'ecs:DeregisterTaskDefinition',
+          'ecs:DescribeTaskDefinition',
+          'ecs:ListTaskDefinitions',
+          'ecs:TagResource',
+          'ecs:UntagResource',
+          'ecs:ListTagsForResource',
+          'ecs:PutAccountSetting',
+        ],
+        resources: ['*'],
+      }),
+    ],
+  });
 }

@@ -1,3 +1,3 @@
 // Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
-exports[`bootstrap version module hash is stable 1`] = `"4892570024965c2e99ef0d9f7ef0a61e4b939ba69c5df52e4bc1647522dad283"`;
+exports[`bootstrap version module hash is stable 1`] = `"a24d14dde94c546fdf94c7839492e92f612ae91def4660aaacab48d8e8da3146"`;
