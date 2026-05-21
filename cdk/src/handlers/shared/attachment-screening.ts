@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import { createHash } from 'crypto';
 import { ApplyGuardrailCommand, type BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+import { createHash } from 'crypto';
 import sharp from 'sharp';
 import { logger } from './logger';
 
