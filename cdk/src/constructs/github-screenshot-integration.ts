@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -43,6 +43,15 @@ export interface GitHubScreenshotIntegrationProps {
    * No new GitHub credential is provisioned by this construct.
    */
   readonly githubTokenSecret: secretsmanager.ISecret;
+
+  /**
+   * Optional — when provided, the processor also tries to post the
+   * screenshot to a linked Linear issue. Resolved from the GitHub PR
+   * title/body via a Linear-identifier regex (e.g. `ABCA-42`), then
+   * looked up across all `status='active'` workspaces in the registry
+   * via Linear's `issueVcsBranchSearch` GraphQL.
+   */
+  readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
 
   /**
    * Removal policy for the dedup table + screenshot bucket. Defaults
@@ -142,12 +151,35 @@ export class GitHubScreenshotIntegration extends Construct {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
         SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
+        ...(props.linearWorkspaceRegistryTable && {
+          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: props.linearWorkspaceRegistryTable.tableName,
+        }),
       },
       bundling: commonBundling,
     });
 
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
     props.githubTokenSecret.grantRead(this.webhookProcessorFn);
+
+    // Optional Linear feedback path. Wired only when a registry table
+    // is provided. The processor scans the registry for active
+    // workspaces, then per-workspace looks up the OAuth token from
+    // Secrets Manager (`bgagent-linear-oauth-*` prefix, written by
+    // `bgagent linear setup`).
+    if (props.linearWorkspaceRegistryTable) {
+      props.linearWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
+      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bgagent-linear-oauth-*',
+          }),
+        ],
+      }));
+    }
 
     // AgentCore Browser session lifecycle + automation-stream connect.
     // The data-plane API doesn't support per-resource ARNs (sessions

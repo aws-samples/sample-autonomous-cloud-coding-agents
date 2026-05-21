@@ -813,6 +813,12 @@ export class AgentStack extends Stack {
     const githubScreenshot = new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
       api: taskApi.api,
       githubTokenSecret,
+      // When the screenshot lands on a PR linked to a Linear issue
+      // (identifier in the PR title/body), also post the screenshot
+      // as a comment on that Linear issue. Wired through the existing
+      // workspace registry so token resolution reuses the per-workspace
+      // OAuth secrets created by `bgagent linear setup`.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
     });
 
     new CfnOutput(this, 'GitHubWebhookUrl', {
