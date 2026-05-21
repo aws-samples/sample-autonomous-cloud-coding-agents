@@ -24,6 +24,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
+  ListSecretsCommand,
   PutSecretValueCommand,
   ResourceExistsException,
   SecretsManagerClient,
@@ -39,6 +40,7 @@ import {
   computeExpiresAt,
   exchangeAuthorizationCode,
   generatePkce,
+  LINEAR_OAUTH_SECRET_PREFIX,
   linearOauthSecretName,
   StoredLinearOauthToken,
 } from '../linear-oauth';
@@ -618,67 +620,108 @@ export function makeLinearCommand(): Command {
 
   linear.addCommand(
     new Command('list-projects')
-      .description('List Linear projects visible to the stored API token (with full UUIDs)')
+      .description('List Linear projects visible to the OAuth-installed workspace (with full UUIDs)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--slug <slug>', 'Linear workspace slug (urlKey). If omitted, queries every active workspace in the registry.')
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
-
-        const apiTokenSecretArn = await getStackOutput(region, opts.stackName, 'LinearApiTokenSecretArn');
-        if (!apiTokenSecretArn) {
-          console.error('Could not find LinearApiTokenSecretArn in stack outputs. Deploy the stack first.');
-          process.exit(1);
-        }
-
         const sm = new SecretsManagerClient({ region });
-        const secret = await sm.send(new GetSecretValueCommand({ SecretId: apiTokenSecretArn }));
-        const apiToken = secret.SecretString;
-        if (!apiToken || apiToken === ' ') {
-          console.error('Linear API token is not populated. Run `bgagent linear setup` first.');
-          process.exit(1);
+
+        // Resolve the set of workspace slugs to query. Either an
+        // explicit `--slug` (one workspace) or every Linear workspace
+        // we have an OAuth secret for (list every `bgagent-linear-oauth-*`).
+        let slugs: string[];
+        if (opts.slug) {
+          slugs = [opts.slug];
+        } else {
+          const listed = await sm.send(new ListSecretsCommand({
+            Filters: [{ Key: 'name', Values: [LINEAR_OAUTH_SECRET_PREFIX] }],
+          }));
+          slugs = (listed.SecretList ?? [])
+            .map((s) => s.Name ?? '')
+            .filter((n) => n.startsWith(LINEAR_OAUTH_SECRET_PREFIX))
+            .map((n) => n.slice(LINEAR_OAUTH_SECRET_PREFIX.length));
+          if (slugs.length === 0) {
+            console.error('No Linear OAuth installs found. Run `bgagent linear setup <slug>` first.');
+            process.exit(1);
+          }
         }
 
-        let projects: Array<{ id: string; name: string; teams?: { nodes?: Array<{ id: string; name: string }> } }>;
-        try {
-          const res = await fetch('https://api.linear.app/graphql', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': apiToken,
-            },
-            body: JSON.stringify({
-              query: '{ projects { nodes { id name teams { nodes { id name } } } } }',
-            }),
-          });
-          if (!res.ok) {
-            throw new Error(`Linear API returned ${res.status}`);
+        type ProjectRow = {
+          slug: string;
+          id: string;
+          name: string;
+          team?: string;
+        };
+        const rows: ProjectRow[] = [];
+
+        for (const slug of slugs) {
+          const secretName = linearOauthSecretName(slug);
+          let accessToken: string;
+          try {
+            const resp = await sm.send(new GetSecretValueCommand({ SecretId: secretName }));
+            const stored = JSON.parse(resp.SecretString ?? '{}') as { access_token?: string };
+            if (!stored.access_token) {
+              console.error(`Secret ${secretName} is missing access_token; skipping.`);
+              continue;
+            }
+            accessToken = stored.access_token;
+          } catch (err) {
+            console.error(`Failed to read ${secretName}: ${err instanceof Error ? err.message : String(err)}`);
+            continue;
           }
-          const body = await res.json() as { data?: { projects?: { nodes?: typeof projects } } };
-          projects = body.data?.projects?.nodes ?? [];
-        } catch (err) {
-          console.error(`Failed to fetch Linear projects: ${err instanceof Error ? err.message : String(err)}`);
-          process.exit(1);
+
+          try {
+            const res = await fetch('https://api.linear.app/graphql', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`,
+              },
+              body: JSON.stringify({
+                query: '{ projects(first: 100) { nodes { id name teams(first: 1) { nodes { name } } } } }',
+              }),
+            });
+            if (!res.ok) {
+              console.error(`Linear API returned ${res.status} for workspace '${slug}'`);
+              continue;
+            }
+            const body = await res.json() as {
+              data?: { projects?: { nodes?: Array<{ id: string; name: string; teams?: { nodes?: Array<{ name: string }> } }> } };
+            };
+            for (const p of body.data?.projects?.nodes ?? []) {
+              rows.push({
+                slug,
+                id: p.id,
+                name: p.name,
+                team: p.teams?.nodes?.[0]?.name,
+              });
+            }
+          } catch (err) {
+            console.error(`Failed to fetch projects for '${slug}': ${err instanceof Error ? err.message : String(err)}`);
+            continue;
+          }
         }
 
         if (opts.output === 'json') {
-          console.log(formatJson(projects));
+          console.log(formatJson(rows));
           return;
         }
 
-        if (projects.length === 0) {
-          console.log('No Linear projects visible to the stored API token.');
+        if (rows.length === 0) {
+          console.log('No Linear projects visible to any installed workspace.');
           return;
         }
 
-        console.log(`Found ${projects.length} Linear project(s):\n`);
-        for (const p of projects) {
-          const team = p.teams?.nodes?.[0];
-          console.log(`  ${p.name}`);
-          console.log(`    id:   ${p.id}`);
-          if (team) {
-            console.log(`    team: ${team.name} (${team.id})`);
+        console.log(`Found ${rows.length} Linear project(s):\n`);
+        for (const r of rows) {
+          console.log(`  ${r.name}`);
+          console.log(`    id:        ${r.id}`);
+          console.log(`    workspace: ${r.slug}`);
+          if (r.team) {
+            console.log(`    team:      ${r.team}`);
           }
           console.log('');
         }
