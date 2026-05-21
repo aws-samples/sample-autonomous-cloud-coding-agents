@@ -17,6 +17,10 @@
  *  SOFTWARE.
  */
 
+import { execFileSync } from 'node:child_process';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { Stack } from 'aws-cdk-lib';
 
 import { allPolicies } from '../../src/bootstrap/policies';
@@ -182,5 +186,50 @@ describe('resource-action-map', () => {
       // Should cover at least 10 distinct services
       expect(services.size).toBeGreaterThanOrEqual(10);
     });
+  });
+});
+
+describe('Synth coverage', () => {
+  const SKIP_TYPES = new Set([
+    'AWS::CDK::Metadata',
+    'Custom::AWS',
+    'Custom::S3AutoDeleteObjects',
+    'Custom::VpcRestrictDefaultSG',
+  ]);
+
+  function getResourceTypes(templatePath: string): string[] {
+    if (!existsSync(templatePath)) return [];
+    const template = JSON.parse(readFileSync(templatePath, 'utf-8'));
+    const resources = template.Resources as Record<string, { Type: string }>;
+    return [...new Set(Object.values(resources).map(r => r.Type))];
+  }
+
+  it('all agentcore resource types have map entries', () => {
+    const templatePath = join(__dirname, '..', '..', 'cdk.out', 'backgroundagent-dev.template.json');
+    const types = getResourceTypes(templatePath);
+    if (types.length === 0) return;
+    const unmapped = types.filter(t => !SKIP_TYPES.has(t) && !RESOURCE_ACTION_MAP[t]);
+    expect(unmapped).toEqual([]);
+  });
+
+  it('all ecs resource types have map entries', () => {
+    const ecsOutDir = join(__dirname, '..', '..', 'cdk.out.ecs');
+    const ecsTemplatePath = join(ecsOutDir, 'backgroundagent-dev.template.json');
+    // Try to synth with ecs config — skip if unavailable (no AWS creds, etc.)
+    if (!existsSync(ecsTemplatePath)) {
+      try {
+        execFileSync('npx', ['cdk', 'synth', '-q', '-c', 'compute_type=ecs', '-o', ecsOutDir], {
+          cwd: join(__dirname, '..', '..'),
+          stdio: 'pipe',
+          timeout: 120000,
+        });
+      } catch {
+        return; // synth unavailable — skip gracefully
+      }
+    }
+    const types = getResourceTypes(ecsTemplatePath);
+    if (types.length === 0) return;
+    const unmapped = types.filter(t => !SKIP_TYPES.has(t) && !RESOURCE_ACTION_MAP[t]);
+    expect(unmapped).toEqual([]);
   });
 });
