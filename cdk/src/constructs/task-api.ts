@@ -295,6 +295,17 @@ export class TaskApi extends Construct {
                         textTransformations: [{ priority: 0, type: 'NONE' }],
                       },
                     },
+                    {
+                      // GitHub deployment_status webhook (Vercel preview
+                      // screenshot pipeline) — absolute deploy URLs trip
+                      // GenericRFI_BODY. HMAC-verified in Lambda.
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/github/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
                   ],
                 },
               },
@@ -337,6 +348,18 @@ export class TaskApi extends Construct {
                             fieldToMatch: { uriPath: {} },
                             positionalConstraint: 'EXACTLY',
                             searchString: '/v1/linear/webhook',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/github/webhook',
                             textTransformations: [{ priority: 0, type: 'NONE' }],
                           },
                         },
