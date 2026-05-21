@@ -26,6 +26,7 @@ import {
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
 import { SignatureV4 } from '@smithy/signature-v4';
+import WebSocket, { type RawData } from 'ws';
 import { logger } from './logger';
 
 const REGION = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1';
@@ -133,16 +134,12 @@ export async function captureScreenshot(url: string, opts: { timeoutMs?: number 
 async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number): Promise<Uint8Array> {
   const headers = await sigV4WsHeaders(wssUrl);
 
-  // The WebSocket constructor in Node 24 doesn't accept custom headers
-  // directly. Use the lower-level `undici` WebSocket via the `headers`
-  // option — but the standard `WebSocket` does NOT expose that. Workaround:
-  // attach the SigV4 headers as protocol fields. AWS's WSS handshake reads
-  // both Authorization headers and Sec-WebSocket-Protocol-encoded variants.
-  //
-  // Simpler: open with the classic `Authorization` style by passing
-  // headers via the dispatcher. Node 24 exposes `WebSocket` from undici
-  // which DOES support this through `globalThis.WebSocket`'s second arg.
-  const ws = new WebSocket(wssUrl, { headers } as unknown as string[]);
+  // Use `ws` (the standard Node WebSocket client) — its constructor accepts
+  // custom HTTP headers on the upgrade GET via `options.headers`. Node 24's
+  // global `WebSocket` (from undici) does NOT accept arbitrary headers, and
+  // AgentCore Browser's WSS handshake requires SigV4-signed `Authorization`
+  // + `X-Amz-*` headers, so we have to inject them somehow.
+  const ws = new WebSocket(wssUrl, { headers });
 
   const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(0, deadline - Date.now());
@@ -158,8 +155,8 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   }
   const eventWaiters: EventWaiter[] = [];
 
-  ws.addEventListener('message', (event) => {
-    const data = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
+  ws.on('message', (raw: RawData) => {
+    const data = raw.toString();
     let msg: CdpMessage;
     try {
       msg = JSON.parse(data) as CdpMessage;
@@ -187,22 +184,31 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     }
   });
 
-  // Open the socket.
+  // Open the socket. `ws` exposes node-style EventEmitter; the
+  // `unexpected-response` event surfaces HTTP-level handshake failures
+  // (e.g. 403 from misaligned SigV4) so we can log a meaningful error
+  // instead of an empty `error` event.
   await new Promise<void>((resolve, reject) => {
-    const onOpen = () => {
+    const onOpen = (): void => {
       cleanup();
       resolve();
     };
-    const onError = (e: Event) => {
+    const onError = (err: Error): void => {
       cleanup();
-      reject(new Error(`AgentCore Browser WebSocket error: ${(e as ErrorEvent).message ?? '(no message)'}`));
+      reject(new Error(`AgentCore Browser WebSocket error: ${err.message || '(no message)'}`));
     };
-    const cleanup = () => {
-      ws.removeEventListener('open', onOpen);
-      ws.removeEventListener('error', onError);
+    const onUnexpectedResponse = (_req: unknown, res: { statusCode?: number }): void => {
+      cleanup();
+      reject(new Error(`AgentCore Browser WebSocket handshake failed: HTTP ${res.statusCode ?? '?'}`));
     };
-    ws.addEventListener('open', onOpen);
-    ws.addEventListener('error', onError);
+    const cleanup = (): void => {
+      ws.removeListener('open', onOpen);
+      ws.removeListener('error', onError);
+      ws.removeListener('unexpected-response', onUnexpectedResponse);
+    };
+    ws.on('open', onOpen);
+    ws.on('error', onError);
+    ws.on('unexpected-response', onUnexpectedResponse);
     setTimeout(() => {
       cleanup();
       reject(new Error(`AgentCore Browser WebSocket open timeout after ${timeoutMs}ms`));
