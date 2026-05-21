@@ -15,7 +15,11 @@ The Docker image is built for `linux/arm64` to match AgentCore Runtime requireme
 
 ### GitHub PAT — Minimal Permissions
 
-Create a **fine-grained PAT** at GitHub > Settings > Developer settings > Personal access tokens > Fine-grained tokens.
+Two token types work. Choose based on your access model:
+
+#### Fine-grained PAT (recommended for repos you own)
+
+Go to GitHub > **Settings** > **Developer settings** > **Fine-grained tokens**.
 
 **Repository access**: Select only the specific repo(s) the agent will work on.
 
@@ -26,7 +30,29 @@ Create a **fine-grained PAT** at GitHub > Settings > Developer settings > Person
 | **Issues** | Read | Fetch issue title, body, and comments for context |
 | **Metadata** | Read | Granted by default |
 
-No other permissions are needed.
+**Limitation:** Fine-grained PATs can only target repos you own or repos in organizations that have opted in to fine-grained token access. If you are a collaborator on someone else's repo (or an org that hasn't enabled the feature), the repo won't appear in the token creation UI.
+
+#### Classic PAT (required for collaborator/cross-org access)
+
+Use a classic PAT when fine-grained tokens cannot reach the target repository — typically when you are a collaborator on a repo owned by another user or an organization that has not enabled fine-grained token access.
+
+Go to GitHub > **Settings** > **Developer settings** > **Personal access tokens** > **Tokens (classic)**.
+
+| Scope | Reason |
+|-------|--------|
+| `repo` | Full repository access (clone, push, PRs, issues) |
+| `read:org` | Resolve org membership for org-owned repos |
+
+Set an expiration (90 days recommended) and store it in Secrets Manager the same way as a fine-grained token.
+
+#### When to use which
+
+| Scenario | Token type |
+|----------|-----------|
+| Your own repos or your org has fine-grained enabled | Fine-grained |
+| Collaborator on another user's repo | Classic |
+| Org has not opted in to fine-grained tokens | Classic |
+| Targeting repos across multiple orgs | Classic (single token covers all) |
 
 ### AWS Credentials
 
