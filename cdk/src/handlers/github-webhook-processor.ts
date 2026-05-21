@@ -39,12 +39,13 @@ interface GitHubDeploymentStatusPayload {
     readonly id?: number;
     readonly state?: string;
     readonly target_url?: string;
+    /** The deployed URL — lives on the *status* object, not the deployment. */
+    readonly environment_url?: string;
   };
   readonly deployment?: {
     readonly id?: number;
     readonly sha?: string;
     readonly environment?: string;
-    readonly environment_url?: string;
   };
   readonly repository?: {
     readonly full_name?: string;
@@ -89,7 +90,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 
   const repo = payload.repository?.full_name;
   const sha = payload.deployment?.sha;
-  const previewUrl = payload.deployment?.environment_url;
+  // The URL lives on `deployment_status` (it changes per status update —
+  // `pending` has no URL, `success` fills it in), not on `deployment`.
+  const previewUrl = payload.deployment_status?.environment_url;
   const deploymentId = payload.deployment?.id;
 
   if (!repo || !sha || !previewUrl) {
