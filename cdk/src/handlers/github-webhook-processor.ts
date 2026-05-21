@@ -129,9 +129,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const pr = await findPullRequestForSha(repo, sha, token);
+  // Race: Vercel posts `deployment_status` the moment its build finishes,
+  // which can be ~5-15s before the agent calls `gh pr create` for the
+  // same SHA. Retry the PR lookup with a small backoff so the screenshot
+  // doesn't get silently dropped on what is the common path.
+  const pr = await findPullRequestForShaWithRetry(repo, sha, token);
   if (!pr) {
-    logger.info('No open PR found for SHA — skipping screenshot post', { repo, sha });
+    logger.info('No open PR found for SHA after retries — skipping screenshot post', { repo, sha });
     return;
   }
 
@@ -247,6 +251,34 @@ interface OpenPr {
   readonly number: number;
   readonly title: string;
   readonly body: string;
+}
+
+/**
+ * Wait for an open PR to exist for the given SHA, retrying with a
+ * small backoff. Vercel commonly posts `deployment_status` before the
+ * agent's `gh pr create` call lands (we've measured 5-15s gap), so a
+ * single check would silently miss the common case.
+ *
+ * Schedule: 0s, 5s, 10s, 20s — covers the observed gap with one
+ * generous bonus retry. Total max wait ~35s.
+ */
+async function findPullRequestForShaWithRetry(
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<OpenPr | null> {
+  const delays = [0, 5_000, 10_000, 20_000];
+  for (const delay of delays) {
+    if (delay > 0) {
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    const pr = await findPullRequestForSha(repo, sha, token);
+    if (pr) return pr;
+    if (delay !== delays[delays.length - 1]) {
+      logger.info('Open PR not found yet for SHA — will retry', { repo, sha, next_delay_ms: delays[delays.indexOf(delay) + 1] });
+    }
+  }
+  return null;
 }
 
 /**
