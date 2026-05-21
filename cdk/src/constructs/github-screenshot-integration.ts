@@ -149,16 +149,15 @@ export class GitHubScreenshotIntegration extends Construct {
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
     props.githubTokenSecret.grantRead(this.webhookProcessorFn);
 
-    // AgentCore Browser session lifecycle. The data-plane API doesn't
-    // support per-resource ARNs (sessions are ephemeral), so wildcards
-    // are required — annotated with a cdk-nag suppression below.
+    // AgentCore Browser session lifecycle + automation-stream connect.
+    // The data-plane API doesn't support per-resource ARNs (sessions
+    // are ephemeral), so wildcards are required — annotated with a
+    // cdk-nag suppression below. The wildcard set covers
+    // `ConnectBrowserAutomationStream` (the SigV4-presigned WSS dial)
+    // which lives under the same prefix but isn't visible in the
+    // public CLI command list.
     this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock-agentcore:StartBrowserSession',
-        'bedrock-agentcore:StopBrowserSession',
-        'bedrock-agentcore:GetBrowserSession',
-        'bedrock-agentcore:UpdateBrowserStream',
-      ],
+      actions: ['bedrock-agentcore:*'],
       resources: ['*'],
     }));
 
