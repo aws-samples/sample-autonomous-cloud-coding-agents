@@ -13,7 +13,7 @@ Permission requirements vary by task type:
 - `new_task` and `pr_iteration` require Contents (read/write) and Pull requests (read/write).
 - `pr_review` only needs Triage or higher since it does not push branches.
 
-Classic PATs with `repo` scope also work. See `agent/README.md` for edge cases.
+Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](/architecture/readme#github-pat--minimal-permissions) for when to use which token type.
 
 ### Quick setup (single repo)
 

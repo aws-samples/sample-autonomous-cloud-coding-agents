@@ -57,6 +57,8 @@ The agent authenticates to GitHub using a **fine-grained personal access token (
 
 Keep the token value - you will store it in AWS Secrets Manager after deploying.
 
+> **Collaborator or cross-org repos?** Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](../../agent/README.md#github-pat--minimal-permissions) for details.
+
 ### Register the repo in CDK
 
 Every repository the agent can work on must be **onboarded** as a `Blueprint` construct in the CDK stack. The Blueprint writes a configuration record to DynamoDB; the orchestrator checks this before accepting tasks.
