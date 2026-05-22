@@ -5,7 +5,7 @@
   },
   "scripts": {
     "compile": "tsc --build tsconfig.json",
-    "eslint": "eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test build-tools",
+    "eslint": "eslint --fix --no-error-on-unmatched-pattern src test build-tools",
     "test": "jest --passWithNoTests --updateSnapshot",
     "test:watch": "jest --watch",
     "build": "npm run compile && npm run test && npm run eslint",
