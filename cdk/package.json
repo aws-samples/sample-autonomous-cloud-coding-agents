@@ -35,27 +35,27 @@
     "ulid": "^3.0.2"
   },
   "devDependencies": {
-    "@cdklabs/eslint-plugin": "^1.5.10",
-    "@stylistic/eslint-plugin": "^2",
+    "@cdklabs/eslint-plugin": "^2.0.5",
+    "@stylistic/eslint-plugin": "^5",
     "@types/aws-lambda": "^8.10.161",
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^20",
+    "@types/node": "^25",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "aws-cdk": "^2",
-    "esbuild": "^0.27.4",
-    "eslint": "^9",
+    "esbuild": "^0.28.0",
+    "eslint": "^10",
     "eslint-import-resolver-typescript": "^4.4.4",
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-jest": "^29.15.1",
     "eslint-plugin-jsdoc": "^62.8.1",
     "eslint-plugin-license-header": "^0.9.0",
     "jest": "^30.3.0",
-    "jest-junit": "^16",
+    "jest-junit": "^17",
     "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   },
   "resolutions": {
     "eslint-plugin-import/minimatch": "^3.1.2"
