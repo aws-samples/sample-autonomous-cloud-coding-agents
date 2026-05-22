@@ -153,9 +153,8 @@ describe('sanitizeExternalContent', () => {
   });
 
   test('returns empty string for undefined/null input', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(sanitizeExternalContent(undefined as any)).toBe('');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     expect(sanitizeExternalContent(null as any)).toBe('');
   });
 

@@ -9,7 +9,7 @@
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
     "test": "jest",
-    "eslint": "ESLINT_USE_FLAT_CONFIG=false eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test",
+    "eslint": "eslint --fix src test",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q"
   },

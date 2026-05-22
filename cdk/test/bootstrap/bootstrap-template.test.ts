@@ -25,7 +25,7 @@ import * as yaml from 'js-yaml';
 import { BOOTSTRAP_VERSION, computeBootstrapHash } from '../../src/bootstrap/version';
 
 const templatePath = join(__dirname, '..', '..', 'bootstrap', 'bootstrap-template.yaml');
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 const template: any = yaml.load(readFileSync(templatePath, 'utf-8'));
 
 describe('Bootstrap template', () => {
@@ -116,7 +116,7 @@ describe('Bootstrap template', () => {
 
       // ECS should be conditional
       const ecsEntry = fallback.find(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         (item: any) => item['Fn::If'] && item['Fn::If'][0] === 'IncludeComputeEcs',
       );
       expect(ecsEntry).toBeDefined();
@@ -156,7 +156,7 @@ describe('Bootstrap template', () => {
       expect(items).toContain('Compute-Agentcore');
 
       // ECS should be conditional
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const ecsItem = items.find((item: any) => item['Fn::If']);
       expect(ecsItem).toBeDefined();
       expect(ecsItem['Fn::If'][0]).toBe('IncludeComputeEcs');
