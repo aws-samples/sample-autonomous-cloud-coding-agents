@@ -6,6 +6,8 @@ This document outlines the overall architecture of the platform. Each component 
 
 ## Design principles
 
+For long-term direction and review tenets, see [VISION.md](./VISION.md).
+
 - **Extensibility** - Extend the system without modifying core code. Critical components are accessed through internal interfaces (ComputeStrategy, MemoryStore) so implementations can be swapped.
 - **Flexibility** - This field moves fast. Components should be replaceable as better options emerge.
 - **Reliability** - Long-running agents will fail. The platform must drive every task to a terminal state regardless of what happens to the agent.
