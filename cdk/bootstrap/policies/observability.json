@@ -1,12 +1,6 @@
 {
   "Statement": [
     {
-      "Action": "bedrock-agentcore:*",
-      "Effect": "Allow",
-      "Resource": "*",
-      "Sid": "BedrockAgentCore"
-    },
-    {
       "Action": [
         "bedrock:CreateGuardrail",
         "bedrock:DeleteGuardrail",

@@ -22,7 +22,13 @@ import { join } from 'node:path';
 
 import { Stack } from 'aws-cdk-lib';
 
-import { applicationPolicy, infrastructurePolicy, observabilityPolicy } from '../../src/bootstrap/policies';
+import {
+  applicationPolicy,
+  computeAgentcorePolicy,
+  computeEcsPolicy,
+  infrastructurePolicy,
+  observabilityPolicy,
+} from '../../src/bootstrap/policies';
 
 /**
  * Extracts all ```json ... ``` fenced code blocks from a markdown string.
@@ -72,23 +78,26 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
   const goldenInfra = JSON.parse(jsonBlocks[1]);
   const goldenApp = JSON.parse(jsonBlocks[2]);
   const goldenObs = JSON.parse(jsonBlocks[3]);
+  const goldenEcs = JSON.parse(jsonBlocks[4]);
 
   // Resolve TypeScript policies via CDK Stack
   const tsInfra = stack.resolve(infrastructurePolicy());
   const tsApp = stack.resolve(applicationPolicy());
   const tsObs = stack.resolve(observabilityPolicy());
+  const tsComputeAgentcore = stack.resolve(computeAgentcorePolicy());
+  const tsComputeEcs = stack.resolve(computeEcsPolicy());
 
-  const testCases: Array<{
+  // --- Infrastructure and Application: direct parity ---
+  const directTestCases: Array<{
     name: string;
     golden: { Statement: Array<Record<string, unknown>> };
     typescript: { Statement: Array<Record<string, unknown>> };
   }> = [
     { name: 'Infrastructure', golden: goldenInfra, typescript: tsInfra },
     { name: 'Application', golden: goldenApp, typescript: tsApp },
-    { name: 'Observability', golden: goldenObs, typescript: tsObs },
   ];
 
-  for (const { name, golden, typescript } of testCases) {
+  for (const { name, golden, typescript } of directTestCases) {
     describe(`${name} policy`, () => {
       const goldenNorm = normalizeStatements(
         golden.Statement as Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }>,
@@ -116,4 +125,91 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
       });
     });
   }
+
+  // --- Observability: golden includes BedrockAgentCore which was extracted ---
+  describe('Observability policy', () => {
+    // Filter out the BedrockAgentCore statement from the golden baseline
+    const goldenObsStatements = goldenObs.Statement as Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }>;
+    const goldenObsWithoutAgentCore = goldenObsStatements.filter((s) => s.Sid !== 'BedrockAgentCore');
+
+    const goldenNorm = normalizeStatements(goldenObsWithoutAgentCore);
+    const tsNorm = normalizeStatements(
+      (tsObs as { Statement: Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }> }).Statement,
+    );
+
+    it('has the same SIDs in the same order (excluding extracted BedrockAgentCore)', () => {
+      const goldenSids = goldenNorm.map((s) => s.sid);
+      const tsSids = tsNorm.map((s) => s.sid);
+      expect(tsSids).toEqual(goldenSids);
+    });
+
+    it('has identical actions per statement (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].actions).toEqual(goldenNorm[i].actions);
+      }
+    });
+
+    it('has identical resources per statement (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].resources).toEqual(goldenNorm[i].resources);
+      }
+    });
+  });
+
+  // --- Compute-AgentCore: extracted BedrockAgentCore matches golden observability ---
+  describe('Compute-AgentCore policy', () => {
+    const goldenObsStatements = goldenObs.Statement as Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }>;
+    const goldenAgentCoreStatement = goldenObsStatements.filter((s) => s.Sid === 'BedrockAgentCore');
+
+    const goldenNorm = normalizeStatements(goldenAgentCoreStatement);
+    const tsNorm = normalizeStatements(
+      (tsComputeAgentcore as { Statement: Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }> }).Statement,
+    );
+
+    it('has the same SIDs', () => {
+      const goldenSids = goldenNorm.map((s) => s.sid);
+      const tsSids = tsNorm.map((s) => s.sid);
+      expect(tsSids).toEqual(goldenSids);
+    });
+
+    it('has identical actions (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].actions).toEqual(goldenNorm[i].actions);
+      }
+    });
+
+    it('has identical resources (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].resources).toEqual(goldenNorm[i].resources);
+      }
+    });
+  });
+
+  // --- Compute-ECS: matches block 4 (ECS conditional) from markdown ---
+  describe('Compute-ECS policy', () => {
+    // Block 4 is a single statement object, not a full policy document
+    const goldenEcsStatement = goldenEcs as { Sid?: string; Action?: string | string[]; Resource?: string | string[] };
+    const goldenNorm = normalizeStatements([goldenEcsStatement]);
+    const tsNorm = normalizeStatements(
+      (tsComputeEcs as { Statement: Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }> }).Statement,
+    );
+
+    it('has the same SIDs', () => {
+      const goldenSids = goldenNorm.map((s) => s.sid);
+      const tsSids = tsNorm.map((s) => s.sid);
+      expect(tsSids).toEqual(goldenSids);
+    });
+
+    it('has identical actions (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].actions).toEqual(goldenNorm[i].actions);
+      }
+    });
+
+    it('has identical resources (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].resources).toEqual(goldenNorm[i].resources);
+      }
+    });
+  });
 });
