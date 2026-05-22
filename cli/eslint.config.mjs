@@ -214,4 +214,12 @@ export default [
       'no-console': 'off',
     },
   },
+
+  // Override: shebang files can't have the license header at line 1
+  {
+    files: ['src/bin/**/*.ts'],
+    rules: {
+      'license-header/header': 'off',
+    },
+  },
 ];
