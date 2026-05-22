@@ -13,7 +13,20 @@ This document states the long-term direction of **ABCA (Autonomous Background Co
 
 ABCA is a **reference sample** of a self-hosted **software dark factory** on AWS: a platform that accepts high-level engineering intent, runs autonomous coding work in isolated cloud environments, and returns **reviewable outcomes** (pull requests, review comments, validation evidence) under human governance — not a chat session that happens to edit files.
 
-We are building toward **lights-sparse**, **graduated** autonomy — the implementation loop is increasingly unattended while governance and release stay supervised (see the [dark factory introduction](/architecture/index)): the default experience is **fire-and-forget** (submit, walk away, review the outcome), while the platform can **escalate to humans** when policy or risk requires it — without turning every task into a live pair-programming session. Customers should be able to **start conservative and loosen over time** (per repo, per policy, per task) as trust in outcomes grows. The platform’s job is to surround the agent with a **durable control plane** — admission, orchestration, memory, policy, HITL gates, cost limits, and observability — so that background agents are **reliable, bounded, and improvable** at organizational scale.
+We are building toward **lights-sparse**, **graduated** autonomy (defined below): the default experience is **fire-and-forget** (submit, walk away, review the outcome), while the platform can **escalate to humans** when policy or risk requires it — without turning every task into a live pair-programming session. Customers should be able to **start conservative and loosen over time** (per repo, per policy, per task) as trust in outcomes grows. The platform’s job is to surround the agent with a **durable control plane** — admission, orchestration, memory, policy, HITL gates, cost limits, and observability — so that background agents are **reliable, bounded, and improvable** at organizational scale.
+
+### What "lights-sparse" means
+
+**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy in the [introduction](/architecture/index).
+
+- **Lights-out** (the analogy’s end state): humans set goals, policy, and constraints; production runs without people on the floor.
+- **Lights-sparse** (where teams are now): the **implementation loop** — edit code, run tests, open pull requests — is increasingly **unattended**, while **governance, merge authority, and production release** stay **supervised**. Humans are not at the keyboard for every step; they are still accountable for what ships.
+
+ABCA is built for that posture: asynchronous tasks, policy-gated escalation when risk requires a person, and a control plane that bounds blast radius and cost. The longer-term direction is **self-evolving** delivery (tenet 9): the platform learns from outcomes—memory, review feedback, evaluation—so repeat work gets cheaper and more reliable, not just one-off autonomous runs.
+
+### What "graduated" means here
+
+**Graduated** autonomy is not a single on/off switch: operators tighten or loosen gates over time (Cedar policies, `--pre-approve`, per-repo posture) without forking the deployment. See tenet 2 and [CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates).
 
 Success looks like teams that can **submit work and walk away**, trust that doomed work fails fast and cheaply, inspect every important decision in an audit trail, and see **measurable improvement** over time (fewer revision cycles, higher first-review merge rates, predictable cost).
 
