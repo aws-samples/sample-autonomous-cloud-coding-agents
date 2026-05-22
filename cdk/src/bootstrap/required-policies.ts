@@ -21,10 +21,10 @@ const CORE_POLICIES = [
   'infrastructure',
   'application',
   'observability',
-  'compute-agentcore',
 ] as const;
 
 const COMPUTE_VARIANT_POLICIES: Record<string, string[]> = {
+  agentcore: ['compute-agentcore'],
   ecs: ['compute-ecs'],
 };
 
