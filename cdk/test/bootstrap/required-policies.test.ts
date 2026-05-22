@@ -20,25 +20,30 @@
 import { getRequiredBootstrapPolicies } from '../../src/bootstrap/required-policies';
 
 describe('getRequiredBootstrapPolicies', () => {
-  it('returns core policies plus compute-agentcore for default', () => {
+  it('returns core policies plus compute-agentcore for agentcore type', () => {
     const result = getRequiredBootstrapPolicies('agentcore');
     expect(result).toEqual(['infrastructure', 'application', 'observability', 'compute-agentcore']);
   });
 
-  it('includes compute-ecs when compute type is ecs', () => {
+  it('returns core policies plus compute-ecs for ecs type', () => {
     const result = getRequiredBootstrapPolicies('ecs');
-    expect(result).toContain('compute-ecs');
-    expect(result).toContain('compute-agentcore');
+    expect(result).toEqual(['infrastructure', 'application', 'observability', 'compute-ecs']);
+    expect(result).not.toContain('compute-agentcore');
   });
 
-  it('always includes compute-agentcore regardless of type', () => {
-    const result = getRequiredBootstrapPolicies('ecs');
-    expect(result).toContain('compute-agentcore');
+  it('compute variants are independent choices', () => {
+    const agentcore = getRequiredBootstrapPolicies('agentcore');
+    const ecs = getRequiredBootstrapPolicies('ecs');
+    expect(agentcore).toContain('compute-agentcore');
+    expect(agentcore).not.toContain('compute-ecs');
+    expect(ecs).toContain('compute-ecs');
+    expect(ecs).not.toContain('compute-agentcore');
   });
 
-  it('returns core policies for unknown compute type', () => {
+  it('returns only core policies for unknown compute type', () => {
     const result = getRequiredBootstrapPolicies('unknown');
-    expect(result).toEqual(['infrastructure', 'application', 'observability', 'compute-agentcore']);
+    expect(result).toEqual(['infrastructure', 'application', 'observability']);
     expect(result).not.toContain('compute-ecs');
+    expect(result).not.toContain('compute-agentcore');
   });
 });
