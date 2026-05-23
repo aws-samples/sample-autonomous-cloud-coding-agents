@@ -12,13 +12,13 @@
   },
   "devDependencies": {
     "jest": "^30.3.0",
-    "jest-junit": "^16",
+    "jest-junit": "^17",
     "retire": "^5.4.2"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.8",
-    "@astrojs/starlight": "^0.38.2",
-    "astro": "6.1.10",
+    "@astrojs/starlight": "^0.39.2",
+    "astro": "6.3.3",
     "typescript": "^6.0.2"
   },
   "main": "lib/index.js",
