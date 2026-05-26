@@ -731,35 +731,61 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
     });
 
-    // Pipe the Linear API token secret into the AgentCore runtime so the
-    // agent's `resolve_linear_api_token()` can populate `LINEAR_API_TOKEN`
-    // for the Linear MCP's `${LINEAR_API_TOKEN}` placeholder.
-    linearIntegration.apiTokenSecret.grantRead(runtime);
-    cfnRuntime.addPropertyOverride(
-      'EnvironmentVariables.LINEAR_API_TOKEN_SECRET_ARN',
-      linearIntegration.apiTokenSecret.secretArn,
-    );
+    // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
+    // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
+    // creates `bgagent-linear-oauth-<slug>` secrets at install time;
+    // the secret JSON contains access_token, refresh_token, expires_at,
+    // and the OAuth client_id/client_secret. The orchestrator passes
+    // `linear_oauth_secret_arn` to the agent via task.channel_metadata,
+    // so the agent looks up the exact ARN — no discovery needed.
+    //
+    // Agent has GetSecretValue ONLY — no Put. Review item S1: agent
+    // runtime executes untrusted repo code, so write access to all
+    // workspace tokens is too broad a blast radius (a compromised
+    // agent could overwrite any workspace's token). Lambdas (trusted
+    // code in this stack) handle the in-place refresh path; the agent
+    // proceeds with whatever token Lambdas have most-recently written.
+    // For a 24h Linear access-token TTL, the practical impact is that
+    // a stale token in the cache forces the agent's next call to fail
+    // closed — preferable to a trust gap.
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
 
-    // Pipe the Linear API token secret into the orchestrator Lambda so the
-    // concurrency-cap rejection path can post a Linear comment + ❌ instead
-    // of silently dropping the task. The orchestrator only uses the secret
-    // when `task.channel_source === 'linear'`, but the IAM grant is
-    // unconditional — the secret is created lazily via Secrets Manager and
-    // costs nothing if unused.
-    linearIntegration.apiTokenSecret.grantRead(orchestrator.fn);
+    // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
+    // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
+    // rejection path can post a Linear comment + ❌. The orchestrator only
+    // resolves a token when `task.channel_source === 'linear'`, but the
+    // IAM grant is unconditional (per-workspace secrets are created lazily
+    // by `bgagent linear setup`).
+    linearIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
     orchestrator.fn.addEnvironment(
-      'LINEAR_API_TOKEN_SECRET_ARN',
-      linearIntegration.apiTokenSecret.secretArn,
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
     );
+    orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
 
     new CfnOutput(this, 'LinearWebhookSecretArn', {
       value: linearIntegration.webhookSecret.secretArn,
       description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',
-    });
-
-    new CfnOutput(this, 'LinearApiTokenSecretArn', {
-      value: linearIntegration.apiTokenSecret.secretArn,
-      description: 'Secrets Manager ARN for the Linear personal API token (agent-side MCP) — populate via `bgagent linear setup`',
     });
 
     new CfnOutput(this, 'LinearProjectMappingTableName', {
@@ -770,6 +796,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearUserMappingTableName', {
       value: linearIntegration.userMappingTable.tableName,
       description: 'Name of the DynamoDB Linear user mapping table',
+    });
+
+    new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
+      value: linearIntegration.workspaceRegistryTable.tableName,
+      description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
     });
 
     // --- Bedrock model invocation logging (account-level) ---

@@ -20,6 +20,7 @@
  */
 
 import { Command } from 'commander';
+import { makeAdminCommand } from '../commands/admin';
 import { makeApproveCommand } from '../commands/approve';
 import { makeCancelCommand } from '../commands/cancel';
 import { makeConfigureCommand } from '../commands/configure';
@@ -72,6 +73,7 @@ program.addCommand(makeLinearCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
 program.addCommand(makeWebhookCommand());
+program.addCommand(makeAdminCommand());
 
 // Execute the CLI only when run directly. Importing this module (e.g.
 // from a test harness or a wrapper) must not parse the importer's

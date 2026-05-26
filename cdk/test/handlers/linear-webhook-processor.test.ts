@@ -34,9 +34,14 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
 }));
 
+const resolveLinearOauthTokenMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
+  resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
+}));
+
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
 process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
-process.env.LINEAR_API_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent/linear/api-token-XYZ';
+process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 
@@ -69,6 +74,9 @@ describe('linear-webhook-processor handler', () => {
     createTaskCoreMock.mockReset();
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
+    resolveLinearOauthTokenMock.mockReset();
+    // Default: workspace not in registry. Tests that need a token override.
+    resolveLinearOauthTokenMock.mockResolvedValue(null);
   });
 
   test('skips missing raw_body', async () => {
@@ -207,8 +215,13 @@ describe('linear-webhook-processor handler', () => {
       await handler(eventWith(payload));
 
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [secretArn, issueId, message] = reportIssueFailureMock.mock.calls[0];
-      expect(secretArn).toBe(process.env.LINEAR_API_TOKEN_SECRET_ARN);
+      const [ctx, issueId, message] = reportIssueFailureMock.mock.calls[0];
+      // Phase 2.0b-O2: feedback context carries workspace id + registry table name
+      // (the resolver does the secret lookup downstream).
+      expect(ctx).toEqual({
+        linearWorkspaceId: payload.organizationId,
+        registryTableName: process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME,
+      });
       expect(issueId).toBe('issue-1');
       expect(message).toContain("isn't in a project");
     });
@@ -246,7 +259,13 @@ describe('linear-webhook-processor handler', () => {
       expect(message).toContain('multi-user OAuth');
     });
 
-    test('posts feedback when webhook is missing organization or actor', async () => {
+    test('skips feedback (no org → no workspace token) when webhook is missing organization', async () => {
+      // Phase 2.0b-O2: feedback requires the workspace's OAuth token, which
+      // is keyed on `organizationId`. If the webhook payload omits it, we
+      // cannot resolve any token, so the feedback path skips with a WARN
+      // instead of trying to post anonymously. The empty-org case is
+      // pathological enough (Linear always sends organizationId) that
+      // logging-only is acceptable.
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } });
       const payload = issue({ organizationId: '', actor: undefined });
@@ -256,9 +275,7 @@ describe('linear-webhook-processor handler', () => {
 
       await handler(eventWith(payload));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [, , message] = reportIssueFailureMock.mock.calls[0];
-      expect(message).toContain('missing the organization or actor');
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
     test('surfaces guardrail block message on createTaskCore 400', async () => {

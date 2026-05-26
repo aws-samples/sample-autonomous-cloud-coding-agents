@@ -57,6 +57,7 @@ describe('EcsComputeStrategy', () => {
       const strategy = new EcsComputeStrategy();
       const handle = await strategy.startSession({
         taskId: 'TASK001',
+        userId: 'cognito-test',
         payload: { repo_url: 'org/repo', prompt: 'Fix the bug', issue_number: 42, max_turns: 50 },
         blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
       });
@@ -109,6 +110,7 @@ describe('EcsComputeStrategy', () => {
       await expect(
         strategy.startSession({
           taskId: 'TASK001',
+          userId: 'cognito-test',
           payload: { repo_url: 'org/repo' },
           blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
         }),
@@ -123,6 +125,7 @@ describe('EcsComputeStrategy', () => {
       const strategy = new EcsComputeStrategy();
       await strategy.startSession({
         taskId: 'TASK001',
+        userId: 'cognito-test',
         payload: { repo_url: 'org/repo' },
         blueprintConfig: {
           compute_type: 'ecs',

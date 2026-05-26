@@ -3,6 +3,7 @@
 import os
 import sys
 import uuid
+from datetime import UTC
 
 from models import AttachmentConfig, TaskConfig, TaskType
 from shell import log
@@ -38,57 +39,278 @@ def resolve_github_token() -> str:
     return ""
 
 
-def resolve_linear_api_token() -> str:
-    """Resolve the Linear personal API token from Secrets Manager or env.
+def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
+    """Resolve the Linear OAuth access token from Secrets Manager.
 
-    Mirrors ``resolve_github_token``: in deployed mode
-    ``LINEAR_API_TOKEN_SECRET_ARN`` is set and the token is fetched once
-    and cached in ``LINEAR_API_TOKEN``. For local development, falls back
-    to ``LINEAR_API_TOKEN`` directly.
+    Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
+    into the task record's ``channel_metadata`` at task-creation time.
+    Pass that dict in via ``channel_metadata`` (the pipeline does this
+    automatically). We fetch the per-workspace secret, parse the token
+    JSON, refresh if expiring, and cache the access_token in
+    ``LINEAR_API_TOKEN`` so downstream consumers (the Linear MCP's
+    ``${LINEAR_API_TOKEN}`` placeholder in ``.mcp.json`` and
+    ``linear_reactions.py``'s GraphQL Authorization header) keep working
+    unchanged.
 
-    Returns an empty string if the secret is absent or empty — the agent-side
-    MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}`` env
-    placeholder, and the Linear MCP will reject the request (fail-closed).
-    This function is only called when ``channel_source == 'linear'``.
+    For local development, a pre-set ``LINEAR_API_TOKEN`` env var
+    short-circuits the lookup so the agent can run outside the runtime.
+
+    Returns an empty string when the credential is absent — the agent-side
+    MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}``
+    placeholder and the Linear MCP fails closed. This function is only
+    called when ``channel_source == 'linear'``.
+
+    Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads
+    Secrets Manager directly because AgentCore Identity's USER_FEDERATION
+    flow has an open service-side bug (see memory/project_oauth_2_0b.md).
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
     if cached:
         return cached
-    secret_arn = os.environ.get("LINEAR_API_TOKEN_SECRET_ARN")
+
+    # Prefer the per-task channel_metadata; fall back to env var so the
+    # function can be called early (e.g. before pipeline construction)
+    # via LINEAR_OAUTH_SECRET_ARN if the orchestrator set it that way.
+    secret_arn = ""
+    if channel_metadata:
+        secret_arn = channel_metadata.get("linear_oauth_secret_arn", "")
+    if not secret_arn:
+        secret_arn = os.environ.get("LINEAR_OAUTH_SECRET_ARN", "")
     if not secret_arn:
         return ""
-    try:
-        import boto3
-        from botocore.exceptions import BotoCoreError, ClientError
-    except ImportError as e:
-        # boto3 missing from the container image — degrade gracefully rather
-        # than hard-crashing the agent. The Linear MCP will fail on first
-        # call with a clear auth error.
-        log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        log("WARN", "resolve_linear_api_token: AWS_REGION not set; cannot resolve token")
         return ""
 
     try:
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("secretsmanager", region_name=region)
-        resp = client.get_secret_value(SecretId=secret_arn)
-        token = resp.get("SecretString", "") or ""
-        if token:
-            os.environ["LINEAR_API_TOKEN"] = token
-        return token
-    except ClientError as e:
-        # Narrowed from a broader `except` per #63 review — broader catches
-        # hid genuine bugs in the Secrets Manager call shape. AccessDenied
-        # is logged at ERROR because it's a persistent IAM misconfig that
-        # should page someone, not a transient blip.
-        code = e.response.get("Error", {}).get("Code", "")
-        severity = "ERROR" if code == "AccessDeniedException" else "WARN"
+        import json
+        from datetime import datetime, timedelta
+
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:
+        log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
+        return ""
+
+    sm = boto3.client("secretsmanager", region_name=region)
+
+    def _fetch_token() -> dict | None:
+        """Fetch + parse the per-workspace OAuth secret.
+
+        Returns the parsed dict, or None if the SM payload can't be
+        decoded as JSON (corrupted byte, missing SecretString key,
+        etc.). The caller treats None like a missing secret — agent
+        proceeds without Linear MCP rather than crashing the task
+        pipeline thread on a raw traceback.
+        """
+        resp = sm.get_secret_value(SecretId=secret_arn)
+        try:
+            return json.loads(resp["SecretString"])
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            log(
+                "ERROR",
+                f"resolve_linear_api_token: secret '{secret_arn}' is not valid JSON "
+                f"({type(e).__name__}: {e}); workspace requires re-onboarding",
+            )
+            return None
+
+    def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
+        try:
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+        except ValueError:
+            # Malformed timestamp: treat as expiring so the refresh path runs.
+            # Log so a bad write earlier in the chain doesn't silently trigger
+            # a refresh on every single task with no diagnostic trace.
+            log(
+                "WARN",
+                f"_is_expiring: malformed expires_at '{expires_at_iso}'; treating as expiring",
+            )
+            return True
+        return (expiry - datetime.now(UTC)).total_seconds() < threshold_seconds
+
+    def _try_refresh_once(current: dict) -> tuple[str, dict | None]:
+        """Single Linear /oauth/token POST.
+
+        Returns one of:
+          - ("success", new_token_dict)
+          - ("invalid_grant", None) — Linear rejected the refresh_token,
+            usually because another caller rotated it first
+          - ("failure", None) — any other error (network, 5xx, missing
+            fields). No retry; surface upward.
+        """
+        try:
+            import urllib.error
+            import urllib.parse
+            import urllib.request
+        except ImportError:
+            return ("failure", None)
+
+        body = urllib.parse.urlencode(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": current["refresh_token"],
+                "client_id": current["client_id"],
+                "client_secret": current["client_secret"],
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.linear.app/oauth/token",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # Body may carry `{"error": "invalid_grant", ...}` even on 400.
+            err_code = None
+            try:
+                err_payload = json.loads(e.read().decode("utf-8"))
+                err_code = err_payload.get("error")
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                # Body wasn't JSON or wasn't readable — caller will see
+                # status code only, no error code.
+                pass
+            log(
+                "WARN",
+                f"resolve_linear_api_token refresh rejected: status={e.code} error={err_code}",
+            )
+            if err_code == "invalid_grant":
+                return ("invalid_grant", None)
+            return ("failure", None)
+        except (urllib.error.URLError, OSError) as e:
+            # Genuine network failures (DNS, timeout, TCP reset). Other
+            # exceptions (KeyError on missing field, TypeError on bad
+            # JSON shape) are programmer errors and should propagate
+            # with a clear stack trace rather than being swallowed.
+            log("WARN", f"resolve_linear_api_token refresh failed: {type(e).__name__}: {e}")
+            return ("failure", None)
+
+        if "access_token" not in payload:
+            return ("failure", None)
+
+        now = datetime.now(UTC)
+        # Linear's `expires_in` is documented and reliably sent; if it's
+        # missing we assume the access token is already valid for as long
+        # as the refresh-token call took to round-trip — set expiry to now.
+        if "expires_in" in payload:
+            future = now + timedelta(seconds=int(payload["expires_in"]))
+            expires_at_iso = future.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        else:
+            expires_at_iso = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        next_token = {
+            **current,
+            "access_token": payload["access_token"],
+            "refresh_token": payload.get("refresh_token", current["refresh_token"]),
+            "expires_at": expires_at_iso,
+            "scope": payload.get("scope", current["scope"]),
+            "updated_at": now.isoformat().replace("+00:00", "Z"),
+        }
+
+        # Phase 2.0b-O2 review item S1: agent runtime no longer has
+        # `secretsmanager:PutSecretValue` on the OAuth secret prefix —
+        # the agent executes untrusted repo code, and writing tokens
+        # back means a compromised agent could overwrite any
+        # workspace's token. Lambdas (trusted code) handle persistence.
+        # The freshly-refreshed in-memory token still works for THIS
+        # task; the rotated refresh_token is lost when the agent exits,
+        # but Linear's grace window (~30 min on replays) absorbs that
+        # for the rare case where this agent refreshed strictly before
+        # any Lambda did.
+
+        # Positive-path log so operators diagnosing intermittent 401s have
+        # a breadcrumb showing which workspace refreshed and to what expiry.
+        ws_id = next_token.get("workspace_id", "?")
+        ws_slug = next_token.get("workspace_slug", "?")
+        log(
+            "INFO",
+            f"linear_oauth_refresh_ok workspace_id={ws_id} "
+            f"workspace_slug={ws_slug} new_expires_at={expires_at_iso}",
+        )
+        return ("success", next_token)
+
+    def _refresh(current: dict) -> dict | None:
+        """Refresh with one retry on invalid_grant after re-reading the secret.
+
+        Linear rotates refresh_tokens on every use. Concurrent callers
+        (Lambda + agent + CLI) racing the same secret will see one
+        succeed and the rest get `invalid_grant`. On invalid_grant,
+        re-read SM (bypassing the just-failed token) and retry once if
+        the refresh_token actually changed.
+        """
+        kind, refreshed = _try_refresh_once(current)
+        if kind == "success":
+            return refreshed
+        if kind == "failure":
+            return None
+
+        # invalid_grant: maybe a concurrent caller refreshed first.
+        log(
+            "WARN",
+            "resolve_linear_api_token: invalid_grant — re-reading secret to check "
+            "for concurrent refresh",
+        )
+        try:
+            fresh = _fetch_token()
+        except (ClientError, BotoCoreError) as e:
+            log("WARN", f"resolve_linear_api_token: re-read after invalid_grant failed: {e}")
+            return None
+        if fresh is None:
+            # Secret is unreadable (corrupted JSON). Already logged inside
+            # _fetch_token; no point retrying refresh against bad data.
+            return None
+
+        if fresh.get("refresh_token") == current.get("refresh_token"):
+            # No race — Linear truly rejected this refresh_token.
+            log(
+                "ERROR",
+                "resolve_linear_api_token: refresh_token permanently rejected; re-onboard required",
+            )
+            return None
+
+        # Concurrent caller rotated the token. If the freshly-read value
+        # is itself usable, just take it.
+        if not _is_expiring(fresh.get("expires_at", "")):
+            log(
+                "INFO",
+                "resolve_linear_api_token: concurrent refresh detected; using freshly-read token",
+            )
+            return fresh
+
+        # Concurrent refresh produced a token that's also already
+        # expiring (rare). Retry once with the new refresh_token.
+        kind2, refreshed2 = _try_refresh_once(fresh)
+        if kind2 == "success":
+            return refreshed2
+        return None
+
+    try:
+        token_obj = _fetch_token()
+    except (ClientError, BotoCoreError) as e:
+        code = ""
+        if hasattr(e, "response"):
+            code = getattr(e, "response", {}).get("Error", {}).get("Code", "") or ""
+        is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
+        severity = "ERROR" if is_hard_failure else "WARN"
         log(severity, f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
         return ""
-    except BotoCoreError as e:
-        # Never let a Secrets Manager outage crash the agent. The Linear MCP
-        # will simply fail on first call with a clear auth error.
-        log("WARN", f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
+    if token_obj is None:
+        # Corrupted secret JSON; already logged inside _fetch_token.
+        # Fail closed — Linear MCP renders with unresolved placeholder.
         return ""
+
+    if _is_expiring(token_obj.get("expires_at", "")):
+        refreshed = _refresh(token_obj)
+        if refreshed:
+            token_obj = refreshed
+
+    access = token_obj.get("access_token", "")
+    if access:
+        os.environ["LINEAR_API_TOKEN"] = access
+    return access
 
 
 def build_config(

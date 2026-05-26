@@ -92,6 +92,45 @@ describe('configure command', () => {
     ).rejects.toThrow(/Missing required configuration/);
   });
 
+  test('--from-bundle decodes a base64 bundle and writes config in one shot', async () => {
+    // Mirrors what `bgagent admin invite-user` would print: the four config
+    // fields encoded as base64 JSON.
+    const payload = {
+      api_url: 'https://api.example.com',
+      region: 'us-east-1',
+      user_pool_id: 'us-east-1_abc',
+      client_id: 'client-123',
+    };
+    const bundle = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64');
+
+    const cmd = makeConfigureCommand();
+    await cmd.parseAsync(['node', 'test', '--from-bundle', bundle]);
+
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
+    expect(config).toEqual(payload);
+    expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
+  });
+
+  test('--from-bundle is mutually exclusive with individual flags', async () => {
+    const bundle = Buffer.from(JSON.stringify({
+      api_url: 'https://x', region: 'us-east-1', user_pool_id: 'p', client_id: 'c',
+    }), 'utf-8').toString('base64');
+
+    const cmd = makeConfigureCommand();
+    await expect(cmd.parseAsync([
+      'node', 'test',
+      '--from-bundle', bundle,
+      '--region', 'us-west-2',
+    ])).rejects.toThrow(/mutually exclusive/);
+  });
+
+  test('--from-bundle rejects malformed input', async () => {
+    const cmd = makeConfigureCommand();
+    await expect(
+      cmd.parseAsync(['node', 'test', '--from-bundle', 'totally not base64']),
+    ).rejects.toThrow();
+  });
+
   test('no flags with complete existing config → reports "No configuration changes" without re-saving', async () => {
     // Seed a complete config.
     const cmd1 = makeConfigureCommand();

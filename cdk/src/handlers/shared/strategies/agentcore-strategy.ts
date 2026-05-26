@@ -36,6 +36,7 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
 
   async startSession(input: {
     taskId: string;
+    userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
   }): Promise<SessionHandle> {
@@ -43,9 +44,19 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     const sessionId = randomUUID();
     const runtimeArn = input.blueprintConfig.runtime_arn;
 
+    // `runtimeUserId` triggers AgentCore Identity's workload-access-token
+    // injection: when set, AgentCore exchanges the caller's identity for
+    // a workload token and delivers it to the agent container via the
+    // `WorkloadAccessToken` request header (read by
+    // `BedrockAgentCoreContext.set_workload_access_token` in app.py).
+    // Without it, the agent's `resolve_linear_api_token()` short-circuits
+    // before reaching the Identity SDK call. Requires the orchestrator
+    // role to have `bedrock-agentcore:InvokeAgentRuntimeForUser` in
+    // addition to `InvokeAgentRuntime`.
     const command = new InvokeAgentRuntimeCommand({
       agentRuntimeArn: runtimeArn,
       runtimeSessionId: sessionId,
+      runtimeUserId: input.userId,
       contentType: 'application/json',
       accept: 'application/json',
       payload: new TextEncoder().encode(JSON.stringify({ input: input.payload })),
@@ -53,7 +64,12 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
 
     await getClient().send(command);
 
-    logger.info('AgentCore session invoked', { task_id: input.taskId, session_id: sessionId, runtime_arn: runtimeArn });
+    logger.info('AgentCore session invoked', {
+      task_id: input.taskId,
+      session_id: sessionId,
+      runtime_arn: runtimeArn,
+      runtime_user_id: input.userId,
+    });
 
     return {
       sessionId,

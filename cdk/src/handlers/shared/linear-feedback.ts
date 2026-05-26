@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { getLinearSecret } from './linear-verify';
+import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
 
 /**
@@ -55,7 +55,7 @@ mutation ReactIssue($issueId: String!, $emoji: String!) {
 `.trim();
 
 async function graphqlRequest(
-  apiToken: string,
+  accessToken: string,
   query: string,
   variables: Record<string, unknown>,
 ): Promise<boolean> {
@@ -65,7 +65,10 @@ async function graphqlRequest(
     const resp = await fetch(LINEAR_GRAPHQL_URL, {
       method: 'POST',
       headers: {
-        'Authorization': apiToken,
+        // OAuth tokens use Bearer; legacy PAK was the bare value. Phase
+        // 2.0b: all tokens stored in Secrets Manager are OAuth bearer
+        // tokens so we always Bearer-prefix.
+        'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ query, variables }),
@@ -91,11 +94,26 @@ async function graphqlRequest(
   }
 }
 
-async function resolveToken(secretArn: string): Promise<string | null> {
+/**
+ * Workspace-scoped feedback context. Resolved once per task by the
+ * caller (webhook processor / orchestrator) and threaded through to
+ * the post-comment / add-reaction helpers, so the resolver runs once
+ * per task instead of once per Linear API call.
+ */
+export interface LinearFeedbackContext {
+  /** Linear organization UUID — registry key. */
+  readonly linearWorkspaceId: string;
+  /** Name of LinearWorkspaceRegistryTable, from CDK stack output. */
+  readonly registryTableName: string;
+}
+
+async function resolveToken(ctx: LinearFeedbackContext): Promise<string | null> {
   try {
-    return await getLinearSecret(secretArn);
+    const resolved = await resolveLinearOauthToken(ctx.linearWorkspaceId, ctx.registryTableName);
+    return resolved?.accessToken ?? null;
   } catch (err) {
-    logger.warn('Linear feedback could not resolve API token', {
+    logger.warn('Linear feedback could not resolve OAuth token', {
+      linear_workspace_id: ctx.linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
@@ -107,11 +125,11 @@ async function resolveToken(secretArn: string): Promise<string | null> {
  * (network, auth, GraphQL errors). Never throws — callers proceed regardless.
  */
 export async function postIssueComment(
-  apiTokenSecretArn: string,
+  ctx: LinearFeedbackContext,
   issueId: string,
   body: string,
 ): Promise<boolean> {
-  const token = await resolveToken(apiTokenSecretArn);
+  const token = await resolveToken(ctx);
   if (!token) return false;
   return graphqlRequest(token, COMMENT_CREATE_MUTATION, { issueId, body });
 }
@@ -121,11 +139,11 @@ export async function postIssueComment(
  * the agent uses on the success/failure side. Returns true on success.
  */
 export async function addIssueReaction(
-  apiTokenSecretArn: string,
+  ctx: LinearFeedbackContext,
   issueId: string,
   emoji: string = EMOJI_FAILURE,
 ): Promise<boolean> {
-  const token = await resolveToken(apiTokenSecretArn);
+  const token = await resolveToken(ctx);
   if (!token) return false;
   return graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji });
 }
@@ -136,12 +154,12 @@ export async function addIssueReaction(
  * never branch on the result.
  */
 export async function reportIssueFailure(
-  apiTokenSecretArn: string,
+  ctx: LinearFeedbackContext,
   issueId: string,
   message: string,
 ): Promise<void> {
   await Promise.allSettled([
-    postIssueComment(apiTokenSecretArn, issueId, message),
-    addIssueReaction(apiTokenSecretArn, issueId, EMOJI_FAILURE),
+    postIssueComment(ctx, issueId, message),
+    addIssueReaction(ctx, issueId, EMOJI_FAILURE),
   ]);
 }

@@ -456,7 +456,7 @@ def run_task(
             # writing .mcp.json so the child SDK process inherits the env var
             # that the MCP server entry references via ${LINEAR_API_TOKEN}.
             if config.channel_source == "linear":
-                resolve_linear_api_token()
+                resolve_linear_api_token(config.channel_metadata)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.

@@ -137,7 +137,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   const sessionHandle = await context.step('start-session', async () => {
     try {
       const strategy = resolveComputeStrategy(blueprintConfig);
-      const handle = await strategy.startSession({ taskId, payload, blueprintConfig });
+      const handle = await strategy.startSession({
+        taskId,
+        userId: task.user_id,
+        payload,
+        blueprintConfig,
+      });
 
       // Build compute metadata for the task record so cancel-task can stop the right backend
       const computeMetadata: Record<string, string> = handle.strategyType === 'ecs'
@@ -299,17 +304,33 @@ export const handler = withDurableExecution(durableHandler);
 export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<void> {
   if (task.channel_source !== 'linear') return;
   const issueId = task.channel_metadata?.linear_issue_id;
-  if (!issueId) return;
-  const secretArn = process.env.LINEAR_API_TOKEN_SECRET_ARN;
-  if (!secretArn) {
-    logger.warn('Skipping Linear concurrency-cap feedback: LINEAR_API_TOKEN_SECRET_ARN not set', {
+  const linearWorkspaceId = task.channel_metadata?.linear_workspace_id;
+  if (!issueId || !linearWorkspaceId) return;
+  const registryTableName = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (!registryTableName) {
+    logger.warn('Skipping Linear concurrency-cap feedback: LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set', {
       task_id: task.task_id,
     });
     return;
   }
-  await reportIssueFailure(
-    secretArn,
-    issueId,
-    '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
-  );
+  // Wrap in try/catch matching the `safeReportIssueFailure` pattern in
+  // the webhook processor. `reportIssueFailure` itself is best-effort
+  // internally, but a synchronous throw bubbling up here would crash the
+  // durable-execution step on a transient DDB throttle during the
+  // workspace registry lookup. Suppress + log so the rejection path is
+  // never blocked by Linear-feedback failures.
+  try {
+    await reportIssueFailure(
+      { linearWorkspaceId, registryTableName },
+      issueId,
+      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+    );
+  } catch (err) {
+    logger.warn('Linear concurrency-cap feedback failed (non-fatal)', {
+      task_id: task.task_id,
+      linear_workspace_id: linearWorkspaceId,
+      issue_id: issueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

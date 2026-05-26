@@ -51,9 +51,16 @@ describe('LinearIntegration construct', () => {
     template = Template.fromStack(stack);
   });
 
-  test('creates three DynamoDB tables (project mapping + user mapping + dedup)', () => {
-    // TaskTable + TaskEventsTable + LinearProjectMapping + LinearUserMapping + LinearWebhookDedup = 5
-    template.resourceCountIs('AWS::DynamoDB::Table', 5);
+  test('creates four Linear DynamoDB tables (project mapping + user mapping + workspace registry + dedup)', () => {
+    // TaskTable + TaskEventsTable + LinearProjectMapping + LinearUserMapping
+    // + LinearWorkspaceRegistry + LinearWebhookDedup = 6
+    template.resourceCountIs('AWS::DynamoDB::Table', 6);
+  });
+
+  test('workspace registry table is keyed on linear_workspace_id', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      KeySchema: [{ AttributeName: 'linear_workspace_id', KeyType: 'HASH' }],
+    });
   });
 
   test('creates three Lambda functions (webhook, processor, link)', () => {
@@ -66,13 +73,13 @@ describe('LinearIntegration construct', () => {
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'link' });
   });
 
-  test('creates two Secrets Manager secrets (webhook + API token)', () => {
-    template.resourceCountIs('AWS::SecretsManager::Secret', 2);
+  test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {
+    // Phase 2.0b-O2: per-workspace OAuth tokens live in
+    // `bgagent-linear-oauth-<slug>` secrets created by `bgagent linear setup`,
+    // NOT by CDK. Only the webhook signing secret is CDK-managed.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 1);
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       Description: Match.stringLikeRegexp('Linear webhook signing secret'),
-    });
-    template.hasResourceProperties('AWS::SecretsManager::Secret', {
-      Description: Match.stringLikeRegexp('Linear personal API token'),
     });
   });
 
@@ -92,12 +99,13 @@ describe('LinearIntegration construct', () => {
     });
   });
 
-  test('processor handler env wires both mapping tables + task table', () => {
+  test('processor handler env wires all mapping tables + task table + workspace registry', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           LINEAR_PROJECT_MAPPING_TABLE_NAME: Match.anyValue(),
           LINEAR_USER_MAPPING_TABLE_NAME: Match.anyValue(),
+          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: Match.anyValue(),
           TASK_TABLE_NAME: Match.anyValue(),
           TASK_EVENTS_TABLE_NAME: Match.anyValue(),
         }),

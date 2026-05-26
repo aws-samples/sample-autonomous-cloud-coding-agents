@@ -91,7 +91,7 @@ describe('start-session step composition', () => {
     mockDdbSend.mockResolvedValue({}); // transitionTask + emitTaskEvent
 
     const strategy = resolveComputeStrategy(blueprintConfig);
-    const handle = await strategy.startSession({ taskId, payload, blueprintConfig });
+    const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
 
     await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
       session_id: handle.sessionId,
@@ -118,7 +118,7 @@ describe('start-session step composition', () => {
     const strategy = resolveComputeStrategy(blueprintConfig);
 
     try {
-      await strategy.startSession({ taskId, payload, blueprintConfig });
+      await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
       fail('Expected startSession to throw');
     } catch (err) {
       await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, userId, true);
@@ -138,7 +138,7 @@ describe('start-session step composition', () => {
       .mockResolvedValue({}); // failTask calls
 
     const strategy = resolveComputeStrategy(blueprintConfig);
-    const handle = await strategy.startSession({ taskId, payload, blueprintConfig });
+    const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
 
     try {
       await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
