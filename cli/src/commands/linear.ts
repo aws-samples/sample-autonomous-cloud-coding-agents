@@ -615,8 +615,6 @@ export function makeLinearCommand(): Command {
       .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
-      .option('--client-id <id>', 'Override the OAuth Client ID (else reused from existing workspace)')
-      .option('--client-secret <secret>', 'Override the OAuth Client Secret (else reused from existing workspace)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
       .action(async (slug: string, opts) => {
@@ -672,31 +670,39 @@ export function makeLinearCommand(): Command {
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
         // ─── Linear OAuth app credentials ──────────────────────────────
-        // Reuse the same client_id/client_secret from an existing active
-        // workspace unless explicitly overridden. The setup wizard owns
-        // first-time credential entry; add-workspace is the "I already did
-        // setup, just install the app in another Linear org" path.
-        let clientId = opts.clientId?.trim() ?? '';
-        let clientSecret = opts.clientSecret?.trim() ?? '';
-
-        if (!clientId || !clientSecret) {
-          process.stdout.write('  → Looking for an existing workspace to reuse OAuth credentials...');
-          const existing = await findReusableOauthAppCredentials(ddb, sm, workspaceRegistryTable!);
-          if (!existing) {
-            console.log(' ✗');
-            throw new CliError(
-              'No active Linear workspace found in the registry. '
-              + 'Run `bgagent linear setup <slug>` first to install the OAuth app, '
-              + 'then re-run `bgagent linear add-workspace` for additional workspaces.',
-            );
-          }
-          console.log(` ✓ (reusing credentials from '${existing.sourceSlug}')`);
-          clientId = clientId || existing.clientId;
-          clientSecret = clientSecret || existing.clientSecret;
-        }
-
+        // Always prompt — never accept secrets via flags (shell history
+        // leak). The auto-detected client_id from an existing active
+        // workspace is offered as the default; user accepts with Enter
+        // (single OAuth app shared across workspaces) or types a new id
+        // (per-workspace OAuth app, e.g. when the existing app is
+        // private to its origin workspace).
         console.log(`bgagent linear add-workspace — workspace '${slug}'`);
         console.log(`  region: ${region}`);
+        console.log();
+
+        process.stdout.write('  → Looking for an existing workspace to reuse OAuth credentials...');
+        const existing = await findReusableOauthAppCredentials(ddb, sm, workspaceRegistryTable!);
+        if (!existing) {
+          console.log(' ✗');
+          throw new CliError(
+            'No active Linear workspace found in the registry. '
+            + 'Run `bgagent linear setup <slug>` first to install the OAuth app, '
+            + 'then re-run `bgagent linear add-workspace` for additional workspaces.',
+          );
+        }
+        console.log(` ✓ (found '${existing.sourceSlug}')`);
+        console.log();
+        console.log('  Linear OAuth credentials. Press Enter to reuse the existing app, or paste new values');
+        console.log(`  (e.g. when ${existing.sourceSlug}'s app is private and you created a new one in '${slug}').`);
+        const clientId = await promptLine('  Linear Client ID', existing.clientId);
+        const sameAsExisting = clientId === existing.clientId;
+        const clientSecret = sameAsExisting
+          ? existing.clientSecret
+          : (await promptSecret('  Linear Client Secret: ')).trim();
+        if (!clientId || !clientSecret) {
+          throw new CliError('Client ID and Client Secret are both required.');
+        }
+        console.log();
 
         // ─── PKCE + browser consent ────────────────────────────────────
         const pkce = generatePkce();
@@ -779,13 +785,13 @@ export function makeLinearCommand(): Command {
         // Different from `setup`, which is intentionally idempotent: the
         // explicit add-workspace verb implies "new workspace", and silently
         // overwriting a registry row could mask a wrong-account login.
-        const existing = await ddb.send(new ScanCommand({
+        const dupCheck = await ddb.send(new ScanCommand({
           TableName: workspaceRegistryTable!,
           FilterExpression: 'linear_workspace_id = :id',
           ExpressionAttributeValues: { ':id': identity.organization.id },
           Limit: 1,
         }));
-        if (existing.Items && existing.Items.length > 0) {
+        if (dupCheck.Items && dupCheck.Items.length > 0) {
           throw new CliError(
             `Workspace '${slug}' (${identity.organization.id}) is already in the registry. `
             + 'Use `bgagent linear setup` to re-authorize an existing workspace, or remove the registry row manually before retrying.',
@@ -1053,6 +1059,29 @@ function promptSecret(label: string): Promise<string> {
       });
       rl.once('close', () => reject(new Error('No input provided.')));
     }
+  });
+}
+
+/**
+ * Read a single line from stdin, with an optional default that's accepted on
+ * empty input (Enter without typing). Visible echo — use only for non-secret
+ * fields. For secrets, use `promptSecret`.
+ *
+ * Used by `bgagent linear add-workspace` to show the auto-detected client_id
+ * as a default the user can override by typing a new value.
+ */
+function promptLine(label: string, defaultValue?: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  const display = defaultValue
+    ? `${label} [${defaultValue}]: `
+    : `${label}: `;
+  return new Promise((resolve, reject) => {
+    rl.question(display, (line) => {
+      rl.close();
+      const trimmed = line.trim();
+      resolve(trimmed || defaultValue || '');
+    });
+    rl.once('close', () => reject(new Error('No input provided.')));
   });
 }
 
