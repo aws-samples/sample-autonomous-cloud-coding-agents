@@ -61,7 +61,8 @@
     "typescript": "^5.9.3"
   },
   "resolutions": {
-    "eslint-plugin-import/minimatch": "^3.1.2"
+    "eslint-plugin-import/minimatch": "^3.1.2",
+    "@aws-sdk/s3-presigned-post/@aws-sdk/client-s3": "^3.1021.0"
   },
   "optionalDependencies": {},
   "engines": {
