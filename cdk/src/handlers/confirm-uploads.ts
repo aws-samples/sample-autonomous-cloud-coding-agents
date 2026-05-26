@@ -170,13 +170,11 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
 
     const screenedAttachments: AttachmentRecord[] = [];
 
-    // Internal deadline timer (design §ConfirmUploadsFunction): abort screening
-    // before the Lambda times out so we can return a graceful 503 + Retry-After
-    // instead of an opaque timeout error. On retry, already-screened attachments
-    // (status === 'passed' in DDB) are skipped, so retries make forward progress.
-    const deadlineMs = context.getRemainingTimeInMillis() - DEADLINE_MARGIN_MS;
-
-    // Process in batches of SCREENING_CONCURRENCY
+    // Process in batches of SCREENING_CONCURRENCY.
+    // Deadline check: abort screening before the Lambda times out so we can
+    // return a graceful 503 + Retry-After instead of an opaque timeout error.
+    // On retry, already-screened attachments (status === 'passed' in DDB) are
+    // skipped, so retries make forward progress.
     for (let i = 0; i < pendingAttachments.length; i += SCREENING_CONCURRENCY) {
       // Deadline check before starting a new batch
       if (context.getRemainingTimeInMillis() <= DEADLINE_MARGIN_MS) {
@@ -186,7 +184,7 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
           task_id: taskId,
           screened,
           remaining,
-          deadline_ms: deadlineMs,
+          remaining_ms: context.getRemainingTimeInMillis(),
           request_id: requestId,
           metric_type: 'confirm_uploads_deadline_exceeded',
         });
