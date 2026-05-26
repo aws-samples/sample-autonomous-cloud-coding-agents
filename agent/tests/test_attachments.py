@@ -54,7 +54,7 @@ class TestPreparedAttachment:
                 filename="test.txt",
                 local_path="/tmp/test.txt",
                 size_bytes=100,
-                extra_field="bad",
+                extra_field="bad",  # ty: ignore[unknown-argument]
             )
 
 
@@ -102,9 +102,7 @@ class TestDownloadAttachments:
 
         mock_s3 = MagicMock()
         mock_client.return_value = mock_s3
-        mock_s3.get_object.return_value = {
-            "Body": MagicMock(read=lambda: tampered_content)
-        }
+        mock_s3.get_object.return_value = {"Body": MagicMock(read=lambda: tampered_content)}
 
         with pytest.raises(RuntimeError, match="integrity check failed"):
             download_attachments([config], str(tmp_path))
@@ -177,9 +175,7 @@ class TestDownloadAttachments:
             {"Body": MagicMock(read=lambda: configs_and_contents[1][1])},
         ]
 
-        result = download_attachments(
-            [c[0] for c in configs_and_contents], str(tmp_path)
-        )
+        result = download_attachments([c[0] for c in configs_and_contents], str(tmp_path))
         assert len(result) == 2
         assert result[0].filename == "file1.txt"
         assert result[1].filename == "file2.txt"

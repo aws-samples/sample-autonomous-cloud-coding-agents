@@ -452,9 +452,13 @@ export async function resolveUrlAttachments(
       content_type: finalContentType,
     });
 
-    // Determine if this is an image or file based on content type
-    const isImage = finalContentType.startsWith('image/');
-    const resolvedContentType = att.content_type || finalContentType;
+    // Determine actual content type from the HTTP response (preferred over any placeholder
+    // set during validation). If the user explicitly declared a content_type on the URL
+    // attachment, use it; otherwise use what the server returned.
+    const resolvedContentType = (att.content_type && att.content_type !== 'application/octet-stream')
+      ? att.content_type
+      : finalContentType;
+    const isImage = resolvedContentType.startsWith('image/');
 
     // Validate content-type is in the allowlist (attacker controls the response header)
     const attachmentType = isImage ? 'image' : 'file';
@@ -533,7 +537,7 @@ export async function resolveUrlAttachments(
 
     resolved.set(att.attachment_id, createAttachmentRecord({
       attachment_id: att.attachment_id,
-      type: att.type,
+      type: isImage ? 'image' : 'file',
       content_type: resolvedContentType,
       filename: att.filename,
       s3_key: s3Key,

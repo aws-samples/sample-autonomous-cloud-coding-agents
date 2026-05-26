@@ -384,6 +384,30 @@ function generateFilename(type: string, contentType: string, index: number): str
   return `attachment_${index}.${ext}`;
 }
 
+/** Extract a safe filename from a URL path, falling back to a generated name. */
+function filenameFromUrl(url: string, index: number): string {
+  try {
+    const parsed = new URL(url);
+    const lastSegment = parsed.pathname.split('/').filter(Boolean).pop();
+    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= 255) {
+      // Decode percent-encoding (e.g., %20 → space) then sanitize
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(lastSegment);
+      } catch {
+        decoded = lastSegment;
+      }
+      const sanitized = decoded.replace(/[^a-zA-Z0-9._\-]/g, '_');
+      if (isValidFilename(sanitized)) {
+        return sanitized;
+      }
+    }
+  } catch {
+    // URL parse failure — fall through to default
+  }
+  return `url_attachment_${index}`;
+}
+
 const MIME_TO_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -498,9 +522,14 @@ export function validateAttachments(
     }
 
     // Filename resolution
-    const resolvedFilename = (att.filename && typeof att.filename === 'string')
-      ? att.filename
-      : generateFilename(attType, resolvedContentType, i);
+    let resolvedFilename: string;
+    if (att.filename && typeof att.filename === 'string') {
+      resolvedFilename = att.filename;
+    } else if (attType === 'url' && att.url && typeof att.url === 'string') {
+      resolvedFilename = filenameFromUrl(att.url as string, i);
+    } else {
+      resolvedFilename = generateFilename(attType, resolvedContentType, i);
+    }
     if (!isValidFilename(resolvedFilename)) {
       return { valid: false, error: `attachments[${i}]: invalid filename` };
     }
