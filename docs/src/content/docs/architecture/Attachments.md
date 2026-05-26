@@ -427,6 +427,8 @@ flowchart TD
     MB -->|Invalid| R[REJECTED: not a valid image]
     MB -->|Valid| D[Dimension check: parse PNG IHDR / JPEG SOF]
     D -->|> 8000px| OV[REJECTED: oversized]
+    D -->|Unparseable + > 5 MB| FC[REJECTED: fail-closed, dimensions unverifiable]
+    D -->|Unparseable + <= 5 MB| G[Bedrock Guardrail: rely on Bedrock validation]
     D -->|OK| G[Bedrock Guardrail: ApplyGuardrail with image content block, retries]
     G -->|INTERVENED| B[BLOCKED: content policy violation]
     G -->|NONE| P[PASSED: original bytes stored as-is]
@@ -437,7 +439,7 @@ flowchart TD
 
 **Magic bytes validation:** Verify the first bytes against known image signatures before any further processing. A file claiming to be `image/png` must start with `\x89PNG\r\n\x1a\n`. This prevents polyglot files (e.g., an image header followed by executable code) from reaching the screening pipeline.
 
-**Dimension checks:** Image dimensions are read from PNG IHDR chunks and JPEG SOF markers using pure buffer parsing (no native dependencies). Images exceeding 8000px on either side are rejected before the Bedrock call.
+**Dimension checks:** Image dimensions are read from PNG IHDR chunks and JPEG SOF markers using pure buffer parsing (no native dependencies). Images exceeding 8000px on either side are rejected before the Bedrock call. For PNGs, a missing IHDR chunk is a hard failure (the file is corrupt or incomplete). For JPEGs, if the SOF marker cannot be found: files > 5 MB are rejected (fail-closed — an unparseable large JPEG is too risky to forward without dimension verification); smaller files are allowed through with a logged warning, relying on Bedrock's own validation to reject oversized images.
 
 **Bedrock image screening:** The `ApplyGuardrailCommand` supports `image` content blocks with `png` and `jpeg` formats. Raw image bytes are passed directly — no re-encoding or format conversion needed.
 
@@ -732,21 +734,13 @@ async function resolveAttachments(attachments, ...) {
 
   for (const att of attachments) {
     if (att.type === 'image') {
-      // getImageDimensions parses PNG IHDR / JPEG SOF markers from the buffer.
-      // If dimensions cannot be determined (corrupt image, unsupported format variant),
-      // throw AttachmentResolutionError — never default to (0,0) or skip the estimate.
-      let width: number, height: number;
-      try {
-        ({ width, height } = await getImageDimensions(att));
-      } catch (err) {
-        throw new AttachmentResolutionError(
-          `Cannot determine dimensions for image "${att.filename}". ` +
-          `The image may be corrupt or in an unsupported format variant. ` +
-          `Re-export the image and try again.`,
-          { cause: err },
-        );
-      }
-      const tokenCost = estimateImageTokens(width, height);
+      // estimateImageTokensFromBuffer parses PNG IHDR / JPEG SOF markers.
+      // Returns undefined when dimensions cannot be determined (unusual JPEG
+      // encoder, corrupt tail). This is non-fatal — use MAX_IMAGE_TOKENS as a
+      // conservative fallback so budget enforcement still works (overestimates
+      // rather than underestimates).
+      const tokenCost = estimateImageTokensFromBuffer(att.content, att.content_type)
+        ?? MAX_IMAGE_TOKENS;
       att.token_estimate = tokenCost;
       attachmentTokenBudget += tokenCost;
     }
@@ -767,7 +761,7 @@ async function resolveAttachments(attachments, ...) {
 }
 ```
 
-**Policy:** If image attachments consume more than `USER_PROMPT_TOKEN_BUDGET - MIN_TEXT_TOKEN_BUDGET` tokens (i.e., they would leave fewer than 20K tokens for text context), the task fails with a clear error. The user can reduce image count or downscale images before resubmitting.
+**Policy:** If image attachments consume more than `USER_PROMPT_TOKEN_BUDGET - MIN_TEXT_TOKEN_BUDGET` tokens (i.e., they would leave fewer than 20K tokens for text context), the task fails with a clear error. The user can reduce image count or downscale images before resubmitting. When dimensions are unparseable, `MAX_IMAGE_TOKENS` (1568) is used as a conservative budget estimate — this may slightly overcount, but ensures the budget check never underestimates token cost due to parsing limitations.
 
 **Token budget vs. payload size:** The token budget above measures **vision tokens** (based on pixel dimensions). This is separate from the **API payload size**, which is affected by base64 encoding overhead (~33% expansion). Image attachments are sent as multimodal content blocks with base64-encoded data, so a 10 MB image becomes ~13.3 MB in the API request. The Anthropic API has its own request size limits (separate from our Lambda payload limits). The `MAX_ATTACHMENT_SIZE_BYTES` (10 MB) is chosen to ensure that even after base64 expansion, individual images stay within the Anthropic API's per-image limits. For multiple large images, the total base64-encoded payload is bounded by the 50 MB total task limit (which produces ~67 MB base64), but in practice the vision token budget is the binding constraint — 10 full-resolution images would consume ~18,820 vision tokens (well within the 100K budget) but produce a very large API payload. The agent should stream images from local files rather than holding all base64 data in memory simultaneously.
 
@@ -1619,7 +1613,7 @@ The implementation is ordered to deliver value incrementally while maintaining s
 34. Add `AttachmentConfig` and `PreparedAttachment` Pydantic models to agent `models.py` (with validators, `s3_version_id` required, `checksum_sha256` required as lowercase hex)
 35. Add attachment download from S3 with pinned `VersionId` (via IAM role) and mandatory SHA-256 integrity verification
 36. Add multimodal content blocks for image attachments in agent prompt
-37. Add token budget accounting with resize-aware formula matching Anthropic docs (1568px cap, 28px tile padding, 1568 token cap, 1.2x safety margin), with explicit error path for `getImageDimensions` failures
+37. Add token budget accounting with resize-aware formula matching Anthropic docs (1568px cap, 28px tile padding, 1568 token cap, 1.2x safety margin), with conservative `MAX_IMAGE_TOKENS` fallback when dimensions are unparseable (non-fatal — avoids rejecting valid images with unusual JPEG encoders)
 38. Add `AttachmentBudgetExceededError` (extends `AttachmentError` base class — already caught by hydration re-throw list from Phase 1 step 10)
 39. Add agent capability check in orchestrator (fail task if agent doesn't support attachments)
 40. Add parity test: `AgentAttachmentPayload` fields match `AttachmentConfig` fields (including `s3_version_id` and `checksum_sha256`)
