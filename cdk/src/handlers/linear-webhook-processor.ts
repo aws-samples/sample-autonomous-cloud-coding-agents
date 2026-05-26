@@ -22,43 +22,62 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { reportIssueFailure } from './shared/linear-feedback';
+import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
+import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
-const API_TOKEN_SECRET_ARN = process.env.LINEAR_API_TOKEN_SECRET_ARN;
+const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
  *
- * Wraps `reportIssueFailure` so each call site is one line and uniformly
- * non-throwing. Two failure modes handled here:
+ * Phase 2.0b-O2: feedback is workspace-scoped — the resolver looks up
+ * the per-workspace OAuth token via `LinearWorkspaceRegistryTable` and
+ * issues a Bearer token. If the workspace isn't registered (drop-on-the-floor
+ * for unmapped orgs) the feedback path no-ops cleanly.
  *
- * - `LINEAR_API_TOKEN_SECRET_ARN` env var unset (deploy misconfig) — log a
- *   single clear diagnostic and skip, instead of letting `resolveToken` log
- *   a cryptic "could not resolve API token" warning on every feedback call.
- *   Mirrors the orchestrator's `notifyLinearOnConcurrencyCap` guard.
+ * Two failure modes handled here:
+ * - `LINEAR_WORKSPACE_REGISTRY_TABLE_NAME` env var unset (deploy misconfig) —
+ *   skip with a clear diagnostic instead of letting the resolver fail
+ *   per-call.
  * - `reportIssueFailure` throws synchronously (today impossible thanks to the
  *   helper's internal `Promise.allSettled`, but a future refactor could
  *   break that contract). Catching here means a synchronous throw can't
  *   bubble up and fail the Lambda — which would trigger SQS retries on a
  *   poison message.
  */
-async function safeReportIssueFailure(issueId: string, message: string): Promise<void> {
-  if (!API_TOKEN_SECRET_ARN) {
-    logger.warn('Skipping Linear feedback: LINEAR_API_TOKEN_SECRET_ARN not set', {
+async function safeReportIssueFailure(
+  issueId: string,
+  linearWorkspaceId: string | undefined,
+  message: string,
+): Promise<void> {
+  if (!WORKSPACE_REGISTRY_TABLE) {
+    logger.warn('Skipping Linear feedback: LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set', {
+      issue_id: issueId,
+    });
+    return;
+  }
+  if (!linearWorkspaceId) {
+    logger.warn('Skipping Linear feedback: webhook payload missing organizationId', {
       issue_id: issueId,
     });
     return;
   }
   try {
-    await reportIssueFailure(API_TOKEN_SECRET_ARN, issueId, message);
+    await reportIssueFailure(
+      { linearWorkspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+      issueId,
+      message,
+    );
   } catch (err) {
     logger.warn('Linear feedback failed (non-fatal)', {
       issue_id: issueId,
+      linear_workspace_id: linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -137,6 +156,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     await safeReportIssueFailure(
       issue.id,
+      payload.organizationId,
       "❌ This Linear issue isn't in a project — ABCA needs a Linear project to route the task to a repo. Move the issue into a project and re-apply the trigger label.",
     );
     return;
@@ -154,6 +174,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     await safeReportIssueFailure(
       issue.id,
+      payload.organizationId,
       "❌ This Linear project isn't onboarded to ABCA. An admin can onboard it with `bgagent linear onboard-project <project-uuid> --repo <owner>/<repo> --label <trigger>`.",
     );
     return;
@@ -190,6 +211,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     await safeReportIssueFailure(
       issue.id,
+      workspaceId,
       "❌ Linear webhook is missing the organization or actor field — ABCA can't attribute this task to a user. This is unusual; please report it to your ABCA admin.",
     );
     return;
@@ -204,6 +226,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     await safeReportIssueFailure(
       issue.id,
+      workspaceId,
       "❌ This Linear user isn't linked to a platform user. In v1 only the API-token owner can submit tasks from Linear; multi-user OAuth support is on the v3 roadmap.",
     );
     return;
@@ -223,11 +246,33 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     channelMetadata.linear_team_id = issue.teamId;
   }
 
+  // Phase 2.0b-O2: resolve the workspace's OAuth secret ARN ONCE here
+  // and stash it on the task record. The agent runtime reads it directly
+  // (no registry lookup at task-execution time). If the workspace isn't
+  // onboarded the agent's outbound Linear MCP simply skips.
+  if (WORKSPACE_REGISTRY_TABLE) {
+    const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
+    if (resolved) {
+      channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
+      channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
+    } else {
+      logger.warn('Linear workspace not in registry — agent will run without Linear MCP', {
+        linear_workspace_id: workspaceId,
+        issue_id: issue.id,
+      });
+    }
+  }
+
+  // Extract embedded image URLs from the issue description markdown.
+  // These become URL attachments that are fetched and screened during context hydration.
+  const attachments = extractImageUrlAttachments(issue.description);
+
   const requestId = crypto.randomUUID();
   const result = await createTaskCore(
     {
       repo,
       task_description: taskDescription,
+      ...(attachments.length > 0 && { attachments }),
     },
     {
       userId: platformUserId,
@@ -245,6 +290,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     await safeReportIssueFailure(
       issue.id,
+      workspaceId,
       buildCreateTaskFailureMessage(result.statusCode, result.body),
     );
     return;
@@ -341,6 +387,35 @@ function buildTaskDescription(issue: LinearIssueEvent['data']): string {
     parts.push(issue.description.trim());
   }
   return parts.join('\n') || 'Linear issue';
+}
+
+/**
+ * Extract image URL attachments from Linear issue description markdown.
+ *
+ * Scans for standard markdown image references: `![alt](url)`.
+ * Only HTTPS URLs are included (security: no HTTP, no data: URIs).
+ * Capped at 10 images per issue to stay within attachment limits.
+ */
+function extractImageUrlAttachments(description: string | undefined): Attachment[] {
+  if (!description) return [];
+
+  const imagePattern = /!\[[^\]]*\]\((https:\/\/[^)]+)\)/g;
+  const attachments: Attachment[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = imagePattern.exec(description)) !== null) {
+    if (attachments.length >= 10) break;
+    const url = match[1];
+    attachments.push({ type: 'url', url });
+  }
+
+  if (attachments.length > 0) {
+    logger.info('Extracted image URL attachments from Linear issue description', {
+      count: attachments.length,
+    });
+  }
+
+  return attachments;
 }
 
 async function lookupPlatformUser(workspaceId: string, userId: string): Promise<string | null> {

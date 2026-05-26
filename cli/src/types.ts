@@ -20,6 +20,9 @@
 /** Valid task types for task creation. */
 export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
 
+/** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
+export type AttachmentType = 'image' | 'file' | 'url';
+
 /**
  * Task status literal union. Mirrors ``cdk/src/constructs/task-status.ts``
  * — the values returned by the API are exactly these. Defined inline
@@ -27,6 +30,7 @@ export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
  * surface stays portable.
  */
 export type TaskStatusType =
+  | 'PENDING_UPLOADS'
   | 'SUBMITTED'
   | 'HYDRATING'
   | 'RUNNING'
@@ -117,6 +121,7 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task. Null only on pre-Cedar-HITL records. */
   readonly approval_gate_count: number | null;
@@ -179,16 +184,39 @@ export interface GetTaskEventsQuery {
   readonly desc?: string;
 }
 
-/**
- * Attachment in a create-task request. Mirrors
- * ``cdk/src/handlers/shared/types.ts::Attachment``.
- */
+/** Wire format — parsed from untrusted JSON. Validate before use. */
 export interface Attachment {
-  readonly type: 'image' | 'file' | 'url';
+  readonly type: AttachmentType;
   readonly content_type?: string;
   readonly data?: string;
   readonly url?: string;
   readonly filename?: string;
+  readonly expected_size_bytes?: number;
+}
+
+/** Attachment metadata in task detail responses. */
+export interface AttachmentSummary {
+  readonly attachment_id: string;
+  readonly type: AttachmentType;
+  readonly filename: string;
+  readonly content_type: string;
+  readonly size_bytes: number;
+  readonly screening_status: 'passed' | 'blocked' | 'pending';
+}
+
+/** Presigned upload instruction returned on PENDING_UPLOADS creation. */
+export interface AttachmentUploadInstruction {
+  readonly attachment_id: string;
+  readonly filename: string;
+  readonly upload_url: string;
+  readonly upload_fields: Record<string, string>;
+  readonly upload_expires_at: string;
+}
+
+/** Response from POST /v1/tasks when presigned uploads are required. */
+export interface CreateTaskResponse extends TaskDetail {
+  readonly upload_instructions?: readonly AttachmentUploadInstruction[];
+  readonly task_expires_at?: string;
 }
 
 /** Create task request body for POST /v1/tasks. */

@@ -34,9 +34,14 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
 }));
 
+const resolveLinearOauthTokenMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
+  resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
+}));
+
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
 process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
-process.env.LINEAR_API_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent/linear/api-token-XYZ';
+process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 
@@ -69,6 +74,9 @@ describe('linear-webhook-processor handler', () => {
     createTaskCoreMock.mockReset();
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
+    resolveLinearOauthTokenMock.mockReset();
+    // Default: workspace not in registry. Tests that need a token override.
+    resolveLinearOauthTokenMock.mockResolvedValue(null);
   });
 
   test('skips missing raw_body', async () => {
@@ -207,8 +215,13 @@ describe('linear-webhook-processor handler', () => {
       await handler(eventWith(payload));
 
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [secretArn, issueId, message] = reportIssueFailureMock.mock.calls[0];
-      expect(secretArn).toBe(process.env.LINEAR_API_TOKEN_SECRET_ARN);
+      const [ctx, issueId, message] = reportIssueFailureMock.mock.calls[0];
+      // Phase 2.0b-O2: feedback context carries workspace id + registry table name
+      // (the resolver does the secret lookup downstream).
+      expect(ctx).toEqual({
+        linearWorkspaceId: payload.organizationId,
+        registryTableName: process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME,
+      });
       expect(issueId).toBe('issue-1');
       expect(message).toContain("isn't in a project");
     });
@@ -246,7 +259,13 @@ describe('linear-webhook-processor handler', () => {
       expect(message).toContain('multi-user OAuth');
     });
 
-    test('posts feedback when webhook is missing organization or actor', async () => {
+    test('skips feedback (no org → no workspace token) when webhook is missing organization', async () => {
+      // Phase 2.0b-O2: feedback requires the workspace's OAuth token, which
+      // is keyed on `organizationId`. If the webhook payload omits it, we
+      // cannot resolve any token, so the feedback path skips with a WARN
+      // instead of trying to post anonymously. The empty-org case is
+      // pathological enough (Linear always sends organizationId) that
+      // logging-only is acceptable.
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } });
       const payload = issue({ organizationId: '', actor: undefined });
@@ -256,9 +275,7 @@ describe('linear-webhook-processor handler', () => {
 
       await handler(eventWith(payload));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [, , message] = reportIssueFailureMock.mock.calls[0];
-      expect(message).toContain('missing the organization or actor');
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
     test('surfaces guardrail block message on createTaskCore 400', async () => {
@@ -360,6 +377,80 @@ describe('linear-webhook-processor handler', () => {
 
       await expect(handler(eventWith(payload))).resolves.toBeUndefined();
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ─── Image URL extraction from issue description ─────────────────────────────
+
+  describe('image URL attachment extraction', () => {
+    beforeEach(() => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+    });
+
+    test('extracts markdown image URLs from issue description', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = 'See this bug:\n\n![screenshot](https://linear.app/uploads/img1.png)\n\nAnd also ![diagram](https://linear.app/uploads/arch.png)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(2);
+      expect(reqBody.attachments[0]).toEqual({ type: 'url', url: 'https://linear.app/uploads/img1.png' });
+      expect(reqBody.attachments[1]).toEqual({ type: 'url', url: 'https://linear.app/uploads/arch.png' });
+    });
+
+    test('does not extract HTTP (non-HTTPS) URLs', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = '![unsafe](http://evil.com/img.png)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
+
+    test('caps image extraction at 10 URLs', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      const lines = Array.from({ length: 15 }, (_, i) => `![img${i}](https://cdn.linear.app/img${i}.png)`);
+      data.description = lines.join('\n');
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(10);
+    });
+
+    test('no attachments when description has no images', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = 'Just text, no images here.';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
+
+    test('no attachments when description is undefined', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      delete data.description;
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
     });
   });
 });

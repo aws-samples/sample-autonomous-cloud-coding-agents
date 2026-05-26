@@ -24,6 +24,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -135,6 +136,12 @@ export interface TaskOrchestratorProps {
     readonly taskRoleArn: string;
     readonly executionRoleArn: string;
   };
+
+  /**
+   * S3 bucket for task attachments. When provided, the orchestrator gets
+   * ReadWrite grants for URL fetch/screen/upload during hydration.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
 }
 
 /**
@@ -170,13 +177,43 @@ export class TaskOrchestrator extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 10;
 
+    // Hydration pulls in bedrock-agentcore (bundled), durable-execution, and
+    // attachment screening (URL resolution). pdf-parse is needed for PDF text
+    // extraction during screening. Note we deliberately bundle
+    // `@aws-sdk/client-bedrock-agentcore`: newer commands (e.g.
+    // StopRuntimeSessionCommand) are not in the Lambda runtime's pinned
+    // SDK and throw `<Command> is not a constructor` if externalized — see
+    // cancel-task silent-failure mode (task-api.ts commonBundling).
+    //
+    // `@aws/durable-execution-sdk-js@1.1.3` ships an ESM build at
+    // `dist/index.mjs` that uses `fileURLToPath(import.meta.url)` to compute
+    // __dirname. When esbuild bundles ESM-into-CJS for Lambda, it stubs
+    // `import.meta = {}` so `import.meta.url` is undefined and
+    // `fileURLToPath(undefined)` crashes at module-load. Substitute via a
+    // banner-defined identifier that holds the file:// URL form of the
+    // bundled file's path. Upstream issue: aws/aws-durable-execution-sdk-js#543.
+    const orchestratorBundling: lambda.BundlingOptions = {
+      externalModules: [
+        '@aws-sdk/client-dynamodb',
+        '@aws-sdk/client-ecs',
+        '@aws-sdk/client-lambda',
+        '@aws-sdk/client-bedrock-runtime',
+        '@aws-sdk/client-secrets-manager',
+        '@aws-sdk/lib-dynamodb',
+        '@aws-sdk/util-dynamodb',
+      ],
+      nodeModules: ['pdf-parse'],
+      define: { 'import.meta.url': '__bundled_import_meta_url' },
+      banner: 'const __bundled_import_meta_url = require("url").pathToFileURL(__filename).href;',
+    };
+
     this.fn = new lambda.NodejsFunction(this, 'OrchestratorFn', {
       entry: path.join(handlersDir, 'orchestrate-task.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(60),
-      memorySize: 256,
+      memorySize: 1024,
       durableConfig: {
         executionTimeout: Duration.hours(9),
         retentionPeriod: Duration.days(14),
@@ -203,22 +240,9 @@ export class TaskOrchestrator extends Construct {
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
         }),
+        ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
       },
-      bundling: {
-        // Bundle `@aws-sdk/client-bedrock-agentcore` — newer commands (e.g.
-        // StopRuntimeSessionCommand) are not in the Lambda runtime's pinned
-        // SDK and throw `<Command> is not a constructor` if externalized.
-        // See cancel-task silent-failure mode (task-api.ts commonBundling).
-        externalModules: [
-          '@aws-sdk/client-dynamodb',
-          '@aws-sdk/client-ecs',
-          '@aws-sdk/client-lambda',
-          '@aws-sdk/client-bedrock-runtime',
-          '@aws-sdk/client-secrets-manager',
-          '@aws-sdk/lib-dynamodb',
-          '@aws-sdk/util-dynamodb',
-        ],
-      },
+      bundling: orchestratorBundling,
     });
 
     // DynamoDB grants
@@ -227,6 +251,11 @@ export class TaskOrchestrator extends Construct {
     props.userConcurrencyTable.grantReadWriteData(this.fn);
     if (props.repoTable) {
       props.repoTable.grantReadData(this.fn);
+    }
+
+    // Attachments bucket grants (URL fetch/screen/upload during hydration)
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
     // Durable execution managed policy
@@ -245,11 +274,19 @@ export class TaskOrchestrator extends Construct {
     // AgentCore runtime invocation permissions
     // The InvokeAgentRuntime API targets a sub-resource (runtime-endpoint/DEFAULT),
     // so we need a wildcard after the runtime ARN.
+    //
+    // `InvokeAgentRuntimeForUser` is required when the call passes
+    // `runtimeUserId` (Phase 2.0a — needed for AgentCore Identity to
+    // inject a `WorkloadAccessToken` header into the agent container so
+    // `BedrockAgentCoreContext.get_workload_access_token()` returns
+    // non-None). Without this grant, `InvokeAgentRuntimeCommand` with
+    // `runtimeUserId` set fails with AccessDenied.
     const runtimeArns = [props.runtimeArn, ...(props.additionalRuntimeArns ?? [])];
     const runtimeResources = runtimeArns.flatMap(arn => [arn, `${arn}/*`]);
     this.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:InvokeAgentRuntime',
+        'bedrock-agentcore:InvokeAgentRuntimeForUser',
         'bedrock-agentcore:StopRuntimeSession',
       ],
       resources: runtimeResources,

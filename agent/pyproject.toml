@@ -5,6 +5,17 @@ description = "Background coding agent — runs tasks in isolated cloud environm
 requires-python = ">=3.13"
 dependencies = [
     "boto3==1.43.9", #https://pypi.org/project/boto3/
+    # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
+    # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
+    # Secrets Manager because AgentCore Identity's USER_FEDERATION
+    # flow has an open service-side bug (see memory/project_oauth_2_0b.md).
+    # Kept here so the workload-token bridge in `server.py` still
+    # imports cleanly when Phase 2.0c eventually resumes the
+    # AgentCore Identity path. The bridge is now wrapped in
+    # try/except (ImportError, AttributeError), so removing this dep
+    # would degrade gracefully — but for now we keep the dep to
+    # preserve the clean code path.
+    "bedrock-agentcore==1.9.1", #https://pypi.org/project/bedrock-agentcore/
     "claude-agent-sdk==0.2.82", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.82
     "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.136.1", #https://pypi.org/project/fastapi/

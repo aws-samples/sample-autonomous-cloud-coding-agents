@@ -14,6 +14,23 @@ There are five ways to interact with the platform. You can use them independentl
 
 For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `pr_review` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
+## Roles
+
+ABCA is a **shared-stack-per-organization** platform — one CDK deployment, used by everyone on the team. Like a self-hosted GitLab or Linear instance: one company → one stack → many users. You generally do **not** run your own deployment to use someone else's; you join theirs as a Cognito user.
+
+There are four lifecycle roles. They are often the same person early on, but the operations they perform are distinct:
+
+| Role | What they do | Frequency |
+|------|--------------|-----------|
+| **Stack admin** | `cdk deploy` the stack; rotates platform-level secrets; runs `bgagent admin invite-user` to onboard teammates | Once + occasional |
+| **Linear / Slack workspace admin** | Runs `bgagent linear setup` (or `bgagent slack setup`) once per workspace to install the OAuth app | One-time per workspace |
+| **Repo onboarder** | Runs `bgagent linear onboard-project` (or registers a Blueprint via CDK) to wire a repo into the platform | As needed; any authenticated user |
+| **Teammate** | Runs `bgagent configure` once + `bgagent submit` / Linear-label / Slack mention from then on | Daily user |
+
+If you're a teammate joining an existing deployment, jump to [Joining an existing deployment](#joining-an-existing-deployment) below.
+
+If you're standing up a new deployment from scratch, see the [Developer guide](./DEVELOPER_GUIDE.md) first, then come back here for the [admin onboarding flow](#get-stack-outputs).
+
 ## Prerequisites
 
 - The CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
@@ -64,6 +81,49 @@ flowchart TB
 3. **Verify signature** - The handler fetches the webhook's shared secret from AWS Secrets Manager, computes `HMAC-SHA256(secret, raw_request_body)`, and compares it to the provided signature using constant-time comparison (`crypto.timingSafeEqual`). Mismatches are rejected with `403`.
 4. **Extract identity** - The `user_id` is the Cognito user who originally created the webhook integration. Tasks created via webhook are owned by that user.
 
+### Joining an existing deployment
+
+If your team already has ABCA deployed and someone (the "stack admin") has invited you, this is your path. You will **not** run `cdk deploy`, will **not** run `bgagent linear setup`, and will not need AWS credentials. You're a tenant on a shared deployment.
+
+Three steps:
+
+1. **Get a config bundle from your admin.** They run `bgagent admin invite-user your-email@example.com` and send you the output via Slack / 1Password / email. The output looks like:
+
+   ```
+   ✓ Created Cognito user your-email@example.com
+   ✓ Set permanent password (no first-login change required)
+
+   Share with the new teammate:
+   ────────────────────────────────────────────────────────────────
+     email:    your-email@example.com
+     password: K9$mPq2nL!vXf3Hb
+     bundle:   eyJhcGlfdXJsIjoiaHR0cHM6Ly9hYmMxMjM…
+   ────────────────────────────────────────────────────────────────
+   ```
+
+   The `bundle` is a base64 blob carrying the four config fields (API URL, region, user pool ID, app client ID) so you don't have to type them as separate flags.
+
+2. **Configure your CLI from the bundle:**
+
+   ```bash
+   bgagent configure --from-bundle <paste the base64 string>
+   ```
+
+3. **Log in with the temp password:**
+
+   ```bash
+   bgagent login --username your-email@example.com
+   # paste the temp password
+   ```
+
+   The CLI caches your tokens in `~/.bgagent/credentials.json` and auto-refreshes them.
+
+You're in. `bgagent submit`, `bgagent list`, `bgagent status` work against the shared stack. Tasks you submit are attributed to your Cognito user; concurrency caps and budgets are scoped to you.
+
+**You do not run** `bgagent linear setup` or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#step-6-link-your-linear-account).
+
+If something looks broken (commands fail with `Not configured` or `401 Unauthorized`), re-paste the bundle and re-run `bgagent login`. The bundle holds no secrets — your password (separate) is the credential.
+
 ### Get stack outputs
 
 After deployment, retrieve the API URL and Cognito identifiers. Set `REGION` to the AWS region where you deployed the stack (for example `us-east-1`). Use the same value for all `aws` and `bgagent configure` commands below  - a mismatch often surfaces as a confusing Cognito “app client does not exist” error.
@@ -82,7 +142,26 @@ APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-
   --query 'Stacks[0].Outputs[?OutputKey==`AppClientId`].OutputValue' --output text)
 ```
 
-### Create a user (admin)
+### Invite a teammate (admin)
+
+```bash
+bgagent admin invite-user teammate@example.com
+```
+
+This wraps Cognito `admin-create-user` + `admin-set-user-password` with the right defaults (email-verified, password set as permanent so the teammate doesn't hit a password-change flow on first login, suppress-email so SES isn't required) and prints a shareable config bundle plus an auto-generated strong temp password. Send the bundle + password to the teammate; they paste them into `bgagent configure --from-bundle <bundle>` + `bgagent login --username <email>` and they're in.
+
+The CLI command requires the running shell to have AWS credentials with `cognito-idp:AdminCreateUser` and `cognito-idp:AdminSetUserPassword` on the configured user pool — i.e. you're acting as the stack admin, not as a Cognito-authenticated end-user.
+
+**Pool constraints** (enforced server-side; the CLI handles them, but useful to know if you ever need to bypass it with raw AWS CLI):
+
+- **Username MUST be an email address.** The pool is configured with email as the sign-in alias.
+- **Password policy**: minimum 12 characters, with at least one uppercase, lowercase, digit, and symbol.
+- **`email_verified=true` attribute is required**, otherwise the account stays in `FORCE_CHANGE_PASSWORD` state and `initiate-auth` fails with `User is not confirmed`.
+- **`--message-action SUPPRESS`** stops Cognito from trying to email the temp password — required unless you've set up SES verified identities.
+
+#### Raw AWS CLI fallback
+
+If you can't run `bgagent admin invite-user` (e.g., you're scripting this from CI without the CLI installed), the underlying calls are:
 
 ```bash
 aws cognito-idp admin-create-user \
@@ -101,14 +180,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-**Pool constraints** (enforced server-side; ignoring them yields cryptic Cognito errors at login):
-
-- **Username MUST be an email address.** The pool is configured with email as the sign-in alias, so `--username` has to be a valid email — short handles like `alice` are rejected at create time.
-- **Password policy**: minimum 12 characters, with at least one uppercase letter, one lowercase letter, one digit, and one symbol.
-- **`email_verified=true` attribute is required** for the account to log in. Creating a user without it leaves the account in `FORCE_CHANGE_PASSWORD` state and subsequent `initiate-auth` calls fail with `User is not confirmed`.
-- **`--message-action SUPPRESS`** stops Cognito from trying to email the temporary password. If SES isn't configured on the account, omitting this flag causes `admin-create-user` to fail with `NotAuthorizedException`. Safe for non-prod; omit only if you have a working SES sender identity.
-
-The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so you do not have to go through a password change flow on first login.
+The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so the teammate does not have to go through a password change flow on first login. After running these, hand the teammate the four config fields manually (or build the bundle: `echo '{"api_url":"…","region":"…","user_pool_id":"…","client_id":"…"}' | base64`).
 
 ### Obtain a JWT token
 
@@ -402,6 +474,15 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 # Review a PR with a specific focus area
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
+# Submit with attachments (local files)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
+  --attachment screenshot.png \
+  --attachment error.log
+
+# Submit with a URL attachment
+node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+  --attachment https://figma.com/file/abc123/export.png
+
 # Submit and wait for completion
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
@@ -430,6 +511,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
@@ -440,6 +522,59 @@ Created:     2026-04-01T00:39:51.271Z
 | `--output` | Output format: `text` (default) or `json`. |
 
 At least one of `--issue`, `--task`, `--pr`, or `--review-pr` is required. The `--pr` and `--review-pr` flags are mutually exclusive.
+
+### Attachments
+
+Attachments let you provide non-text context to the agent — screenshots of bugs, design mockups, CSV data, log files, or URLs to external resources. Every attachment passes through security screening before reaching the agent.
+
+**Supported file types:**
+
+| Category | Types | Extensions |
+|---|---|---|
+| Images | PNG, JPEG | `.png`, `.jpg` |
+| Text files | Plain text, CSV, Markdown, JSON, PDF, Log | `.txt`, `.csv`, `.md`, `.json`, `.pdf`, `.log` |
+
+**Limits:**
+
+| Limit | Value |
+|---|---|
+| Max attachments per task | 10 |
+| Max size per attachment | 10 MB |
+| Max total size per task | 50 MB |
+| URL attachments | HTTPS only |
+
+**Usage:**
+
+```bash
+# Local file (auto-detects MIME type from content)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
+  --attachment screenshot.png
+
+# Multiple attachments
+node lib/bin/bgagent.js submit --repo owner/repo --task "Analyze these logs" \
+  --attachment error.log \
+  --attachment metrics.csv
+
+# URL attachment (fetched during task hydration)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+  --attachment https://example.com/mockup.png
+```
+
+The CLI automatically routes attachments through the optimal upload path:
+
+- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body).
+- **Files > 500 KB** use presigned upload (uploaded directly to S3, then confirmed).
+- **URLs** are validated at submission and fetched during context hydration with SSRF protection.
+
+**Security screening:**
+
+All attachments are screened before reaching the agent:
+
+- **Images**: Magic bytes validation, dimension checks (max 8000px per side), Bedrock Guardrail content screening (prompt attack detection). Only PNG and JPEG are accepted.
+- **Text files**: Magic bytes validation, Bedrock Guardrail text content screening. PDFs have text extracted (max 50 pages) before screening.
+- **URLs**: HTTPS-only enforcement, DNS resolution pinning (prevents DNS rebinding/SSRF), private IP blocking, redirect validation, size and timeout limits.
+
+If any attachment fails screening, the entire task is rejected with a clear error identifying the problematic file. Re-submit without the flagged attachment.
 
 ### Checking task status
 
