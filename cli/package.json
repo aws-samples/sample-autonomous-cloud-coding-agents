@@ -12,31 +12,31 @@
     "security:retire": "retire --path . --severity high"
   },
   "devDependencies": {
-    "@stylistic/eslint-plugin": "^2",
+    "@stylistic/eslint-plugin": "^5",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
-    "eslint": "^9",
+    "eslint": "^10",
     "eslint-import-resolver-typescript": "^4.4.4",
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-jest": "^29.15.1",
     "eslint-plugin-jsdoc": "^62.8.1",
     "eslint-plugin-license-header": "^0.9.0",
     "jest": "^30.3.0",
-    "jest-junit": "^16",
+    "jest-junit": "^17",
     "retire": "^5.4.2",
     "ts-jest": "^29.4.6",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agentcore": "3.1024.0",
-    "@aws-sdk/client-bedrock-agentcore-control": "3.1024.0",
-    "@aws-sdk/client-cloudformation": "3.1024.0",
-    "@aws-sdk/client-cognito-identity-provider": "3.1024.0",
-    "@aws-sdk/client-dynamodb": "3.1024.0",
-    "@aws-sdk/client-secrets-manager": "3.1024.0",
-    "@aws-sdk/lib-dynamodb": "3.1024.0",
+    "@aws-sdk/client-bedrock-agentcore": "3.1050.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "3.1050.0",
+    "@aws-sdk/client-cloudformation": "3.1050.0",
+    "@aws-sdk/client-cognito-identity-provider": "3.1050.0",
+    "@aws-sdk/client-dynamodb": "3.1050.0",
+    "@aws-sdk/client-secrets-manager": "3.1050.0",
+    "@aws-sdk/lib-dynamodb": "3.1050.0",
     "commander": "^14.0.3"
   },
   "resolutions": {
