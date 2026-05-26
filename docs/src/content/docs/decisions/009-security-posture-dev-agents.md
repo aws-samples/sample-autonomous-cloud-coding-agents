@@ -4,7 +4,7 @@ title: 009 security posture dev agents
 
 # ADR-009: Security posture and blast radius for development-time agents
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-05-19
 
 ## Context

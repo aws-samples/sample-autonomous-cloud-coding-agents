@@ -4,7 +4,7 @@ title: 010 error recovery
 
 # ADR-010: Error recovery and rollback protocol
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-05-19
 
 ## Context

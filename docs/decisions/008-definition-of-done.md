@@ -1,6 +1,6 @@
 # ADR-008: Definition of Done (progressive maturity)
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-05-19
 
 ## Context

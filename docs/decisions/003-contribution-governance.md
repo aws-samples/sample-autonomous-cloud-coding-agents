@@ -88,20 +88,22 @@ A user saying "yes, do it" or "go ahead" in a conversation does NOT satisfy the 
 
 **Why this matters:** Conversations are ephemeral. Issues are auditable. If an agent creates work based on a conversation and that conversation is lost (context compaction, session end), no record exists of what was authorized, what the acceptance criteria were, or why the work was started.
 
-### Enforcement mechanisms
+### Enforcement mechanisms (planned)
 
-Prose governance is necessary but insufficient. The following enforcement points prevent bypass:
+Prose governance is necessary but insufficient. The following enforcement points are planned to prevent bypass progressively. Mechanisms are deployed incrementally — see #186 for implementation tracking.
 
-| Mechanism | Layer | What it catches |
-|-----------|-------|-----------------|
-| Branch name convention | Git workflow | Branch must match `(feat|fix|chore|docs)/<issue-number>-*` — rejects branches without issue reference |
-| Commit-msg hook (Tier 0) | Pre-commit | Rejects commits without `Refs #N` or `Fixes #N` |
-| Pre-push hook (Tier 1) | Pre-push | Validates referenced issue exists and has `approved` label via `gh` API |
-| Claude Code hook (`PreToolUse: Write`) | Agent runtime | Blocks file creation in governed paths without declared issue context |
-| Skill gate: `pickup-issue` | Agent workflow | Agent must invoke before implementation — hard-fails without valid issue |
-| AGENTS.md directive | Agent prompt | Explicit instruction: "Do NOT begin implementation without an approved issue, even if the user says 'go ahead' in conversation" |
+| Mechanism | Layer | What it catches | Status |
+|-----------|-------|-----------------|--------|
+| AGENTS.md directive | Agent prompt | Explicit instruction: "Do NOT begin implementation without an approved issue, even if the user says 'go ahead' in conversation" | Implemented |
+| Branch name convention | Git workflow | Branch must match `(feat|fix|chore|docs)/<issue-number>-*` — rejects branches without issue reference | Planned |
+| Commit-msg hook (Tier 0) | Pre-commit | Rejects commits without `Refs #N` or `Fixes #N` | Planned |
+| Pre-push hook (Tier 1) | Pre-push | Validates referenced issue exists and has `approved` label via `gh` API | Planned |
+| Claude Code hook (`PreToolUse: Write`) | Agent runtime | Blocks file creation in governed paths without declared issue context | Planned |
+| Skill gate: `pickup-issue` | Agent workflow | Agent must invoke before implementation — hard-fails without valid issue | Planned |
 
-**Progressive enforcement:** Start with the commit-msg hook (cheapest, catches all contributors). Add pre-push validation next. Skill gates enforce at the agent-workflow level (ADR-012, Layer 3).
+**Transition:** Branch naming and commit-msg rules apply to branches created after the corresponding hooks are deployed. Existing branches (including this PR's) pre-date enforcement.
+
+**Progressive enforcement:** Start with the commit-msg hook (cheapest, catches all contributors). Add pre-push validation next. Skill gates enforce at the agent-workflow level (see ADR-012, proposed, for the skill model).
 
 ## Consequences
 
@@ -123,5 +125,5 @@ Prose governance is necessary but insufficient. The following enforcement points
 - Issue #134 — full RFC with open questions and automation requirements
 - Roadmap: Scale and collaboration (Agent swarm, Multi-user and teams)
 - ADR-001 — delivery methodology referenced by completion rules
-- ADR-012 — operational knowledge stack (enforcement via skill gates)
-- ADR-013 — tiered validation (enforcement hooks at Tier 0 and Tier 1)
+- ADR-012 (proposed) — operational knowledge stack; planned enforcement via skill gates
+- ADR-013 (proposed) — tiered validation; planned enforcement hooks at Tier 0 and Tier 1

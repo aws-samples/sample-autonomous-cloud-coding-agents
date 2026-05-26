@@ -145,7 +145,7 @@ Status: **Implemented** (GitHub Actions). This remains the authoritative gate fo
 
 ### Agent interaction model
 
-Agents interact with validation tiers through skills (ADR-012):
+Agents interact with validation tiers through skills (depends on ADR-012 for the skill model):
 
 ```
 Agent completes implementation
@@ -210,7 +210,7 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - Issue #149 — implementation tracking for this ADR
 - ADR-002 — bootstrap policies (Tier 2c validates IAM preflight locally)
 - ADR-008 — definition of done (tier requirements per DoD level)
-- ADR-012 — operational knowledge stack (validation tiers interact with skill gates)
+- ADR-012 (prerequisite) — operational knowledge stack; this ADR depends on 012's skill model for agent interaction with validation tiers
 - Current hooks: `.pre-commit-config.yaml` (Tier 0 implementation)
 - Current build: `mise.toml` root + package-level configs (Tier 1 implementation)
 - LocalStack: https://localstack.cloud (candidate for Tier 2a)

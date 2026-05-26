@@ -4,7 +4,7 @@ title: 011 conflict resolution
 
 # ADR-011: Conflict resolution protocol
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-05-19
 
 ## Context

@@ -4,7 +4,7 @@ title: 007 knowledge acquisition
 
 # ADR-007: Knowledge acquisition through progressive failure
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-05-19
 
 ## Context

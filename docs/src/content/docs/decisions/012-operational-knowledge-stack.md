@@ -264,6 +264,6 @@ Skills become shareable across projects:
 - ADR-007 — knowledge acquisition (skills enable Level 3 self-improving)
 - ADR-008 — definition of done (skill `verify-done` is a natural fit)
 - ADR-010 — error recovery (decision tree is a natural skill)
-- ADR-013 — tiered validation pyramid (enforcement hooks at Tier 0 and Tier 1)
+- ADR-013 (proposed) — tiered validation pyramid; depends on this ADR for skill-based agent interaction with validation tiers
 - [agentskills.io](https://agentskills.io/) — skill marketplace concept for shareable operational knowledge
 - Claude Code plugin/skill format — the implementation vehicle for Layer 3

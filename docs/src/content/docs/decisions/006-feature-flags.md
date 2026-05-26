@@ -4,7 +4,7 @@ title: 006 feature flags
 
 # ADR-006: Feature flags for concurrent development
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-05-19
 
 ## Context
