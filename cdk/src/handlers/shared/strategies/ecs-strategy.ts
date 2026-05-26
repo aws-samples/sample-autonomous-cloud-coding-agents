@@ -41,6 +41,9 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
   async startSession(input: {
     taskId: string;
+    /** Accepted to satisfy the ComputeStrategy interface; ECS doesn't
+     *  use a workload-token-injecting runtime so this is unused. */
+    userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
   }): Promise<SessionHandle> {
