@@ -148,6 +148,7 @@ describe('TaskOrchestrator construct', () => {
           Match.objectLike({
             Action: [
               'bedrock-agentcore:InvokeAgentRuntime',
+              'bedrock-agentcore:InvokeAgentRuntimeForUser',
               'bedrock-agentcore:StopRuntimeSession',
             ],
             Effect: 'Allow',
@@ -295,6 +296,7 @@ describe('TaskOrchestrator construct', () => {
           Match.objectLike({
             Action: [
               'bedrock-agentcore:InvokeAgentRuntime',
+              'bedrock-agentcore:InvokeAgentRuntimeForUser',
               'bedrock-agentcore:StopRuntimeSession',
             ],
             Effect: 'Allow',

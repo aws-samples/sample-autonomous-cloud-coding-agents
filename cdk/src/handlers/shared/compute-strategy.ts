@@ -34,6 +34,18 @@ export interface ComputeStrategy {
   readonly type: ComputeType;
   startSession(input: {
     taskId: string;
+    /**
+     * Stable user identifier (the task's Cognito sub) propagated to
+     * AgentCore via `runtimeUserId` on `InvokeAgentRuntimeCommand`. Used
+     * by AgentCore Identity to derive a workload access token and inject
+     * it into the agent container via the `WorkloadAccessToken` request
+     * header. Without this, `BedrockAgentCoreContext.get_workload_
+     * access_token()` returns None inside the runtime and any code path
+     * that resolves a credential through Identity (e.g.
+     * `agent/src/config.py::resolve_linear_api_token`) silently
+     * fails-closed. Phase 2.0a requirement.
+     */
+    userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
   }): Promise<SessionHandle>;

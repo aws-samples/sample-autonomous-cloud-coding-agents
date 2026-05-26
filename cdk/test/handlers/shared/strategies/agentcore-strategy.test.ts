@@ -47,6 +47,7 @@ describe('AgentCoreComputeStrategy', () => {
 
       const handle = await strategy.startSession({
         taskId: 'TASK001',
+        userId: 'cognito-user-1',
         payload: { repo_url: 'org/repo', task_id: 'TASK001' },
         blueprintConfig: { compute_type: 'agentcore', runtime_arn: defaultRuntimeArn },
       });
@@ -56,6 +57,9 @@ describe('AgentCoreComputeStrategy', () => {
       const acHandle = handle as Extract<typeof handle, { strategyType: 'agentcore' }>;
       expect(acHandle.runtimeArn).toBe(defaultRuntimeArn);
       expect(mockSend).toHaveBeenCalledTimes(1);
+      // runtimeUserId triggers AgentCore Identity workload-token injection.
+      const invokeInput = mockSend.mock.calls[0][0].input;
+      expect(invokeInput.runtimeUserId).toBe('cognito-user-1');
     });
 
     test('uses runtime_arn from blueprintConfig (single source of truth)', async () => {
@@ -65,6 +69,7 @@ describe('AgentCoreComputeStrategy', () => {
 
       const handle = await strategy.startSession({
         taskId: 'TASK001',
+        userId: 'cognito-user-1',
         payload: { repo_url: 'org/repo', task_id: 'TASK001' },
         blueprintConfig: { compute_type: 'agentcore', runtime_arn: runtimeArn },
       });
@@ -86,11 +91,13 @@ describe('AgentCoreComputeStrategy', () => {
 
       await strategy1.startSession({
         taskId: 'T1',
+        userId: 'u1',
         payload: {},
         blueprintConfig: { compute_type: 'agentcore', runtime_arn: defaultRuntimeArn },
       });
       await strategy2.startSession({
         taskId: 'T2',
+        userId: 'u2',
         payload: {},
         blueprintConfig: { compute_type: 'agentcore', runtime_arn: defaultRuntimeArn },
       });

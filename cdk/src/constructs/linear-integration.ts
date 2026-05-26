@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -30,6 +30,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
+import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
 
 /**
  * Properties for LinearIntegration construct.
@@ -76,6 +77,10 @@ export interface LinearIntegrationProps {
  * Creates:
  * - LinearProjectMappingTable (Linear project → GitHub repo mapping)
  * - LinearUserMappingTable (Linear user → platform user mapping)
+ * - LinearWorkspaceRegistryTable (Linear workspace → AgentCore credential
+ *   provider name; Phase 2.0b OAuth migration). Webhook processor and
+ *   orchestrator use this to look up which credential provider holds the
+ *   workspace's OAuth token.
  * - LinearWebhookDedupTable (60s TTL dedup for webhook retries)
  * - Lambda handlers for the webhook receiver, async processor, and account linking
  * - API Gateway routes under /linear/*
@@ -88,17 +93,18 @@ export class LinearIntegration extends Construct {
   /** Linear user → platform user mapping table. */
   public readonly userMappingTable: dynamodb.Table;
 
+  /**
+   * Registry of Linear workspaces that have completed OAuth onboarding.
+   * Lookup `provider_name` (AgentCore credential provider) by Linear
+   * `organizationId` from the inbound webhook.
+   */
+  public readonly workspaceRegistryTable: dynamodb.Table;
+
   /** Webhook dedup table — (issue_id, action) keys with 60s TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Linear webhook signing secret (placeholder — populated by `bgagent linear setup`). */
   public readonly webhookSecret: secretsmanager.Secret;
-
-  /**
-   * Linear personal API token used by the agent-side MCP (placeholder —
-   * populated by `bgagent linear setup`).
-   */
-  public readonly apiTokenSecret: secretsmanager.Secret;
 
   constructor(scope: Construct, id: string, props: LinearIntegrationProps) {
     super(scope, id);
@@ -108,8 +114,10 @@ export class LinearIntegration extends Construct {
     // --- DynamoDB tables ---
     const projectMapping = new LinearProjectMappingTable(this, 'ProjectMappingTable', { removalPolicy });
     const userMapping = new LinearUserMappingTable(this, 'UserMappingTable', { removalPolicy });
+    const workspaceRegistry = new LinearWorkspaceRegistryTable(this, 'WorkspaceRegistryTable', { removalPolicy });
     this.projectMappingTable = projectMapping.table;
     this.userMappingTable = userMapping.table;
+    this.workspaceRegistryTable = workspaceRegistry.table;
 
     // Dedup table: linear webhook retries collapse to a single processor invoke
     // within the 60s TTL window. Keyed on `{issue_id}#{action}`.
@@ -121,13 +129,11 @@ export class LinearIntegration extends Construct {
       removalPolicy,
     });
 
-    // --- Secrets (CDK-created placeholders, populated by `bgagent linear setup`) ---
+    // --- Webhook signing secret (CDK-created placeholder, populated by `bgagent linear setup`) ---
+    // Per-workspace OAuth tokens (Phase 2.0b-O2) live in `bgagent-linear-oauth-<slug>`
+    // secrets created by the CLI at runtime — not here.
     this.webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'Linear webhook signing secret — populate via `bgagent linear setup`',
-      removalPolicy,
-    });
-    this.apiTokenSecret = new secretsmanager.Secret(this, 'ApiTokenSecret', {
-      description: 'Linear personal API token for agent-side MCP — populate via `bgagent linear setup`',
       removalPolicy,
     });
 
@@ -181,13 +187,29 @@ export class LinearIntegration extends Construct {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
-        LINEAR_API_TOKEN_SECRET_ARN: this.apiTokenSecret.secretArn,
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
       bundling: commonBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
-    this.apiTokenSecret.grantRead(webhookProcessorFn);
+    this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
+    // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant
+    // the webhook processor Get + Put on the prefix so it can read tokens
+    // and write back rotated refresh-token JSON during expiring-token
+    // refresh.
+    webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
     if (props.repoTable) {
@@ -281,14 +303,12 @@ export class LinearIntegration extends Construct {
       },
     ]);
 
-    for (const secret of [this.webhookSecret, this.apiTokenSecret]) {
-      NagSuppressions.addResourceSuppressions(secret, [
-        {
-          id: 'AwsSolutions-SMG4',
-          reason: 'Linear credentials are managed externally (Linear web UI) — automatic rotation is not applicable',
-        },
-      ]);
-    }
+    NagSuppressions.addResourceSuppressions(this.webhookSecret, [
+      {
+        id: 'AwsSolutions-SMG4',
+        reason: 'Linear webhook signing secret is managed externally (Linear web UI) — automatic rotation is not applicable',
+      },
+    ]);
 
     const allFunctions = [webhookFn, webhookProcessorFn, linkFn];
     for (const fn of allFunctions) {
