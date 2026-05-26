@@ -739,7 +739,10 @@ async function generateUploadInstructions(
     if (!record) continue;
 
     const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${userId}/${taskId}/${record.attachment_id}/${att.filename}`;
-    const { url, fields } = await createPresignedPost(client, {
+    // Type assertion: @aws-sdk/s3-presigned-post bundles a nested @aws-sdk/client-s3
+    // with divergent @smithy/types declarations. The runtime is compatible; only the
+    // type declarations conflict. Cast to `any` at the boundary.
+    const { url, fields } = await createPresignedPost(client as any, {
       Bucket: ATTACHMENTS_BUCKET!,
       Key: s3Key,
       Conditions: [
