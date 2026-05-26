@@ -17,9 +17,10 @@
  *  SOFTWARE.
  */
 
-import { PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
+  findReusableOauthAppCredentials,
   isWebhookSecretConfigured,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
@@ -232,5 +233,89 @@ describe('isWebhookSecretConfigured', () => {
   test('returns false when SecretString is missing', async () => {
     mockSend.mockResolvedValueOnce({});
     expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+  });
+});
+
+describe('findReusableOauthAppCredentials', () => {
+  // The helper is the linchpin of `bgagent linear add-workspace`: if it
+  // returns the wrong (or no) values, the operator either gets a confusing
+  // re-prompt or — worse — installs a workspace against an OAuth app that
+  // doesn't match the existing workspaces' refresh-token rotations.
+  const smSend = jest.fn();
+  const smClient = { send: smSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[1];
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset();
+  });
+
+  test('returns null when registry has no active rows', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [] });
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
+    // Verify the scan filter is the active-status one, not a full table scan.
+    const scanCmd = ddbSend.mock.calls[0][0] as ScanCommand;
+    expect(scanCmd.input.FilterExpression).toBe('#status = :active');
+    expect(scanCmd.input.Limit).toBe(1);
+  });
+
+  test('returns credentials from the first active workspace', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{
+        workspace_slug: 'acme',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      }],
+    });
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify({
+        access_token: 'lin_at',
+        refresh_token: 'lin_rt',
+        client_id: 'cid-acme',
+        client_secret: 'csec-acme',
+        workspace_id: 'ws-1',
+        workspace_slug: 'acme',
+      }),
+    });
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    const result = await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry');
+    expect(result).toEqual({
+      clientId: 'cid-acme',
+      clientSecret: 'csec-acme',
+      sourceSlug: 'acme',
+    });
+  });
+
+  test('returns null when the secret is missing client_id/client_secret', async () => {
+    // Phase 2.0a (parked) secrets only stored access_token + refresh_token —
+    // a half-migrated install would hit this path. Returning null forces the
+    // operator to pass --client-id explicitly rather than silently using
+    // empty strings.
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 'old', oauth_secret_arn: 'arn:secret:old', status: 'active' }],
+    });
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify({ access_token: 'a', refresh_token: 'r' }),
+    });
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
+  });
+
+  test('returns null on corrupted SecretString JSON', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 's', oauth_secret_arn: 'arn:s', status: 'active' }],
+    });
+    smSend.mockResolvedValueOnce({ SecretString: '{not valid json' });
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
+  });
+
+  test('returns null when SecretString is missing', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 's', oauth_secret_arn: 'arn:s', status: 'active' }],
+    });
+    smSend.mockResolvedValueOnce({});
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
   });
 });
