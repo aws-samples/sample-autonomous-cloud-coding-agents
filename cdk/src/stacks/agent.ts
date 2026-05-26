@@ -34,16 +34,18 @@ import { Construct, IConstruct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
+import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
+// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
-// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { TaskApi } from '../constructs/task-api';
 import { TaskApprovalsTable } from '../constructs/task-approvals-table';
 import { TaskDashboard } from '../constructs/task-dashboard';
@@ -102,6 +104,16 @@ export class AgentStack extends Stack {
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
     const traceArtifactsBucket = new TraceArtifactsBucket(this, 'TraceArtifactsBucket');
+
+    // Attachment storage — images, files, and URL-fetched content for tasks.
+    const attachmentsBucket = new AttachmentsBucket(this, 'AttachmentsBucket');
+
+    NagSuppressions.addResourceSuppressions(attachmentsBucket.bucket, [
+      {
+        id: 'AwsSolutions-S1',
+        reason: 'Task attachments: writes from create-task and orchestrator Lambdas only; reads by agent via IAM role. 90-day lifecycle; versioning + screening prevent TOCTOU. Access logging not justified for this use case.',
+      },
+    ]);
 
     // Server access logging intentionally disabled. Rationale:
     //  - writes: only the agent runtime IAM role (``grantPut`` below).
@@ -258,6 +270,8 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
       agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
       traceArtifactsBucket: traceArtifactsBucket.bucket,
+      attachmentsBucket: attachmentsBucket.bucket,
+      userConcurrencyTable: userConcurrencyTable.table,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -374,6 +388,10 @@ export class AgentStack extends Stack {
     // the runtime itself. Deferred because the session-tag plumbing is
     // orthogonal to landing the feature behavior.
     traceArtifactsBucket.bucket.grantPut(runtime);
+    // Version-pinned attachment downloads (agent/src/attachments.py uses
+    // GetObject + VersionId). grantRead expands to s3:GetObject* including
+    // GetObjectVersion on the versioned attachments bucket.
+    attachmentsBucket.bucket.grantRead(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -551,6 +569,7 @@ export class AgentStack extends Stack {
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      attachmentsBucket: attachmentsBucket.bucket,
       // To wire ECS, uncomment the ecsCluster block above and add:
       // ecsConfig: {
       //   clusterArn: ecsCluster.cluster.clusterArn,
@@ -585,6 +604,16 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+    });
+
+    // --- Pending-upload cleanup rule ---
+    // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
+    // 30 minutes (client crash, abandoned session, network failure).
+    // Cleans up orphaned S3 objects under the task's attachment prefix.
+    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // --- Fan-out plane consumer ---

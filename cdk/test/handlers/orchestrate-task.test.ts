@@ -887,12 +887,24 @@ describe('failTask', () => {
     expect(transitionCall.input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
   });
 
-  test('handles transition failure gracefully', async () => {
-    mockDdbSend
-      .mockRejectedValueOnce(new Error('Condition failed')) // transitionTask
-      .mockResolvedValue({}); // emitTaskEvent
-    // Should not throw
-    await failTask('TASK001', 'SUBMITTED', 'error', 'user-123', false);
+  test('handles transition failure gracefully without emitting when not transitioned', async () => {
+    mockDdbSend.mockRejectedValueOnce(new Error('Condition failed')); // transitionTask only
+    await expect(failTask('TASK001', 'SUBMITTED', 'error', 'user-123', false)).resolves.toBeUndefined();
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('second failTask does not re-emit or re-decrement when transition fails (idempotent under step retry)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await failTask('TASK001', 'HYDRATING', 'first failure', 'user-123', true);
+    expect(mockDdbSend).toHaveBeenCalledTimes(3); // transition + emit + decrement
+
+    mockDdbSend.mockClear();
+    const condErr = new Error('The conditional request failed');
+    condErr.name = 'ConditionalCheckFailedException';
+    mockDdbSend.mockRejectedValueOnce(condErr); // already FAILED — transition no-ops
+
+    await expect(failTask('TASK001', 'HYDRATING', 'durable replay', 'user-123', true)).resolves.toBeUndefined();
+    expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only; no Put, no concurrency Update
   });
 });
 

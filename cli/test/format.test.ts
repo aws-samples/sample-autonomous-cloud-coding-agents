@@ -49,6 +49,7 @@ describe('format', () => {
     turns_completed: null,
     trace: false,
     trace_s3_uri: null,
+    attachments: null,
     approval_gate_count: 0,
     approval_gate_cap: 50,
     awaiting_approval_request_id: null,

@@ -156,7 +156,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Task attachments (multimodal)** | Implement end-to-end support for the create-task **`attachments`** array (`API_CONTRACT.md`: `image`, `file`, `url` — inline base64 or fetchable URL, size/MIME limits). Flow through validation, guardrails, context hydration, and agent prompt so images (screenshots, mockups), documents, and linked assets reach the model where the channel allows it. Extend **CLI** and **webhook** task creation to populate the same schema. *Multimodal* is the vision/image path; attachments are the unified carrier for all non-text task context. |
+| ~~**Task attachments (multimodal)**~~ | **Implemented.** End-to-end support for the `attachments` array: inline base64 (≤ 500 KB), presigned upload (up to 10 MB), and URL fetch with SSRF protection. Images (PNG, JPEG, GIF, WebP) and text files (TXT, CSV, MD, JSON, PDF, LOG) pass through Bedrock Guardrail screening, magic bytes validation, EXIF stripping, and re-encoding. CLI `--attachment` flag, Slack file uploads, and Linear image extraction all feed the same schema. See [ATTACHMENTS.md](../design/ATTACHMENTS.md). |
 | **Additional git providers** | GitLab (and optionally Bitbucket). Same workflow, provider-specific API adapters. |
 | **Slack integration** | Submit tasks, check status, receive notifications from Slack. Block Kit rendering. |
 | **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. |

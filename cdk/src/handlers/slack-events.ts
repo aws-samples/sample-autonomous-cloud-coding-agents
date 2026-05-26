@@ -25,7 +25,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
-import type { MentionEvent } from './slack-command-processor';
+import type { MentionEvent, SlackFileRef } from './slack-command-processor';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const sm = new SecretsManagerClient({});
@@ -201,6 +201,18 @@ async function handleAppMention(
   const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
   const commandText = `submit ${repo} ${description}`;
 
+  // Extract file references from the Slack event (if any attached)
+  const rawFiles = Array.isArray(event.files) ? event.files as Array<Record<string, unknown>> : [];
+  const files: SlackFileRef[] = rawFiles
+    .filter(f => typeof f.url_private_download === 'string' && typeof f.name === 'string')
+    .map(f => ({
+      id: String(f.id ?? ''),
+      name: String(f.name),
+      mimetype: String(f.mimetype ?? 'application/octet-stream'),
+      size: typeof f.size === 'number' ? f.size : 0,
+      url_private_download: String(f.url_private_download),
+    }));
+
   const mentionPayload: MentionEvent = {
     text: commandText,
     user_id: userId,
@@ -208,6 +220,7 @@ async function handleAppMention(
     channel_id: channelId,
     source: 'mention',
     mention_thread_ts: threadTs ?? messageTs,
+    ...(files.length > 0 && { files }),
   };
 
   // React with :eyes: immediately so the user knows the bot saw their message.

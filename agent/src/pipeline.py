@@ -57,6 +57,32 @@ def _chain_prior_agent_error(agent_result: AgentResult | None, exc: BaseExceptio
     return tail
 
 
+def _inject_attachment_context(prompt: str, prepared_attachments: list) -> str:
+    """Append attachment file references to the user prompt.
+
+    Images are referenced by absolute path so the agent can view them
+    with the Read tool (which supports multimodal image reading).
+    File attachments are similarly referenced by path.
+    """
+    lines = ["\n\n---\n\n**Attachments provided with this task:**\n"]
+    for att in prepared_attachments:
+        size_kb = att.size_bytes / 1024
+        if att.type == "image":
+            lines.append(
+                f"- **Image:** `{att.filename}` ({size_kb:.1f} KB, {att.content_type}) "
+                f"— View with: `Read {att.local_path}`"
+            )
+        else:
+            lines.append(
+                f"- **File:** `{att.filename}` ({size_kb:.1f} KB, {att.content_type}) "
+                f"— Read with: `Read {att.local_path}`"
+            )
+    lines.append(
+        "\nUse the Read tool to view these files. Image files will be displayed visually when read."
+    )
+    return prompt + "\n".join(lines)
+
+
 def _maybe_upload_trace(
     config: TaskConfig,
     trajectory,
@@ -252,6 +278,7 @@ def run_task(
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
+    attachments: list[dict] | None = None,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -290,6 +317,7 @@ def run_task(
         initial_approvals=initial_approvals,
         initial_approval_gate_count=initial_approval_gate_count,
         approval_gate_cap=approval_gate_cap,
+        attachments=attachments,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
@@ -440,6 +468,33 @@ def run_task(
                 config.channel_metadata,
             )
 
+            # Download attachments from S3 (version-pinned, integrity-verified)
+            prepared_attachments: list = []
+            if config.attachments:
+                from attachments import download_attachments
+
+                try:
+                    with task_span("task.attachment_download"):
+                        prepared_attachments = download_attachments(
+                            config.attachments, setup.repo_dir
+                        )
+                    progress.write_agent_milestone(
+                        "attachments_downloaded",
+                        f"count={len(prepared_attachments)}",
+                    )
+                except RuntimeError as e:
+                    log("ERROR", f"Attachment integrity check failed: {e}")
+                    raise RuntimeError(
+                        f"Attachment download/verification failed: {e}. "
+                        "The task cannot proceed without valid attachments."
+                    ) from e
+                except Exception as e:
+                    err_type = type(e).__name__
+                    log("ERROR", f"Attachment download failed: {err_type}: {e}")
+                    raise RuntimeError(
+                        f"Failed to download task attachments from S3: {err_type}: {e}"
+                    ) from e
+
             # Log discovered repo-level project configuration
             # (all files loaded by setting_sources=["project"])
             repo_dir = setup.repo_dir
@@ -448,6 +503,13 @@ def run_task(
                 log("TASK", f"Repo project configuration: {project_config}")
             else:
                 log("TASK", "No repo-level project configuration found")
+
+            # Inject attachment references into the prompt so the agent knows
+            # about available files. Images are read natively by the agent's
+            # Read tool (multimodal support). File attachments are referenced
+            # by path for the agent to read as needed.
+            if prepared_attachments:
+                prompt = _inject_attachment_context(prompt, prepared_attachments)
 
             # Run agent
             disk_before = get_disk_usage(AGENT_WORKSPACE)

@@ -18,15 +18,17 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
-import { hydrateContext } from './context-hydration';
+import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
-import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type TaskRecord } from './types';
+import { resolveUrlAttachments } from './resolve-url-attachments';
+import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
@@ -39,6 +41,10 @@ const RUNTIME_ARN = process.env.RUNTIME_ARN!;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const MEMORY_ID = process.env.MEMORY_ID;
+const ATTACHMENTS_BUCKET_NAME = process.env.ATTACHMENTS_BUCKET_NAME;
+
+/** Conservative fallback token count for images where metadata could not be read. */
+const MAX_IMAGE_TOKENS_FALLBACK = 1568;
 
 /**
  * State tracked across waitForCondition poll cycles.
@@ -246,6 +252,58 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
 }
 
 /**
+ * Map passed AttachmentRecords into the payload shape the agent runtime expects.
+ * Only includes attachments that passed screening (others are already rejected).
+ * Throws AttachmentBudgetExceededError if total image token cost exceeds budget.
+ */
+function resolveAttachmentPayloads(
+  attachments: AttachmentRecord[],
+  tokenBudget: number,
+): AgentAttachmentPayload[] {
+  const payloads: AgentAttachmentPayload[] = [];
+  let totalImageTokens = 0;
+
+  for (const att of attachments) {
+    if (att.screening.status !== 'passed') continue;
+    if (!att.s3_key || !att.s3_version_id || !att.checksum_sha256 || !att.size_bytes) {
+      throw new AttachmentResolutionError(
+        `Attachment '${att.filename}' (${att.attachment_id}) has passed screening but is missing required ` +
+        'storage metadata (s3_key, s3_version_id, checksum_sha256, or size_bytes). ' +
+        'This is an internal data integrity error — please re-submit the task.',
+      );
+    }
+
+    if (att.type === 'image') {
+      // Use actual estimate if available, otherwise apply a conservative default
+      // to prevent images with unreadable metadata from bypassing the budget check.
+      totalImageTokens += att.token_estimate ?? MAX_IMAGE_TOKENS_FALLBACK;
+    }
+
+    payloads.push({
+      attachment_id: att.attachment_id,
+      type: att.type,
+      content_type: att.content_type,
+      filename: att.filename,
+      s3_uri: `s3://${ATTACHMENTS_BUCKET_NAME}/${att.s3_key}`,
+      s3_version_id: att.s3_version_id,
+      size_bytes: att.size_bytes,
+      checksum_sha256: att.checksum_sha256,
+      ...(att.source_url && { source_url: att.source_url }),
+      ...(att.token_estimate !== undefined && { token_estimate: att.token_estimate }),
+    });
+  }
+
+  if (totalImageTokens > tokenBudget) {
+    throw new AttachmentBudgetExceededError(
+      `Image attachments require ~${totalImageTokens} tokens, exceeding the ${tokenBudget}-token budget. ` +
+      'Reduce the number or resolution of image attachments.',
+    );
+  }
+
+  return payloads;
+}
+
+/**
  * Cedar HITL Chunk 7b: structural guard on the TaskRecord's persisted
  * ``approval_gate_cap`` before we thread it into the agent payload. The
  * submit path bounds-checks the blueprint value before writing it
@@ -361,6 +419,82 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     });
   }
 
+  // Resolve URL attachments: fetch (SSRF-safe), screen, upload to S3.
+  // This step handles type: 'url' attachments that are still pending.
+  // Throws AttachmentResolutionError on failure (propagates to fail the task).
+  let resolvedAttachments = task.attachments ?? [];
+  if (resolvedAttachments.some(a => a.type === 'url' && a.screening.status === 'pending') && ATTACHMENTS_BUCKET_NAME) {
+    const { BedrockRuntimeClient } = await import('@aws-sdk/client-bedrock-runtime');
+    const screeningConfig = process.env.GUARDRAIL_ID && process.env.GUARDRAIL_VERSION
+      ? {
+        guardrailId: process.env.GUARDRAIL_ID,
+        guardrailVersion: process.env.GUARDRAIL_VERSION,
+        bedrockClient: new BedrockRuntimeClient({}),
+      }
+      : undefined;
+
+    if (!screeningConfig) {
+      throw new AttachmentConfigurationError(
+        'URL attachments require content screening (Bedrock Guardrail) but screening is not configured. ' +
+        'Set GUARDRAIL_ID and GUARDRAIL_VERSION environment variables.',
+      );
+    }
+
+    // Resolve the GitHub token for URL fetches that target GitHub domains
+    const githubTokenSecretArn = process.env.GITHUB_TOKEN_SECRET_ARN;
+    let githubToken: string | undefined;
+    if (githubTokenSecretArn) {
+      try {
+        githubToken = await resolveGitHubToken(githubTokenSecretArn);
+      } catch (err) {
+        // Check if any pending URL attachments target GitHub — if so, fail clearly
+        // rather than proceeding to get an opaque 401/403 on fetch.
+        const githubHosts = ['github.com', 'raw.githubusercontent.com', 'api.github.com'];
+        const pendingUrlAtts = resolvedAttachments.filter(a => a.type === 'url' && a.screening.status === 'pending');
+        const hasGitHubUrl = pendingUrlAtts.some(a => {
+          try {
+            const hostname = new URL(a.source_url ?? '').hostname.toLowerCase();
+            return githubHosts.some(h => hostname === h || hostname.endsWith(`.${h}`));
+          } catch { return false; }
+        });
+
+        if (hasGitHubUrl) {
+          throw new AttachmentResolutionError(
+            'Failed to retrieve GitHub credentials needed to fetch URL attachment(s). ' +
+            `Ensure the GitHub token secret (${githubTokenSecretArn}) is accessible. ` +
+            `Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          );
+        }
+
+        logger.warn('Failed to resolve GitHub token for URL attachment fetch (no GitHub URLs in batch — proceeding)', {
+          task_id: task.task_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    resolvedAttachments = await resolveUrlAttachments(
+      resolvedAttachments,
+      task.task_id,
+      task.user_id,
+      {
+        s3Client: new S3Client({}),
+        bucketName: ATTACHMENTS_BUCKET_NAME,
+        screeningConfig,
+        githubToken,
+        githubInstallationDomain: process.env.GITHUB_INSTALLATION_DOMAIN,
+      },
+    );
+  }
+
+  // Resolve attachment payloads for the agent (only passed-screening attachments).
+  // Token budget check is applied here — throws AttachmentBudgetExceededError if
+  // image tokens exceed the configured prompt token budget.
+  const attachmentPayloads = resolvedAttachments.length > 0 && ATTACHMENTS_BUCKET_NAME
+    ? resolveAttachmentPayloads(resolvedAttachments, Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? '100000'))
+    : [];
+
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
@@ -424,6 +558,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     hydrated_context: hydratedContext,
     channel_source: task.channel_source,
     ...(task.channel_metadata && Object.keys(task.channel_metadata).length > 0 && { channel_metadata: task.channel_metadata }),
+    ...(attachmentPayloads.length > 0 && { attachments: attachmentPayloads }),
   };
 
   if (hydratedContext.fallback_error) {
@@ -707,17 +842,24 @@ export async function failTask(
   userId: string,
   releaseConcurrency: boolean,
 ): Promise<void> {
+  let transitioned = false;
   try {
     await transitionTask(taskId, fromStatus, TaskStatus.FAILED, {
       completed_at: new Date().toISOString(),
       error_message: errorMessage,
     });
+    transitioned = true;
   } catch (err) {
     logger.warn('Failed to transition task to FAILED', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
   }
-  await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage });
-  if (releaseConcurrency) {
-    await decrementConcurrency(userId);
+  // Only emit / release concurrency after a successful transition. Callers such as
+  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
+  // would otherwise re-run emit + decrement while the task is already FAILED.
+  if (transitioned) {
+    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage });
+    if (releaseConcurrency) {
+      await decrementConcurrency(userId);
+    }
   }
 }
 

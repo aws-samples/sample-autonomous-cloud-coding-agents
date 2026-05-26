@@ -27,6 +27,7 @@ import {
   ApprovalScope,
   CancelTaskResponse,
   CreateTaskRequest,
+  CreateTaskResponse,
   CreateWebhookRequest,
   CreateWebhookResponse,
   DenyRequest,
@@ -137,12 +138,18 @@ export class ApiClient {
   }
 
   /** POST /tasks — create a new task. */
-  async createTask(req: CreateTaskRequest, idempotencyKey?: string): Promise<TaskDetail> {
+  async createTask(req: CreateTaskRequest, idempotencyKey?: string): Promise<CreateTaskResponse> {
     const headers: Record<string, string> = {};
     if (idempotencyKey) {
       headers['Idempotency-Key'] = idempotencyKey;
     }
-    const res = await this.request<SuccessResponse<TaskDetail>>('POST', '/tasks', req, headers);
+    const res = await this.request<SuccessResponse<CreateTaskResponse>>('POST', '/tasks', req, headers);
+    return res.data;
+  }
+
+  /** POST /tasks/{task_id}/confirm-uploads — confirm presigned uploads. */
+  async confirmUploads(taskId: string): Promise<TaskDetail> {
+    const res = await this.request<SuccessResponse<TaskDetail>>('POST', `/tasks/${taskId}/confirm-uploads`);
     return res.data;
   }
 

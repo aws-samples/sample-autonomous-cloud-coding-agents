@@ -227,4 +227,114 @@ describe('slack-command-processor handler', () => {
     );
     expect(posted).toBeTruthy();
   });
+
+  // ─── Slack file attachment extraction ────────────────────────────────────────
+
+  describe('file attachments', () => {
+    beforeEach(() => {
+      // Standard setup: linked user, public channel
+      ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+      ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
+      });
+    });
+
+    test('downloads Slack files and passes as inline attachments', async () => {
+      // fetch for file download
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(Buffer.from('file content')),
+      });
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 201,
+        body: JSON.stringify({ data: { task_id: 'T1' } }),
+      });
+
+      await handler(mention({
+        text: 'submit org/repo fix the bug',
+        files: [{
+          id: 'F1',
+          name: 'screenshot.png',
+          mimetype: 'image/png',
+          size: 1024,
+          url_private_download: 'https://files.slack.com/files/F1/screenshot.png',
+        }],
+      }));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(1);
+      expect(reqBody.attachments[0].type).toBe('image');
+      expect(reqBody.attachments[0].content_type).toBe('image/png');
+      expect(reqBody.attachments[0].filename).toBe('screenshot.png');
+      expect(reqBody.attachments[0].data).toBe(Buffer.from('file content').toString('base64'));
+    });
+
+    test('rejects files with unsupported MIME types', async () => {
+      await handler(mention({
+        text: 'submit org/repo fix',
+        files: [{
+          id: 'F1',
+          name: 'virus.exe',
+          mimetype: 'application/x-executable',
+          size: 1024,
+          url_private_download: 'https://files.slack.com/files/F1/virus.exe',
+        }],
+      }));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const reply = fetchMock.mock.calls.find(
+        ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('unsupported type'),
+      );
+      expect(reply).toBeTruthy();
+    });
+
+    test('rejects files exceeding 10 MB size limit', async () => {
+      await handler(mention({
+        text: 'submit org/repo fix',
+        files: [{
+          id: 'F1',
+          name: 'huge.png',
+          mimetype: 'image/png',
+          size: 11 * 1024 * 1024, // 11 MB
+          url_private_download: 'https://files.slack.com/files/F1/huge.png',
+        }],
+      }));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const reply = fetchMock.mock.calls.find(
+        ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('too large'),
+      );
+      expect(reply).toBeTruthy();
+    });
+
+    test('reports all file errors atomically', async () => {
+      await handler(mention({
+        text: 'submit org/repo fix',
+        files: [
+          { id: 'F1', name: 'big.png', mimetype: 'image/png', size: 11 * 1024 * 1024, url_private_download: 'https://files.slack.com/files/F1/big.png' },
+          { id: 'F2', name: 'bad.exe', mimetype: 'application/x-executable', size: 100, url_private_download: 'https://files.slack.com/files/F2/bad.exe' },
+        ],
+      }));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const reply = fetchMock.mock.calls.find(
+        ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('2 attachment errors'),
+      );
+      expect(reply).toBeTruthy();
+    });
+
+    test('proceeds without attachments when no files are present', async () => {
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 201,
+        body: JSON.stringify({ data: { task_id: 'T1' } }),
+      });
+      await handler(mention({ text: 'submit org/repo fix' }));
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
+  });
 });

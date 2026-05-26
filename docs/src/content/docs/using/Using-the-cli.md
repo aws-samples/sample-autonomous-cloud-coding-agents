@@ -44,6 +44,15 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 # Review a PR with a specific focus area
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
+# Submit with attachments (local files)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
+  --attachment screenshot.png \
+  --attachment error.log
+
+# Submit with a URL attachment
+node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+  --attachment https://figma.com/file/abc123/export.png
+
 # Submit and wait for completion
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
@@ -72,6 +81,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
@@ -82,6 +92,59 @@ Created:     2026-04-01T00:39:51.271Z
 | `--output` | Output format: `text` (default) or `json`. |
 
 At least one of `--issue`, `--task`, `--pr`, or `--review-pr` is required. The `--pr` and `--review-pr` flags are mutually exclusive.
+
+### Attachments
+
+Attachments let you provide non-text context to the agent — screenshots of bugs, design mockups, CSV data, log files, or URLs to external resources. Every attachment passes through security screening before reaching the agent.
+
+**Supported file types:**
+
+| Category | Types | Extensions |
+|---|---|---|
+| Images | PNG, JPEG | `.png`, `.jpg` |
+| Text files | Plain text, CSV, Markdown, JSON, PDF, Log | `.txt`, `.csv`, `.md`, `.json`, `.pdf`, `.log` |
+
+**Limits:**
+
+| Limit | Value |
+|---|---|
+| Max attachments per task | 10 |
+| Max size per attachment | 10 MB |
+| Max total size per task | 50 MB |
+| URL attachments | HTTPS only |
+
+**Usage:**
+
+```bash
+# Local file (auto-detects MIME type from content)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
+  --attachment screenshot.png
+
+# Multiple attachments
+node lib/bin/bgagent.js submit --repo owner/repo --task "Analyze these logs" \
+  --attachment error.log \
+  --attachment metrics.csv
+
+# URL attachment (fetched during task hydration)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+  --attachment https://example.com/mockup.png
+```
+
+The CLI automatically routes attachments through the optimal upload path:
+
+- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body).
+- **Files > 500 KB** use presigned upload (uploaded directly to S3, then confirmed).
+- **URLs** are validated at submission and fetched during context hydration with SSRF protection.
+
+**Security screening:**
+
+All attachments are screened before reaching the agent:
+
+- **Images**: Magic bytes validation, dimension checks (max 8000px per side), Bedrock Guardrail content screening (prompt attack detection). Only PNG and JPEG are accepted.
+- **Text files**: Magic bytes validation, Bedrock Guardrail text content screening. PDFs have text extracted (max 50 pages) before screening.
+- **URLs**: HTTPS-only enforcement, DNS resolution pinning (prevents DNS rebinding/SSRF), private IP blocking, redirect validation, size and timeout limits.
+
+If any attachment fails screening, the entire task is rejected with a clear error identifying the problematic file. Re-submit without the flagged attachment.
 
 ### Checking task status
 

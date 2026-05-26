@@ -60,6 +60,7 @@ The gateway extracts `user_id` from the authenticated identity and attaches it t
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/v1/tasks` | Cognito | Create a task |
+| `POST` | `/v1/tasks/{task_id}/confirm-uploads` | Cognito | Confirm presigned uploads and trigger screening |
 | `GET` | `/v1/tasks` | Cognito | List tasks (paginated) |
 | `GET` | `/v1/tasks/{task_id}` | Cognito | Get task details |
 | `DELETE` | `/v1/tasks/{task_id}` | Cognito | Cancel a task |
@@ -83,7 +84,7 @@ Creates a new task. The orchestrator runs admission control, context hydration, 
 |---|---|---|---|
 | `repo` | String | Yes | GitHub repository (`owner/repo`) |
 | `issue_number` | Number | No | GitHub issue number. Title, body, and comments are fetched during hydration. |
-| `task_description` | String | No | Free-text description (max 2,000 chars). At least one of `issue_number`, `task_description`, or `pr_number` required. |
+| `task_description` | String | No | Free-text description (max 10,000 chars). At least one of `issue_number`, `task_description`, or `pr_number` required. |
 | `task_type` | String | No | `new_task` (default), `pr_iteration`, or `pr_review` |
 | `pr_number` | Number | No | PR to iterate on or review. Required when `task_type` is `pr_iteration` or `pr_review`. |
 | `max_turns` | Number | No | Max agent turns (1-500, default 100) |
@@ -95,10 +96,69 @@ Creates a new task. The orchestrator runs admission control, context hydration, 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `type` | String | Yes | `image`, `file`, or `url` |
-| `content_type` | String | No | MIME type (for inline data) |
-| `data` | String | No | Base64-encoded content (max 10 MB decoded) |
-| `url` | String | No | URL to fetch |
-| `filename` | String | No | Original filename |
+| `content_type` | String | Conditional | MIME type. Required for presigned uploads and URL attachments; auto-detected from magic bytes for inline data. |
+| `data` | String | No | Base64-encoded content (max 500 KB decoded per attachment; max 3 MB total inline per request). Mutually exclusive with `url`. |
+| `url` | String | No | HTTPS URL to fetch during hydration (max 10 MB, 10s timeout). Required when `type` is `url`. |
+| `filename` | String | No | Original filename. Auto-generated if absent. Must not contain path separators or start with `.`. |
+| `expected_size_bytes` | Number | Conditional | Declared file size in bytes. Required for presigned uploads (no `data`, no `url`). Used for early budget validation. |
+
+**Supported MIME types:**
+
+| Category | MIME types | Extensions |
+|---|---|---|
+| Images | `image/png`, `image/jpeg` | `.png`, `.jpg` |
+| Text files | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | `.txt`, `.csv`, `.md`, `.json`, `.pdf`, `.log` |
+
+**Attachment limits:**
+
+| Limit | Value |
+|---|---|
+| Max attachments per task | 10 |
+| Max inline data per attachment | 500 KB (decoded) |
+| Max total inline data per request | 3 MB (decoded) |
+| Max size per attachment (presigned/URL) | 10 MB |
+| Max total size per task | 50 MB |
+| URL scheme | HTTPS only |
+| URL fetch timeout | 10 seconds |
+
+**Upload paths:**
+
+- **Inline** (≤ 500 KB): Include base64-encoded `data` in the request body. Task is created in `SUBMITTED` status.
+- **Presigned** (> 500 KB, up to 10 MB): Omit `data` and `url`, include `expected_size_bytes`. Task is created in `PENDING_UPLOADS` status with presigned POST URLs returned in the response. Upload directly to S3, then call `POST /v1/tasks/{task_id}/confirm-uploads`.
+- **URL** (deferred): Include `url`. Content is fetched and screened during context hydration.
+
+**Response for presigned upload tasks: `202 Accepted`**
+
+```json
+{
+  "data": {
+    "task_id": "01HYX...",
+    "status": "PENDING_UPLOADS",
+    "task_expires_at": "2025-03-15T11:00:00Z",
+    "attachments": [
+      {
+        "attachment_id": "01HYX...",
+        "filename": "screenshot.png",
+        "upload_url": "https://s3.amazonaws.com/...",
+        "upload_fields": { "key": "...", "policy": "...", "x-amz-signature": "..." },
+        "upload_expires_at": "2025-03-15T10:40:00Z"
+      }
+    ]
+  }
+}
+```
+
+### Confirm uploads
+
+```
+POST /v1/tasks/{task_id}/confirm-uploads
+```
+
+Triggers security screening for presigned-upload attachments and transitions the task from `PENDING_UPLOADS` to `SUBMITTED`. No request body required.
+
+**Response: `200 OK`** — Task detail with `status: "SUBMITTED"`.
+
+**Errors:** `400 ATTACHMENT_BLOCKED`, `400 ATTACHMENT_SIZE_MISMATCH`, `404 TASK_NOT_FOUND`, `409 UPLOADS_NOT_CONFIRMED` (task not in `PENDING_UPLOADS` state), `410 UPLOADS_EXPIRED`, `503 ATTACHMENT_SCREENING_UNAVAILABLE`.
 
 **Response: `201 Created`**
 
@@ -120,7 +180,7 @@ For PR tasks, `branch_name` is initially `pending:pr_resolution` and resolved to
 
 **Idempotency:** Clients may send `Idempotency-Key` (same format as other `POST` requests). The first successful create returns **`201 Created`** with the body shape above. A subsequent request with the same key and the **same authenticated user** returns **`200 OK`** with the same `{ data: ... }` envelope (full `TaskDetail`, reflecting **current** task state), plus response header `Idempotent-Replay: true`. No duplicate task is created and the orchestrator is not invoked again for that replay. If the key is already bound to a task owned by **another** user, the API returns **`409 DUPLICATE_TASK`** without exposing that task (extremely unlikely for high-entropy keys).
 
-**Errors:** `400 VALIDATION_ERROR`, `400 GUARDRAIL_BLOCKED`, `401 UNAUTHORIZED`, `409 DUPLICATE_TASK` (idempotency key collision across users only), `422 REPO_NOT_ONBOARDED`, `429 RATE_LIMIT_EXCEEDED`, `503 SERVICE_UNAVAILABLE`.
+**Errors:** `400 VALIDATION_ERROR`, `400 GUARDRAIL_BLOCKED`, `400 ATTACHMENT_BLOCKED`, `400 ATTACHMENT_INVALID_TYPE`, `400 ATTACHMENT_INVALID_CONTENT`, `400 ATTACHMENT_INLINE_TOO_LARGE`, `400 ATTACHMENTS_TOTAL_TOO_LARGE`, `401 UNAUTHORIZED`, `409 DUPLICATE_TASK` (idempotency key collision across users only), `422 REPO_NOT_ONBOARDED`, `429 RATE_LIMIT_EXCEEDED`, `503 SERVICE_UNAVAILABLE`, `503 ATTACHMENT_SCREENING_UNAVAILABLE`.
 
 ### Get task
 
@@ -344,6 +404,21 @@ Tasks created via webhook record `channel_source: 'webhook'` with audit metadata
 | `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | Repo onboarded but credentials cannot reach it |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | PR does not exist, is closed, or is inaccessible |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | 422 | GitHub token lacks required permissions for the task type |
+| `ATTACHMENT_BLOCKED` | 400 | Attachment content blocked by security screening |
+| `ATTACHMENT_TOO_LARGE` | 400 | Individual attachment exceeds 10 MB size limit |
+| `ATTACHMENT_INLINE_TOO_LARGE` | 400 | Inline attachment exceeds 500 KB limit (use presigned upload) |
+| `ATTACHMENTS_INLINE_TOTAL_TOO_LARGE` | 400 | Total inline attachment size exceeds 3 MB limit |
+| `ATTACHMENTS_TOTAL_TOO_LARGE` | 400 | Total attachment size exceeds 50 MB limit |
+| `ATTACHMENT_INVALID_TYPE` | 400 | MIME type not in allowlist |
+| `ATTACHMENT_INVALID_CONTENT` | 400 | Content does not match declared MIME type (magic bytes mismatch) or could not be sanitized |
+| `ATTACHMENT_INVALID_FILENAME` | 400 | Filename contains invalid characters or path traversal |
+| `ATTACHMENT_SIZE_MISMATCH` | 400 | Uploaded file size does not match declared `expected_size_bytes` |
+| `ATTACHMENT_FETCH_FAILED` | 422 | URL attachment could not be fetched (timeout, DNS, SSRF blocked) |
+| `ATTACHMENT_BUDGET_EXCEEDED` | 422 | Image attachments exceed token budget |
+| `ATTACHMENT_UNSUPPORTED_AGENT` | 422 | Agent runtime version does not support attachments |
+| `UPLOADS_NOT_CONFIRMED` | 409 | Task is in PENDING_UPLOADS but confirm-uploads not yet called |
+| `UPLOADS_EXPIRED` | 410 | Upload window expired (30 minutes); re-submit the task |
+| `ATTACHMENT_SCREENING_UNAVAILABLE` | 503 | Screening service unavailable after retries |
 | `GITHUB_UNREACHABLE` | 502 | GitHub API unreachable during pre-flight (transient) |
 | `RATE_LIMIT_EXCEEDED` | 429 | User exceeded rate limit |
 | `CONCURRENCY_LIMIT_EXCEEDED` | 409 | User at max concurrent tasks |

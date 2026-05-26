@@ -69,7 +69,7 @@ describe('loadMemoryContext', () => {
     expect(result!.repo_knowledge[0]).toContain('Jest');
   });
 
-  test('uses namespacePath (hierarchical retrieval) for both queries', async () => {
+  test('uses namespace prefix (hierarchical retrieval) for both queries', async () => {
     const { RetrieveMemoryRecordsCommand } = jest.requireMock('@aws-sdk/client-bedrock-agentcore');
     mockAgentCoreSend
       .mockResolvedValueOnce({ memoryRecordSummaries: [] })
@@ -77,33 +77,24 @@ describe('loadMemoryContext', () => {
 
     await loadMemoryContext('mem-123', 'owner/repo', 'Fix the build');
 
-    // Semantic search uses /{repo}/knowledge/ as namespacePath. The legacy
-    // `namespace` field switched from prefix-match to exact-match in the
-    // AgentCore Memory API; namespacePath preserves the hierarchical (prefix)
-    // semantics this code depends on for episodic per-task records nested
-    // under /{repo}/episodes/{sessionId}/.
+    // Semantic search uses /{repo}/knowledge/ as a namespace prefix.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespacePath: '/owner/repo/knowledge/',
+        namespace: '/owner/repo/knowledge/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'Fix the build',
         }),
       }),
     );
-    // Episodic search uses /{repo}/episodes/ namespacePath to scoop up records
+    // Episodic search uses /{repo}/episodes/ prefix to scoop up records
     // under all task sessions plus the cross-task reflection records.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespacePath: '/owner/repo/episodes/',
+        namespace: '/owner/repo/episodes/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'recent task episodes',
         }),
       }),
-    );
-    // Confirm the legacy `namespace` field is NOT being passed — we don't
-    // want to send both fields (the API rejects that) or the wrong one.
-    expect(RetrieveMemoryRecordsCommand).not.toHaveBeenCalledWith(
-      expect.objectContaining({ namespace: expect.anything() }),
     );
   });
 

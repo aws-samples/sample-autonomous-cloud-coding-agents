@@ -91,6 +91,20 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   'APPROVAL_GATE_CAP_MIN',
   'APPROVAL_GATE_CAP_MAX',
   'APPROVAL_GATE_CAP_DEFAULT',
+  // Attachment validation / persistence (server-only; CLI uses
+  // Attachment / AttachmentSummary / AttachmentUploadInstruction):
+  'AttachmentDelivery',
+  'InlineAttachment',
+  'PresignedAttachment',
+  'UrlAttachment',
+  'ValidatedAttachment',
+  'ScreeningResult',
+  'AttachmentRecord',
+  'PendingAttachmentRecord',
+  'PassedAttachmentRecord',
+  'BlockedAttachmentRecord',
+  'CreateAttachmentRecordParams',
+  'AgentAttachmentPayload',
 ]);
 
 /**

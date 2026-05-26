@@ -143,6 +143,18 @@ export interface TaskApiProps {
    * When provided, the cancel Lambda gets `ECS_CLUSTER_ARN` env var and `ecs:StopTask` permission.
    */
   readonly ecsClusterArn?: string;
+
+  /**
+   * S3 bucket for task attachments. When provided, the create-task Lambda
+   * gets PutObject/DeleteObject grants and the bucket name as env var.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
+
+  /**
+   * User concurrency table for admission control during confirm-uploads.
+   * Required when attachmentsBucket is provided.
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
 }
 
 /**
@@ -250,30 +262,87 @@ export class TaskApi extends Construct {
       },
       rules: [
         {
-          name: 'AWSManagedRulesCommonRuleSet',
+          // CRS for task paths that accept large bodies (inline base64
+          // attachments up to 3 MB, presigned upload metadata). Excludes
+          // SizeRestrictions_BODY only; all other CRS rules apply. Payload
+          // size is bounded by API GW (10 MB) and validateAttachments().
+          name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
           statement: {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
-              // Inbound webhook payloads from mature SaaS tools (Linear ships
-              // full Issue payloads > 8 KB) trip SizeRestrictions_BODY in this
-              // ruleset. Exempt the Linear webhook path from CRS entirely:
-              // the route is HMAC-verified in the Lambda, parsed as strict
-              // JSON, never interpolated into SQL/HTML, and rate-limited by
-              // the priority-3 rule below. CRS still applies to every other
-              // route (user API, Slack, etc.).
+              excludedRules: [{ name: 'SizeRestrictions_BODY' }],
               scopeDownStatement: {
-                notStatement: {
-                  statement: {
-                    byteMatchStatement: {
-                      fieldToMatch: { uriPath: {} },
-                      positionalConstraint: 'EXACTLY',
-                      searchString: '/v1/linear/webhook',
-                      textTransformations: [{ priority: 0, type: 'NONE' }],
+                orStatement: {
+                  statements: [
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'STARTS_WITH',
+                        searchString: '/v1/tasks',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
                     },
-                  },
+                    {
+                      // Linear webhook payloads > 8 KB (HMAC-verified in Lambda,
+                      // rate-limited by priority-4 rule below).
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/linear/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'CommonRuleSetTaskPaths',
+            sampledRequestsEnabled: true,
+          },
+        },
+        {
+          // Full CRS (including SizeRestrictions_BODY) for all other paths.
+          name: 'AWSManagedRulesCommonRuleSet',
+          priority: 2,
+          overrideAction: { none: {} },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: 'AWS',
+              name: 'AWSManagedRulesCommonRuleSet',
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'STARTS_WITH',
+                            searchString: '/v1/tasks',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/linear/webhook',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                  ],
                 },
               },
             },
@@ -286,7 +355,7 @@ export class TaskApi extends Construct {
         },
         {
           name: 'AWSManagedRulesKnownBadInputsRuleSet',
-          priority: 2,
+          priority: 3,
           overrideAction: { none: {} },
           statement: {
             managedRuleGroupStatement: {
@@ -302,7 +371,7 @@ export class TaskApi extends Construct {
         },
         {
           name: 'RateLimitRule',
-          priority: 3,
+          priority: 4,
           action: { block: {} },
           statement: {
             rateBasedStatement: {
@@ -368,6 +437,12 @@ export class TaskApi extends Construct {
       ],
     };
 
+    // pdf-parse is used for PDF attachment screening (text extraction).
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
+
     // --- Lambda handlers ---
     const createTaskEnv: Record<string, string> = { ...commonEnv };
     if (props.repoTable) {
@@ -380,6 +455,9 @@ export class TaskApi extends Construct {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+    }
 
     const createTaskFn = new lambda.NodejsFunction(this, 'CreateTaskFn', {
       entry: path.join(handlersDir, 'create-task.ts'),
@@ -387,7 +465,9 @@ export class TaskApi extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
-      bundling: commonBundling,
+      bundling: attachmentScreeningBundling,
+      memorySize: 512,
+      timeout: Duration.seconds(15),
     });
 
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
@@ -500,8 +580,68 @@ export class TaskApi extends Construct {
       }));
     }
 
+    // Grant create-task Lambda put/delete on attachments bucket for inline upload + cleanup
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantPut(createTaskFn);
+      props.attachmentsBucket.grantDelete(createTaskFn);
+    }
+
+    // --- Confirm-uploads Lambda (presigned upload flow) ---
+    let confirmUploadsFn: lambda.NodejsFunction | undefined;
+    if (props.attachmentsBucket && props.userConcurrencyTable) {
+      const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
+      confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+      confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      if (props.orchestratorFunctionArn) {
+        confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
+      }
+      if (props.guardrailId && props.guardrailVersion) {
+        confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
+        confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+      }
+
+      confirmUploadsFn = new lambda.NodejsFunction(this, 'ConfirmUploadsFn', {
+        entry: path.join(handlersDir, 'confirm-uploads.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: confirmUploadsEnv,
+        bundling: attachmentScreeningBundling,
+        memorySize: 1024,
+        timeout: Duration.seconds(180),
+      });
+
+      // Grants: DDB read-write, S3 read-write-delete, orchestrator invoke, guardrail
+      props.taskTable.grantReadWriteData(confirmUploadsFn);
+      props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
+      props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
+      props.attachmentsBucket.grantDelete(confirmUploadsFn);
+      props.userConcurrencyTable.grantReadWriteData(confirmUploadsFn);
+
+      if (props.orchestratorFunctionArn) {
+        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [props.orchestratorFunctionArn],
+        }));
+      }
+
+      if (props.guardrailId) {
+        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['bedrock:ApplyGuardrail'],
+          resources: [
+            Stack.of(this).formatArn({
+              service: 'bedrock',
+              resource: 'guardrail',
+              resourceName: props.guardrailId,
+            }),
+          ],
+        }));
+      }
+    }
+
     // Collect all Lambda functions for cdk-nag suppressions
     const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn];
+    if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
@@ -514,6 +654,12 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // --- Confirm-uploads endpoint: POST /tasks/{task_id}/confirm-uploads ---
+    if (confirmUploadsFn) {
+      const confirmUploads = taskById.addResource('confirm-uploads');
+      confirmUploads.addMethod('POST', new apigw.LambdaIntegration(confirmUploadsFn), cognitoAuthOptions);
+    }
 
     // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
     if (props.traceArtifactsBucket) {
@@ -805,7 +951,9 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: createTaskEnv,
-        bundling: commonBundling,
+        bundling: attachmentScreeningBundling,
+        memorySize: 1024,
+        timeout: Duration.seconds(15),
       });
 
       // --- IAM grants for webhook Lambdas ---

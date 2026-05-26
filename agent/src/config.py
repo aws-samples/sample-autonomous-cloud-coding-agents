@@ -4,7 +4,7 @@ import os
 import sys
 import uuid
 
-from models import TaskConfig, TaskType
+from models import AttachmentConfig, TaskConfig, TaskType
 from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
@@ -114,6 +114,7 @@ def build_config(
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
+    attachments: list[dict] | None = None,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -149,6 +150,17 @@ def build_config(
     if errors:
         raise ValueError("; ".join(errors))
 
+    # Validate attachment descriptors into typed models (Pydantic validation
+    # surfaces schema mismatches between the orchestrator and agent early).
+    validated_attachments: list[AttachmentConfig] = []
+    if attachments:
+        for i, raw_att in enumerate(attachments):
+            try:
+                validated_attachments.append(AttachmentConfig.model_validate(raw_att))
+            except Exception as e:
+                log("ERROR", f"Attachment[{i}] validation failed: {e}")
+                raise ValueError(f"Attachment[{i}] validation failed: {e}") from e
+
     return TaskConfig(
         repo_url=resolved_repo_url,
         issue_number=resolved_issue_number,
@@ -172,6 +184,7 @@ def build_config(
         initial_approvals=initial_approvals or [],
         initial_approval_gate_count=initial_approval_gate_count,
         approval_gate_cap=approval_gate_cap,
+        attachments=validated_attachments,
     )
 
 

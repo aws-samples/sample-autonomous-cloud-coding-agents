@@ -28,7 +28,7 @@ flowchart LR
 ```
 
 1. **Admission** (deterministic) - The orchestrator validates the request, checks concurrency limits, and loads the repository's Blueprint configuration.
-2. **Context hydration** (deterministic) - The platform fetches external data (GitHub issue body, PR diff, review comments), loads memory from past tasks, and assembles the full prompt. For PR tasks, the prompt is screened through Bedrock Guardrails.
+2. **Context hydration** (deterministic) - The platform fetches external data (GitHub issue body, PR diff, review comments), loads memory from past tasks, resolves attachments (URL fetch with SSRF protection, screening, upload to S3), and assembles the full prompt. For PR tasks, the prompt is screened through Bedrock Guardrails.
 3. **Pre-flight checks** (deterministic) - GitHub API reachability and repository access are verified. Doomed tasks fail fast with a clear reason before consuming compute.
 4. **Agent execution** (agentic) - The agent runs in an isolated compute environment: clone repo, create branch, edit code, commit, run tests, create PR. The orchestrator polls for completion without blocking.
 5. **Finalization** (deterministic) - The orchestrator infers the result (PR created or not), writes memory, updates task status, and releases concurrency.
