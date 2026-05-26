@@ -100,6 +100,9 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   'ValidatedAttachment',
   'ScreeningResult',
   'AttachmentRecord',
+  'PendingAttachmentRecord',
+  'PassedAttachmentRecord',
+  'BlockedAttachmentRecord',
   'CreateAttachmentRecordParams',
   'AgentAttachmentPayload',
 ]);

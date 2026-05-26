@@ -67,7 +67,13 @@ const PRIVATE_IP_RANGES = [
   { prefix: '169.254.', mask: null },
   { prefix: '127.', mask: null },
   { prefix: '0.', mask: null },
-  { prefix: '100.64.', mask: null }, // CGN / Shared Address Space (RFC 6598)
+  {
+    prefix: '100.',
+    mask: (ip: string) => {
+      const second = parseInt(ip.split('.')[1], 10);
+      return second >= 64 && second <= 127; // 100.64.0.0/10 (RFC 6598)
+    },
+  },
   // IPv6
   { prefix: '::1', mask: null },
   { prefix: '::', mask: (ip: string) => ip === '::' }, // Unspecified address (could route to localhost)
@@ -131,14 +137,29 @@ async function resolveAndValidate(hostname: string): Promise<string> {
   try {
     // Try IPv4 first (more common for HTTP endpoints)
     addresses = await dns.resolve4(hostname);
-  } catch (ipv4Err) {
-    try {
-      addresses = await dns.resolve6(hostname);
-    } catch (ipv6Err) {
-      throw new AttachmentResolutionError(
-        `DNS resolution failed for '${hostname}'. Check that the URL is correct and the server is reachable.`,
-        { cause: new AggregateError([ipv4Err, ipv6Err], `Both IPv4 and IPv6 resolution failed for '${hostname}'`) },
-      );
+  } catch (ipv4Err: any) {
+    // Only fall through to IPv6 for NODATA/NXDOMAIN — system errors should propagate
+    const dnsNoRecordCodes = ['ENODATA', 'ENOTFOUND', 'NODATA'];
+    if (!dnsNoRecordCodes.includes(ipv4Err?.code)) {
+      // System-level DNS failure (ENOMEM, ESERVFAIL, etc.) — do not mask
+      try {
+        addresses = await dns.resolve6(hostname);
+      } catch (ipv6Err) {
+        throw new AttachmentResolutionError(
+          `DNS resolution failed for '${hostname}': ${ipv4Err?.code ?? ipv4Err?.message ?? 'unknown error'}`,
+          { cause: new AggregateError([ipv4Err, ipv6Err], `Both IPv4 and IPv6 resolution failed for '${hostname}'`) },
+        );
+      }
+    } else {
+      // No IPv4 records — try IPv6
+      try {
+        addresses = await dns.resolve6(hostname);
+      } catch (ipv6Err) {
+        throw new AttachmentResolutionError(
+          `DNS resolution failed for '${hostname}'. Check that the URL is correct and the server is reachable.`,
+          { cause: new AggregateError([ipv4Err, ipv6Err], `Both IPv4 and IPv6 resolution failed for '${hostname}'`) },
+        );
+      }
     }
   }
 
@@ -207,7 +228,17 @@ async function pinnedHttpsRequest(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let totalBytes = 0;
+        res.on('data', (chunk: Buffer) => {
+          totalBytes += chunk.length;
+          if (totalBytes > MAX_FETCH_SIZE_BYTES) {
+            res.destroy();
+            agent.destroy();
+            reject(new Error(`Response exceeds ${MAX_FETCH_SIZE_BYTES} byte size limit`));
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on('end', () => {
           const body = Buffer.concat(chunks);
           const responseHeaders = new Headers();

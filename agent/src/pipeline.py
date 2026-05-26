@@ -473,12 +473,27 @@ def run_task(
             if config.attachments:
                 from attachments import download_attachments
 
-                with task_span("task.attachment_download"):
-                    prepared_attachments = download_attachments(config.attachments, setup.repo_dir)
-                progress.write_agent_milestone(
-                    "attachments_downloaded",
-                    f"count={len(prepared_attachments)}",
-                )
+                try:
+                    with task_span("task.attachment_download"):
+                        prepared_attachments = download_attachments(
+                            config.attachments, setup.repo_dir
+                        )
+                    progress.write_agent_milestone(
+                        "attachments_downloaded",
+                        f"count={len(prepared_attachments)}",
+                    )
+                except RuntimeError as e:
+                    log("ERROR", f"Attachment integrity check failed: {e}")
+                    raise RuntimeError(
+                        f"Attachment download/verification failed: {e}. "
+                        "The task cannot proceed without valid attachments."
+                    ) from e
+                except Exception as e:
+                    err_type = type(e).__name__
+                    log("ERROR", f"Attachment download failed: {err_type}: {e}")
+                    raise RuntimeError(
+                        f"Failed to download task attachments from S3: {err_type}: {e}"
+                    ) from e
 
             # Log discovered repo-level project configuration
             # (all files loaded by setting_sources=["project"])

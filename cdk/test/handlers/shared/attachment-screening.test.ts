@@ -26,6 +26,7 @@ import {
   readJpegDimensions,
   readPngDimensions,
   screenImage,
+  screenTextFile,
 } from '../../../src/handlers/shared/attachment-screening';
 
 const ARCHITECTURE_PNG = path.join(
@@ -243,5 +244,157 @@ describe('screenImage', () => {
     if (result.screening.status === 'blocked') {
       expect(result.screening.categories).toContain('SEXUAL');
     }
+  });
+
+  test('retries on 429 status and eventually succeeds', async () => {
+    const png = minimalPng();
+    const send = jest.fn()
+      .mockRejectedValueOnce({ $metadata: { httpStatusCode: 429 }, message: 'throttled' })
+      .mockRejectedValueOnce({ $metadata: { httpStatusCode: 429 }, message: 'throttled' })
+      .mockResolvedValueOnce({ action: 'NONE', outputs: [], assessments: [] });
+
+    const retryConfig = {
+      bedrockClient: { send } as unknown as BedrockRuntimeClient,
+      guardrailId: 'g',
+      guardrailVersion: '1',
+    };
+
+    const result = await screenImage(png, 'image/png', 'retry.png', retryConfig);
+    expect(result.screening.status).toBe('passed');
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  test('throws after exhausting retries on persistent 500', async () => {
+    const png = minimalPng();
+    const error = { $metadata: { httpStatusCode: 500 }, message: 'internal error' };
+    const send = jest.fn().mockRejectedValue(error);
+
+    const retryConfig = {
+      bedrockClient: { send } as unknown as BedrockRuntimeClient,
+      guardrailId: 'g',
+      guardrailVersion: '1',
+    };
+
+    await expect(screenImage(png, 'image/png', 'fail.png', retryConfig)).rejects.toBeDefined();
+    // 1 initial + 3 retries = 4 attempts
+    expect(send).toHaveBeenCalledTimes(4);
+  });
+
+  test('does not retry non-retryable errors (e.g., 400)', async () => {
+    const png = minimalPng();
+    const error = { $metadata: { httpStatusCode: 400 }, message: 'bad request' };
+    const send = jest.fn().mockRejectedValue(error);
+
+    const retryConfig = {
+      bedrockClient: { send } as unknown as BedrockRuntimeClient,
+      guardrailId: 'g',
+      guardrailVersion: '1',
+    };
+
+    await expect(screenImage(png, 'image/png', 'bad.png', retryConfig)).rejects.toBeDefined();
+    // Should not retry — only 1 attempt
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects large JPEG with unparseable dimensions (fail-closed)', async () => {
+    // 6 MB JPEG-like buffer with valid signature but no SOF marker
+    const largeJpeg = Buffer.alloc(6 * 1024 * 1024);
+    largeJpeg[0] = 0xff;
+    largeJpeg[1] = 0xd8;
+    largeJpeg[2] = 0xff;
+
+    const send = jest.fn();
+    const retryConfig = {
+      bedrockClient: { send } as unknown as BedrockRuntimeClient,
+      guardrailId: 'g',
+      guardrailVersion: '1',
+    };
+
+    await expect(
+      screenImage(largeJpeg, 'image/jpeg', 'obfuscated.jpg', retryConfig),
+    ).rejects.toThrow('dimensions could not be verified');
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('screenTextFile', () => {
+  test('screens plain text content', async () => {
+    const config = {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    };
+
+    const content = Buffer.from('Hello, this is a test file with some content.');
+    const result = await screenTextFile(content, 'text/plain', 'test.txt', config);
+
+    expect(result.screening.status).toBe('passed');
+    expect(result.content).toBe(content);
+    expect(result.checksum).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('screens CSV content', async () => {
+    const config = {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    };
+
+    const content = Buffer.from('name,age\nAlice,30\nBob,25');
+    const result = await screenTextFile(content, 'text/csv', 'data.csv', config);
+    expect(result.screening.status).toBe('passed');
+  });
+
+  test('returns blocked status for text that triggers guardrail', async () => {
+    const config = {
+      bedrockClient: mockBedrockBlock(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    };
+
+    const content = Buffer.from('This content triggers the guardrail');
+    const result = await screenTextFile(content, 'text/plain', 'bad.txt', config);
+    expect(result.screening.status).toBe('blocked');
+    if (result.screening.status === 'blocked') {
+      expect(result.screening.categories.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('throws for PDF with no extractable text', async () => {
+    // Mock pdf-parse to return empty text
+    jest.mock('pdf-parse', () => ({
+      __esModule: true,
+      default: jest.fn().mockResolvedValue({ text: '' }),
+    }), { virtual: true });
+
+    const config = {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    };
+
+    // A minimal PDF-like buffer (pdf-parse is mocked so content doesn't matter)
+    const content = Buffer.from('%PDF-1.4 empty');
+
+    await expect(
+      screenTextFile(content, 'application/pdf', 'empty.pdf', config),
+    ).rejects.toThrow(/no extractable text/);
+  });
+
+  test('retries on transient Bedrock errors for text screening', async () => {
+    const send = jest.fn()
+      .mockRejectedValueOnce({ $metadata: { httpStatusCode: 503 }, message: 'service unavailable' })
+      .mockResolvedValueOnce({ action: 'NONE', outputs: [], assessments: [] });
+
+    const config = {
+      bedrockClient: { send } as unknown as BedrockRuntimeClient,
+      guardrailId: 'g',
+      guardrailVersion: '1',
+    };
+
+    const content = Buffer.from('retry test');
+    const result = await screenTextFile(content, 'text/plain', 'retry.txt', config);
+    expect(result.screening.status).toBe('passed');
+    expect(send).toHaveBeenCalledTimes(2);
   });
 });

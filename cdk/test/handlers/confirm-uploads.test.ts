@@ -196,4 +196,120 @@ describe('confirm-uploads handler', () => {
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('ATTACHMENT_UPLOAD_MISSING');
   });
+
+  test('happy path: HeadObject → screen → transition to SUBMITTED → invoke orchestrator', async () => {
+    const { screenImage, screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG magic
+    const textContent = Buffer.alloc(512);
+    textContent.write('hello world');
+
+    // Screening passes
+    screenImage.mockResolvedValue({
+      content: pngContent,
+      contentType: 'image/png',
+      checksum: 'abc123',
+      screening: { status: 'passed' },
+    });
+    screenTextFile.mockResolvedValue({
+      content: textContent,
+      contentType: 'text/plain',
+      checksum: 'def456',
+      screening: { status: 'passed' },
+    });
+
+    // Use mockImplementation to route DDB calls correctly
+    let ddbCallCount = 0;
+    ddbSend.mockImplementation(() => {
+      ddbCallCount++;
+      switch (ddbCallCount) {
+        case 1: return Promise.resolve({ Item: PENDING_TASK }); // GetCommand (task)
+        case 2: return Promise.resolve({ Item: { active_count: 1 } }); // GetCommand (concurrency pre-check)
+        case 3: return Promise.resolve({}); // UpdateCommand (checkConcurrency)
+        case 4: return Promise.resolve({}); // UpdateCommand (status transition)
+        case 5: return Promise.resolve({}); // PutCommand (event)
+        default: return Promise.resolve({});
+      }
+    });
+
+    // Use mockImplementation for S3 calls to handle interleaving
+    let s3CallCount = 0;
+    s3Send.mockImplementation((cmd: any) => {
+      s3CallCount++;
+      if (cmd._type === 'S3Head') {
+        // HeadObject — return valid metadata
+        const isAtt1 = cmd.input.Key?.includes('att-1');
+        return Promise.resolve({
+          VersionId: isAtt1 ? 'v1' : 'v2',
+          ContentLength: isAtt1 ? 1024 : 512,
+        });
+      }
+      if (cmd._type === 'S3Get') {
+        // GetObject — return content for screening
+        const isAtt1 = cmd.input.Key?.includes('att-1');
+        const content = isAtt1 ? pngContent : textContent;
+        return Promise.resolve({
+          Body: { transformToByteArray: () => content },
+        });
+      }
+      if (cmd._type === 'S3Put') {
+        return Promise.resolve({ VersionId: 'v-screened' });
+      }
+      return Promise.resolve({});
+    });
+
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body);
+    expect(body.data.status).toBe('SUBMITTED');
+    expect(lambdaSend).toHaveBeenCalled();
+  });
+
+  test('returns 429 when concurrency pre-check fails', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: PENDING_TASK });
+    s3Send
+      .mockResolvedValueOnce({ VersionId: 'v1', ContentLength: 1024 })
+      .mockResolvedValueOnce({ VersionId: 'v2', ContentLength: 512 });
+
+    // Concurrency pre-check shows user is at limit
+    ddbSend.mockResolvedValueOnce({ Item: { active_count: 3 } });
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+    expect(result.statusCode).toBe(429);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('RATE_LIMIT_EXCEEDED');
+  });
+
+  test('returns 400 ATTACHMENT_BLOCKED when screening rejects content', async () => {
+    const { screenImage, AttachmentScreeningError } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    ddbSend.mockResolvedValueOnce({ Item: PENDING_TASK });
+    s3Send
+      .mockResolvedValueOnce({ VersionId: 'v1', ContentLength: 1024 })
+      .mockResolvedValueOnce({ VersionId: 'v2', ContentLength: 512 });
+
+    // Pre-check passes
+    ddbSend.mockResolvedValueOnce({ Item: { active_count: 0 } });
+
+    // GetObject for first attachment
+    const pngContent = Buffer.alloc(1024);
+    s3Send.mockResolvedValueOnce({ Body: { transformToByteArray: () => pngContent } });
+
+    // Screening blocks the image
+    screenImage.mockRejectedValueOnce(new AttachmentScreeningError('Inappropriate content detected'));
+
+    // DDB updates for failure (conditional write + event)
+    ddbSend.mockResolvedValue({});
+    // S3 cleanup (delete objects)
+    s3Send.mockResolvedValue({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+    expect(result.statusCode).toBe(400);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('ATTACHMENT_BLOCKED');
+  });
 });

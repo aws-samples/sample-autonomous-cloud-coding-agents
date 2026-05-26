@@ -483,6 +483,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
         bucketName: ATTACHMENTS_BUCKET_NAME,
         screeningConfig,
         githubToken,
+        githubInstallationDomain: process.env.GITHUB_INSTALLATION_DOMAIN,
       },
     );
   }

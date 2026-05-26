@@ -375,8 +375,8 @@ const SLACK_FILE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 /** Max number of file attachments per Slack message. */
 const SLACK_FILE_MAX_COUNT = 10;
 
-/** MIME types supported for attachments (must match validation.ts). */
-const SUPPORTED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+/** MIME types supported for attachments (must match validation.ts — PNG/JPEG only). */
+const SUPPORTED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
 const SUPPORTED_FILE_MIMES = new Set([
   'text/plain', 'text/csv', 'text/markdown', 'application/json',
   'application/pdf', 'text/x-log',
@@ -428,6 +428,13 @@ async function extractSlackFileAttachments(
       continue;
     }
 
+    // Validate the download URL points to a legitimate Slack domain before
+    // sending the bot token — prevents SSRF and token exfiltration via crafted events.
+    if (!isSlackFileUrl(file.url_private_download)) {
+      errors.push(`\`${file.name}\` (invalid download URL — not a Slack domain)`);
+      continue;
+    }
+
     // Download the file from Slack CDN using the bot token
     try {
       const response = await fetch(file.url_private_download, {
@@ -474,6 +481,17 @@ async function extractSlackFileAttachments(
   }
 
   return attachments;
+}
+
+/** Validate that a URL points to a legitimate Slack file domain. */
+function isSlackFileUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:'
+      && (parsed.hostname === 'files.slack.com' || parsed.hostname.endsWith('.slack.com'));
+  } catch {
+    return false;
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

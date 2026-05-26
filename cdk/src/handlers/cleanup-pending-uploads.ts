@@ -40,7 +40,7 @@ import {
   UpdateItemCommand,
   PutItemCommand,
 } from '@aws-sdk/client-dynamodb';
-import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
 import { ulid } from 'ulid';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../constructs/attachments-bucket';
 import { logger } from './shared/logger';
@@ -187,41 +187,43 @@ async function cancelExpiredTask(task: ExpiredTask): Promise<boolean> {
 async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
   const prefix = `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${task.task_id}/`;
 
-  let continuationToken: string | undefined;
+  let keyMarker: string | undefined;
+  let versionIdMarker: string | undefined;
   let totalDeleted = 0;
 
   do {
-    const listResp = await s3.send(new ListObjectsV2Command({
+    const listResp = await s3.send(new ListObjectVersionsCommand({
       Bucket: ATTACHMENTS_BUCKET,
       Prefix: prefix,
-      ContinuationToken: continuationToken,
+      KeyMarker: keyMarker,
+      VersionIdMarker: versionIdMarker,
     }));
 
-    const objects = listResp.Contents;
-    if (!objects || objects.length === 0) break;
+    // Collect all versions and delete markers for deletion
+    const objects = [
+      ...(listResp.Versions ?? []).map(v => ({ Key: v.Key!, VersionId: v.VersionId })),
+      ...(listResp.DeleteMarkers ?? []).map(d => ({ Key: d.Key!, VersionId: d.VersionId })),
+    ].filter(obj => obj.Key !== undefined);
 
-    const keys = objects
-      .map(obj => obj.Key)
-      .filter((key): key is string => key !== undefined);
+    if (objects.length === 0) break;
 
-    if (keys.length > 0) {
-      const deleteResp = await s3.send(new DeleteObjectsCommand({
-        Bucket: ATTACHMENTS_BUCKET,
-        Delete: { Objects: keys.map(Key => ({ Key })) },
-      }));
+    const deleteResp = await s3.send(new DeleteObjectsCommand({
+      Bucket: ATTACHMENTS_BUCKET,
+      Delete: { Objects: objects.map(({ Key, VersionId }) => ({ Key, VersionId })) },
+    }));
 
-      if (deleteResp.Errors && deleteResp.Errors.length > 0) {
-        logger.error('Partial S3 cleanup failure for expired pending-upload task', {
-          task_id: task.task_id,
-          failedKeys: deleteResp.Errors.map(e => e.Key),
-        });
-      }
-
-      totalDeleted += keys.length - (deleteResp.Errors?.length ?? 0);
+    if (deleteResp.Errors && deleteResp.Errors.length > 0) {
+      logger.error('Partial S3 cleanup failure for expired pending-upload task', {
+        task_id: task.task_id,
+        failedKeys: deleteResp.Errors.map(e => e.Key),
+      });
     }
 
-    continuationToken = listResp.NextContinuationToken;
-  } while (continuationToken);
+    totalDeleted += objects.length - (deleteResp.Errors?.length ?? 0);
+
+    keyMarker = listResp.NextKeyMarker;
+    versionIdMarker = listResp.NextVersionIdMarker;
+  } while (keyMarker);
 
   if (totalDeleted > 0) {
     logger.info('Cleaned up S3 objects for expired pending-upload task', {

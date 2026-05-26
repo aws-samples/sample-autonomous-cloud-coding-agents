@@ -418,10 +418,47 @@ export type ScreeningResult =
   | { readonly status: 'blocked'; readonly screened_at: string; readonly categories: [string, ...string[]] };
 
 // ---------------------------------------------------------------------------
-// Attachment record (persisted metadata in TaskRecord)
+// Attachment record (persisted metadata in TaskRecord) — discriminated union
+// keyed on screening.status ensures that passed records always have storage fields.
 // ---------------------------------------------------------------------------
 
-export interface AttachmentRecord {
+interface BaseAttachmentRecord {
+  readonly attachment_id: string;
+  readonly type: AttachmentType;
+  readonly content_type: string;
+  readonly filename: string;
+  readonly source_url?: string;
+  readonly token_estimate?: number;
+}
+
+export interface PendingAttachmentRecord extends BaseAttachmentRecord {
+  readonly screening: { readonly status: 'pending' };
+  readonly s3_key?: string;
+  readonly s3_version_id?: string;
+  readonly size_bytes?: number;
+  readonly checksum_sha256?: string;
+}
+
+export interface PassedAttachmentRecord extends BaseAttachmentRecord {
+  readonly screening: { readonly status: 'passed'; readonly screened_at: string };
+  readonly s3_key: string;
+  readonly s3_version_id: string;
+  readonly size_bytes: number;
+  readonly checksum_sha256: string;
+}
+
+export interface BlockedAttachmentRecord extends BaseAttachmentRecord {
+  readonly screening: { readonly status: 'blocked'; readonly screened_at: string; readonly categories: [string, ...string[]] };
+  readonly s3_key?: string;
+  readonly s3_version_id?: string;
+  readonly size_bytes?: number;
+  readonly checksum_sha256?: string;
+}
+
+export type AttachmentRecord = PendingAttachmentRecord | PassedAttachmentRecord | BlockedAttachmentRecord;
+
+/** Parameters for creating an AttachmentRecord — accepts the union of all fields. */
+export type CreateAttachmentRecordParams = {
   readonly attachment_id: string;
   readonly type: AttachmentType;
   readonly content_type: string;
@@ -433,22 +470,23 @@ export interface AttachmentRecord {
   readonly source_url?: string;
   readonly checksum_sha256?: string;
   readonly token_estimate?: number;
-}
-
-/** Parameters for creating an AttachmentRecord with cross-field invariant validation. */
-export type CreateAttachmentRecordParams = AttachmentRecord;
+};
 
 /**
  * Factory function enforcing cross-field invariants on AttachmentRecord construction.
- * Validates that required fields are present based on screening status and type.
+ * Returns the appropriate discriminated union variant based on screening status.
  */
 export function createAttachmentRecord(params: CreateAttachmentRecordParams): AttachmentRecord {
   if (params.screening.status === 'passed') {
     if (!params.s3_key || !params.s3_version_id || !params.checksum_sha256 || !params.size_bytes) {
       throw new Error('Passed screening requires s3_key, s3_version_id, checksum_sha256, and size_bytes');
     }
+    return params as PassedAttachmentRecord;
   }
-  return params;
+  if (params.screening.status === 'blocked') {
+    return params as BlockedAttachmentRecord;
+  }
+  return params as PendingAttachmentRecord;
 }
 
 // ---------------------------------------------------------------------------

@@ -404,7 +404,18 @@ function assertImageDimensionsWithinLimits(
   } else if (contentType === 'image/jpeg') {
     dims = readJpegDimensions(content);
     if (!dims) {
-      // Non-fatal: if we can't parse dimensions, let Bedrock handle rejection
+      // Fail-closed for large JPEGs where dimensions cannot be verified (> 5 MB).
+      // Smaller files are allowed through to Bedrock which will reject if oversized.
+      if (content.length > 5 * 1024 * 1024) {
+        throw new AttachmentScreeningError(
+          `Image "${filename}" is ${(content.length / (1024 * 1024)).toFixed(1)} MB and its dimensions ` +
+          'could not be verified. Please use a standard JPEG encoder or convert to PNG.',
+        );
+      }
+      logger.warn('Could not parse JPEG dimensions — relying on Bedrock validation', {
+        filename,
+        size_bytes: content.length,
+      });
       return;
     }
   } else {

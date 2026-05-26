@@ -25,7 +25,7 @@ import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bed
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { PutObjectCommand, DeleteObjectsCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -666,12 +666,31 @@ export async function createTaskCore(
         taskRecord, validatedAttachments, context.userId, taskId, s3Client,
       );
     } catch (presignErr) {
-      logger.error('Failed to generate presigned upload instructions — task orphaned in PENDING_UPLOADS', {
+      logger.error('Failed to generate presigned upload instructions — transitioning task to FAILED', {
         task_id: taskId,
         error: presignErr instanceof Error ? presignErr.message : String(presignErr),
         request_id: requestId,
         metric_type: 'presigned_post_generation_failure',
       });
+      // Transition task to FAILED so it doesn't remain orphaned in PENDING_UPLOADS
+      try {
+        await ddb.send(new UpdateCommand({
+          TableName: TABLE_NAME,
+          Key: { task_id: taskId },
+          UpdateExpression: 'SET #s = :failed, error_message = :err, updated_at = :now',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: {
+            ':failed': TaskStatus.FAILED,
+            ':err': 'Failed to generate upload instructions. Please try again.',
+            ':now': new Date().toISOString(),
+          },
+        }));
+      } catch (cleanupErr) {
+        logger.error('Failed to transition orphaned task to FAILED', {
+          task_id: taskId,
+          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        });
+      }
       return errorResponse(500, ErrorCode.INTERNAL_ERROR,
         'Failed to generate upload instructions. Please try again.', requestId);
     }

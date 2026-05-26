@@ -30,7 +30,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({
 
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: mockS3Send })),
-  ListObjectsV2Command: jest.fn((input: any) => ({ input, _type: 'ListObjectsV2' })),
+  ListObjectVersionsCommand: jest.fn((input: any) => ({ input, _type: 'ListObjectVersions' })),
   DeleteObjectsCommand: jest.fn((input: any) => ({ input, _type: 'DeleteObjects' })),
 }));
 
@@ -132,24 +132,25 @@ describe('cleanup-pending-uploads handler', () => {
     // write event
     mockDdbSend.mockResolvedValueOnce({});
 
-    // S3 list returns objects
+    // S3 ListObjectVersions returns versions
     mockS3Send.mockResolvedValueOnce({
-      Contents: [
-        { Key: 'attachments/user-123/TASK001/ATT001/image.png' },
-        { Key: 'attachments/user-123/TASK001/ATT002/doc.pdf' },
+      Versions: [
+        { Key: 'attachments/user-123/TASK001/ATT001/image.png', VersionId: 'v1' },
+        { Key: 'attachments/user-123/TASK001/ATT002/doc.pdf', VersionId: 'v2' },
       ],
+      DeleteMarkers: [],
     });
     // S3 delete succeeds
     mockS3Send.mockResolvedValueOnce({ Deleted: [{}, {}] });
 
     await handler();
 
-    // Verify S3 delete was called with the right keys
+    // Verify S3 delete was called with VersionIds (versioned cleanup)
     const deleteCall = mockS3Send.mock.calls[1][0];
     expect(deleteCall.input.Bucket).toBe('test-attachments-bucket');
     expect(deleteCall.input.Delete.Objects).toEqual([
-      { Key: 'attachments/user-123/TASK001/ATT001/image.png' },
-      { Key: 'attachments/user-123/TASK001/ATT002/doc.pdf' },
+      { Key: 'attachments/user-123/TASK001/ATT001/image.png', VersionId: 'v1' },
+      { Key: 'attachments/user-123/TASK001/ATT002/doc.pdf', VersionId: 'v2' },
     ]);
   });
 
@@ -185,7 +186,7 @@ describe('cleanup-pending-uploads handler', () => {
     // First task: cancel succeeds
     mockDdbSend.mockResolvedValueOnce({});
     mockDdbSend.mockResolvedValueOnce({}); // event
-    mockS3Send.mockResolvedValueOnce({ Contents: [] }); // no S3 objects
+    mockS3Send.mockResolvedValueOnce({ Versions: [], DeleteMarkers: [] }); // no S3 objects
 
     // Second task: cancel fails with infra error
     const infraErr = new Error('Timeout');

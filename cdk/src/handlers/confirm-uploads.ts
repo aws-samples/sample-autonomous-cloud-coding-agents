@@ -799,6 +799,10 @@ async function decrementConcurrency(userId: string): Promise<void> {
         error: err instanceof Error ? err.message : String(err),
         metric_type: 'concurrency_counter_leak',
       });
+      throw new Error(
+        `Concurrency counter decrement failed for user ${userId} after ${maxAttempts} attempts. ` +
+        'Manual intervention may be required to reset the counter.',
+      );
     }
   }
 }
