@@ -19,8 +19,8 @@
 
 // Image token estimation matching Anthropic's documented resize rules.
 
-import sharp from 'sharp';
 import { logger } from './logger';
+import { loadSharp } from './sharp-loader';
 
 const MAX_IMAGE_SIDE = 1568;
 const MAX_IMAGE_TOKENS = 1568;
@@ -58,6 +58,7 @@ export function estimateImageTokens(width: number, height: number): number {
  */
 export async function estimateImageTokensFromBuffer(content: Buffer): Promise<number | undefined> {
   try {
+    const sharp = await loadSharp();
     const metadata = await sharp(content).metadata();
     if (metadata.width && metadata.height) {
       return estimateImageTokens(metadata.width, metadata.height);

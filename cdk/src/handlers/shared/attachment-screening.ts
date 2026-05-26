@@ -19,8 +19,8 @@
 
 import { createHash } from 'crypto';
 import { ApplyGuardrailCommand, type BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
-import sharp from 'sharp';
 import { logger } from './logger';
+import { loadSharp } from './sharp-loader';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,6 +31,9 @@ const BASE_DELAY_MS = 200;
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
 
 export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/** Bedrock Guardrail image filter max side (docs: 8000x8000). */
+export const MAX_IMAGE_DIMENSION_PX = 8000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,6 +125,8 @@ export async function screenImage(
   filename: string,
   config: ScreeningConfig,
 ): Promise<ScreenedAttachment> {
+  await assertImageDecodable(content, contentType, filename);
+
   // Convert GIF/WebP to PNG before screening (Bedrock only accepts png | jpeg)
   let screeningBuffer: Buffer;
   let screeningFormat: 'png' | 'jpeg';
@@ -132,7 +137,7 @@ export async function screenImage(
   } else if (contentType === 'image/gif' || contentType === 'image/webp') {
     // GIF/WebP → PNG. For animated GIFs, extract first frame only.
     try {
-      screeningBuffer = await sharp(content, { animated: false }).png().toBuffer();
+      screeningBuffer = await stripAndReencodeImage(content, 'image/png');
     } catch (convErr) {
       throw new AttachmentScreeningError(
         `Image "${filename}" could not be converted from ${contentType} for screening. ` +
@@ -183,16 +188,17 @@ export async function screenImage(
     };
   }
 
-  // Screening passed — strip EXIF and re-encode.
-  // Note: NOT calling .withMetadata() — sharp strips all metadata by default
-  // when withMetadata is omitted. Calling .withMetadata({}) would opt INTO
-  // metadata preservation, which is the opposite of what we want.
+  // Screening passed — strip EXIF and re-encode in the declared format.
   let cleanedContent: Buffer;
   try {
-    cleanedContent = await sharp(content)
-      .rotate() // Apply EXIF orientation before stripping
-      .toBuffer();
+    cleanedContent = await stripAndReencodeImage(content, contentType);
   } catch (sharpErr) {
+    logger.warn('Image sanitization failed (sharp)', {
+      filename,
+      content_type: contentType,
+      content_bytes: content.length,
+      error: sharpErr instanceof Error ? sharpErr.message : String(sharpErr),
+    });
     throw new AttachmentScreeningError(
       `Image "${filename}" could not be processed for security sanitization. ` +
       'Please re-export the image in a standard format and try again.',
@@ -324,6 +330,72 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
   } finally {
     clearTimeout(timeoutId!);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Image decode / sanitize helpers
+// ---------------------------------------------------------------------------
+
+const SHARP_INPUT_OPTIONS = { animated: false, failOn: 'none' as const };
+
+/**
+ * Verify the image decodes and fits Bedrock Guardrail + platform limits.
+ */
+async function assertImageDecodable(
+  content: Buffer,
+  contentType: string,
+  filename: string,
+): Promise<void> {
+  try {
+    const sharp = await loadSharp();
+    const metadata = await sharp(content, SHARP_INPUT_OPTIONS).metadata();
+    const width = metadata.width;
+    const height = metadata.height;
+    if (!width || !height) {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" could not be decoded (missing dimensions). ` +
+        'Please re-export as PNG or JPEG.',
+      );
+    }
+    if (width > MAX_IMAGE_DIMENSION_PX || height > MAX_IMAGE_DIMENSION_PX) {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" is ${width}x${height}px; maximum allowed dimension is ` +
+        `${MAX_IMAGE_DIMENSION_PX}px. Please resize the image before uploading.`,
+      );
+    }
+    if (contentType === 'image/jpeg' && metadata.format && metadata.format !== 'jpeg') {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" is not a valid JPEG despite the declared content type.`,
+      );
+    }
+    if (contentType === 'image/png' && metadata.format && metadata.format !== 'png') {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" is not a valid PNG despite the declared content type.`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof AttachmentScreeningError) {
+      throw err;
+    }
+    throw new AttachmentScreeningError(
+      `Image "${filename}" could not be decoded. The file may be corrupt or use an unsupported variant. ` +
+      'Please re-export as PNG or JPEG.',
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Strip metadata (EXIF/ICC/XMP), apply orientation, and re-encode.
+ * Explicit output format avoids ambiguous `.toBuffer()` behaviour in Lambda/libvips.
+ */
+async function stripAndReencodeImage(content: Buffer, contentType: string): Promise<Buffer> {
+  const sharp = await loadSharp();
+  const pipeline = sharp(content, SHARP_INPUT_OPTIONS).rotate();
+  if (contentType === 'image/jpeg') {
+    return pipeline.jpeg({ mozjpeg: true, force: true }).toBuffer();
+  }
+  return pipeline.png({ compressionLevel: 9, force: true }).toBuffer();
 }
 
 // ---------------------------------------------------------------------------

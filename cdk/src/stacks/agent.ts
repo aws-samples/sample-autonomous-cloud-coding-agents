@@ -388,6 +388,10 @@ export class AgentStack extends Stack {
     // the runtime itself. Deferred because the session-tag plumbing is
     // orthogonal to landing the feature behavior.
     traceArtifactsBucket.bucket.grantPut(runtime);
+    // Version-pinned attachment downloads (agent/src/attachments.py uses
+    // GetObject + VersionId). grantRead expands to s3:GetObject* including
+    // GetObjectVersion on the versioned attachments bucket.
+    attachmentsBucket.bucket.grantRead(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,

@@ -274,8 +274,15 @@ export class TaskApi extends Construct {
               // ruleset. Exempt the Linear webhook path from CRS entirely:
               // the route is HMAC-verified in the Lambda, parsed as strict
               // JSON, never interpolated into SQL/HTML, and rate-limited by
-              // the priority-3 rule below. CRS still applies to every other
-              // route (user API, Slack, etc.).
+              // the priority-3 rule below.
+              //
+              // Inline task attachments (base64 in POST /v1/tasks, up to 3 MB
+              // total per ATTACHMENTS.md) also exceed the CRS 8 KB body cap and
+              // surface as API Gateway 403 {"message":"Forbidden"} before the
+              // create-task Lambda runs. Drop only SizeRestrictions_BODY here;
+              // other CRS rules still apply. Payload size is bounded by API GW
+              // (10 MB) and validateAttachments() in the handler.
+              excludedRules: [{ name: 'SizeRestrictions_BODY' }],
               scopeDownStatement: {
                 notStatement: {
                   statement: {
@@ -380,6 +387,13 @@ export class TaskApi extends Construct {
       ],
     };
 
+    // sharp ships native bindings; copy from node_modules (Docker bundling)
+    // instead of esbuild-inlining. Used by create-task / confirm-uploads paths.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['sharp'],
+    };
+
     // --- Lambda handlers ---
     const createTaskEnv: Record<string, string> = { ...commonEnv };
     if (props.repoTable) {
@@ -402,8 +416,10 @@ export class TaskApi extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
-      bundling: commonBundling,
-      memorySize: 256,
+      bundling: attachmentScreeningBundling,
+      // Inline attachment screening (sharp) needs headroom; 256 MB caused
+      // cold-start init failures → API Gateway 502 on POST /tasks.
+      memorySize: 1024,
       timeout: Duration.seconds(15),
     });
 
@@ -543,7 +559,7 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: confirmUploadsEnv,
-        bundling: commonBundling,
+        bundling: attachmentScreeningBundling,
         memorySize: 2048,
         timeout: Duration.seconds(180),
       });
@@ -888,7 +904,9 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: createTaskEnv,
-        bundling: commonBundling,
+        bundling: attachmentScreeningBundling,
+        memorySize: 1024,
+        timeout: Duration.seconds(15),
       });
 
       // --- IAM grants for webhook Lambdas ---
