@@ -266,7 +266,7 @@ export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024;
 /** Compile-time exhaustiveness check for AttachmentType. */
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
 type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TYPE_LIST)[number]> extends never ? true : never;
-const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true; // eslint-disable-line @typescript-eslint/no-unused-vars
+const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
 /** Allowed image MIME types (PNG and JPEG only — passed directly to Bedrock). */
