@@ -179,3 +179,25 @@ class TestDownloadAttachments:
         assert len(result) == 2
         assert result[0].filename == "file1.txt"
         assert result[1].filename == "file2.txt"
+
+    @patch("boto3.client")
+    def test_partial_failure_cleans_up_attachments_dir(self, mock_client, tmp_path):
+        """When download fails mid-loop, already-downloaded files are removed."""
+        config_ok, content_ok = _make_config(b"good content", "good.txt", "ATT001")
+        config_bad, _ = _make_config(b"bad content", "bad.txt", "ATT002")
+
+        mock_s3 = MagicMock()
+        mock_client.return_value = mock_s3
+        # First attachment succeeds, second returns tampered content (checksum mismatch)
+        mock_s3.get_object.side_effect = [
+            {"Body": MagicMock(read=lambda: content_ok)},
+            {"Body": MagicMock(read=lambda: b"tampered")},
+        ]
+
+        attachments_dir = tmp_path / ATTACHMENTS_DIR
+
+        with pytest.raises(RuntimeError, match="integrity check failed"):
+            download_attachments([config_ok, config_bad], str(tmp_path))
+
+        # The entire .attachments directory should be cleaned up
+        assert not attachments_dir.exists()

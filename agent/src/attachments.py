@@ -61,19 +61,25 @@ def download_attachments(
     s3_client = boto3.client("s3")
     prepared: list[PreparedAttachment] = []
 
-    for att in attachments:
-        local_path = _download_single(att, attachments_dir, s3_client)
-        prepared.append(
-            PreparedAttachment(
-                attachment_id=att.attachment_id,
-                type=att.type,
-                content_type=att.content_type,
-                filename=att.filename,
-                local_path=str(local_path),
-                size_bytes=att.size_bytes,
-                token_estimate=att.token_estimate,
+    try:
+        for att in attachments:
+            local_path = _download_single(att, attachments_dir, s3_client)
+            prepared.append(
+                PreparedAttachment(
+                    attachment_id=att.attachment_id,
+                    type=att.type,
+                    content_type=att.content_type,
+                    filename=att.filename,
+                    local_path=str(local_path),
+                    size_bytes=att.size_bytes,
+                    token_estimate=att.token_estimate,
+                )
             )
-        )
+    except Exception:
+        import shutil
+
+        shutil.rmtree(attachments_dir, ignore_errors=True)
+        raise
 
     log("TASK", f"Downloaded {len(prepared)} attachment(s) to {attachments_dir}")
     return prepared
