@@ -44,15 +44,17 @@ Input screening happens at two points in the pipeline, forming a defense-in-dept
 
 ### Submission-time screening
 
-- **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 2,000 characters.
-- **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `HIGH` strength screens task descriptions for prompt injection.
+- **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 10,000 characters.
+- **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `MEDIUM` input strength screens task descriptions for prompt injection.
+- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](./ATTACHMENTS.md) for the full screening pipeline.
 - **Fail-closed** - If the Bedrock API is unavailable, submissions are rejected (HTTP 503). Unscreened content never reaches the agent.
 
 ### Hydration-time screening
 
 - **PR tasks** (`pr_iteration`, `pr_review`) - The assembled prompt (PR body, review comments, diff, task description) is screened through Bedrock Guardrails before the agent receives it.
 - **`new_task` with issue content** - The assembled prompt (issue body, comments, task description) is screened. When no issue content is present, hydration-time screening is skipped because the task description was already screened at submission.
-- **Fail-closed** - A Bedrock outage during hydration fails the task. A `guardrail_blocked` event is emitted when content is blocked.
+- **URL attachments** - URL attachments are fetched during hydration with full SSRF protection (DNS resolution pinning to prevent rebinding attacks, private IP blocking, redirect validation, timeout enforcement). Fetched content is screened through the same pipeline as inline attachments before being stored in S3.
+- **Fail-closed** - A Bedrock outage during hydration fails the task. A `guardrail_blocked` event is emitted when content is blocked. Attachment resolution errors (fetch failures, screening blocks, integrity failures) also fail the task — attachments are never silently dropped.
 
 ### Tool access control
 

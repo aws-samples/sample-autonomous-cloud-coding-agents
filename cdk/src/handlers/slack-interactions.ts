@@ -132,21 +132,23 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
   }
 
   // Attempt to cancel.
-  const ACTIVE_STATUSES = ['SUBMITTED', 'HYDRATING', 'RUNNING', 'FINALIZING'];
+  const CANCELLABLE_STATUSES = ['PENDING_UPLOADS', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
   try {
     await ddb.send(new UpdateCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
       UpdateExpression: 'SET #s = :cancelled, updated_at = :now',
-      ConditionExpression: '#s IN (:s1, :s2, :s3, :s4)',
+      ConditionExpression: '#s IN (:s1, :s2, :s3, :s4, :s5, :s6)',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':cancelled': 'CANCELLED',
         ':now': new Date().toISOString(),
-        ':s1': ACTIVE_STATUSES[0],
-        ':s2': ACTIVE_STATUSES[1],
-        ':s3': ACTIVE_STATUSES[2],
-        ':s4': ACTIVE_STATUSES[3],
+        ':s1': CANCELLABLE_STATUSES[0],
+        ':s2': CANCELLABLE_STATUSES[1],
+        ':s3': CANCELLABLE_STATUSES[2],
+        ':s4': CANCELLABLE_STATUSES[3],
+        ':s5': CANCELLABLE_STATUSES[4],
+        ':s6': CANCELLABLE_STATUSES[5],
       },
     }));
 
