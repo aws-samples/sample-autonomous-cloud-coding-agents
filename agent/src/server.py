@@ -280,6 +280,38 @@ async def lifespan(_application: FastAPI):
 app = FastAPI(title="Background Agent", version="1.0.0", lifespan=lifespan)
 
 
+def _extract_workload_access_token(request: Request) -> str:
+    """Read AgentCore's workload access token off the inbound request.
+
+    AgentCore Runtime delivers the token on `/invocations` requests under
+    one of two header spellings (both observed 2026-05-18 on a single
+    request via diagnostic logging in us-east-1):
+      1. ``WorkloadAccessToken`` — the SDK's documented header in
+         ``bedrock_agentcore.runtime.models::ACCESS_TOKEN_HEADER``.
+      2. ``x-amzn-bedrock-agentcore-runtime-workload-accesstoken`` —
+         undocumented but present on the wire; included for forward
+         compatibility.
+
+    The token must be propagated explicitly into the pipeline thread (see
+    ``_run_task_background``) because Python ``ContextVar`` is per-thread,
+    not per-request — the SDK's bundled ``_build_request_context``
+    middleware sets it in the request handler's async context, but our
+    pipeline runs in a separate ``threading.Thread`` spawned by
+    ``_spawn_background``. The new thread sees a fresh empty ContextVar
+    unless we re-set it on entry.
+
+    See aws/bedrock-agentcore-sdk-python#219 for the upstream tracking
+    issue (per-thread ContextVar) and the workaround pattern in
+    ``awslabs/agentcore-samples`` 07-Outbound_Auth_3LO_ECS_Fargate.
+    """
+    return (
+        request.headers.get("WorkloadAccessToken")
+        or request.headers.get("x-amzn-bedrock-agentcore-runtime-workload-accesstoken")
+        or request.headers.get("x-amzn-bedrock-agentcore-workload-access-token")
+        or ""
+    )
+
+
 class InvocationRequest(BaseModel):
     input: dict[str, Any]
 
@@ -352,10 +384,40 @@ def _run_task_background(
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
+    workload_access_token: str = "",
     attachments: list[dict] | None = None,
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
+
+    # Re-establish the AgentCore workload-token ContextVar in this thread.
+    # Python ContextVar storage is per-thread, so the request-handler thread's
+    # context (where BedrockAgentCoreApp's _build_request_context would normally
+    # set this) doesn't propagate to here. Without this re-set,
+    # IdentityClient.get_api_key() callers like resolve_linear_api_token()
+    # short-circuit on a None workload token even when the platform delivered
+    # one. See aws/bedrock-agentcore-sdk-python#219 for the upstream design
+    # constraint that motivates this manual propagation.
+    if workload_access_token:
+        # Vestigial path from the parked AgentCore Identity flow. If the
+        # `bedrock-agentcore` SDK is missing or its module structure
+        # changes, fail open: the Linear token resolver falls back to
+        # reading per-workspace Secrets Manager directly, so the agent
+        # can still proceed without this ContextVar set. Catching
+        # (ImportError, AttributeError) here keeps the pipeline alive
+        # instead of bricking the entire task with no diagnostic when
+        # the upstream SDK rearranges modules.
+        try:
+            from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
+
+            BedrockAgentCoreContext.set_workload_access_token(workload_access_token)
+        except (ImportError, AttributeError) as e:
+            _warn_cw(
+                f"bedrock_agentcore workload-token bridge unavailable "
+                f"({type(e).__name__}: {e}); Linear MCP will resolve via "
+                "Secrets Manager fallback",
+                task_id=task_id,
+            )
 
     _debug_cw(
         f"_run_task_background ENTERED task_id={task_id!r} "
@@ -532,6 +594,13 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     if started_at and isinstance(started_at, str):
         os.environ["TASK_STARTED_AT"] = started_at
 
+    # AgentCore-injected workload access token (see _extract_workload_access_token
+    # for full rationale). Threaded into _run_task_background so the pipeline
+    # thread can call BedrockAgentCoreContext.set_workload_access_token() on entry
+    # — without that the IdentityClient.get_api_key path used by
+    # resolve_linear_api_token() returns None.
+    workload_access_token = _extract_workload_access_token(request)
+
     return {
         "repo_url": repo_url,
         "task_description": task_description,
@@ -559,6 +628,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "channel_metadata": channel_metadata,
         "trace": trace,
         "user_id": user_id,
+        "workload_access_token": workload_access_token,
         "attachments": attachments,
     }
 
