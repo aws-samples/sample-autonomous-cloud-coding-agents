@@ -197,12 +197,12 @@ export function makeSubmitCommand(): Command {
             throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
           }
           const filePath = attachmentArgs.find(arg =>
-            !arg.startsWith('http') && path.basename(path.resolve(arg)) === instruction.filename,
+            !arg.startsWith('http') && path.basename(safeResolvePath(arg)) === instruction.filename,
           );
           if (!filePath) {
             throw new CliError(`Cannot locate local file for presigned upload: ${instruction.filename}`);
           }
-          await uploadViaPresignedPost(path.resolve(filePath), instruction);
+          await uploadViaPresignedPost(safeResolvePath(filePath), instruction);
           process.stderr.write(`  Uploaded: ${instruction.filename}\n`);
         }
 
@@ -226,6 +226,19 @@ export function makeSubmitCommand(): Command {
 // ---------------------------------------------------------------------------
 // Attachment resolution helpers
 // ---------------------------------------------------------------------------
+
+/** Resolve a user-supplied path and validate it stays under CWD (CWE-22 mitigation). */
+function safeResolvePath(userPath: string): string {
+  // nosemgrep: path-join-resolve-traversal -- this IS the path-traversal guard
+  const resolved = path.resolve(userPath);
+  const cwd = process.cwd();
+  if (!resolved.startsWith(cwd + path.sep) && resolved !== cwd) {
+    throw new CliError(
+      `Attachment path must be within the working directory: ${userPath}`,
+    );
+  }
+  return resolved;
+}
 
 const MAX_INLINE_SIZE_BYTES = 500 * 1024; // 500 KB
 
@@ -263,7 +276,7 @@ function resolveAttachmentArg(arg: string): Attachment {
   }
 
   // Local file
-  const resolvedPath = path.resolve(arg);
+  const resolvedPath = safeResolvePath(arg);
   if (!fs.existsSync(resolvedPath)) {
     throw new CliError(`Attachment file not found: ${arg}`);
   }
