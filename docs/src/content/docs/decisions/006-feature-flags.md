@@ -47,9 +47,27 @@ Feature flags enable trunk-based development where incomplete work merges safely
 4. **Verified** — feature complete, flag toggled on in testing
 5. **Permanent** — flag removed, feature is always-on (or removed entirely)
 
+### Lifecycle metadata
+
+Each flag must track:
+
+| Field | Required | Source |
+|-------|----------|--------|
+| Flag name | Yes | Code constant |
+| Purpose / linked issue | Yes | Issue reference |
+| First merge date | Yes | Auto from git log |
+| Max lifetime | Yes | Declared at creation (default: 4 weeks) |
+| Expected removal date | Yes | first_merge + max_lifetime |
+| Actual removal date | — | Auto when flag deleted |
+| Days active | — | Computed |
+
 ### Maximum lifetime
 
-Flags must be removed within one release cycle of the feature being verified. Stale flags are treated as technical debt and surfaced in periodic reviews.
+Flags must be removed within the declared max lifetime (default: 4 weeks) of the feature being verified. The max lifetime can be overridden per-flag with justification in the issue. Stale flags are treated as technical debt and surfaced in periodic reviews.
+
+### Mechanism constraint
+
+Flags MUST be resolvable at synth time for infrastructure flags and at runtime for behavior flags. The specific storage mechanism (CDK context, DynamoDB, SSM Parameter Store, env vars) is context-dependent and follows from this split — it is not prescribed by this ADR.
 
 ## Consequences
 

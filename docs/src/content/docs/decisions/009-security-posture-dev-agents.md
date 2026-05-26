@@ -19,9 +19,9 @@ The core principle: **planners and implementors must be separated by context and
 
 | Role | Can do | Cannot do |
 |------|--------|-----------|
-| **Planner** | Create/edit issues, write RFCs/ADRs, define roadmap | Write code, push branches, approve PRs |
+| **Planner** | Create/edit issues, write RFCs/ADRs, define roadmap and revisit vision | Write code, push branches, approve PRs |
 | **Implementor** | Write code, create PRs, push branches, run tests | Approve own PRs, merge own PRs, modify CI/security config |
-| **Reviewer** | Approve PRs, request changes, merge | Write code on the same PR being reviewed |
+| **Reviewer** | Approve PRs, request changes, merge, suggest code (no commits) | Write code on the same PR being reviewed |
 | **Admin** | All of the above + modify policies, approve issues | Still requires 2P for policy changes |
 
 ### Blast radius classification
@@ -46,6 +46,7 @@ For High and Critical actions:
 ### No self-approval (structural)
 
 - Branch protection requires review from someone other than the pusher
+- Approval cannot come from the last committer on the branch
 - If an agent plans AND implements, review must come from an identity that did neither
 - The identity that writes code cannot approve or merge it
 

@@ -26,12 +26,22 @@ At each failure point, the agent:
 2. **Documents** — creates an issue: which document, which step, what was missing
 3. **Continues** — attempts the next step (if possible) to find additional gaps
 
+### Retrospectives
+
+After completing a task, project milestone, or sprint, agents produce a retrospective artifact:
+- What worked well (patterns to repeat)
+- What failed or caused friction (patterns to avoid)
+- Actionable experiments for future workflows
+
+Retrospectives are a first-class knowledge artifact — they feed into documentation improvements, inform ADR amendments, and surface systemic issues that individual task failures cannot.
+
 ### Knowledge artifacts (interim)
 
 Until documentation meets ADR-004, agents may create ephemeral artifacts:
 - Semantic indices of the codebase (call graphs, dependency maps)
 - Annotated walkthroughs of successful executions
 - "What I learned" summaries after completing a task
+- Retrospectives (see above)
 
 These are scaffolding that informs documentation improvements, not documentation themselves.
 
