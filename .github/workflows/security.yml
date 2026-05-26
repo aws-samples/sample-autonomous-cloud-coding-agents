@@ -62,7 +62,9 @@ jobs:
 
       - name: Run security suite
         id: scan
-        run: mise run security 2>&1 | tee security-log.txt
+        run: |
+          set -o pipefail
+          mise run security 2>&1 | tee security-log.txt
         continue-on-error: true
 
       - name: Open issue on failure
