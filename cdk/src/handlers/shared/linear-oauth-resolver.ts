@@ -218,6 +218,32 @@ async function getRegistryRow(
   return row;
 }
 
+/**
+ * Required fields on the StoredOauthToken JSON in Secrets Manager.
+ * Validated as a set at deserialization so a missing field fails fast
+ * here, not 24 hours later inside `tryRefreshOnce` when the refresh
+ * call needs `client_id` / `client_secret` and finds them undefined.
+ *
+ * Keep this list in sync with the `StoredOauthToken` interface above
+ * AND the CLI-side `StoredLinearOauthToken` shape (see
+ * `cli/src/linear-oauth.ts`). The contract test in
+ * `cdk/test/contracts/stored-oauth-token-parity.test.ts` enforces
+ * the cross-language match.
+ */
+const STORED_OAUTH_TOKEN_REQUIRED_FIELDS: ReadonlyArray<keyof StoredOauthToken> = [
+  'access_token',
+  'refresh_token',
+  'expires_at',
+  'scope',
+  'client_id',
+  'client_secret',
+  'workspace_id',
+  'workspace_slug',
+  'installed_at',
+  'updated_at',
+  'installed_by_platform_user_id',
+];
+
 async function getOauthSecret(
   sm: SecretsManagerClient,
   secretArn: string,
@@ -226,7 +252,16 @@ async function getOauthSecret(
     const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
     if (!res.SecretString) return null;
     const parsed = JSON.parse(res.SecretString) as StoredOauthToken;
-    if (!parsed.access_token || !parsed.refresh_token || !parsed.expires_at) return null;
+    const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
+      (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
+    );
+    if (missing.length > 0) {
+      logger.error('Linear OAuth secret JSON is missing required fields', {
+        secret_arn: secretArn,
+        missing_fields: missing,
+      });
+      return null;
+    }
     return parsed;
   } catch (err) {
     logger.error('Failed to fetch Linear OAuth secret', {

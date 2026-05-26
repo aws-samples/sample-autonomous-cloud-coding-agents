@@ -50,7 +50,7 @@ describe('awaitOauthCallback', () => {
   // Jest's default test isolation per file. If a developer has another
   // bgagent setup running locally, expect EADDRINUSE.
 
-  test('captures session_id from the first valid request and resolves', async () => {
+  test('captures session_id from the first valid request and resolves with kind=agentcore', async () => {
     // Fire the server + the request in parallel; the server resolves once it
     // sees the request, then closes.
     const expectedSessionId = 'urn:ietf:params:oauth:request_uri:test-uuid';
@@ -60,12 +60,15 @@ describe('awaitOauthCallback', () => {
     const requestPromise = localGet(`/oauth/callback?session_id=${encodeURIComponent(expectedSessionId)}`);
 
     const [callbackResult, response] = await Promise.all([callbackPromise, requestPromise]);
-    expect(callbackResult.sessionId).toBe(expectedSessionId);
+    expect(callbackResult.kind).toBe('agentcore');
+    if (callbackResult.kind === 'agentcore') {
+      expect(callbackResult.sessionId).toBe(expectedSessionId);
+    }
     expect(response.status).toBe(200);
     expect(response.body).toContain('Linear authorized');
   });
 
-  test('captures code+state from a direct Linear OAuth redirect', async () => {
+  test('captures code+state from a direct Linear OAuth redirect with kind=direct-oauth', async () => {
     // Phase 2.0b Option 2 path: Linear redirects with `code` + `state`
     // (no AgentCore proxy in the middle).
     const callbackPromise = awaitOauthCallback({ timeoutMs: 5_000 });
@@ -75,9 +78,11 @@ describe('awaitOauthCallback', () => {
     );
 
     const [callbackResult, response] = await Promise.all([callbackPromise, requestPromise]);
-    expect(callbackResult.code).toBe('lin_authcode_abc');
-    expect(callbackResult.state).toBe('stateuuid');
-    expect(callbackResult.sessionId).toBeNull();
+    expect(callbackResult.kind).toBe('direct-oauth');
+    if (callbackResult.kind === 'direct-oauth') {
+      expect(callbackResult.code).toBe('lin_authcode_abc');
+      expect(callbackResult.state).toBe('stateuuid');
+    }
     expect(response.status).toBe(200);
   });
 

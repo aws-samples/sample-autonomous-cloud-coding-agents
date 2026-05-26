@@ -49,26 +49,34 @@ const FAILURE_HTML = `<!doctype html>
 <style>body{font-family:system-ui,sans-serif;max-width:480px;margin:8em auto;text-align:center;color:#222}h1{color:#c00}p{color:#666}</style></head>
 <body><h1>✗ Authorization not captured</h1><p>The callback URL did not include a session_id. Re-run <code>bgagent linear setup</code> and try again.</p></body></html>`;
 
-export interface CallbackResult {
-  /**
-   * Value of the `session_id` query param if present (AgentCore-style
-   * redirect). Null in direct-OAuth flows where Linear redirects with
-   * `code` + `state` instead.
-   */
-  readonly sessionId: string | null;
-  /**
-   * OAuth `code` from a direct-Linear redirect (Phase 2.0b Option 2).
-   * Null in AgentCore-style flows where AWS performs the code-to-token
-   * exchange itself.
-   */
-  readonly code: string | null;
-  /**
-   * OAuth `state` from a direct-Linear redirect — caller MUST verify
-   * against the value passed into `buildAuthorizationUrl` to prevent
-   * CSRF. Null in AgentCore-style flows.
-   */
-  readonly state: string | null;
-}
+/**
+ * Discriminated union over the two redirect shapes Linear may send to
+ * the localhost callback. Was previously an all-nullable struct
+ * `{ sessionId: string | null, code: string | null, state: string | null }`
+ * which let callers (and tests) construct nonsense values like
+ * "all three null" or "sessionId AND code+state set" — neither is
+ * actually reachable in production. Splitting into two cases makes
+ * downstream pattern-matching exhaustive and the "impossible state"
+ * unrepresentable.
+ *
+ * - `agentcore`: legacy AgentCore Identity USER_FEDERATION redirect.
+ *   AWS handles the code-for-token exchange itself; we receive only
+ *   the session_id we use to poll for the resulting token. Parked
+ *   path; kept for the eventual 2.0c resume.
+ * - `direct-oauth`: Phase 2.0b Option 2. Linear redirects directly to
+ *   localhost with `code` + `state`. Caller MUST verify `state` against
+ *   the value passed into `buildAuthorizationUrl` to prevent CSRF.
+ */
+export type CallbackResult =
+  | {
+      readonly kind: 'agentcore';
+      readonly sessionId: string;
+    }
+  | {
+      readonly kind: 'direct-oauth';
+      readonly code: string;
+      readonly state: string;
+    };
 
 export interface CallbackServerOptions {
   /**
@@ -179,8 +187,15 @@ export async function awaitOauthCallback(
         }
         res.statusCode = 200;
         res.setHeader('content-type', 'text/html; charset=utf-8');
+        // Build the discriminated union value here so callers don't
+        // see the all-nullable shape. Direct-OAuth path takes
+        // precedence: if Linear sent both session_id AND code+state
+        // (shouldn't happen, but defensively…) we treat it as direct.
+        const result: CallbackResult = code && state
+          ? { kind: 'direct-oauth', code, state }
+          : { kind: 'agentcore', sessionId: sessionId! };
         res.once('finish', () => {
-          settle(() => resolve({ sessionId, code, state }));
+          settle(() => resolve(result));
         });
         res.end(SUCCESS_HTML);
       },

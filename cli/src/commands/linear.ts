@@ -409,28 +409,15 @@ export function makeLinearCommand(): Command {
         const callback = await callbackPromise;
         console.log(' ✓');
 
-        // The localhost callback server resolves with `?session_id=` from
-        // AWS's redirect, but we're not using AgentCore — for the direct
-        // flow, the callback server gives us `?code=...&state=...` from
-        // Linear directly. We need to extract differently.
-        //
-        // Reality check: our awaitOauthCallback() is hard-coded to
-        // extract `session_id`. For Option 2 we need to also capture
-        // `code` + `state` from the same redirect. The localhost server
-        // module needs adjusting; for now we use a workaround that reads
-        // the 'session_id' field which the callback server populated
-        // from whatever query param was named `session_id`. We override
-        // by re-reading the actual redirect URL inside the server.
-        //
-        // Defensive: callback.sessionId may contain the full session_id
-        // value when this code is reached against an AgentCore-style
-        // redirect. We don't reach here in O2 because Linear redirects
-        // with `code` + `state`, not `session_id`. The callback module
-        // is updated separately to expose both shapes.
-        if (!callback.code || !callback.state) {
+        // Phase 2.0b Option 2 expects Linear to redirect with `code` +
+        // `state`. If we got the AgentCore session_id shape, the user
+        // likely configured an `actor=app` flow against an AgentCore
+        // Identity provider — that path is parked, error out clearly.
+        if (callback.kind !== 'direct-oauth') {
           throw new CliError(
-            'Localhost callback did not surface code/state. This indicates the callback '
-            + 'server module is in legacy AgentCore-only mode; rebuild the CLI.',
+            'Localhost callback returned an AgentCore session_id, not a direct OAuth code. '
+            + 'Phase 2.0b Option 2 only supports the direct redirect — verify Linear\'s '
+            + 'redirect URI is set to http://localhost:8080/oauth/callback and re-run.',
           );
         }
         if (callback.state !== state) {
