@@ -435,7 +435,7 @@ export async function createTaskCore(
 
       // Estimate image token cost (best-effort, non-blocking)
       const tokenEstimate = inlineAtt.type === 'image'
-        ? await estimateImageTokensFromBuffer(screenResult.content)
+        ? estimateImageTokensFromBuffer(screenResult.content, inlineAtt.content_type)
         : undefined;
 
       attachmentRecords.push(createAttachmentRecord({
@@ -660,9 +660,21 @@ export async function createTaskCore(
   // 9. Return created task
   if (hasPresignedAttachments && s3Client && ATTACHMENTS_BUCKET) {
     // Generate presigned POST policies for presigned attachments
-    const uploadInstructions = await generateUploadInstructions(
-      taskRecord, validatedAttachments, context.userId, taskId, s3Client,
-    );
+    let uploadInstructions: AttachmentUploadInstruction[];
+    try {
+      uploadInstructions = await generateUploadInstructions(
+        taskRecord, validatedAttachments, context.userId, taskId, s3Client,
+      );
+    } catch (presignErr) {
+      logger.error('Failed to generate presigned upload instructions — task orphaned in PENDING_UPLOADS', {
+        task_id: taskId,
+        error: presignErr instanceof Error ? presignErr.message : String(presignErr),
+        request_id: requestId,
+        metric_type: 'presigned_post_generation_failure',
+      });
+      return errorResponse(500, ErrorCode.INTERNAL_ERROR,
+        'Failed to generate upload instructions. Please try again.', requestId);
+    }
     const taskExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 min auto-cancel window
     return successResponse(202, {
       ...toTaskDetail(taskRecord),

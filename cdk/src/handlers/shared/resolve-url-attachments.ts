@@ -34,6 +34,7 @@
  */
 
 import { promises as dns } from 'dns';
+import * as https from 'https';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { AttachmentResolutionError } from './context-hydration';
@@ -69,6 +70,7 @@ const PRIVATE_IP_RANGES = [
   { prefix: '100.64.', mask: null }, // CGN / Shared Address Space (RFC 6598)
   // IPv6
   { prefix: '::1', mask: null },
+  { prefix: '::', mask: (ip: string) => ip === '::' }, // Unspecified address (could route to localhost)
   { prefix: 'fc', mask: null },
   { prefix: 'fd', mask: null },
   { prefix: 'fe80:', mask: null },
@@ -98,7 +100,7 @@ export interface ResolveUrlAttachmentsOptions {
  * Check if an IP address belongs to a private/internal range.
  * Returns a reason string if private, undefined if public.
  */
-function isPrivateIp(ip: string): string | undefined {
+export function isPrivateIp(ip: string): string | undefined {
   const normalized = ip.toLowerCase();
 
   for (const range of PRIVATE_IP_RANGES) {
@@ -174,6 +176,76 @@ function buildPinnedUrl(originalUrl: URL, resolvedIp: string): URL {
 }
 
 /**
+ * Perform an HTTPS request using Node.js native https module with proper
+ * TLS servername for DNS pinning. This is necessary because global fetch()
+ * uses the URL hostname for SNI — when connecting to a resolved IP, the
+ * certificate check fails unless servername is overridden.
+ *
+ * Returns a standard Response object for compatibility with the existing code.
+ */
+async function pinnedHttpsRequest(
+  pinnedUrl: URL,
+  originalHostname: string,
+  options: { headers: Record<string, string>; signal: AbortSignal },
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const hostname = pinnedUrl.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+    const port = Number(pinnedUrl.port || '443');
+
+    const agent = new https.Agent({
+      servername: originalHostname,
+    });
+
+    const req = https.request(
+      {
+        hostname,
+        port,
+        path: pinnedUrl.pathname + pinnedUrl.search,
+        method: 'GET',
+        headers: options.headers,
+        agent,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const body = Buffer.concat(chunks);
+          const responseHeaders = new Headers();
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (value) responseHeaders.set(key, Array.isArray(value) ? value[0] : value);
+          }
+          resolve(new Response(body, {
+            status: res.statusCode ?? 500,
+            statusText: res.statusMessage,
+            headers: responseHeaders,
+          }));
+          agent.destroy();
+        });
+        res.on('error', (err) => {
+          agent.destroy();
+          reject(err);
+        });
+      },
+    );
+
+    req.on('error', (err) => {
+      agent.destroy();
+      reject(err);
+    });
+
+    if (options.signal) {
+      options.signal.addEventListener('abort', () => {
+        req.destroy();
+        agent.destroy();
+        reject(new DOMException('The operation was aborted.', 'AbortError'));
+      });
+    }
+
+    req.end();
+  });
+}
+
+/**
  * Fetch a URL with SSRF protections: DNS pinning, private IP rejection,
  * redirect validation, timeout, and size limit.
  *
@@ -210,6 +282,7 @@ async function ssrfSafeFetch(
   }
 
   let currentUrl = url;
+  let currentHostname = parsedUrl.hostname;
   let redirectCount = 0;
   let response: Response;
 
@@ -219,12 +292,11 @@ async function ssrfSafeFetch(
     const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
 
     try {
-      // Use pinnedUrl (resolved IP) for the actual connection, with Host header
-      // preserving the real hostname for TLS SNI and virtual-host routing.
-      response = await fetch(pinnedUrl.toString(), {
+      // Use pinnedHttpsRequest with proper TLS servername for DNS pinning.
+      // Connects to the resolved IP while using the original hostname for SNI.
+      response = await pinnedHttpsRequest(pinnedUrl, currentHostname, {
         headers,
         signal: controller.signal,
-        redirect: 'manual', // Handle redirects manually for IP re-validation
       });
     } catch (err: any) {
       if (err.name === 'AbortError') {
@@ -265,6 +337,7 @@ async function ssrfSafeFetch(
       }
       const redirectIp = await resolveAndValidate(redirectUrl.hostname);
       currentUrl = redirectUrl.toString();
+      currentHostname = redirectUrl.hostname;
 
       // Pin the redirect target to its resolved IP
       pinnedUrl = buildPinnedUrl(redirectUrl, redirectIp);
@@ -427,12 +500,27 @@ export async function resolveUrlAttachments(
 
     // Upload screened content to S3
     const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${userId}/${taskId}/${att.attachment_id}/${att.filename}`;
-    const putResult = await options.s3Client.send(new PutObjectCommand({
-      Bucket: options.bucketName,
-      Key: s3Key,
-      Body: screenResult.content,
-      ContentType: resolvedContentType,
-    }));
+    let putResult;
+    try {
+      putResult = await options.s3Client.send(new PutObjectCommand({
+        Bucket: options.bucketName,
+        Key: s3Key,
+        Body: screenResult.content,
+        ContentType: resolvedContentType,
+      }));
+    } catch (s3Err) {
+      logger.error('S3 upload failed for URL attachment', {
+        attachment_id: att.attachment_id,
+        filename: att.filename,
+        s3_key: s3Key,
+        error: s3Err instanceof Error ? s3Err.message : String(s3Err),
+        metric_type: 'url_attachment_upload_failure',
+      });
+      throw new AttachmentResolutionError(
+        `URL attachment '${att.filename}' could not be stored. Please try again later.`,
+        { cause: s3Err },
+      );
+    }
 
     // Use checksum from screening (already computed over the cleaned content)
     const checksum = screenResult.checksum;
@@ -440,7 +528,7 @@ export async function resolveUrlAttachments(
     // Estimate token cost for images
     let tokenEstimate: number | undefined;
     if (isImage) {
-      tokenEstimate = await estimateImageTokensFromBuffer(screenResult.content);
+      tokenEstimate = estimateImageTokensFromBuffer(screenResult.content, resolvedContentType);
     }
 
     resolved.set(att.attachment_id, createAttachmentRecord({

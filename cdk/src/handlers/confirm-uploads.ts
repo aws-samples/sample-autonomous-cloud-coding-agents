@@ -355,7 +355,7 @@ async function screenSingleAttachment(
   // Estimate token cost for images (using shared utility)
   let tokenEstimate: number | undefined;
   if (isImage) {
-    tokenEstimate = await estimateImageTokensFromBuffer(screenResult.content);
+    tokenEstimate = estimateImageTokensFromBuffer(screenResult.content, att.content_type);
   }
 
   return createAttachmentRecord({
@@ -545,11 +545,12 @@ async function failTaskOnScreening(
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
       Key: { task_id: taskId },
-      UpdateExpression: 'SET #s = :failed, #sca = :status_created_at, error_message = :err, updated_at = :now',
+      UpdateExpression: 'SET #s = :failed, #sca = :status_created_at, error_message = :err, updated_at = :now, #ttl = :ttl',
       ConditionExpression: '#s = :pending_uploads',
       ExpressionAttributeNames: {
         '#s': 'status',
         '#sca': 'status_created_at',
+        '#ttl': 'ttl',
       },
       ExpressionAttributeValues: {
         ':failed': TaskStatus.FAILED,
@@ -557,6 +558,7 @@ async function failTaskOnScreening(
         ':status_created_at': `${TaskStatus.FAILED}#${now}`,
         ':err': `Attachment '${filename}' blocked: ${reason}`,
         ':now': now,
+        ':ttl': computeTtlEpoch(TASK_RETENTION_DAYS),
       },
     }));
   } catch (err: any) {
@@ -717,16 +719,28 @@ async function preCheckConcurrency(userId: string): Promise<boolean> {
       TableName: CONCURRENCY_TABLE_NAME,
       Key: { user_id: userId },
     }));
-    const activeCount = (result.Item?.active_count as number) ?? 0;
+    const activeCount = (result?.Item?.active_count as number) ?? 0;
     return activeCount < MAX_CONCURRENT;
-  } catch (err) {
-    // On error reading concurrency, allow the request to proceed —
-    // the atomic check in transitionToSubmitted is the authoritative gate.
-    logger.warn('Pre-check concurrency read failed — allowing request to proceed', {
+  } catch (err: any) {
+    // Only swallow DDB throttling errors — these are transient and the atomic
+    // check in transitionToSubmitted is the authoritative gate.
+    const throttleErrors = ['ProvisionedThroughputExceededException', 'RequestLimitExceeded', 'ThrottlingException'];
+    if (throttleErrors.includes(err?.name)) {
+      logger.warn('Pre-check concurrency throttled — allowing request to proceed', {
+        user_id: userId,
+        error: err.message,
+      });
+      return true;
+    }
+    // Non-throttling errors (misconfigured table, IAM, network partition)
+    // should propagate — no point running expensive screening if infra is broken.
+    logger.error('Pre-check concurrency failed (non-throttling error)', {
       user_id: userId,
       error: err instanceof Error ? err.message : String(err),
+      error_name: err?.name,
+      metric_type: 'precheck_concurrency_failure',
     });
-    return true;
+    throw err;
   }
 }
 

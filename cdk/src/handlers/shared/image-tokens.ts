@@ -19,8 +19,7 @@
 
 // Image token estimation matching Anthropic's documented resize rules.
 
-import { logger } from './logger';
-import { loadSharp } from './sharp-loader';
+import { readPngDimensions, readJpegDimensions } from './attachment-screening';
 
 const MAX_IMAGE_SIDE = 1568;
 const MAX_IMAGE_TOKENS = 1568;
@@ -53,21 +52,17 @@ export function estimateImageTokens(width: number, height: number): number {
 }
 
 /**
- * Estimate image tokens from a buffer by reading dimensions via sharp.
+ * Estimate image tokens from a buffer by reading dimensions from headers.
+ * Uses pure buffer parsing (PNG IHDR / JPEG SOF markers) — no native deps.
  * Returns undefined if dimensions cannot be determined (non-fatal).
  */
-export async function estimateImageTokensFromBuffer(content: Buffer): Promise<number | undefined> {
-  try {
-    const sharp = await loadSharp();
-    const metadata = await sharp(content).metadata();
-    if (metadata.width && metadata.height) {
-      return estimateImageTokens(metadata.width, metadata.height);
-    }
-  } catch (err) {
-    logger.warn('Failed to estimate image tokens (non-fatal)', {
-      error: err instanceof Error ? err.message : String(err),
-      content_length: content.length,
-    });
+export function estimateImageTokensFromBuffer(content: Buffer, contentType?: string): number | undefined {
+  const dims = contentType === 'image/jpeg'
+    ? readJpegDimensions(content)
+    : readPngDimensions(content) ?? readJpegDimensions(content);
+
+  if (dims) {
+    return estimateImageTokens(dims.width, dims.height);
   }
   return undefined;
 }

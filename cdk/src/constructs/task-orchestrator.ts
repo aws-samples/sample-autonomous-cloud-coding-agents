@@ -178,9 +178,8 @@ export class TaskOrchestrator extends Construct {
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 10;
 
     // Hydration pulls in bedrock-agentcore (bundled), durable-execution, and
-    // attachment screening (sharp via resolve-url-attachments). 256 MB OOMs
-    // at cold start / early steps → task stuck in SUBMITTED (async invoke
-    // retryAttempts: 0 on the alias).
+    // attachment screening (URL resolution). pdf-parse is needed for PDF text
+    // extraction during screening.
     const orchestratorBundling: lambda.BundlingOptions = {
       externalModules: [
         '@aws-sdk/client-dynamodb',
@@ -191,7 +190,7 @@ export class TaskOrchestrator extends Construct {
         '@aws-sdk/lib-dynamodb',
         '@aws-sdk/util-dynamodb',
       ],
-      nodeModules: ['sharp'],
+      nodeModules: ['pdf-parse'],
     };
 
     this.fn = new lambda.NodejsFunction(this, 'OrchestratorFn', {

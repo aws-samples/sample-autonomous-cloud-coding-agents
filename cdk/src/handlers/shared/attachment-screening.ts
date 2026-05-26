@@ -20,7 +20,6 @@
 import { createHash } from 'crypto';
 import { ApplyGuardrailCommand, type BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { logger } from './logger';
-import { loadSharp } from './sharp-loader';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -63,10 +62,6 @@ export interface ScreenedAttachment {
 // Retry utility
 // ---------------------------------------------------------------------------
 
-/**
- * Retry with exponential backoff for transient Bedrock errors.
- * Non-retryable errors (4xx except 429, validation errors) propagate immediately.
- */
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   opts: { maxRetries: number; baseDelayMs: number; context: string },
@@ -116,11 +111,11 @@ function sleep(ms: number): Promise<void> {
 /**
  * Screen an image attachment through the Bedrock Guardrail.
  *
- * Flow: validate → convert GIF/WebP to PNG (Bedrock only accepts png|jpeg) →
- * screen → strip EXIF / re-encode on pass.
+ * Only PNG and JPEG are accepted. Raw bytes are passed directly to Bedrock
+ * (no re-encoding or metadata stripping required).
  *
- * @returns ScreenedAttachment with cleaned content (EXIF-stripped, re-encoded) and checksum.
- * @throws Error on sharp failure or guardrail unavailability (fail-closed).
+ * @returns ScreenedAttachment with original content and checksum.
+ * @throws AttachmentScreeningError for unsupported formats or corrupt files.
  */
 export async function screenImage(
   content: Buffer,
@@ -128,43 +123,11 @@ export async function screenImage(
   filename: string,
   config: ScreeningConfig,
 ): Promise<ScreenedAttachment> {
+  assertSupportedImageFormat(contentType, filename);
   assertImageUploadBytes(content, contentType, filename);
-  await assertImageDecodable(content, contentType, filename);
+  assertImageDimensionsWithinLimits(content, contentType, filename);
 
-  // Convert GIF/WebP to PNG before screening (Bedrock only accepts png | jpeg)
-  let screeningBuffer: Buffer;
-  let screeningFormat: 'png' | 'jpeg';
-
-  if (contentType === 'image/jpeg') {
-    screeningBuffer = content;
-    screeningFormat = 'jpeg';
-  } else if (contentType === 'image/gif' || contentType === 'image/webp') {
-    // GIF/WebP → PNG. For animated GIFs, extract first frame only.
-    try {
-      screeningBuffer = await stripAndReencodeImage(content, 'image/png');
-    } catch (convErr) {
-      throw new AttachmentScreeningError(
-        `Image "${filename}" could not be converted from ${contentType} for screening. ` +
-        'The file may be corrupt. Please re-export or use a PNG/JPEG format.',
-        { cause: convErr },
-      );
-    }
-    screeningFormat = 'png';
-
-    // Post-conversion size check: PNG expansion of compressed GIF/WebP can exceed limit.
-    if (screeningBuffer.length > MAX_ATTACHMENT_SIZE_BYTES) {
-      throw new AttachmentScreeningError(
-        `Image "${filename}" is ${contentType} and its PNG conversion for screening ` +
-        `exceeds the ${MAX_ATTACHMENT_SIZE_BYTES / (1024 * 1024)} MB limit ` +
-        `(${(screeningBuffer.length / (1024 * 1024)).toFixed(1)} MB after conversion). ` +
-        'Please convert to JPEG or reduce image dimensions before uploading.',
-      );
-    }
-  } else {
-    // PNG: use as-is
-    screeningBuffer = content;
-    screeningFormat = 'png';
-  }
+  const screeningFormat: 'png' | 'jpeg' = contentType === 'image/jpeg' ? 'jpeg' : 'png';
 
   // Screen through Bedrock Guardrail with retry
   const result = await retryWithBackoff(
@@ -175,44 +138,27 @@ export async function screenImage(
       content: [{
         image: {
           format: screeningFormat,
-          source: { bytes: screeningBuffer },
+          source: { bytes: content },
         },
       }],
     })),
     { maxRetries: MAX_RETRIES, baseDelayMs: BASE_DELAY_MS, context: `image_screening:${filename}` },
   );
 
+  const checksum = computeSha256(content);
+
   if (result.action === 'GUARDRAIL_INTERVENED') {
     const categories = extractBlockedCategories(result.assessments);
     return {
-      content: screeningBuffer,
+      content,
       contentType,
-      checksum: computeSha256(screeningBuffer),
+      checksum,
       screening: { status: 'blocked', categories },
     };
   }
 
-  // Screening passed — strip EXIF and re-encode in the declared format.
-  let cleanedContent: Buffer;
-  try {
-    cleanedContent = await stripAndReencodeImage(content, contentType);
-  } catch (sharpErr) {
-    logger.warn('Image sanitization failed (sharp)', {
-      filename,
-      content_type: contentType,
-      content_bytes: content.length,
-      error: sharpErr instanceof Error ? sharpErr.message : String(sharpErr),
-    });
-    throw new AttachmentScreeningError(
-      `Image "${filename}" could not be processed for security sanitization. ` +
-      'Please re-export the image in a standard format and try again.',
-      { cause: sharpErr },
-    );
-  }
-
-  const checksum = computeSha256(cleanedContent);
   return {
-    content: cleanedContent,
+    content,
     contentType,
     checksum,
     screening: { status: 'passed' },
@@ -337,14 +283,23 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
 }
 
 // ---------------------------------------------------------------------------
-// Image decode / sanitize helpers
+// Image validation helpers (pure buffer parsing — no native dependencies)
 // ---------------------------------------------------------------------------
 
-const SHARP_INPUT_OPTIONS = { animated: false, failOn: 'none' as const };
+/**
+ * Reject GIF and WebP — only PNG and JPEG are supported for image screening.
+ */
+function assertSupportedImageFormat(contentType: string, filename: string): void {
+  if (contentType === 'image/gif' || contentType === 'image/webp') {
+    throw new AttachmentScreeningError(
+      `Image "${filename}" uses ${contentType} format which is not supported for image attachments. ` +
+      'Please convert to PNG or JPEG before uploading.',
+    );
+  }
+}
 
 /**
- * Reject empty or obviously corrupt uploads before invoking sharp (common when
- * a presigned POST body was assembled incorrectly).
+ * Reject empty or obviously corrupt uploads by checking magic bytes.
  */
 export function assertImageUploadBytes(
   content: Buffer,
@@ -383,61 +338,85 @@ export function assertImageUploadBytes(
   }
 }
 
-/**
- * Verify the image decodes and fits Bedrock Guardrail + platform limits.
- */
-async function assertImageDecodable(
-  content: Buffer,
-  contentType: string,
-  filename: string,
-): Promise<void> {
-  try {
-    const sharp = await loadSharp();
-    const metadata = await sharp(content, SHARP_INPUT_OPTIONS).metadata();
-    const width = metadata.width;
-    const height = metadata.height;
-    if (!width || !height) {
-      throw new AttachmentScreeningError(
-        `Image "${filename}" could not be decoded (missing dimensions). ` +
-        'Please re-export as PNG or JPEG.',
-      );
-    }
-    if (width > MAX_IMAGE_DIMENSION_PX || height > MAX_IMAGE_DIMENSION_PX) {
-      throw new AttachmentScreeningError(
-        `Image "${filename}" is ${width}x${height}px; maximum allowed dimension is ` +
-        `${MAX_IMAGE_DIMENSION_PX}px. Please resize the image before uploading.`,
-      );
-    }
-  } catch (err) {
-    if (err instanceof AttachmentScreeningError) {
-      throw err;
-    }
-    const detail = err instanceof Error ? err.message : String(err);
-    logger.warn('Image decode failed (sharp)', {
-      filename,
-      content_type: contentType,
-      content_bytes: content.length,
-      error: detail,
-    });
-    throw new AttachmentScreeningError(
-      `Image "${filename}" could not be decoded. The file may be corrupt or use an unsupported variant. ` +
-      'Please re-export as PNG or JPEG.',
-      { cause: err },
-    );
+/** Read width/height from the PNG IHDR chunk (bytes 16–23). */
+export function readPngDimensions(content: Buffer): { width: number; height: number } | undefined {
+  if (content.length < 24) {
+    return undefined;
   }
+  if (!content.subarray(0, PNG_FILE_SIGNATURE.length).equals(PNG_FILE_SIGNATURE)) {
+    return undefined;
+  }
+  if (content.toString('ascii', 12, 16) !== 'IHDR') {
+    return undefined;
+  }
+  return { width: content.readUInt32BE(16), height: content.readUInt32BE(20) };
 }
 
 /**
- * Strip metadata (EXIF/ICC/XMP), apply orientation, and re-encode.
- * Explicit output format avoids ambiguous `.toBuffer()` behaviour in Lambda/libvips.
+ * Read width/height from a JPEG buffer by scanning SOF markers.
+ * SOF0 (0xFFC0), SOF1 (0xFFC1), SOF2 (0xFFC2) contain dimensions.
  */
-async function stripAndReencodeImage(content: Buffer, contentType: string): Promise<Buffer> {
-  const sharp = await loadSharp();
-  const pipeline = sharp(content, SHARP_INPUT_OPTIONS).rotate();
-  if (contentType === 'image/jpeg') {
-    return pipeline.jpeg({ mozjpeg: true, force: true }).toBuffer();
+export function readJpegDimensions(content: Buffer): { width: number; height: number } | undefined {
+  if (content.length < 4) return undefined;
+  if (content[0] !== 0xff || content[1] !== 0xd8) return undefined;
+
+  let offset = 2;
+  while (offset < content.length - 1) {
+    if (content[offset] !== 0xff) {
+      offset++;
+      continue;
+    }
+    const marker = content[offset + 1];
+    // SOF0, SOF1, SOF2 markers
+    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      if (offset + 9 > content.length) return undefined;
+      const height = content.readUInt16BE(offset + 5);
+      const width = content.readUInt16BE(offset + 7);
+      return { width, height };
+    }
+    // Skip non-SOF markers
+    if (marker === 0xd9 || marker === 0xda) {
+      // End of image or start of scan — stop searching
+      return undefined;
+    }
+    if (offset + 3 >= content.length) return undefined;
+    const segmentLength = content.readUInt16BE(offset + 2);
+    offset += 2 + segmentLength;
   }
-  return pipeline.png({ compressionLevel: 9, force: true }).toBuffer();
+  return undefined;
+}
+
+function assertImageDimensionsWithinLimits(
+  content: Buffer,
+  contentType: string,
+  filename: string,
+): void {
+  let dims: { width: number; height: number } | undefined;
+
+  if (contentType === 'image/png') {
+    dims = readPngDimensions(content);
+    if (!dims) {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" upload is not a valid PNG file (missing IHDR). ` +
+        'The upload may be incomplete or corrupted — please try submitting again.',
+      );
+    }
+  } else if (contentType === 'image/jpeg') {
+    dims = readJpegDimensions(content);
+    if (!dims) {
+      // Non-fatal: if we can't parse dimensions, let Bedrock handle rejection
+      return;
+    }
+  } else {
+    return;
+  }
+
+  if (dims.width > MAX_IMAGE_DIMENSION_PX || dims.height > MAX_IMAGE_DIMENSION_PX) {
+    throw new AttachmentScreeningError(
+      `Image "${filename}" is ${dims.width}x${dims.height}px; maximum allowed dimension is ` +
+      `${MAX_IMAGE_DIMENSION_PX}px. Please resize the image before uploading.`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -128,15 +128,16 @@ async function cancelExpiredTask(task: ExpiredTask): Promise<boolean> {
       Key: { task_id: { S: task.task_id } },
       UpdateExpression:
         'SET #s = :cancelled, updated_at = :now, completed_at = :now, '
-        + 'error_message = :err, status_created_at = :sca',
+        + 'error_message = :err, status_created_at = :sca, #ttl = :ttl',
       ConditionExpression: '#s = :expected',
-      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeNames: { '#s': 'status', '#ttl': 'ttl' },
       ExpressionAttributeValues: {
         ':cancelled': { S: 'CANCELLED' },
         ':expected': { S: 'PENDING_UPLOADS' },
         ':now': { S: now },
         ':err': { S: errorMessage },
         ':sca': { S: `CANCELLED#${now}` },
+        ':ttl': { N: String(Math.floor(Date.now() / 1000) + TASK_RETENTION_DAYS * 86400) },
       },
     }));
   } catch (err: any) {

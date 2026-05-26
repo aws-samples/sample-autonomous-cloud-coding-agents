@@ -141,7 +141,7 @@ function createAttachmentRecord(params: CreateAttachmentRecordParams): Attachmen
   // - checksum_sha256 required when screening.status === 'passed'
   // - size_bytes required when screening.status === 'passed'
   // - categories non-empty when screening.status === 'blocked'
-  // Note: token_estimate is best-effort for images (sharp may fail on unusual formats),
+  // Note: token_estimate is best-effort for images (dimension parsing may fail on unusual formats),
   // so it is NOT enforced here. The budget check uses a conservative fallback when absent.
   if (params.screening.status === 'passed') {
     if (!params.s3_key || !params.s3_version_id || !params.checksum_sha256 || !params.size_bytes) {
@@ -194,7 +194,7 @@ The `<attachment_id>` segment ensures uniqueness even if multiple attachments sh
 | Max total inline data per request | 3 MB decoded | Hard cap on total base64-decoded bytes in a single request. Even with base64 overhead (~4 MB encoded) plus JSON fields, this stays under the 6 MB Lambda payload limit. |
 | Max total size per task | 50 MB | Prevents abuse; bounds total screening and transfer time |
 | Max task_description length | 10,000 chars | Increased from 2,000. **This is a standalone API change that affects all tasks** (not just attachment tasks). Rationale: (a) attachments need rich explanatory context ("implement this design per the attached mockup, paying attention to the header layout"), (b) multiple users have reported the 2K limit as a friction point for complex task descriptions even without attachments, (c) the guardrail screening cost increase is minimal (text screening is cheap), (d) DynamoDB item size impact is negligible (~8 KB vs ~2 KB for the description field). **Requires updating [API_CONTRACT.md](./API_CONTRACT.md) line 82 in tandem.** |
-| Allowed image MIME types | `image/png`, `image/jpeg`, `image/gif`, `image/webp` | Bedrock vision-supported formats |
+| Allowed image MIME types | `image/png`, `image/jpeg` | Bedrock-supported formats; GIF/WebP removed to eliminate native image processing dependency |
 | Allowed file MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | Useful for code/data context; no executables |
 | Max URL fetch size | 10 MB | Same per-attachment limit for fetched content |
 | URL fetch timeout | 10 seconds | Prevent SSRF-style long-poll attacks |
@@ -244,7 +244,6 @@ sequenceDiagram
             H-->>C: 400 ATTACHMENT_BLOCKED { attachment_id, reason }
         end
     end
-    H->>H: Strip EXIF from images, re-upload cleaned version
     H->>DB: Update TaskRecord (status: SUBMITTED, screening: passed) with condition: status = PENDING_UPLOADS
     H->>H: Async-invoke Orchestrator
     H-->>C: 200 OK { task_id, status: SUBMITTED }
@@ -328,8 +327,7 @@ sequenceDiagram
             H->>H: Cleanup already-uploaded S3 objects
             H-->>C: 400 ATTACHMENT_BLOCKED
         end
-        H->>H: Strip EXIF (images) / sanitize; on sharp failure → ATTACHMENT_INVALID_CONTENT
-        H->>S3: PutObject (cleaned content)
+        H->>S3: PutObject (screened content)
         H->>H: Build AttachmentRecord
     end
     H->>DB: Write TaskRecord (status: SUBMITTED, with attachment metadata)
@@ -364,7 +362,6 @@ sequenceDiagram
     O->>SCR: Screen fetched content (with retry)
     SCR-->>O: Pass / Blocked
     alt Screening passed
-        O->>O: Strip EXIF (images) / sanitize; on sharp failure → fail task
         O->>S3: PutObject
         O->>O: Update AttachmentRecord
     else Screening blocked or fetch failed
@@ -420,76 +417,27 @@ This prevents a single transient Bedrock hiccup from failing an entire task afte
 
 ```mermaid
 flowchart TD
-    I[Image attachment] --> MB[Magic bytes: verify image signature]
+    I[Image attachment] --> FMT{PNG or JPEG?}
+    FMT -->|No: GIF/WebP| RJ[REJECTED: unsupported format]
+    FMT -->|Yes| MB[Magic bytes: verify image signature]
     MB -->|Invalid| R[REJECTED: not a valid image]
-    MB -->|Valid| V[Validate: decodable, dimensions ≤ 8192x8192]
-    V --> G[Bedrock Guardrail: ApplyGuardrail with image content block, retries]
+    MB -->|Valid| D[Dimension check: parse PNG IHDR / JPEG SOF]
+    D -->|> 8000px| OV[REJECTED: oversized]
+    D -->|OK| G[Bedrock Guardrail: ApplyGuardrail with image content block, retries]
     G -->|INTERVENED| B[BLOCKED: content policy violation]
-    G -->|NONE| M[EXIF strip + re-encode via sharp]
-    M -->|sharp error| SE[REJECTED: ATTACHMENT_INVALID_CONTENT]
-    M -->|Success| P[PASSED]
+    G -->|NONE| P[PASSED: original bytes stored as-is]
     G -->|Error after retries| F[FAIL CLOSED: 503]
 ```
 
-**Magic bytes validation:** Verify the first bytes against known image signatures before any further processing. A file claiming to be `image/png` must start with `\x89PNG\r\n\x1a\n`. This prevents polyglot files (e.g., an image header followed by executable code) from reaching the image processing pipeline.
+**Supported formats:** Only `image/png` and `image/jpeg` are accepted. GIF and WebP are rejected at the validation layer. This eliminates the need for a native image processing library (sharp/libvips) — raw image bytes are passed directly to Bedrock for screening.
 
-**Bedrock image screening:** The `ApplyGuardrailCommand` supports `image` content blocks. **Prerequisite:** Verify that the installed version of `@aws-sdk/client-bedrock-runtime` in `cdk/package.json` supports image content blocks in `ApplyGuardrail`. If it does not, a dependency upgrade is required before Phase 1.
+**Magic bytes validation:** Verify the first bytes against known image signatures before any further processing. A file claiming to be `image/png` must start with `\x89PNG\r\n\x1a\n`. This prevents polyglot files (e.g., an image header followed by executable code) from reaching the screening pipeline.
 
-**Format limitation:** The Bedrock `GuardrailImageBlock` API **only supports `png` and `jpeg` formats**. GIF and WebP images must be converted to PNG via `sharp` before screening. This conversion happens before the `ApplyGuardrailCommand` call (not after — the screened content must be the same content that reaches the agent):
+**Dimension checks:** Image dimensions are read from PNG IHDR chunks and JPEG SOF markers using pure buffer parsing (no native dependencies). Images exceeding 8000px on either side are rejected before the Bedrock call.
 
-```typescript
-// Convert GIF/WebP to PNG before screening (Bedrock only accepts png | jpeg)
-let screeningBuffer: Buffer;
-let screeningFormat: 'png' | 'jpeg';
+**Bedrock image screening:** The `ApplyGuardrailCommand` supports `image` content blocks with `png` and `jpeg` formats. Raw image bytes are passed directly — no re-encoding or format conversion needed.
 
-if (contentType === 'image/jpeg') {
-  screeningBuffer = imageBuffer;
-  screeningFormat = 'jpeg';
-} else if (['image/gif', 'image/webp'].includes(contentType)) {
-  // GIF/WebP → PNG. For animated GIFs, extract first frame only (prevents OOM).
-  screeningBuffer = await sharp(imageBuffer, { animated: false }).png().toBuffer();
-  screeningFormat = 'png';
-
-  // Post-conversion size check: PNG expansion of compressed GIF/WebP can exceed 10 MB.
-  // Fail with a clear error rather than letting a downstream size check reject it opaquely.
-  if (screeningBuffer.length > MAX_ATTACHMENT_SIZE_BYTES) {
-    throw new AttachmentResolutionError(
-      `Image "${filename}" is ${contentType} and its PNG conversion for screening ` +
-      `exceeds the ${MAX_ATTACHMENT_SIZE_BYTES / (1024 * 1024)} MB limit ` +
-      `(${(screeningBuffer.length / (1024 * 1024)).toFixed(1)} MB after conversion). ` +
-      `Please convert to JPEG or reduce image dimensions before uploading.`
-    );
-  }
-} else {
-  // PNG: use as-is
-  screeningBuffer = imageBuffer;
-  screeningFormat = 'png';
-}
-
-const result = await retryWithBackoff(() =>
-  bedrockClient.send(new ApplyGuardrailCommand({
-    guardrailIdentifier: GUARDRAIL_ID,
-    guardrailVersion: GUARDRAIL_VERSION,
-    source: 'INPUT',
-    content: [{
-      image: {
-        format: screeningFormat,
-        source: { bytes: screeningBuffer },
-      },
-    }],
-  })),
-  { maxRetries: 3, baseDelayMs: 200, retryableErrors: [429, 500, 502, 503] },
-);
-```
-
-The GIF/WebP → PNG conversion uses `{ animated: false }` to extract only the first frame from animated GIFs, preventing unbounded memory usage. The post-conversion size check catches cases where a highly-compressed GIF/WebP expands beyond 10 MB as PNG — the user gets a clear error with remediation (convert to JPEG or reduce dimensions). The conversion error path (`ATTACHMENT_INVALID_CONTENT`) is shared with the EXIF stripping pipeline.
-
-**EXIF stripping + re-encoding:** After screening passes, the image is processed through `sharp`:
-1. Strip all EXIF/IPTC/XMP metadata (GPS coordinates, device info, timestamps — prevents PII leakage).
-2. Re-encode the image in the same format. This strips any non-image data that may have been appended to the file (steganography payloads, polyglot trailing data).
-3. The re-encoded image is what gets stored in S3 and delivered to the agent.
-
-**sharp failure handling:** If `sharp` cannot process an image (corrupt image that passes magic bytes check, OOM on large image, library bug), the attachment is **rejected** with `ATTACHMENT_INVALID_CONTENT` and message: "Image could not be processed for security sanitization. Please re-export the image in a standard format and try again." This preserves the security guarantee — no un-sanitized images reach the agent. Fail-closed, not fail-open.
+**No EXIF stripping:** Images are stored as-is after screening passes. EXIF metadata (GPS, camera info) is not stripped since attachments are uploaded by the task submitter for their own agent. This trade-off eliminates the native `sharp`/`libvips` dependency, which caused cross-platform build issues and Lambda ARM64 decode failures.
 
 ### File screening
 
@@ -515,8 +463,6 @@ flowchart TD
 | `text/*` | Valid UTF-8, no null bytes in first 8 KB |
 | `image/png` | `\x89PNG\r\n\x1a\n` |
 | `image/jpeg` | `\xFF\xD8\xFF` |
-| `image/gif` | `GIF87a` or `GIF89a` |
-| `image/webp` | `RIFF....WEBP` |
 
 A file claiming to be `text/plain` but starting with `MZ` (PE executable) or `PK` (ZIP) is rejected immediately.
 
@@ -672,7 +618,7 @@ const resolvedAttachments = await resolveAttachments(
 `resolveAttachments()` handles:
 
 1. **Inline/presigned attachments (already screened, already in S3):** Validate S3 key exists, compute `s3_uri` for the agent.
-2. **URL attachments (not yet fetched):** Fetch (with SSRF protections), screen (with retry), sanitize (EXIF strip / re-encode), upload to S3, compute `s3_uri`. On any failure, throw `AttachmentResolutionError` which fails the task.
+2. **URL attachments (not yet fetched):** Fetch (with SSRF protections), screen (with retry), upload to S3, compute `s3_uri`. On any failure, throw `AttachmentResolutionError` which fails the task.
 3. **Token budget accounting:** Estimate token cost of image attachments and deduct from the available prompt budget (see [Token budget](#token-budget-accounting)).
 
 ### Payload changes
@@ -782,7 +728,7 @@ async function resolveAttachments(attachments, ...) {
 
   for (const att of attachments) {
     if (att.type === 'image') {
-      // getImageDimensions uses sharp.metadata() on the S3 content.
+      // getImageDimensions parses PNG IHDR / JPEG SOF markers from the buffer.
       // If dimensions cannot be determined (corrupt image, unsupported format variant),
       // throw AttachmentResolutionError — never default to (0,0) or skip the estimate.
       let width: number, height: number;
@@ -1027,7 +973,7 @@ When a user mentions `@Shoof` in a message that contains file uploads or image a
 |---|---|
 | File too large | "Task not created. `{filename}` is too large ({size} MB, max 10 MB). Please reduce the file size or remove it and try again." |
 | Screening blocked | "Task not created. `{filename}` was blocked by content screening ({categories}). Please remove this file and try again." |
-| Unsupported MIME type | "Task not created. `{filename}` has unsupported type `{mime}`. Supported: images (png, jpeg, gif, webp) and text files (txt, csv, json, md, pdf, log)." |
+| Unsupported MIME type | "Task not created. `{filename}` has unsupported type `{mime}`. Supported: images (png, jpeg) and text files (txt, csv, json, md, pdf, log)." |
 | S3 upload failure | "Task not created. Failed to process `{filename}`. Please try again." |
 | Multiple failures | "Task not created. 2 attachment errors: `{file1}` (blocked by content screening), `{file2}` (too large, 15 MB > 10 MB limit). Fix or remove these files and try again." |
 
@@ -1399,12 +1345,11 @@ New construct at `cdk/src/constructs/attachments-bucket.ts`. Follows `TraceArtif
 ### New: `ConfirmUploadsFunction`
 
 A separate Lambda for the `confirm-uploads` endpoint, with:
-- **Memory:** 2048 MB (must hold up to 10 MB raw image + decompressed pixel buffer for `sharp` re-encoding; `sharp` decompresses a 4096x4096 RGBA image to ~64 MB in memory)
-- **Timeout:** 180 seconds (3 minutes). Attachments are screened in **parallel with bounded concurrency of 3**. Worst-case: 4 batches of ~45s each (S3 read + Bedrock screen with retries + sharp re-encode + S3 write). The 180s budget accommodates Bedrock retry delays.
+- **Memory:** 1024 MB (holds up to 10 MB raw image bytes in memory for Bedrock screening; no native image processing)
+- **Timeout:** 180 seconds (3 minutes). Attachments are screened in **parallel with bounded concurrency of 3**. Worst-case: 4 batches of ~45s each (S3 read + Bedrock screen with retries + S3 write). The 180s budget accommodates Bedrock retry delays.
 - **Internal deadline timer:** The handler sets a deadline at `Lambda timeout - 15 seconds` (165s). If the screening loop has not completed by this deadline, remaining unscreened attachments are aborted and the handler returns a 503 with `Retry-After: 30` header and body: "Attachment screening did not complete within the time limit. Reduce the number or size of attachments and try again, or retry after 30 seconds (already-screened attachments will be skipped on retry)." The `Retry-After` header enables clients to implement automatic backoff. On retry, the per-attachment screening state (above) ensures only unscreened attachments are re-processed, so retries make forward progress. This prevents opaque Lambda timeout errors.
-- **Per-attachment screening state with atomic DynamoDB + S3 ordering:** Each attachment's screening pipeline follows a strict order: (1) screen content, (2) sanitize/re-encode via sharp, (3) PutObject to S3 (the cleaned version), (4) update the attachment's `screening` status to `passed` in DynamoDB (with `s3_version_id` from the PutObject response). The DynamoDB write is the **commit point** — if any prior step fails, the attachment remains in `pending` status. On retry (after a timeout or Lambda restart), the handler skips attachments with `screening.status === 'passed'` (already committed to both S3 and DynamoDB). Attachments still in `pending` are re-processed from step 1 — this is safe because S3 PutObject is idempotent and the version ID from the new put supersedes any orphaned partial upload. This ordering ensures no attachment is marked as `passed` in DynamoDB without the corresponding cleaned content being in S3.
-- **Bundled dependencies:** `sharp` (for EXIF stripping + re-encoding), `pdf-parse` (for PDF text extraction)
-- **Cold-start validation:** On module initialization, the handler verifies `sharp` loads correctly (e.g., `sharp(Buffer.alloc(1)).metadata()` wrapped in try-catch). If the native module fails to load (architecture mismatch, missing binary), the handler short-circuits all requests with 503: "Attachment processing is temporarily unavailable. Please try again later." This prevents opaque `Runtime.ImportModuleError` failures from reaching users.
+- **Per-attachment screening state with atomic DynamoDB + S3 ordering:** Each attachment's screening pipeline follows a strict order: (1) screen content via Bedrock Guardrail, (2) PutObject to S3, (3) update the attachment's `screening` status to `passed` in DynamoDB (with `s3_version_id` from the PutObject response). The DynamoDB write is the **commit point** — if any prior step fails, the attachment remains in `pending` status. On retry (after a timeout or Lambda restart), the handler skips attachments with `screening.status === 'passed'` (already committed to both S3 and DynamoDB). Attachments still in `pending` are re-processed from step 1 — this is safe because S3 PutObject is idempotent and the version ID from the new put supersedes any orphaned partial upload.
+- **Bundled dependencies:** `pdf-parse` (for PDF text extraction)
 
 Separating this from the create-task Lambda keeps the common path (task creation without attachments) lean and fast.
 
@@ -1523,7 +1468,7 @@ New error codes for attachment-related failures:
 | `ATTACHMENTS_INLINE_TOTAL_TOO_LARGE` | 400 | Total inline attachment size exceeds 3 MB limit |
 | `ATTACHMENTS_TOTAL_TOO_LARGE` | 400 | Total attachment size exceeds 50 MB limit |
 | `ATTACHMENT_INVALID_TYPE` | 400 | MIME type not in allowlist |
-| `ATTACHMENT_INVALID_CONTENT` | 400 | Content does not match declared MIME type (magic bytes mismatch) or could not be sanitized (sharp failure) |
+| `ATTACHMENT_INVALID_CONTENT` | 400 | Content does not match declared MIME type (magic bytes mismatch) or image dimensions exceed limits |
 | `ATTACHMENT_INVALID_FILENAME` | 400 | Filename contains invalid characters or path traversal |
 | `ATTACHMENT_SIZE_MISMATCH` | 400 | Uploaded file size does not match declared `expected_size_bytes` (> 10% deviation) |
 | `ATTACHMENT_FETCH_FAILED` | 422 | URL attachment could not be fetched (timeout, DNS, SSRF blocked) |
@@ -1555,7 +1500,6 @@ New error codes for attachment-related failures:
 | `OrphanedAttachmentNoTask` | — | Objects uploaded before task was persisted to DynamoDB (pre-write failures); no task record to correlate |
 | `PendingUploadExpired` | — | Tasks that expired in PENDING_UPLOADS (never confirmed) |
 | `ConfirmUploadsRace` | — | Concurrent confirm-uploads detected (condition check failed) |
-| `SharpColdStartFailure` | — | `sharp` native module failed to load on Lambda cold start |
 | `ScreeningDeadlineExceeded` | — | Confirm-uploads hit internal deadline timer before all attachments screened |
 
 ### Task events
@@ -1578,14 +1522,14 @@ New event types in `TaskEventsTable`:
 
 | Threat | Vector | Mitigation |
 |---|---|---|
-| Malicious image (steganography, exploit payload) | Inline upload or URL | Magic bytes validation; Bedrock image screening; EXIF stripping; image re-encoding through `sharp` strips embedded payloads; sharp failure → reject |
+| Malicious image (steganography, exploit payload) | Inline upload or URL | Magic bytes validation; dimension checks; Bedrock Guardrail image screening (detects harmful visual content); only PNG/JPEG accepted (no executable formats) |
 | Prompt injection via file content | Text file containing adversarial instructions | Magic bytes validation; Bedrock Guardrail text screening with retry (same as task descriptions); content trust tagging as `untrusted-external` |
 | SSRF via URL attachment | URL pointing to internal network | HTTPS-only; DNS resolution with manual connect to resolved IP (prevents rebinding TOCTOU); redirect validation; private IP blocking; applied at fetch time; content-type allowlist + magic bytes validation after fetch (prevents attacker-controlled Content-Type header from bypassing type restrictions) |
 | Data exfiltration via URL attachment | URL pointing to attacker-controlled server (leaks request headers/IP) | No auth headers sent to non-GitHub URLs; minimal request headers; no cookies |
 | Denial of service via large attachments | Many large base64 payloads | 500 KB inline limit; 3 MB total inline; 10 MB per-attachment; 50 MB total; 10 count limit; 6 MB Lambda payload limit |
 | Path traversal via filename | `filename: "../../etc/passwd"` | Filename sanitization regex; reject path separators, dots-prefix, null bytes; use `attachment_id` as primary path component |
 | Zip bomb / decompression bomb | Compressed content that expands massively | No archive types in MIME allowlist; PDF text extraction capped at 50 pages and 1 MB output |
-| Polyglot files | File with valid image header + appended executable | Magic bytes validation at upload; image re-encoding strips trailing data |
+| Polyglot files | File with valid image header + appended executable | Magic bytes validation at upload; only PNG/JPEG image types accepted; Bedrock screens the actual image content |
 | Presigned URL abuse | Leaked presigned POST policy used to upload different content | Content-Type fixed in presigned POST policy; `content-length-range` enforced by S3 (rejects > 10 MB before writing); 10-minute expiry; screening runs after upload regardless; size verified via HeadObject (defense-in-depth) |
 | S3 object replacement (TOCTOU) | Client uploads benign content (passes screening), then replaces object with malicious content before agent downloads | S3 versioning enabled; `VersionId` pinned at screening time and stored in `AttachmentRecord`; agent downloads with pinned `VersionId`; `noncurrentVersionExpiration: 7 days` prevents storage bloat while allowing long-running tasks to complete |
 | Upload slot exhaustion | Create many tasks in PENDING_UPLOADS, never confirm | 30-minute EventBridge auto-cancel with S3 cleanup; PENDING_UPLOADS does not count against concurrency; rate limiting on task creation already exists |
@@ -1613,7 +1557,7 @@ This is correct even for inline uploads from authenticated users. The content of
 | S3 PUT/GET | ~$0.00001 | 10 PUTs + 10 GETs |
 | Bedrock Guardrail (image) | ~$0.01-0.05 per image | Depends on image size and guardrail config |
 | Bedrock Guardrail (text) | ~$0.001-0.01 per file | Same as existing text screening |
-| Lambda compute (confirm-uploads) | ~$0.01-0.05 | 30-180s at 2048 MB for screening + re-encoding |
+| Lambda compute (confirm-uploads) | ~$0.005-0.03 | 30-180s at 1024 MB for screening (no image re-encoding) |
 | Lambda compute (create-task, inline) | ~$0.001 | Additional 1-3s at 256 MB for small inline attachments |
 | Lambda compute (auto-cancel rule) | ~$0.0001 | 5-minute schedule, mostly no-op |
 | Data transfer (URL fetch) | ~$0.001 | Outbound fetch within region is free; cross-region is negligible |
@@ -1640,8 +1584,8 @@ The implementation is ordered to deliver value incrementally while maintaining s
 11. Add attachment validation to `validation.ts` (sync: schema, limits, magic bytes, content_type detection, filename generation; async: SSRF DNS pre-check with differentiated error messages)
 12. Increase `MAX_TASK_DESCRIPTION_LENGTH` to 10,000 (standalone API change — update API_CONTRACT.md)
 13. Add Bedrock screening retry logic (3 retries, exponential backoff)
-14. Add GIF/WebP → PNG conversion before Bedrock screening (Bedrock only supports png|jpeg), with post-conversion size check
-15. Add inline upload path to `create-task-core.ts` (base64 → magic bytes → screen with retry → EXIF strip/re-encode → S3 with versioning; sharp failure → ATTACHMENT_INVALID_CONTENT)
+14. ~~Add GIF/WebP → PNG conversion~~ — Removed: only PNG/JPEG accepted (no native image dependency)
+15. Add inline upload path to `create-task-core.ts` (base64 → magic bytes → dimension check → screen with retry → S3 with versioning)
 16. Add SHA-256 checksum computation at upload time (stored in AttachmentRecord, required by factory)
 17. Add partial failure cleanup with proper `DeleteObjects` error handling and metrics
 18. Add `attachments` field to `TaskRecord`
@@ -1650,13 +1594,13 @@ The implementation is ordered to deliver value incrementally while maintaining s
 21. Increase create-task Lambda memory to 256 MB (from CDK default 128 MB), timeout to 15s (from CDK default 3s)
 22. Update `API_CONTRACT.md` (inline limit, task_description limit, note Bedrock format constraints)
 
-**Security included in Phase 1:** magic bytes validation, EXIF stripping, image re-encoding, GIF/WebP conversion (with post-conversion size check), sharp fail-closed, filename sanitization, partial failure cleanup, Bedrock retry, S3 versioning (TOCTOU prevention), SHA-256 integrity.
+**Security included in Phase 1:** magic bytes validation, dimension checks, filename sanitization, partial failure cleanup, Bedrock retry, S3 versioning (TOCTOU prevention), SHA-256 integrity.
 
 ### Phase 2: Presigned upload + state machine (large attachments)
 
 23. Add `PENDING_UPLOADS` to `task-status.ts` (status, transitions, `PRE_ACTIVE_STATUSES` classification)
 24. Update all code paths that assume binary status classification (active vs terminal) — see [Impact on existing code](#impact-on-existing-code-that-assumes-binary-status-classification)
-25. Add `confirm-uploads` Lambda (2048 MB, 180s timeout) with parallel screening (concurrency 3), internal deadline timer, per-attachment screening state, and sharp cold-start validation
+25. Add `confirm-uploads` Lambda (1024 MB, 180s timeout) with parallel screening (concurrency 3), internal deadline timer, per-attachment screening state
 26. Add `POST /v1/tasks/{task_id}/confirm-uploads` API endpoint with concurrent-call safety (early short-circuit, conditional DynamoDB write for both success and failure paths)
 27. Move concurrency increment from create-task to confirm-uploads for presigned-upload tasks
 28. Add presigned POST policy generation in create-task handler (with `content-length-range` enforcement, `expected_size_bytes` validation, S3 versioning)
@@ -1692,5 +1636,5 @@ The implementation is ordered to deliver value incrementally while maintaining s
 47. Add alerting on `OrphanedAttachmentCleanupFailure` and `PendingUploadExpired`
 48. Add comprehensive integration tests (all upload paths, all failure modes, all channels, concurrent confirm-uploads, auto-cancel racing with confirm-uploads)
 49. Add load testing for screening pipeline (sustained 10-attachment tasks at peak rate)
-50. Add monitoring for `sharp` native module health (cold-start validation failures)
-51. Add monitoring for format conversion size expansion (GIF/WebP → PNG rejection rate)
+50. ~~Add monitoring for sharp native module health~~ — Removed: no native image dependencies
+51. ~~Add monitoring for format conversion size expansion~~ — Removed: no format conversion

@@ -46,7 +46,7 @@ Input screening happens at two points in the pipeline, forming a defense-in-dept
 
 - **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 10,000 characters.
 - **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `MEDIUM` input strength screens task descriptions for prompt injection.
-- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images are validated via magic bytes, screened through Bedrock Guardrails (image content blocks), stripped of EXIF/metadata, and re-encoded. Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](./ATTACHMENTS.md) for the full screening pipeline.
+- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](./ATTACHMENTS.md) for the full screening pipeline.
 - **Fail-closed** - If the Bedrock API is unavailable, submissions are rejected (HTTP 503). Unscreened content never reaches the agent.
 
 ### Hydration-time screening

@@ -101,7 +101,7 @@ Attachments let you provide non-text context to the agent — screenshots of bug
 
 | Category | Types | Extensions |
 |---|---|---|
-| Images | PNG, JPEG, GIF, WebP | `.png`, `.jpg`, `.gif`, `.webp` |
+| Images | PNG, JPEG | `.png`, `.jpg` |
 | Text files | Plain text, CSV, Markdown, JSON, PDF, Log | `.txt`, `.csv`, `.md`, `.json`, `.pdf`, `.log` |
 
 **Limits:**
@@ -140,7 +140,7 @@ The CLI automatically routes attachments through the optimal upload path:
 
 All attachments are screened before reaching the agent:
 
-- **Images**: Magic bytes validation, Bedrock Guardrail content screening (prompt attack detection), EXIF/metadata stripping, re-encoding to remove embedded payloads.
+- **Images**: Magic bytes validation, dimension checks (max 8000px per side), Bedrock Guardrail content screening (prompt attack detection). Only PNG and JPEG are accepted.
 - **Text files**: Magic bytes validation, Bedrock Guardrail text content screening. PDFs have text extracted (max 50 pages) before screening.
 - **URLs**: HTTPS-only enforcement, DNS resolution pinning (prevents DNS rebinding/SSRF), private IP blocking, redirect validation, size and timeout limits.
 

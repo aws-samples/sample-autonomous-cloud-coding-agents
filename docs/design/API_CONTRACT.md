@@ -102,7 +102,7 @@ Creates a new task. The orchestrator runs admission control, context hydration, 
 
 | Category | MIME types | Extensions |
 |---|---|---|
-| Images | `image/png`, `image/jpeg`, `image/gif`, `image/webp` | `.png`, `.jpg`, `.gif`, `.webp` |
+| Images | `image/png`, `image/jpeg` | `.png`, `.jpg` |
 | Text files | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | `.txt`, `.csv`, `.md`, `.json`, `.pdf`, `.log` |
 
 **Attachment limits:**

@@ -33,7 +33,6 @@
     "cdk-nag": "^2.37.55",
     "constructs": "^10.3.0",
     "pdf-parse": "^1.1.1",
-    "sharp": "^0.33.5",
     "js-yaml": "^4.1.1",
     "ulid": "^3.0.2"
   },
@@ -64,6 +63,7 @@
   "resolutions": {
     "eslint-plugin-import/minimatch": "^3.1.2"
   },
+  "optionalDependencies": {},
   "engines": {
     "node": ">= 20.x <= 24.x"
   },

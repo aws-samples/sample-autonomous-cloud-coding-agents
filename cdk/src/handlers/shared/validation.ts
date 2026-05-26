@@ -269,12 +269,10 @@ type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TY
 const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true; // eslint-disable-line @typescript-eslint/no-unused-vars
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
-/** Allowed image MIME types (Bedrock vision-supported formats). */
+/** Allowed image MIME types (PNG and JPEG only — passed directly to Bedrock). */
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
-  'image/gif',
-  'image/webp',
 ]);
 
 /** Allowed file MIME types. */
@@ -294,25 +292,14 @@ const ALLOWED_FILE_MIME_TYPES = new Set([
 const MAGIC_BYTES: ReadonlyArray<{ readonly mime: string; readonly bytes: readonly number[]; readonly offset?: number }> = [
   { mime: 'image/png', bytes: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
   { mime: 'image/jpeg', bytes: [0xFF, 0xD8, 0xFF] },
-  { mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] }, // GIF8 (covers GIF87a and GIF89a)
   { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2D] }, // %PDF-
 ];
-
-// RIFF....WEBP requires checking bytes 0-3 (RIFF) and 8-11 (WEBP)
-function isWebP(data: Buffer): boolean {
-  if (data.length < 12) return false;
-  return data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46
-    && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50;
-}
 
 /**
  * Validate content against declared MIME type using magic bytes.
  * For text types, checks for valid UTF-8 and no null bytes.
  */
 export function validateMagicBytes(data: Buffer, contentType: string): boolean {
-  // WebP has a split signature
-  if (contentType === 'image/webp') return isWebP(data);
-
   // Check against known binary signatures
   const sig = MAGIC_BYTES.find(s => s.mime === contentType);
   if (sig) {
@@ -338,7 +325,6 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
  * Detect MIME type from magic bytes (for inline attachments without content_type).
  */
 export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
-  if (isWebP(data)) return 'image/webp';
   for (const sig of MAGIC_BYTES) {
     if (data.length >= sig.bytes.length) {
       const offset = sig.offset ?? 0;
@@ -401,8 +387,6 @@ function generateFilename(type: string, contentType: string, index: number): str
 const MIME_TO_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
   'text/plain': 'txt',
   'text/csv': 'csv',
   'text/markdown': 'md',
@@ -498,8 +482,12 @@ export function validateAttachments(
         return { valid: false, error: `attachments[${i}]: detected content_type '${detected}' not allowed for type '${attType}'` };
       }
       resolvedContentType = detected;
+    } else if (attType === 'url') {
+      // URL attachments: content_type is determined at fetch time during hydration.
+      // Use a placeholder — resolve-url-attachments.ts validates after download.
+      resolvedContentType = 'application/octet-stream';
     } else {
-      return { valid: false, error: `attachments[${i}]: content_type is required for presigned uploads and URL attachments` };
+      return { valid: false, error: `attachments[${i}]: content_type is required for presigned uploads` };
     }
 
     // Magic bytes check against declared content_type (for inline data with declared type)

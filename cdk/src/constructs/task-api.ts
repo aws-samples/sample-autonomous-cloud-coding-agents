@@ -437,11 +437,10 @@ export class TaskApi extends Construct {
       ],
     };
 
-    // sharp ships native bindings; copy from node_modules (Docker bundling)
-    // instead of esbuild-inlining. Used by create-task / confirm-uploads paths.
+    // pdf-parse is used for PDF attachment screening (text extraction).
     const attachmentScreeningBundling: lambda.BundlingOptions = {
       ...commonBundling,
-      nodeModules: ['sharp'],
+      nodeModules: ['pdf-parse'],
     };
 
     // --- Lambda handlers ---
@@ -467,9 +466,7 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
       bundling: attachmentScreeningBundling,
-      // Inline attachment screening (sharp) needs headroom; 256 MB caused
-      // cold-start init failures → API Gateway 502 on POST /tasks.
-      memorySize: 1024,
+      memorySize: 512,
       timeout: Duration.seconds(15),
     });
 
@@ -610,7 +607,7 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: confirmUploadsEnv,
         bundling: attachmentScreeningBundling,
-        memorySize: 2048,
+        memorySize: 1024,
         timeout: Duration.seconds(180),
       });
 

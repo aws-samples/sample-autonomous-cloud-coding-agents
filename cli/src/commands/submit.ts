@@ -313,29 +313,51 @@ function resolveAttachmentArg(arg: string): Attachment {
  * Policy fields from the API must precede the file; use FormData so Node sets
  * the boundary and Content-Length correctly for multi-megabyte payloads.
  */
+/** Upload timeout: 2 minutes for large files. */
+const UPLOAD_TIMEOUT_MS = 120_000;
+
 async function uploadViaPresignedPost(
   filePath: string,
   instruction: AttachmentUploadInstruction,
 ): Promise<void> {
   const fileData = fs.readFileSync(filePath);
-  const ext = path.extname(filePath).toLowerCase();
-  const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
 
   const form = new FormData();
   for (const [key, value] of Object.entries(instruction.upload_fields)) {
     form.append(key, value);
   }
-  // File must be last. Object Content-Type comes from the policy field above,
-  // not the multipart part headers (per S3 POST Object).
-  form.append('file', new Blob([fileData], { type: contentType }), path.basename(filePath));
+  // File must be last. S3 POST Object uses Content-Type from the policy field,
+  // not the multipart part — do not set a part Content-Type (breaks some clients).
+  form.append('file', new Blob([fileData]), path.basename(filePath));
 
-  const res = await fetch(instruction.upload_url, {
-    method: 'POST',
-    body: form,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
+  let res: Response;
+  try {
+    res = await fetch(instruction.upload_url, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new CliError(
+        `Upload timed out for ${instruction.filename} after ${UPLOAD_TIMEOUT_MS / 1000}s. ` +
+        'Check your network connection and try again.',
+      );
+    }
+    throw new CliError(
+      `Upload failed for ${instruction.filename}: ${err.message ?? String(err)}`,
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  // S3 POST Object returns 204 on success. Some error conditions return 200
+  // with an XML error body (e.g., KMS failures). Check for XML error pattern.
+  const text = await res.text().catch(() => '');
+  if (!res.ok || (res.status === 200 && text.includes('<Error>'))) {
     throw new CliError(
       `Presigned upload failed for ${instruction.filename}: HTTP ${res.status}${text ? ` — ${text.slice(0, 200)}` : ''}`,
     );

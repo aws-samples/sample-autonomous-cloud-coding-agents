@@ -638,8 +638,11 @@ describe('isAllowedMimeType', () => {
   test('allows valid image types', () => {
     expect(isAllowedMimeType('image/png', 'image')).toBe(true);
     expect(isAllowedMimeType('image/jpeg', 'image')).toBe(true);
-    expect(isAllowedMimeType('image/gif', 'image')).toBe(true);
-    expect(isAllowedMimeType('image/webp', 'image')).toBe(true);
+  });
+
+  test('rejects GIF and WebP image types', () => {
+    expect(isAllowedMimeType('image/gif', 'image')).toBe(false);
+    expect(isAllowedMimeType('image/webp', 'image')).toBe(false);
   });
 
   test('allows valid file types', () => {
