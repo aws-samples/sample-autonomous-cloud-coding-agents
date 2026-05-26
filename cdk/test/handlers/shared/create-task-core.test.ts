@@ -376,7 +376,7 @@ describe('createTaskCore', () => {
 
   test('returns 400 when task_description exceeds length limit', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_description: 'a'.repeat(2001) },
+      { repo: 'org/repo', task_description: 'a'.repeat(10_001) },
       makeContext(),
       'req-1',
     );
@@ -386,7 +386,7 @@ describe('createTaskCore', () => {
 
   test('accepts task_description at exactly the length limit', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_description: 'a'.repeat(2000) },
+      { repo: 'org/repo', task_description: 'a'.repeat(10_000) },
       makeContext(),
       'req-1',
     );

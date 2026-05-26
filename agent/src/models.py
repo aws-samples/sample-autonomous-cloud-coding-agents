@@ -61,6 +61,39 @@ ContentTrustLevel = Literal["trusted", "untrusted-external", "memory"]
 # (see cdk/src/handlers/shared/context-hydration.ts).
 SUPPORTED_HYDRATED_CONTEXT_VERSION = 1
 
+# Attachment types — mirrors AttachmentType in cdk/src/handlers/shared/types.ts.
+AttachmentType = Literal["image", "file", "url"]
+
+
+class AttachmentConfig(BaseModel):
+    """Attachment descriptor from the orchestrator — mirrors AgentAttachmentPayload in types.ts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    attachment_id: str
+    type: AttachmentType
+    content_type: str
+    filename: str
+    s3_uri: str
+    s3_version_id: str
+    size_bytes: int
+    source_url: str | None = None
+    token_estimate: int | None = None
+    checksum_sha256: str
+
+    @model_validator(mode="after")
+    def _validate_integrity_fields(self) -> Self:
+        if not self.s3_version_id:
+            raise ValueError("s3_version_id is required for integrity verification")
+        if not self.checksum_sha256:
+            raise ValueError("checksum_sha256 is required for integrity verification")
+        # checksum must be lowercase hex (SHA-256 = 64 hex chars)
+        if len(self.checksum_sha256) != 64 or not all(
+            c in "0123456789abcdef" for c in self.checksum_sha256
+        ):
+            raise ValueError("checksum_sha256 must be a 64-character lowercase hex string")
+        return self
+
 
 class HydratedContext(BaseModel):
     """Orchestrator context JSON — keep in sync with HydratedContext in context-hydration.ts."""
@@ -150,6 +183,9 @@ class TaskConfig(BaseModel):
     approval_gate_cap: int | None = None
     issue: GitHubIssue | None = None
     base_branch: str | None = None
+    # Attachments from the orchestrator payload (Phase 3). Validated as
+    # AttachmentConfig models. Empty list for tasks without attachments.
+    attachments: list[AttachmentConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_trace_requires_user_id(self) -> Self:

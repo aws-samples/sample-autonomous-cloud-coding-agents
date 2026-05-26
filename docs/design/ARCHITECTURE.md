@@ -6,6 +6,8 @@ This document outlines the overall architecture of the platform. Each component 
 
 ## Design principles
 
+For long-term direction and review tenets, see [VISION.md](./VISION.md).
+
 - **Extensibility** - Extend the system without modifying core code. Critical components are accessed through internal interfaces (ComputeStrategy, MemoryStore) so implementations can be swapped.
 - **Flexibility** - This field moves fast. Components should be replaceable as better options emerge.
 - **Reliability** - Long-running agents will fail. The platform must drive every task to a terminal state regardless of what happens to the agent.
@@ -26,7 +28,7 @@ flowchart LR
 ```
 
 1. **Admission** (deterministic) - The orchestrator validates the request, checks concurrency limits, and loads the repository's Blueprint configuration.
-2. **Context hydration** (deterministic) - The platform fetches external data (GitHub issue body, PR diff, review comments), loads memory from past tasks, and assembles the full prompt. For PR tasks, the prompt is screened through Bedrock Guardrails.
+2. **Context hydration** (deterministic) - The platform fetches external data (GitHub issue body, PR diff, review comments), loads memory from past tasks, resolves attachments (URL fetch with SSRF protection, screening, upload to S3), and assembles the full prompt. For PR tasks, the prompt is screened through Bedrock Guardrails.
 3. **Pre-flight checks** (deterministic) - GitHub API reachability and repository access are verified. Doomed tasks fail fast with a clear reason before consuming compute.
 4. **Agent execution** (agentic) - The agent runs in an isolated compute environment: clone repo, create branch, edit code, commit, run tests, create PR. The orchestrator polls for completion without blocking.
 5. **Finalization** (deterministic) - The orchestrator infers the result (PR created or not), writes memory, updates task status, and releases concurrency.

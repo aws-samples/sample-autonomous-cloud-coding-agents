@@ -152,6 +152,42 @@ export class GuardrailScreeningError extends Error {
   }
 }
 
+/**
+ * Base class for all attachment-related errors. A single `instanceof AttachmentError`
+ * check in the hydration catch block covers all current and future attachment error
+ * types, avoiding a growing allowlist.
+ */
+export class AttachmentError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'AttachmentError';
+  }
+}
+
+/** Attachment could not be resolved (fetch failed, screening blocked, S3 missing). */
+export class AttachmentResolutionError extends AttachmentError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'AttachmentResolutionError';
+  }
+}
+
+/** Image attachments exceed the token budget available for text context. */
+export class AttachmentBudgetExceededError extends AttachmentError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'AttachmentBudgetExceededError';
+  }
+}
+
+/** Attachment infrastructure is misconfigured (e.g. missing guardrail env vars). */
+export class AttachmentConfigurationError extends AttachmentError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'AttachmentConfigurationError';
+  }
+}
+
 /** Mapping from policy response keys to assessment detail extraction rules. */
 const POLICY_EXTRACTORS: ReadonlyArray<{
   readonly policyKey: string;
@@ -1157,6 +1193,10 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
   } catch (err) {
     // Guardrail failures must propagate (fail-closed) — unscreened content must not reach the agent
     if (err instanceof GuardrailScreeningError) {
+      throw err;
+    }
+    // Attachment errors must propagate — user explicitly provided attachments; proceeding without them is wrong
+    if (err instanceof AttachmentError) {
       throw err;
     }
     // Programming errors (bugs) should fail the task, not silently degrade context
