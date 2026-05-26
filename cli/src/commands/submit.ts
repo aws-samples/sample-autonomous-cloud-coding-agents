@@ -310,41 +310,28 @@ function resolveAttachmentArg(arg: string): Attachment {
 
 /**
  * Upload a local file to S3 via a presigned POST (multipart/form-data).
- * The presigned fields (policy, signature, etc.) are included as form fields
- * before the file content, as required by S3's POST Object API.
+ * Policy fields from the API must precede the file; use FormData so Node sets
+ * the boundary and Content-Length correctly for multi-megabyte payloads.
  */
 async function uploadViaPresignedPost(
   filePath: string,
   instruction: AttachmentUploadInstruction,
 ): Promise<void> {
   const fileData = fs.readFileSync(filePath);
-  const boundary = `----AttachmentBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
-
-  // Build multipart/form-data body: presigned fields first, then the file.
-  const parts: Buffer[] = [];
-
-  for (const [key, value] of Object.entries(instruction.upload_fields)) {
-    parts.push(Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`,
-    ));
-  }
-
-  // The file field must be last per S3 POST Object requirements.
   const ext = path.extname(filePath).toLowerCase();
   const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${path.basename(filePath)}"\r\n`
-    + `Content-Type: ${contentType}\r\n\r\n`,
-  ));
-  parts.push(fileData);
-  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
 
-  const body = Buffer.concat(parts);
+  const form = new FormData();
+  for (const [key, value] of Object.entries(instruction.upload_fields)) {
+    form.append(key, value);
+  }
+  // File must be last. Object Content-Type comes from the policy field above,
+  // not the multipart part headers (per S3 POST Object).
+  form.append('file', new Blob([fileData], { type: contentType }), path.basename(filePath));
 
   const res = await fetch(instruction.upload_url, {
     method: 'POST',
-    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-    body,
+    body: form,
   });
 
   if (!res.ok) {

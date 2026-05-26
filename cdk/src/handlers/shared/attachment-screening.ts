@@ -35,6 +35,9 @@ export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 /** Bedrock Guardrail image filter max side (docs: 8000x8000). */
 export const MAX_IMAGE_DIMENSION_PX = 8000;
 
+const PNG_FILE_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_FILE_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -125,6 +128,7 @@ export async function screenImage(
   filename: string,
   config: ScreeningConfig,
 ): Promise<ScreenedAttachment> {
+  assertImageUploadBytes(content, contentType, filename);
   await assertImageDecodable(content, contentType, filename);
 
   // Convert GIF/WebP to PNG before screening (Bedrock only accepts png | jpeg)
@@ -339,6 +343,47 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
 const SHARP_INPUT_OPTIONS = { animated: false, failOn: 'none' as const };
 
 /**
+ * Reject empty or obviously corrupt uploads before invoking sharp (common when
+ * a presigned POST body was assembled incorrectly).
+ */
+export function assertImageUploadBytes(
+  content: Buffer,
+  contentType: string,
+  filename: string,
+): void {
+  if (content.length === 0) {
+    throw new AttachmentScreeningError(
+      `Image "${filename}" upload is empty. Ensure the upload completed and try again.`,
+    );
+  }
+
+  if (contentType === 'image/png') {
+    if (
+      content.length < PNG_FILE_SIGNATURE.length
+      || !content.subarray(0, PNG_FILE_SIGNATURE.length).equals(PNG_FILE_SIGNATURE)
+    ) {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" upload is not a valid PNG file. ` +
+        'The upload may be incomplete or corrupted — please try submitting again.',
+      );
+    }
+    return;
+  }
+
+  if (contentType === 'image/jpeg') {
+    if (
+      content.length < JPEG_FILE_SIGNATURE.length
+      || !content.subarray(0, JPEG_FILE_SIGNATURE.length).equals(JPEG_FILE_SIGNATURE)
+    ) {
+      throw new AttachmentScreeningError(
+        `Image "${filename}" upload is not a valid JPEG file. ` +
+        'The upload may be incomplete or corrupted — please try submitting again.',
+      );
+    }
+  }
+}
+
+/**
  * Verify the image decodes and fits Bedrock Guardrail + platform limits.
  */
 async function assertImageDecodable(
@@ -363,20 +408,17 @@ async function assertImageDecodable(
         `${MAX_IMAGE_DIMENSION_PX}px. Please resize the image before uploading.`,
       );
     }
-    if (contentType === 'image/jpeg' && metadata.format && metadata.format !== 'jpeg') {
-      throw new AttachmentScreeningError(
-        `Image "${filename}" is not a valid JPEG despite the declared content type.`,
-      );
-    }
-    if (contentType === 'image/png' && metadata.format && metadata.format !== 'png') {
-      throw new AttachmentScreeningError(
-        `Image "${filename}" is not a valid PNG despite the declared content type.`,
-      );
-    }
   } catch (err) {
     if (err instanceof AttachmentScreeningError) {
       throw err;
     }
+    const detail = err instanceof Error ? err.message : String(err);
+    logger.warn('Image decode failed (sharp)', {
+      filename,
+      content_type: contentType,
+      content_bytes: content.length,
+      error: detail,
+    });
     throw new AttachmentScreeningError(
       `Image "${filename}" could not be decoded. The file may be corrupt or use an unsupported variant. ` +
       'Please re-export as PNG or JPEG.',

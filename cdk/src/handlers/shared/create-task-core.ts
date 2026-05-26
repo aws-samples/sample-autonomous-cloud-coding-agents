@@ -340,12 +340,16 @@ export async function createTaskCore(
   const attachmentRecords: AttachmentRecord[] = [];
   const uploadedS3Keys: string[] = [];
   if (validatedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
-    // Build screening config — fail-closed if guardrail is not configured
+    // Build screening config — fail-closed if guardrail is not configured.
+    // Reject inline AND presigned attachments upfront: presigned attachments will
+    // need screening in confirm-uploads, so rejecting early prevents the user from
+    // wasting time uploading files that can never be screened.
     if (!bedrockClient || !process.env.GUARDRAIL_ID || !process.env.GUARDRAIL_VERSION) {
-      const hasInline = validatedAttachments.some(a => a.delivery === 'inline');
-      if (hasInline) {
-        logger.error('Inline attachment submitted but guardrail is not configured (fail-closed)', {
+      const hasScreenable = validatedAttachments.some(a => a.delivery === 'inline' || a.delivery === 'presigned');
+      if (hasScreenable) {
+        logger.error('Attachment submitted but guardrail is not configured (fail-closed)', {
           request_id: requestId,
+          delivery_types: [...new Set(validatedAttachments.map(a => a.delivery))],
         });
         return errorResponse(503, ErrorCode.ATTACHMENT_SCREENING_UNAVAILABLE,
           'Attachment content screening is not configured. Please contact your administrator.', requestId);

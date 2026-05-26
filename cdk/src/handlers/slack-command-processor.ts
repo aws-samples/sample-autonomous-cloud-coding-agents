@@ -441,6 +441,14 @@ async function extractSlackFileAttachments(
 
       const buffer = Buffer.from(await response.arrayBuffer());
 
+      // Post-download size validation: Slack's declared file.size may differ
+      // from the actual download (e.g., server-side processing, bug, or manipulation).
+      if (buffer.length > SLACK_FILE_MAX_SIZE_BYTES) {
+        const sizeMb = (buffer.length / (1024 * 1024)).toFixed(1);
+        errors.push(`\`${file.name}\` (downloaded size ${sizeMb} MB exceeds 10 MB limit)`);
+        continue;
+      }
+
       attachments.push({
         type: isImage ? 'image' : 'file',
         content_type: mime,

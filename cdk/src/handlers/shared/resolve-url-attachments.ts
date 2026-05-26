@@ -33,7 +33,6 @@
  * Tests: cdk/test/handlers/shared/resolve-url-attachments.test.ts
  */
 
-import { createHash } from 'crypto';
 import { promises as dns } from 'dns';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
@@ -41,6 +40,7 @@ import { AttachmentResolutionError } from './context-hydration';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { createAttachmentRecord, type AttachmentRecord } from './types';
+import { isAllowedMimeType, validateMagicBytes } from './validation';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 
 // ---------------------------------------------------------------------------
@@ -383,6 +383,23 @@ export async function resolveUrlAttachments(
     const isImage = finalContentType.startsWith('image/');
     const resolvedContentType = att.content_type || finalContentType;
 
+    // Validate content-type is in the allowlist (attacker controls the response header)
+    const attachmentType = isImage ? 'image' : 'file';
+    if (!isAllowedMimeType(resolvedContentType, attachmentType)) {
+      throw new AttachmentResolutionError(
+        `URL attachment '${att.filename}' returned unsupported content type '${resolvedContentType}'. ` +
+        'Only supported image and text file types are allowed.',
+      );
+    }
+
+    // Validate magic bytes match declared content type (prevents polyglot/masquerade)
+    if (!validateMagicBytes(content, resolvedContentType)) {
+      throw new AttachmentResolutionError(
+        `URL attachment '${att.filename}' content does not match declared type '${resolvedContentType}'. ` +
+        'The file may be corrupt or masquerading as a different type.',
+      );
+    }
+
     // Screen the fetched content
     let screenResult;
     try {
@@ -417,8 +434,8 @@ export async function resolveUrlAttachments(
       ContentType: resolvedContentType,
     }));
 
-    // Compute checksum
-    const checksum = createHash('sha256').update(screenResult.content).digest('hex');
+    // Use checksum from screening (already computed over the cleaned content)
+    const checksum = screenResult.checksum;
 
     // Estimate token cost for images
     let tokenEstimate: number | undefined;

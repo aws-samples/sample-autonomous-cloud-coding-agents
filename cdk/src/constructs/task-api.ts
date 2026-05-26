@@ -262,37 +262,87 @@ export class TaskApi extends Construct {
       },
       rules: [
         {
-          name: 'AWSManagedRulesCommonRuleSet',
+          // CRS for task paths that accept large bodies (inline base64
+          // attachments up to 3 MB, presigned upload metadata). Excludes
+          // SizeRestrictions_BODY only; all other CRS rules apply. Payload
+          // size is bounded by API GW (10 MB) and validateAttachments().
+          name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
           statement: {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
-              // Inbound webhook payloads from mature SaaS tools (Linear ships
-              // full Issue payloads > 8 KB) trip SizeRestrictions_BODY in this
-              // ruleset. Exempt the Linear webhook path from CRS entirely:
-              // the route is HMAC-verified in the Lambda, parsed as strict
-              // JSON, never interpolated into SQL/HTML, and rate-limited by
-              // the priority-3 rule below.
-              //
-              // Inline task attachments (base64 in POST /v1/tasks, up to 3 MB
-              // total per ATTACHMENTS.md) also exceed the CRS 8 KB body cap and
-              // surface as API Gateway 403 {"message":"Forbidden"} before the
-              // create-task Lambda runs. Drop only SizeRestrictions_BODY here;
-              // other CRS rules still apply. Payload size is bounded by API GW
-              // (10 MB) and validateAttachments() in the handler.
               excludedRules: [{ name: 'SizeRestrictions_BODY' }],
               scopeDownStatement: {
-                notStatement: {
-                  statement: {
-                    byteMatchStatement: {
-                      fieldToMatch: { uriPath: {} },
-                      positionalConstraint: 'EXACTLY',
-                      searchString: '/v1/linear/webhook',
-                      textTransformations: [{ priority: 0, type: 'NONE' }],
+                orStatement: {
+                  statements: [
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'STARTS_WITH',
+                        searchString: '/v1/tasks',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
                     },
-                  },
+                    {
+                      // Linear webhook payloads > 8 KB (HMAC-verified in Lambda,
+                      // rate-limited by priority-4 rule below).
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/linear/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'CommonRuleSetTaskPaths',
+            sampledRequestsEnabled: true,
+          },
+        },
+        {
+          // Full CRS (including SizeRestrictions_BODY) for all other paths.
+          name: 'AWSManagedRulesCommonRuleSet',
+          priority: 2,
+          overrideAction: { none: {} },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: 'AWS',
+              name: 'AWSManagedRulesCommonRuleSet',
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'STARTS_WITH',
+                            searchString: '/v1/tasks',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/linear/webhook',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                  ],
                 },
               },
             },
@@ -305,7 +355,7 @@ export class TaskApi extends Construct {
         },
         {
           name: 'AWSManagedRulesKnownBadInputsRuleSet',
-          priority: 2,
+          priority: 3,
           overrideAction: { none: {} },
           statement: {
             managedRuleGroupStatement: {
@@ -321,7 +371,7 @@ export class TaskApi extends Construct {
         },
         {
           name: 'RateLimitRule',
-          priority: 3,
+          priority: 4,
           action: { block: {} },
           statement: {
             rateBasedStatement: {

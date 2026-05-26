@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import {
+  assertImageUploadBytes,
   AttachmentScreeningError,
   screenImage,
 } from '../../../src/handlers/shared/attachment-screening';
@@ -44,6 +45,13 @@ function mockBedrockPass(): BedrockRuntimeClient {
     }),
   } as unknown as BedrockRuntimeClient;
 }
+
+describe('assertImageUploadBytes', () => {
+  test('rejects non-PNG bytes for image/png', () => {
+    expect(() => assertImageUploadBytes(Buffer.from('not a png'), 'image/png', 'x.png'))
+      .toThrow(AttachmentScreeningError);
+  });
+});
 
 describe('screenImage', () => {
   const config = {

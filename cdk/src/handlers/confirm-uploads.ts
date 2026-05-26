@@ -151,6 +151,16 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
       });
     }
 
+    // 6b. Pre-check concurrency before expensive screening (fail-fast).
+    // The actual atomic increment happens in transitionToSubmitted after screening
+    // passes. This read-only check avoids wasting Bedrock calls when the user is
+    // already at their concurrency limit.
+    const preCheckAdmitted = await preCheckConcurrency(task.user_id);
+    if (!preCheckAdmitted) {
+      return errorResponse(429, ErrorCode.RATE_LIMIT_EXCEEDED,
+        'User concurrency limit reached. Wait for a running task to finish or cancel one, then retry.', requestId);
+    }
+
     // 7. Screen attachments in parallel with bounded concurrency
     const screeningConfig = await buildScreeningConfig();
     if (!screeningConfig) {
@@ -303,6 +313,13 @@ async function screenSingleAttachment(
   }
   const content = Buffer.from(await getResult.Body.transformToByteArray());
 
+  if (content.length !== sizeBytes) {
+    throw new AttachmentScreeningError(
+      `Upload for '${att.filename}' size mismatch (expected ${sizeBytes} bytes, read ${content.length}). ` +
+      'Please re-upload the file and try again.',
+    );
+  }
+
   // Screen based on type
   const isImage = att.type === 'image';
   const screenResult = isImage
@@ -443,6 +460,9 @@ async function transitionToSubmitted(
       }
       return errorResponse(404, ErrorCode.TASK_NOT_FOUND, 'Task not found.', requestId);
     }
+    // Roll back concurrency counter on any other DDB error (throttling,
+    // network timeout, etc.) to prevent permanent slot leaks.
+    await decrementConcurrency(task.user_id);
     throw err;
   }
 
@@ -471,6 +491,7 @@ async function transitionToSubmitted(
   }
 
   // Invoke orchestrator (fire-and-forget)
+  let orchestratorInvokeFailed = false;
   if (lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
     try {
       await lambdaClient.send(new InvokeCommand({
@@ -483,7 +504,8 @@ async function transitionToSubmitted(
         request_id: requestId,
       });
     } catch (orchErr) {
-      logger.error('Failed to invoke orchestrator after confirm-uploads — task may be stuck in SUBMITTED until EventBridge retry', {
+      orchestratorInvokeFailed = true;
+      logger.error('Failed to invoke orchestrator after confirm-uploads — task will be picked up by StrandedTaskReconciler', {
         error: orchErr instanceof Error ? orchErr.message : String(orchErr),
         task_id: taskId,
         request_id: requestId,
@@ -499,7 +521,12 @@ async function transitionToSubmitted(
     attachments: finalAttachments,
     updated_at: now,
   };
-  return successResponse(200, toTaskDetail(updatedTask), requestId);
+  const responseBody = toTaskDetail(updatedTask);
+  if (orchestratorInvokeFailed) {
+    (responseBody as any).warning = 'Task was submitted successfully but orchestration dispatch failed. ' +
+      'The task will be picked up automatically within minutes by the background reconciler.';
+  }
+  return successResponse(200, responseBody, requestId);
 }
 
 // ---------------------------------------------------------------------------
@@ -574,26 +601,32 @@ async function failTaskOnScreening(
 async function cleanupAllAttachments(task: TaskRecord, taskId: string): Promise<void> {
   if (!task.attachments || task.attachments.length === 0) return;
 
-  const keys = task.attachments.map(att =>
-    `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${taskId}/${att.attachment_id}/${att.filename}`,
-  );
+  // Include VersionId when available — in a versioned bucket, DeleteObjects
+  // without VersionId only creates a delete marker, leaving the actual content
+  // accessible until the 7-day noncurrent lifecycle runs.
+  const objects = task.attachments.map(att => ({
+    Key: `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${taskId}/${att.attachment_id}/${att.filename}`,
+    ...(att.s3_version_id && att.s3_version_id !== 'unversioned' && { VersionId: att.s3_version_id }),
+  }));
 
   try {
     const result = await s3Client.send(new DeleteObjectsCommand({
       Bucket: ATTACHMENTS_BUCKET,
-      Delete: { Objects: keys.map(Key => ({ Key })) },
+      Delete: { Objects: objects },
     }));
     if (result.Errors && result.Errors.length > 0) {
       logger.error('Partial cleanup failure in confirm-uploads', {
         task_id: taskId,
         failedKeys: result.Errors.map(e => e.Key),
+        metric_type: 'cleanup_failure_blocked_content',
       });
     }
   } catch (err) {
     logger.error('S3 cleanup failed in confirm-uploads — 90-day lifecycle is safety net', {
       task_id: taskId,
-      keys,
+      object_count: objects.length,
       error: String(err),
+      metric_type: 'cleanup_failure_blocked_content',
     });
   }
 }
@@ -673,6 +706,30 @@ async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
   };
 }
 
+/**
+ * Non-mutating read to check if the user is at their concurrency limit.
+ * Used as a fast pre-check before expensive screening; the actual atomic
+ * increment happens in checkConcurrency() during transitionToSubmitted.
+ */
+async function preCheckConcurrency(userId: string): Promise<boolean> {
+  try {
+    const result = await ddb.send(new GetCommand({
+      TableName: CONCURRENCY_TABLE_NAME,
+      Key: { user_id: userId },
+    }));
+    const activeCount = (result.Item?.active_count as number) ?? 0;
+    return activeCount < MAX_CONCURRENT;
+  } catch (err) {
+    // On error reading concurrency, allow the request to proceed —
+    // the atomic check in transitionToSubmitted is the authoritative gate.
+    logger.warn('Pre-check concurrency read failed — allowing request to proceed', {
+      user_id: userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return true;
+  }
+}
+
 async function checkConcurrency(userId: string): Promise<boolean> {
   try {
     await ddb.send(new UpdateCommand({
@@ -697,26 +754,37 @@ async function checkConcurrency(userId: string): Promise<boolean> {
 }
 
 async function decrementConcurrency(userId: string): Promise<void> {
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: userId },
-      UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
-      ConditionExpression: 'attribute_exists(active_count) AND active_count > :zero',
-      ExpressionAttributeValues: {
-        ':one': 1,
-        ':zero': 0,
-        ':now': new Date().toISOString(),
-      },
-    }));
-  } catch (err: any) {
-    if (err.name === 'ConditionalCheckFailedException') {
-      // Counter already at 0 or doesn't exist — nothing to roll back
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: CONCURRENCY_TABLE_NAME,
+        Key: { user_id: userId },
+        UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
+        ConditionExpression: 'attribute_exists(active_count) AND active_count > :zero',
+        ExpressionAttributeValues: {
+          ':one': 1,
+          ':zero': 0,
+          ':now': new Date().toISOString(),
+        },
+      }));
       return;
+    } catch (err: any) {
+      if (err.name === 'ConditionalCheckFailedException') {
+        // Counter already at 0 or doesn't exist — nothing to roll back
+        return;
+      }
+      if (attempt < maxAttempts - 1) {
+        // Retry transient DDB errors (throttling, network) with backoff
+        await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt)));
+        continue;
+      }
+      logger.error('Failed to decrement concurrency counter after retries (leak possible)', {
+        user_id: userId,
+        attempts: maxAttempts,
+        error: err instanceof Error ? err.message : String(err),
+        metric_type: 'concurrency_counter_leak',
+      });
     }
-    logger.error('Failed to decrement concurrency counter (leak possible)', {
-      user_id: userId,
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
 }

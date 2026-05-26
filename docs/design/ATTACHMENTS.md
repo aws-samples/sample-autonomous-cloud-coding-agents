@@ -232,6 +232,7 @@ sequenceDiagram
     C->>GW: POST /v1/tasks/{task_id}/confirm-uploads
     GW->>H: Forward
     H->>H: Check status == PENDING_UPLOADS (short-circuit if already SUBMITTED)
+    H->>DB: Pre-check user concurrency (read-only, fail-fast before expensive screening)
     H->>S3: HeadObject per attachment (verify uploads exist, with retry for 404)
     loop Each attachment (parallel, bounded concurrency 3)
         H->>S3: GetObject (stream content for screening)
@@ -359,6 +360,7 @@ sequenceDiagram
     Note over O: During context hydration
     O->>O: SSRF check (DNS resolve → reject private IPs → connect to resolved IP)
     O->>O: Fetch URL content (with timeout + size limit)
+    O->>O: Validate content-type allowlist + magic bytes (prevents polyglot/masquerade)
     O->>SCR: Screen fetched content (with retry)
     SCR-->>O: Pass / Blocked
     alt Screening passed
@@ -1578,7 +1580,7 @@ New event types in `TaskEventsTable`:
 |---|---|---|
 | Malicious image (steganography, exploit payload) | Inline upload or URL | Magic bytes validation; Bedrock image screening; EXIF stripping; image re-encoding through `sharp` strips embedded payloads; sharp failure → reject |
 | Prompt injection via file content | Text file containing adversarial instructions | Magic bytes validation; Bedrock Guardrail text screening with retry (same as task descriptions); content trust tagging as `untrusted-external` |
-| SSRF via URL attachment | URL pointing to internal network | HTTPS-only; DNS resolution with manual connect to resolved IP (prevents rebinding TOCTOU); redirect validation; private IP blocking; applied at fetch time |
+| SSRF via URL attachment | URL pointing to internal network | HTTPS-only; DNS resolution with manual connect to resolved IP (prevents rebinding TOCTOU); redirect validation; private IP blocking; applied at fetch time; content-type allowlist + magic bytes validation after fetch (prevents attacker-controlled Content-Type header from bypassing type restrictions) |
 | Data exfiltration via URL attachment | URL pointing to attacker-controlled server (leaks request headers/IP) | No auth headers sent to non-GitHub URLs; minimal request headers; no cookies |
 | Denial of service via large attachments | Many large base64 payloads | 500 KB inline limit; 3 MB total inline; 10 MB per-attachment; 50 MB total; 10 count limit; 6 MB Lambda payload limit |
 | Path traversal via filename | `filename: "../../etc/passwd"` | Filename sanitization regex; reject path separators, dots-prefix, null bytes; use `attachment_id` as primary path component |

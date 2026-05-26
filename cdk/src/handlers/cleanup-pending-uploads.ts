@@ -272,5 +272,16 @@ export async function handler(): Promise<void> {
     cancelled,
     raced,
     errored,
+    metric_type: errored > 0 ? 'pending_upload_cleanup_errors' : undefined,
   });
+
+  // If ALL tasks errored and none were cancelled, throw so EventBridge sees
+  // a Lambda failure and CloudWatch alarms fire. Partial success (some cancelled,
+  // some errored) is acceptable — the next scheduled run will retry the failed ones.
+  if (errored > 0 && cancelled === 0 && raced === 0) {
+    throw new Error(
+      `All ${errored} expired PENDING_UPLOADS task(s) failed to process. ` +
+      'Investigate DynamoDB/S3 connectivity — abandoned tasks will not auto-cancel until resolved.',
+    );
+  }
 }
