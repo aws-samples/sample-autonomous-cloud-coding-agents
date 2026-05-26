@@ -69,14 +69,14 @@ const FAILURE_HTML = `<!doctype html>
  */
 export type CallbackResult =
   | {
-      readonly kind: 'agentcore';
-      readonly sessionId: string;
-    }
+    readonly kind: 'agentcore';
+    readonly sessionId: string;
+  }
   | {
-      readonly kind: 'direct-oauth';
-      readonly code: string;
-      readonly state: string;
-    };
+    readonly kind: 'direct-oauth';
+    readonly code: string;
+    readonly state: string;
+  };
 
 export interface CallbackServerOptions {
   /**
