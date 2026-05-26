@@ -273,6 +273,7 @@ class TestResolveLinearApiTokenRefreshPaths:
         import json
         import urllib.error
         from datetime import datetime, timedelta
+        from email.message import Message
         from unittest.mock import patch as upatch
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
@@ -296,7 +297,7 @@ class TestResolveLinearApiTokenRefreshPaths:
             "https://api.linear.app/oauth/token",
             400,
             "Bad Request",
-            {},
+            Message(),
             io.BytesIO(json.dumps({"error": "invalid_grant"}).encode("utf-8")),
         )
 
@@ -316,6 +317,7 @@ class TestResolveLinearApiTokenRefreshPaths:
         import io
         import json
         import urllib.error
+        from email.message import Message
         from unittest.mock import patch as upatch
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
@@ -330,7 +332,7 @@ class TestResolveLinearApiTokenRefreshPaths:
             "https://api.linear.app/oauth/token",
             400,
             "Bad Request",
-            {},
+            Message(),
             io.BytesIO(json.dumps({"error": "invalid_grant"}).encode("utf-8")),
         )
 
