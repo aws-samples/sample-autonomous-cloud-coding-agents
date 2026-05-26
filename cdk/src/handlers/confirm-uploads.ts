@@ -23,7 +23,7 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -230,8 +230,10 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
               request_id: requestId,
             });
             // Fail the entire task
-            await failTaskOnScreening(task, taskId, att.filename, err.message, requestId);
-            await cleanupAllAttachments(task, taskId);
+            const transitioned = await failTaskOnScreening(task, taskId, att.filename, err.message, requestId);
+            if (transitioned) {
+              await cleanupAllAttachments(task, taskId);
+            }
             return errorResponse(400, ErrorCode.ATTACHMENT_BLOCKED,
               `Attachment '${att.filename}' was rejected: ${err.message}`, requestId);
           }
@@ -260,8 +262,10 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
       const categories = blockedAtt.screening.status === 'blocked'
         ? blockedAtt.screening.categories.join(', ')
         : 'content_policy_violation';
-      await failTaskOnScreening(task, taskId, blockedAtt.filename, categories, requestId);
-      await cleanupAllAttachments(task, taskId);
+      const transitioned = await failTaskOnScreening(task, taskId, blockedAtt.filename, categories, requestId);
+      if (transitioned) {
+        await cleanupAllAttachments(task, taskId);
+      }
       return errorResponse(400, ErrorCode.ATTACHMENT_BLOCKED,
         `Attachment '${blockedAtt.filename}' was blocked by content policy (${categories}).`, requestId);
     }
@@ -342,13 +346,7 @@ async function screenSingleAttachment(
     });
   }
 
-  // Screening passed — re-upload cleaned content (EXIF-stripped for images)
-  const putResult = await s3Client.send(new PutObjectCommand({
-    Bucket: ATTACHMENTS_BUCKET,
-    Key: s3Key,
-    Body: screenResult.content,
-    ContentType: att.content_type,
-  }));
+  // Screening passed — reuse existing S3 object (no transformation needed)
 
   // Estimate token cost for images (using shared utility)
   let tokenEstimate: number | undefined;
@@ -362,8 +360,8 @@ async function screenSingleAttachment(
     content_type: att.content_type,
     filename: att.filename,
     s3_key: s3Key,
-    s3_version_id: putResult.VersionId ?? 'unversioned',
-    size_bytes: screenResult.content.length,
+    s3_version_id: versionId ?? 'unversioned',
+    size_bytes: sizeBytes,
     screening: { status: 'passed', screened_at: new Date().toISOString() },
     checksum_sha256: screenResult.checksum,
     ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
@@ -537,7 +535,7 @@ async function failTaskOnScreening(
   filename: string,
   reason: string,
   requestId: string,
-): Promise<void> {
+): Promise<boolean> {
   const now = new Date().toISOString();
   try {
     await ddb.send(new UpdateCommand({
@@ -566,7 +564,7 @@ async function failTaskOnScreening(
         task_id: taskId,
         request_id: requestId,
       });
-      return;
+      return false;
     }
     throw err;
   }
@@ -592,6 +590,8 @@ async function failTaskOnScreening(
       request_id: requestId,
     });
   }
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------

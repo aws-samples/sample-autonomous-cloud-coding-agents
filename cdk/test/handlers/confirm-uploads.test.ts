@@ -312,4 +312,173 @@ describe('confirm-uploads handler', () => {
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('ATTACHMENT_BLOCKED');
   });
+
+  test('skips S3 cleanup when failTaskOnScreening loses the race (ConditionalCheckFailedException)', async () => {
+    const { screenImage, AttachmentScreeningError } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    ddbSend.mockResolvedValueOnce({ Item: PENDING_TASK });
+    s3Send
+      .mockResolvedValueOnce({ VersionId: 'v1', ContentLength: 1024 })
+      .mockResolvedValueOnce({ VersionId: 'v2', ContentLength: 512 });
+
+    // Pre-check passes
+    ddbSend.mockResolvedValueOnce({ Item: { active_count: 0 } });
+
+    // GetObject for first attachment
+    const pngContent = Buffer.alloc(1024);
+    s3Send.mockResolvedValueOnce({ Body: { transformToByteArray: () => pngContent } });
+
+    // Screening blocks the image
+    screenImage.mockRejectedValueOnce(new AttachmentScreeningError('Inappropriate content detected'));
+
+    // failTaskOnScreening conditional write fails — another caller already transitioned
+    const condErr = new Error('The conditional request failed');
+    condErr.name = 'ConditionalCheckFailedException';
+    ddbSend.mockRejectedValueOnce(condErr);
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+    expect(result.statusCode).toBe(400);
+
+    // S3 DeleteObjectsCommand should NOT have been called (only Head + Get calls)
+    const s3DeleteCalls = s3Send.mock.calls.filter(
+      (call: any[]) => call[0]?._type === 'S3Delete',
+    );
+    expect(s3DeleteCalls).toHaveLength(0);
+  });
+
+  test('does not re-upload content to S3 after screening passes (no redundant PUT)', async () => {
+    const { screenImage, screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const textContent = Buffer.alloc(512);
+    textContent.write('hello world');
+
+    screenImage.mockResolvedValue({
+      content: pngContent,
+      contentType: 'image/png',
+      checksum: 'abc123',
+      screening: { status: 'passed' },
+    });
+    screenTextFile.mockResolvedValue({
+      content: textContent,
+      contentType: 'text/plain',
+      checksum: 'def456',
+      screening: { status: 'passed' },
+    });
+
+    let ddbCallCount = 0;
+    ddbSend.mockImplementation(() => {
+      ddbCallCount++;
+      switch (ddbCallCount) {
+        case 1: return Promise.resolve({ Item: PENDING_TASK });
+        case 2: return Promise.resolve({ Item: { active_count: 1 } });
+        case 3: return Promise.resolve({});
+        case 4: return Promise.resolve({});
+        case 5: return Promise.resolve({});
+        default: return Promise.resolve({});
+      }
+    });
+
+    s3Send.mockImplementation((cmd: any) => {
+      if (cmd._type === 'S3Head') {
+        const isAtt1 = cmd.input.Key?.includes('att-1');
+        return Promise.resolve({
+          VersionId: isAtt1 ? 'v1' : 'v2',
+          ContentLength: isAtt1 ? 1024 : 512,
+        });
+      }
+      if (cmd._type === 'S3Get') {
+        const isAtt1 = cmd.input.Key?.includes('att-1');
+        return Promise.resolve({
+          Body: { transformToByteArray: () => (isAtt1 ? pngContent : textContent) },
+        });
+      }
+      if (cmd._type === 'S3Put') {
+        return Promise.resolve({ VersionId: 'v-screened' });
+      }
+      return Promise.resolve({});
+    });
+
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+    expect(result.statusCode).toBe(200);
+
+    // Verify NO S3 PutObject calls were made
+    const s3PutCalls = s3Send.mock.calls.filter(
+      (call: any[]) => call[0]?._type === 'S3Put',
+    );
+    expect(s3PutCalls).toHaveLength(0);
+  });
+
+  test('uses original versionId and size from HeadObject in attachment record after screening', async () => {
+    const { screenImage, screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const textContent = Buffer.alloc(512);
+    textContent.write('hello world');
+
+    screenImage.mockResolvedValue({
+      content: pngContent,
+      contentType: 'image/png',
+      checksum: 'abc123',
+      screening: { status: 'passed' },
+    });
+    screenTextFile.mockResolvedValue({
+      content: textContent,
+      contentType: 'text/plain',
+      checksum: 'def456',
+      screening: { status: 'passed' },
+    });
+
+    let ddbCallCount = 0;
+    ddbSend.mockImplementation(() => {
+      ddbCallCount++;
+      switch (ddbCallCount) {
+        case 1: return Promise.resolve({ Item: PENDING_TASK });
+        case 2: return Promise.resolve({ Item: { active_count: 0 } });
+        case 3: return Promise.resolve({});
+        case 4: return Promise.resolve({});
+        case 5: return Promise.resolve({});
+        default: return Promise.resolve({});
+      }
+    });
+
+    s3Send.mockImplementation((cmd: any) => {
+      if (cmd._type === 'S3Head') {
+        const isAtt1 = cmd.input.Key?.includes('att-1');
+        return Promise.resolve({
+          VersionId: isAtt1 ? 'original-v1' : 'original-v2',
+          ContentLength: isAtt1 ? 1024 : 512,
+        });
+      }
+      if (cmd._type === 'S3Get') {
+        const isAtt1 = cmd.input.Key?.includes('att-1');
+        return Promise.resolve({
+          Body: { transformToByteArray: () => (isAtt1 ? pngContent : textContent) },
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+    expect(result.statusCode).toBe(200);
+
+    // Check the DDB UpdateCommand (transition to SUBMITTED) includes original versionIds
+    const updateCall = ddbSend.mock.calls.find(
+      (call: any[]) => call[0]?.input?.UpdateExpression?.includes('attachments'),
+    );
+    expect(updateCall).toBeDefined();
+    const attachments = updateCall![0].input.ExpressionAttributeValues[':atts'];
+    const att1 = attachments.find((a: any) => a.attachment_id === 'att-1');
+    const att2 = attachments.find((a: any) => a.attachment_id === 'att-2');
+    expect(att1.s3_version_id).toBe('original-v1');
+    expect(att1.size_bytes).toBe(1024);
+    expect(att2.s3_version_id).toBe('original-v2');
+    expect(att2.size_bytes).toBe(512);
+  });
 });

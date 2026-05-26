@@ -173,6 +173,63 @@ describe('cleanup-pending-uploads handler', () => {
     await expect(handler()).rejects.toThrow('All 1 expired PENDING_UPLOADS task(s) failed to process');
   });
 
+  test('continues pagination when S3 returns empty page with IsTruncated=true', async () => {
+    const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60 * 1000).toISOString();
+
+    mockDdbSend.mockResolvedValueOnce({
+      Items: [{
+        task_id: { S: 'TASK001' },
+        user_id: { S: 'user-123' },
+        created_at: { S: thirtyFiveMinAgo },
+      }],
+    });
+
+    // cancelExpiredTask succeeds
+    mockDdbSend.mockResolvedValueOnce({});
+    // write event
+    mockDdbSend.mockResolvedValueOnce({});
+
+    // Page 1: empty but IsTruncated=true (S3 scanned past prefix boundary)
+    mockS3Send.mockResolvedValueOnce({
+      Versions: [],
+      DeleteMarkers: [],
+      IsTruncated: true,
+      NextKeyMarker: 'attachments/user-123/TASK001/ATT001/image.png',
+      NextVersionIdMarker: 'v1',
+    });
+    // Page 2: has objects, not truncated
+    mockS3Send.mockResolvedValueOnce({
+      Versions: [
+        { Key: 'attachments/user-123/TASK001/ATT001/image.png', VersionId: 'v1' },
+      ],
+      DeleteMarkers: [],
+      IsTruncated: false,
+    });
+    // DeleteObjects succeeds
+    mockS3Send.mockResolvedValueOnce({ Deleted: [{}] });
+
+    await handler();
+
+    // Verify both ListObjectVersions calls were made (pagination continued past empty page)
+    const listCalls = mockS3Send.mock.calls.filter(
+      (call: any[]) => call[0]?._type === 'ListObjectVersions',
+    );
+    expect(listCalls).toHaveLength(2);
+
+    // Verify second list call used the marker from first response
+    expect(listCalls[1][0].input.KeyMarker).toBe('attachments/user-123/TASK001/ATT001/image.png');
+    expect(listCalls[1][0].input.VersionIdMarker).toBe('v1');
+
+    // Verify delete was called with the objects from page 2
+    const deleteCalls = mockS3Send.mock.calls.filter(
+      (call: any[]) => call[0]?._type === 'DeleteObjects',
+    );
+    expect(deleteCalls).toHaveLength(1);
+    expect(deleteCalls[0][0].input.Delete.Objects).toEqual([
+      { Key: 'attachments/user-123/TASK001/ATT001/image.png', VersionId: 'v1' },
+    ]);
+  });
+
   test('does not throw on partial success (some cancelled, some errored)', async () => {
     const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60 * 1000).toISOString();
 

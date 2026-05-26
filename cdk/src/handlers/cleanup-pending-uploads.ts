@@ -190,8 +190,9 @@ async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
   let keyMarker: string | undefined;
   let versionIdMarker: string | undefined;
   let totalDeleted = 0;
+  let isTruncated = true;
 
-  do {
+  while (isTruncated) {
     const listResp = await s3.send(new ListObjectVersionsCommand({
       Bucket: ATTACHMENTS_BUCKET,
       Prefix: prefix,
@@ -199,13 +200,17 @@ async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
       VersionIdMarker: versionIdMarker,
     }));
 
+    isTruncated = listResp.IsTruncated ?? false;
+    keyMarker = listResp.NextKeyMarker;
+    versionIdMarker = listResp.NextVersionIdMarker;
+
     // Collect all versions and delete markers for deletion
     const objects = [
       ...(listResp.Versions ?? []).map(v => ({ Key: v.Key!, VersionId: v.VersionId })),
       ...(listResp.DeleteMarkers ?? []).map(d => ({ Key: d.Key!, VersionId: d.VersionId })),
     ].filter(obj => obj.Key !== undefined);
 
-    if (objects.length === 0) break;
+    if (objects.length === 0) continue;
 
     const deleteResp = await s3.send(new DeleteObjectsCommand({
       Bucket: ATTACHMENTS_BUCKET,
@@ -220,10 +225,7 @@ async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
     }
 
     totalDeleted += objects.length - (deleteResp.Errors?.length ?? 0);
-
-    keyMarker = listResp.NextKeyMarker;
-    versionIdMarker = listResp.NextVersionIdMarker;
-  } while (keyMarker);
+  }
 
   if (totalDeleted > 0) {
     logger.info('Cleaned up S3 objects for expired pending-upload task', {
