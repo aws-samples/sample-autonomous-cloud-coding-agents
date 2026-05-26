@@ -28,7 +28,7 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
@@ -240,6 +240,58 @@ export async function upsertOauthSecret(
     }
     throw err;
   }
+}
+
+/**
+ * Find an OAuth credential pair (client_id + client_secret) reusable for a
+ * new workspace install. Returns the values from the FIRST `active` row in
+ * the workspace registry, by reading that row's per-workspace SM secret.
+ *
+ * Used by `bgagent linear add-workspace` so the operator doesn't have to
+ * re-paste the same Linear OAuth app credentials they already typed during
+ * the initial `bgagent linear setup`. Same Linear OAuth app can authorize
+ * multiple workspaces — Linear scopes consent per-workspace, but the app's
+ * client_id/client_secret are workspace-independent.
+ *
+ * Returns null when there's no existing active workspace, signalling that
+ * the operator should run `bgagent linear setup` first.
+ */
+export async function findReusableOauthAppCredentials(
+  ddb: DynamoDBDocumentClient,
+  sm: SecretsManagerClient,
+  registryTableName: string,
+): Promise<{ clientId: string; clientSecret: string; sourceSlug: string } | null> {
+  // Limit=1 keeps the scan cheap. The registry table is one row per
+  // workspace install (small N) so a scan is acceptable here.
+  const scan = await ddb.send(new ScanCommand({
+    TableName: registryTableName,
+    FilterExpression: '#status = :active',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':active': 'active' },
+    Limit: 1,
+  }));
+  const row = scan.Items?.[0];
+  if (!row || !row.oauth_secret_arn || !row.workspace_slug) {
+    return null;
+  }
+  const value = await sm.send(new GetSecretValueCommand({ SecretId: row.oauth_secret_arn as string }));
+  if (!value.SecretString) {
+    return null;
+  }
+  let parsed: Partial<StoredLinearOauthToken>;
+  try {
+    parsed = JSON.parse(value.SecretString) as Partial<StoredLinearOauthToken>;
+  } catch {
+    return null;
+  }
+  if (!parsed.client_id || !parsed.client_secret) {
+    return null;
+  }
+  return {
+    clientId: parsed.client_id,
+    clientSecret: parsed.client_secret,
+    sourceSlug: row.workspace_slug as string,
+  };
 }
 
 export function makeLinearCommand(): Command {
@@ -554,6 +606,259 @@ export function makeLinearCommand(): Command {
         console.log('  1. Onboard a Linear project to a GitHub repo:');
         console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
         console.log('  2. Add the `bgagent` label to a Linear issue in a mapped project.');
+      }),
+  );
+
+  linear.addCommand(
+    new Command('add-workspace')
+      .description('Authorize an additional Linear workspace using the existing OAuth app + webhook secret')
+      .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--client-id <id>', 'Override the OAuth Client ID (else reused from existing workspace)')
+      .option('--client-secret <secret>', 'Override the OAuth Client Secret (else reused from existing workspace)')
+      .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
+      .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
+      .action(async (slug: string, opts) => {
+        if (!SLUG_RE.test(slug)) {
+          throw new CliError(
+            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
+            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+          );
+        }
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+
+        // ─── Stack outputs ─────────────────────────────────────────────
+        // Subset of `setup`'s outputs — webhook secret ARN is intentionally
+        // NOT required here: add-workspace assumes the initial setup wizard
+        // already installed it (one signing secret covers all workspaces
+        // sharing the same Linear OAuth app + webhook receiver URL).
+        const [
+          workspaceRegistryTable,
+          userMappingTable,
+        ] = await Promise.all([
+          getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+          getStackOutput(region, stackName, 'LinearUserMappingTableName'),
+        ]);
+
+        const missing: string[] = [];
+        if (!workspaceRegistryTable) missing.push('LinearWorkspaceRegistryTableName');
+        if (!userMappingTable) missing.push('LinearUserMappingTableName');
+        if (missing.length > 0) {
+          throw new CliError(
+            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
+            + 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).',
+          );
+        }
+
+        // ─── Resolve caller identity ──────────────────────────────────
+        const creds = loadCredentials();
+        if (!creds?.id_token) {
+          throw new CliError('Not authenticated — run `bgagent login` first.');
+        }
+        let cognitoSub: string;
+        try {
+          cognitoSub = extractCognitoSub();
+        } catch (err) {
+          throw new CliError(
+            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
+            + 'Run `bgagent login` to refresh credentials.',
+          );
+        }
+
+        const sm = new SecretsManagerClient({ region });
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+
+        // ─── Linear OAuth app credentials ──────────────────────────────
+        // Reuse the same client_id/client_secret from an existing active
+        // workspace unless explicitly overridden. The setup wizard owns
+        // first-time credential entry; add-workspace is the "I already did
+        // setup, just install the app in another Linear org" path.
+        let clientId = opts.clientId?.trim() ?? '';
+        let clientSecret = opts.clientSecret?.trim() ?? '';
+
+        if (!clientId || !clientSecret) {
+          process.stdout.write('  → Looking for an existing workspace to reuse OAuth credentials...');
+          const existing = await findReusableOauthAppCredentials(ddb, sm, workspaceRegistryTable!);
+          if (!existing) {
+            console.log(' ✗');
+            throw new CliError(
+              'No active Linear workspace found in the registry. '
+              + 'Run `bgagent linear setup <slug>` first to install the OAuth app, '
+              + 'then re-run `bgagent linear add-workspace` for additional workspaces.',
+            );
+          }
+          console.log(` ✓ (reusing credentials from '${existing.sourceSlug}')`);
+          clientId = clientId || existing.clientId;
+          clientSecret = clientSecret || existing.clientSecret;
+        }
+
+        console.log(`bgagent linear add-workspace — workspace '${slug}'`);
+        console.log(`  region: ${region}`);
+
+        // ─── PKCE + browser consent ────────────────────────────────────
+        const pkce = generatePkce();
+        const state = randomState();
+        const useActorApp = opts.actorApp !== false;
+        const authorizationUrl = buildAuthorizationUrl({
+          clientId,
+          redirectUri: CALLBACK_URL,
+          state,
+          codeChallenge: pkce.codeChallenge,
+          actorApp: useActorApp,
+        });
+        if (!useActorApp) {
+          console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
+        }
+
+        const callbackPromise = awaitOauthCallback();
+
+        console.log();
+        if (opts.browser !== false) {
+          const opened = await openBrowser(authorizationUrl);
+          if (opened) {
+            console.log('  → Opened your browser to the Linear consent screen.');
+            console.log('    Sign in to the workspace you want to add (use a workspace switcher if needed).');
+          } else {
+            console.log('  → Could not open browser automatically. Open this URL manually:');
+            console.log(`    ${authorizationUrl}`);
+          }
+        } else {
+          console.log('  → --no-browser: open this URL manually:');
+          console.log(`    ${authorizationUrl}`);
+        }
+
+        process.stdout.write('  → Waiting for browser callback...');
+        const callback = await callbackPromise;
+        console.log(' ✓');
+
+        if (callback.kind !== 'direct-oauth') {
+          throw new CliError(
+            'Localhost callback returned an AgentCore session_id, not a direct OAuth code. '
+            + 'Verify Linear\'s redirect URI is set to http://localhost:8080/oauth/callback and re-run.',
+          );
+        }
+        if (callback.state !== state) {
+          throw new CliError(
+            `OAuth state mismatch (expected '${state}', got '${callback.state}'). `
+            + 'Possible CSRF attack or stale tab — re-run add-workspace.',
+          );
+        }
+
+        // ─── Exchange code → fetch identity ────────────────────────────
+        process.stdout.write('  → Exchanging code for access token...');
+        const tokenResponse = await exchangeAuthorizationCode({
+          code: callback.code,
+          codeVerifier: pkce.codeVerifier,
+          redirectUri: CALLBACK_URL,
+          clientId,
+          clientSecret,
+        });
+        console.log(' ✓');
+
+        process.stdout.write('  → Querying Linear viewer + organization...');
+        const identity = await queryLinearIdentity(`Bearer ${tokenResponse.access_token}`);
+        if (!identity) {
+          throw new CliError(
+            'Linear viewer query rejected the access token. This is unexpected — token was just issued. '
+            + 'Re-run `bgagent linear add-workspace` if Linear\'s API is recovering from a transient outage.',
+          );
+        }
+        console.log(` ✓ (${identity.organization.name ?? identity.organization.urlKey ?? identity.organization.id})`);
+
+        if (identity.organization.urlKey && identity.organization.urlKey !== slug) {
+          throw new CliError(
+            `Slug '${slug}' does not match Linear's urlKey '${identity.organization.urlKey}' for the authorized workspace. `
+            + 'Re-run with the correct slug — using the wrong slug would shadow the secret name and produce a confusing registry row.',
+          );
+        }
+
+        // ─── Refuse re-install of an already-onboarded workspace ───────
+        // Different from `setup`, which is intentionally idempotent: the
+        // explicit add-workspace verb implies "new workspace", and silently
+        // overwriting a registry row could mask a wrong-account login.
+        const existing = await ddb.send(new ScanCommand({
+          TableName: workspaceRegistryTable!,
+          FilterExpression: 'linear_workspace_id = :id',
+          ExpressionAttributeValues: { ':id': identity.organization.id },
+          Limit: 1,
+        }));
+        if (existing.Items && existing.Items.length > 0) {
+          throw new CliError(
+            `Workspace '${slug}' (${identity.organization.id}) is already in the registry. `
+            + 'Use `bgagent linear setup` to re-authorize an existing workspace, or remove the registry row manually before retrying.',
+          );
+        }
+
+        // ─── Persist token to per-workspace SM ─────────────────────────
+        process.stdout.write('  → Storing OAuth token...');
+        const now = new Date().toISOString();
+        const stored: StoredLinearOauthToken = {
+          access_token: tokenResponse.access_token,
+          refresh_token: tokenResponse.refresh_token ?? '',
+          expires_at: computeExpiresAt(tokenResponse.expires_in),
+          scope: tokenResponse.scope,
+          client_id: clientId,
+          client_secret: clientSecret,
+          workspace_id: identity.organization.id,
+          workspace_slug: slug,
+          installed_at: now,
+          updated_at: now,
+          installed_by_platform_user_id: cognitoSub,
+        };
+        if (!stored.refresh_token) {
+          throw new CliError(
+            'Linear did not return a refresh_token. The integration cannot self-renew tokens; '
+            + 're-check that the Linear OAuth app permits refresh-token grants.',
+          );
+        }
+        const secretName = linearOauthSecretName(slug);
+        const oauthSecretArn = await upsertOauthSecret(sm, secretName, stored, slug);
+        console.log(` ✓ (${secretName})`);
+
+        // ─── Persist registry + user-mapping rows ──────────────────────
+        await ddb.send(new PutCommand({
+          TableName: workspaceRegistryTable!,
+          Item: {
+            linear_workspace_id: identity.organization.id,
+            workspace_slug: slug,
+            oauth_secret_arn: oauthSecretArn,
+            installed_by_platform_user_id: cognitoSub,
+            installed_at: now,
+            updated_at: now,
+            status: 'active',
+          },
+        }));
+        console.log('  ✓ Recorded workspace in registry');
+
+        await ddb.send(new PutCommand({
+          TableName: userMappingTable!,
+          Item: {
+            linear_identity: `${identity.organization.id}#${identity.viewer.id}`,
+            platform_user_id: cognitoSub,
+            linear_workspace_id: identity.organization.id,
+            linear_user_id: identity.viewer.id,
+            linked_at: now,
+            status: 'active',
+            link_method: 'add_workspace_oauth',
+          },
+        }));
+        const adminLabel = identity.viewer.name ?? identity.viewer.email ?? identity.viewer.id;
+        console.log(`  ✓ Linked Linear user ${adminLabel} → platform user`);
+
+        // ─── Done ──────────────────────────────────────────────────────
+        console.log();
+        console.log('✅ Workspace added.');
+        console.log();
+        console.log('Note: webhook signing secret was NOT prompted — it is shared across all');
+        console.log('workspaces installed against the same Linear OAuth app. If this is the first');
+        console.log('time installing in a new Linear team that has its own OAuth app, run');
+        console.log('`bgagent linear setup` instead so the webhook signing secret gets configured.');
+        console.log();
+        console.log('Next: onboard a project from this workspace:');
+        console.log('  bgagent linear onboard-project <linear-project-id> --repo owner/repo');
       }),
   );
 
