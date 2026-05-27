@@ -157,6 +157,21 @@ The fallback path keeps existing single-workspace deployments working without re
 
 **Trust model.** The `organizationId` in the body is attacker-controlled, but it only **selects** which secret to verify against; an attacker still needs the matching signing secret to forge a valid signature. Cross-workspace impersonation is prevented by the no-fallback-on-mismatch rule.
 
+## Attachments and documents
+
+Beyond the issue title and description, Linear stores additional context the agent may need:
+
+- **Paperclip attachments** (PDFs, logs, spec files attached to an issue)
+- **Project documents** (Linear's wiki-style docs attached to a project)
+- **Comments posted after the task starts** (clarifications, approve / deny signals)
+
+ABCA does not pre-fetch this material into S3 or run it through Bedrock Guardrails — it stays in Linear, and the agent fetches it on demand at runtime via the Linear MCP. Concretely:
+
+- The webhook processor calls Linear's GraphQL API once per triggered issue to check for paperclip attachments and project documents. If anything is present it prepends a one-line hint (`Linear may have additional context for this issue: …`) to the task description, naming the relevant MCP tools.
+- The agent's system prompt addendum tells it to call `mcp__linear-server__get_issue` for the full issue (including the `attachments` connection), `mcp__linear-server__get_attachment` per paperclip, `mcp__linear-server__list_documents` / `get_document` for project wikis, and `mcp__linear-server__list_comments` before opening the PR to pick up new comments.
+
+No additional setup is required — once Linear MCP is wired (steps above), this works automatically. Only embedded markdown images in the issue description (`![alt](https://…)`) are still pre-fetched and screened at task-creation time, because they enter the agent's context as URL attachments.
+
 ## Usage
 
 - **Trigger a task**: apply the trigger label to an issue in a mapped Linear project. The issue title + description becomes the task description.

@@ -22,6 +22,10 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { reactToComment, replyToComment, reportIssueFailure, EMOJI_STARTED } from './shared/linear-feedback';
+import {
+  probeLinearIssueContext,
+  renderIssueContextHint,
+} from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
@@ -311,8 +315,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const taskDescription = buildTaskDescription(issue);
-
   const channelMetadata: Record<string, string> = {
     linear_issue_id: issue.id,
     linear_workspace_id: workspaceId,
@@ -343,6 +345,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // is guaranteed present (we return otherwise), so the token is set
   // whenever the registry table is configured.
   let resolvedAccessToken: string | undefined;
+  let contextHint = '';
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -355,6 +358,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
     resolvedAccessToken = resolved.accessToken;
+    // Best-effort presence probe: ask Linear once whether the issue has
+    // paperclip attachments or sits in a project with documents. The agent
+    // will fetch the actual content via the Linear MCP at runtime — this
+    // step only flags that there's something worth fetching.
+    const probe = await probeLinearIssueContext(resolved.accessToken, issue.id);
+    contextHint = renderIssueContextHint(probe);
   }
 
   // #247 Mode A — parent/sub-issue orchestration. Env-var gated: until
@@ -576,6 +585,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // discovery.kind === 'single_task' → fall through to the single-task
     // path below (issue had no sub-issues).
   }
+
+  const taskDescription = buildTaskDescription(issue, contextHint);
 
   // Extract embedded image URLs from the issue description markdown.
   // These become URL attachments that are fetched and screened during context hydration.
@@ -1098,12 +1109,16 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
   return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
 }
 
-function buildTaskDescription(issue: LinearIssueEvent['data']): string {
+function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: string = ''): string {
   const parts: string[] = [];
   if (issue.identifier && issue.title) {
     parts.push(`${issue.identifier}: ${issue.title}`);
   } else if (issue.title) {
     parts.push(issue.title);
+  }
+  if (contextHint) {
+    parts.push('');
+    parts.push(contextHint);
   }
   if (issue.description && issue.description.trim()) {
     parts.push('');
