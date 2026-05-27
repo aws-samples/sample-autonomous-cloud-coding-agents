@@ -597,3 +597,45 @@ class TestBuildSystemPromptLinearChannel:
         # so we surface them directly in the prompt.
         assert "issue-uuid-deadbeef" in prompt
         assert "project-uuid-cafebabe" in prompt
+
+    def test_linear_addendum_warns_save_issue_no_ops_on_unknown_state(self):
+        # Regression-guard: many Linear teams do NOT have an `In Review`
+        # state. When the agent passes a state name that doesn't exist,
+        # save_issue silently no-ops — the response shows the unchanged
+        # state, but the agent claimed success on DEM-9 (2026-05-27).
+        # The prompt must (a) tell the agent to cache list_issue_statuses,
+        # (b) check the cached map before each transition, and (c) verify
+        # the response state.name matches what was asked.
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={"linear_issue_id": "i"},
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "no-op" in prompt or "no op" in prompt
+        assert "cache" in prompt.lower()
+        # Must explicitly call out post-transition response verification.
+        assert "state.name" in prompt or "returned" in prompt.lower()
+
+    def test_linear_addendum_warns_against_embedding_uploads_linear_app_in_comments(self):
+        # Regression-guard: Linear's CDN signed URLs render fine in the
+        # original poster's context but show a broken-image icon when
+        # re-embedded by the bot in a comment. Hit on DEM-9 2026-05-27.
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={"linear_issue_id": "i"},
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "uploads.linear.app" in prompt
+        # The phrasing must be a prohibition for save_comment specifically,
+        # not just a passing mention — make sure we're forbidding the embed.
+        assert "Do NOT embed" in prompt or "do not embed" in prompt.lower()
