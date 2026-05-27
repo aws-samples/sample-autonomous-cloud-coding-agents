@@ -60,9 +60,12 @@ export interface GitHubScreenshotIntegrationProps {
   readonly removalPolicy?: RemovalPolicy;
 
   /**
-   * Override for the deploy environment we screenshot. Defaults to
-   * `Preview` (Vercel's label for per-PR deploys). Set this when
-   * targeting a different deploy backend.
+   * Override for the GitHub deployment `environment` value we
+   * screenshot. Different providers use different conventions:
+   * `Preview` (Vercel's per-PR label, the default), branch names
+   * (Amplify Hosting), `Deploy Preview <PR#>` (Netlify), or whatever
+   * your GitHub Actions workflow passes. Set this when your provider
+   * uses a different name and you want per-PR-only screenshots.
    * @default 'Preview'
    */
   readonly screenshotTargetEnvironment?: string;
