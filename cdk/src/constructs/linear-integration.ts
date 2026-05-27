@@ -183,6 +183,12 @@ export class LinearIntegration extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(30),
+      // Default 128 MB OOMs at module init since the attachment-screening
+      // path (#176) bundles pdf-parse + URL-resolver libs alongside the
+      // existing AWS SDK + bedrock-agentcore deps. 512 MB gives ~4× headroom
+      // and lifts CPU enough that p99 startup stays under the API Gateway
+      // 30s deadline on cold starts.
+      memorySize: 512,
       environment: {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
