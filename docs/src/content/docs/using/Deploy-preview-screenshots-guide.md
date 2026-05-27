@@ -4,9 +4,9 @@ title: Deploy preview screenshots guide
 
 # Deploy preview screenshots setup guide
 
-Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on both the open GitHub PR **and** the linked Linear issue.
+Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on the open GitHub PR. If you also have Linear configured, the same screenshot is posted to the linked Linear issue as a bonus.
 
-> **Prerequisite:** Linear OAuth (Phase 2.0b — see [Linear setup guide](/using/linear-setup-guide)) must be installed before this guide is useful, since the screenshot-to-Linear leg reuses the per-workspace OAuth tokens from that path.
+> The pipeline only needs GitHub. Linear posting is opt-in: present iff `LinearWorkspaceRegistryTable` has at least one active row (configured via [Linear setup guide](/using/linear-setup-guide)). Without Linear, the GitHub-side screenshot still works; the Linear-side just no-ops silently.
 
 ## Works with any provider that posts `deployment_status`
 
@@ -29,12 +29,12 @@ If your provider gives you that, you're done. The example below is Vercel becaus
 
 ## What you get
 
-When ABCA opens a PR for a Linear-driven task, your provider deploys the preview, posts a `deployment_status` event back to GitHub, and ABCA's webhook receiver:
+When you (or the agent) push to a branch that triggers a preview deploy, your provider deploys the preview, posts a `deployment_status` event back to GitHub, and ABCA's webhook receiver:
 
 1. Captures a full-page screenshot of the preview URL via AgentCore Browser
 2. Uploads the PNG to a private S3 bucket served via CloudFront
 3. Posts a markdown image comment on the open GitHub PR
-4. Looks up the Linear issue (by identifier in the PR title/body — e.g. `ABCA-42`) and posts the same screenshot as a Linear comment
+4. **(Optional)** If Linear is wired: looks up the Linear issue by identifier in the PR title/body (e.g. `ABCA-42`) and posts the same screenshot as a Linear comment. Skipped silently if Linear isn't configured or no identifier is present.
 
 End-to-end latency: typically 10–15 seconds after your provider reports the deploy.
 
@@ -57,20 +57,20 @@ agent push → provider preview build → deployment_status webhook
                                               ↓
                               CloudFront-served public URL
                                               ↓
-                          GitHub PR comment + Linear issue comment
+                          GitHub PR comment (+ Linear issue comment if linked)
 ```
 
 Architecture notes:
 
 - **Lambda-only.** No agent runtime is involved post-PR — the screenshot job is deterministic; an LLM would only add cost without changing behavior.
 - **AWS-managed default browser.** AgentCore Browser ships an `aws.browser.v1` session you can attach to without provisioning your own browser resource.
-- **Private S3 + CloudFront with OAC.** Screenshot bucket is fully private; CloudFront serves images anonymously over HTTPS so GitHub Markdown and Linear's image previews can render them without auth.
+- **Private S3 + CloudFront with OAC.** Screenshot bucket is fully private; CloudFront serves images anonymously over HTTPS so GitHub markdown image embeds (and Linear's, when configured) can render them without auth.
 - **WAF exemption.** The `/v1/github/webhook` path is excluded from the AWSManagedRulesCommonRuleSet because deployment_status payloads (which embed absolute deploy URLs) trip `GenericRFI_BODY` otherwise.
 
 ## Prerequisites
 
 - ABCA stack deployed (`mise //cdk:deploy`) — confirm `GitHubWebhookUrl` + `GitHubWebhookSecretArn` + `ScreenshotCloudFrontDomain` are listed in the stack outputs
-- Linear OAuth installed for at least one workspace (`bgagent linear setup <slug>`)
+- (Optional) Linear OAuth installed for at least one workspace (`bgagent linear setup <slug>`) — only required if you want screenshots posted to Linear issues in addition to the GitHub PR
 - A GitHub repo you own
 - Your deploy provider connected to that repo (the example uses Vercel)
 - AWS CLI logged in to the same account as the ABCA stack
@@ -138,16 +138,9 @@ Paste the same secret you used in 4b. The CLI writes it to the stack's `GitHubWe
 
 ### Step 4 — Smoke test
 
-1. Open a Linear issue in your mapped project (e.g. "Update homepage heading"). It will get a Linear identifier like `ABCA-42`.
-2. Add the `abca` label.
-3. Wait 2-5 minutes:
-   - Agent reacts 👀 on the Linear issue (within ~10s)
-   - Agent does the work, opens a PR
-   - Provider builds the preview
-   - **Screenshot lands on the GitHub PR** as a comment
-   - **Same screenshot lands on the Linear issue** as a comment
+Open any PR on the configured repo (push a commit, open a PR however you normally do — GitHub UI, `gh pr create`, GitHub Actions, agent, etc.) Wait 2–5 minutes for your provider to build the preview. The screenshot should land on the PR as a markdown image comment.
 
-If the GitHub comment shows up but Linear doesn't (or vice versa), see Troubleshooting below.
+**If you also have Linear configured:** create a Linear issue in a mapped project (e.g. "Update homepage heading"), apply the trigger label, and watch the agent open a PR. The same screenshot lands on both the GitHub PR and the Linear issue. If the GitHub comment shows but Linear doesn't, see Troubleshooting.
 
 ## Configuring for non-Vercel providers
 
@@ -187,7 +180,7 @@ Then tail the function's CloudWatch log group. Common silent skips:
 
 ### Screenshot lands on GitHub PR but not on Linear
 
-The GitHub comment is the load-bearing path; Linear is best-effort. Look for the processor log line `Linear identifier did not resolve to an issue` — usually means:
+The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skipping the Linear post is normal if you don't have Linear configured. If you do, look for the processor log line `Linear identifier did not resolve to an issue` — usually means:
 
 - The PR title and body don't contain a Linear-style identifier (e.g. `ABCA-42`). The agent's task description includes the identifier by default; if you opened the PR manually it might not.
 - The identifier's workspace isn't OAuth-installed. Run `bgagent linear list-projects` to confirm the issue's project is in the registry.
