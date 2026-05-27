@@ -82,8 +82,8 @@ interface CdpMessage {
  *      8. StopBrowserSession (best-effort; sessions auto-expire)
  *
  *  We don't try to be clever about fonts, viewports, or cookie
- *  injection — the agent is just snapshotting Vercel preview URLs that
- *  render with default settings.
+ *  injection — the agent is just snapshotting public preview URLs
+ *  that render with default settings (no auth, no per-user state).
  *
  * @param url The URL to navigate to and screenshot.
  * @param opts.timeoutMs Override the default 60s budget.
@@ -288,7 +288,8 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
 
     // 5. Wait for the page load event. SPA-style apps may continue
     //    fetching after this fires, so add a 2s settle wait. For
-    //    Vercel preview URLs this tends to be enough.
+    //    typical preview URLs (Vercel/Netlify/Amplify CDN edges) this
+    //    is enough.
     await waitForEvent('Page.loadEventFired');
     await new Promise((r) => setTimeout(r, 2000));
 

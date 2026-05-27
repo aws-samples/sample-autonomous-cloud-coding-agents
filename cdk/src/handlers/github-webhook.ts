@@ -39,16 +39,21 @@ const PROCESSOR_FUNCTION_NAME = process.env.GITHUB_WEBHOOK_PROCESSOR_FUNCTION_NA
 const DEDUP_TTL_SECONDS = 60 * 60;
 
 /**
- * Subset of GitHub's `deployment_status` payload we route on. Vercel
- * (and any GitHub-Deployments-API-aware deploy backend) posts this when
- * a preview / production deploy finishes. The interesting fields:
+ * Subset of GitHub's `deployment_status` payload we route on. Any deploy
+ * backend that calls the GitHub Deployments API posts this when a deploy
+ * finishes — Vercel, AWS Amplify Hosting, Netlify, Cloud Run, or your
+ * own GitHub Actions workflow that calls `POST /repos/.../deployments`.
+ * The interesting fields:
  *  - `deployment_status.state`: `success` | `failure` | `error` | `pending` | `in_progress`
  *  - `deployment_status.environment_url`: the deployed URL — lives on the
  *    *status* object, not the deployment itself. (The deployment object
  *    only has the immutable SHA + environment name; URL changes per
  *    status update — first `pending` has no URL, then `success` fills
  *    it in.)
- *  - `deployment.environment`: `Preview` | `Production`
+ *  - `deployment.environment`: provider-defined string (Vercel uses
+ *    `Preview`/`Production`, Amplify uses the branch name, GitHub
+ *    Actions uses whatever the workflow passes). Filtered against
+ *    `SCREENSHOT_TARGET_ENVIRONMENT` env var.
  *  - `deployment.sha`: the commit SHA the deploy is for (used to map
  *    back to a PR via the GitHub commit-pulls API)
  *
@@ -77,18 +82,21 @@ interface GitHubDeploymentStatusEnvelope {
  *
  * Verifies `X-Hub-Signature-256` (per
  * https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
- * filters to `deployment_status` events from Vercel-style preview deploys,
- * dedups on `(repo, deployment_id, status_id)`, and async-invokes the
- * processor Lambda so we can ack within GitHub's 10s timeout. Other event
- * types (push, pull_request, ping, …) get an immediate 200 so GitHub
- * doesn't retry them.
+ * filters to successful `deployment_status` events whose environment
+ * matches `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`), dedups
+ * on `(repo, deployment_id, status_id)`, and async-invokes the
+ * processor Lambda so we can ack within GitHub's 10s timeout. Other
+ * event types (push, pull_request, ping, …) get an immediate 200 so
+ * GitHub doesn't retry them.
  *
  * Why `deployment_status` and not `workflow_run`:
- * Vercel doesn't run a GitHub Action to deploy — it posts directly to
- * the GitHub Deployments API. `deployment_status` carries the deploy
- * URL (`deployment.environment_url`) and the SHA the deploy is for,
- * letting us route to the correct ABCA task and screenshot the right
- * URL without extra API calls.
+ * Most managed hosting providers (Vercel, Netlify, Amplify) don't run
+ * a GitHub Action to deploy — they post directly to the GitHub
+ * Deployments API. Self-hosted CI typically calls the same API at the
+ * end of its workflow. `deployment_status` carries the deploy URL
+ * (`deployment_status.environment_url`) and the SHA the deploy is
+ * for, letting us route to the correct ABCA task and screenshot the
+ * right URL without provider-specific extra API calls.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
@@ -134,19 +142,25 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
 
-    // Vercel posts intermediate states (`pending`, `in_progress`) before
-    // the terminal `success` / `failure` / `error`. Only `success` deploys
-    // are worth screenshotting; everything else gets a clean 200 so GitHub
+    // GitHub deployment_status events have multiple intermediate states
+    // (`pending`, `in_progress`) before the terminal `success` /
+    // `failure` / `error`. Only `success` deploys are worth
+    // screenshotting; everything else gets a clean 200 so GitHub
     // doesn't retry.
     if (payload.deployment_status?.state !== 'success') {
       return jsonResponse(200, { ok: true, skipped_state: payload.deployment_status?.state });
     }
 
-    // v1 scope: preview deploys only. Production deploys are skipped here
-    // (followup #87 in the plan covers post-merge screenshots if useful).
-    // Vercel labels its preview environment `Preview`; configurable via
-    // `SCREENSHOT_TARGET_ENVIRONMENT` env so non-Vercel backends with
-    // different naming can flip it without a code change.
+    // Filter to a configured environment name. Defaults to `Preview`
+    // because Vercel labels per-PR deploys that way, but every provider
+    // uses different conventions:
+    //   - Vercel preview:           `Preview`
+    //   - AWS Amplify Hosting:      branch name (e.g. `main`, `feat/x`)
+    //   - GitHub Actions deploys:   whatever the workflow passes to
+    //                               `actions/create-deployment`
+    //   - Netlify deploy previews:  `Deploy Preview <PR#>`
+    // Operators on non-Vercel backends override via
+    // `SCREENSHOT_TARGET_ENVIRONMENT` (Lambda env var, redeploy required).
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
     if (payload.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
