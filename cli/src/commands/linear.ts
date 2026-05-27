@@ -368,19 +368,42 @@ export function makeLinearCommand(): Command {
 
   linear.addCommand(
     new Command('link')
-      .description('Link your Linear account using a verification code')
-      .argument('<code>', 'Verification code from Linear')
+      .description('Redeem an invite code from `bgagent linear invite-user` to link your Linear identity')
+      .argument('<code>', 'One-time invite code (e.g. link-3f8b4a2c)')
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (code: string, opts) => {
         const client = new ApiClient();
-        const result = await client.linearLink(code);
 
+        // Dry-run preview FIRST so the user can confirm what they're
+        // linking before any write hits DDB. This is the safety rail
+        // that lets a teammate abort if the admin picked the wrong row.
+        const preview = await client.linearLink(code, { dryRun: true });
+
+        if (opts.output !== 'json') {
+          const name = preview.linear_user_name || preview.linear_user_id;
+          const email = preview.linear_user_email ? ` (${preview.linear_user_email})` : '';
+          const wsLabel = preview.linear_workspace_slug || preview.linear_workspace_id;
+          console.log('You are about to link the following Linear identity to YOUR ABCA account:');
+          console.log();
+          console.log(`  Linear user:      ${name}${email}`);
+          console.log(`  Linear workspace: ${wsLabel}`);
+          console.log();
+          console.log('After linking, tasks triggered by this Linear user will be attributed to');
+          console.log('your platform user (concurrency caps, billing, `bgagent list`).');
+          console.log();
+          const confirm = (await promptLine('Continue? [Y/n]')).trim().toLowerCase();
+          if (confirm && confirm !== 'y' && confirm !== 'yes') {
+            console.log('Aborted. The invite code is still valid until it expires.');
+            return;
+          }
+        }
+
+        const result = await client.linearLink(code);
         if (opts.output === 'json') {
           console.log(formatJson(result));
         } else {
-          console.log('Linear account linked successfully.');
-          console.log(`  Workspace: ${result.linear_workspace_id}`);
-          console.log(`  User:      ${result.linear_user_id}`);
+          console.log();
+          console.log('✅ Linear account linked.');
           console.log(`  Linked at: ${result.linked_at}`);
         }
       }),
@@ -680,17 +703,40 @@ export function makeLinearCommand(): Command {
           console.log('  ✓ Mirrored signing secret to per-workspace OAuth bundle');
         }
 
+        // ─── Step 7: Self-link picker ──────────────────────────────────
+        // With actor=app, Linear's `viewer` returns the bot user, not
+        // you. We can't auto-link from the OAuth dance — instead we
+        // show the workspace member list so you can pick yourself.
+        // One extra question, no separate command. Teammate linking
+        // is a different flow (`bgagent linear invite-user`).
+        console.log();
+        const linked = await runSelfLinkPicker({
+          ddb,
+          userMappingTable: userMappingTable!,
+          accessToken: tokenResponse.access_token,
+          workspaceId: identity.organization.id,
+          slug,
+          cognitoSub,
+          linkMethod: 'auto_setup_oauth',
+        });
+
         // ─── Done ──────────────────────────────────────────────────────
         console.log();
         console.log('✅ Setup complete.');
         console.log();
         console.log('Next steps:');
-        console.log(`  1. Link your Linear identity in this workspace to your platform user:`);
-        console.log(`       bgagent linear link-user ${slug}`);
-        console.log('     (Required — without this, tasks you trigger from Linear are dropped.)');
-        console.log('  2. Onboard a Linear project to a GitHub repo:');
-        console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
-        console.log('  3. Add the trigger label to a Linear issue in a mapped project.');
+        if (!linked) {
+          console.log(`  1. Re-run \`bgagent linear setup ${slug}\` to retry the self-link picker,`);
+          console.log('     OR label a test issue and the resulting CloudWatch warning will tell you');
+          console.log('     your Linear UUID. (Required — without linking, your Linear-triggered tasks are dropped.)');
+          console.log('  2. Onboard a Linear project to a GitHub repo:');
+          console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
+        } else {
+          console.log('  1. Onboard a Linear project to a GitHub repo:');
+          console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
+          console.log('  2. Add the trigger label to a Linear issue in a mapped project.');
+          console.log('  (To onboard teammates: `bgagent linear invite-user <slug>`.)');
+        }
       }),
   );
 
@@ -962,16 +1008,34 @@ export function makeLinearCommand(): Command {
         await upsertOauthSecret(sm, secretName, merged, slug);
         console.log('  ✓ Stored webhook signing secret on per-workspace OAuth bundle');
 
+        // ─── Self-link picker (same as setup; see explanation there) ───
+        console.log();
+        const linked = await runSelfLinkPicker({
+          ddb,
+          userMappingTable: userMappingTable!,
+          accessToken: tokenResponse.access_token,
+          workspaceId: identity.organization.id,
+          slug,
+          cognitoSub,
+          linkMethod: 'add_workspace_oauth',
+        });
+
         // ─── Done ──────────────────────────────────────────────────────
         console.log();
         console.log('✅ Workspace added.');
         console.log();
         console.log('Next steps:');
-        console.log(`  1. Link your Linear identity in this workspace to your platform user:`);
-        console.log(`       bgagent linear link-user ${slug}`);
-        console.log('     (Required — without this, tasks you trigger from Linear are dropped.)');
-        console.log('  2. Onboard a Linear project to a GitHub repo:');
-        console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
+        if (!linked) {
+          console.log(`  1. Re-run \`bgagent linear add-workspace ${slug}\` to retry the self-link picker,`);
+          console.log('     OR label a test issue and the resulting CloudWatch warning will tell you');
+          console.log('     your Linear UUID. (Required — without linking, your Linear-triggered tasks are dropped.)');
+          console.log('  2. Onboard a Linear project to a GitHub repo:');
+          console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
+        } else {
+          console.log('  1. Onboard a Linear project from this workspace to a GitHub repo:');
+          console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
+          console.log('  (To onboard teammates: `bgagent linear invite-user <slug>`.)');
+        }
       }),
   );
 
@@ -1064,29 +1128,26 @@ export function makeLinearCommand(): Command {
   );
 
   linear.addCommand(
-    new Command('link-user')
-      .description('Map a Linear user UUID in a workspace to an ABCA platform user')
+    new Command('invite-user')
+      .description('Generate a one-time code for a Linear teammate to redeem via `bgagent linear link <code>`')
       .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
-      .option('--linear-user-id <uuid>', 'Linear user UUID to map (else prompted)')
-      .option('--platform-user-id <sub>', 'Cognito sub of the platform user (defaults to you)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (slug: string, opts) => {
-        // Why this command exists:
-        //   bgagent linear setup / add-workspace USED to auto-link the
-        //   wizard runner via Linear's `viewer` query. With actor=app,
-        //   `viewer` returns the OAuth bot user (a synthetic
-        //   `<uuid>@oauthapp.linear.app` identity) — not the human
-        //   admin. The bot never applies labels, so the auto-link
-        //   mapped the wrong UUID and every human-triggered task got
-        //   dropped with "Linear actor has no linked platform user".
+        // Two-party handshake for linking a teammate:
+        //   1. (here) Admin picks the teammate's Linear identity from
+        //      the workspace member list. CLI writes a `pending#<code>`
+        //      row to LinearUserMappingTable with 24h TTL and prints
+        //      the code.
+        //   2. Admin sends the code to the teammate (Slack/email/etc).
+        //   3. Teammate runs `bgagent linear link <code>` from their
+        //      own machine. Their Cognito-authenticated id_token
+        //      supplies the platform-user half. They see the Linear
+        //      name+email before confirming, so an admin who picked
+        //      the wrong row can't silently misattribute.
         //
-        // What this does:
-        //   Writes a row into LinearUserMappingTable mapping
-        //   `(workspaceId, linearUserId)` → platformUserId. The
-        //   processor reads this row when an issue is labeled and
-        //   uses it to attribute the resulting task. One row per
-        //   teammate per workspace.
+        // Self-linking the admin themselves is folded into `setup` /
+        // `add-workspace` — no separate command for that case.
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
             `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
@@ -1097,7 +1158,6 @@ export function makeLinearCommand(): Command {
         const region = opts.region || config.region;
         const stackName = opts.stackName;
 
-        // ─── Resolve table names + caller identity ─────────────────────
         const [workspaceRegistryTable, userMappingTable] = await Promise.all([
           getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
           getStackOutput(region, stackName, 'LinearUserMappingTableName'),
@@ -1116,93 +1176,93 @@ export function makeLinearCommand(): Command {
         if (!creds?.id_token) {
           throw new CliError('Not authenticated — run `bgagent login` first.');
         }
-        let callerCognitoSub: string;
-        try {
-          callerCognitoSub = extractCognitoSub();
-        } catch (err) {
-          throw new CliError(
-            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + 'Run `bgagent login` to refresh credentials.',
-          );
-        }
+        const callerCognitoSub = extractCognitoSub();
 
-        // ─── Resolve workspace UUID via slug ────────────────────────────
+        // ─── Resolve workspace + OAuth secret arn ──────────────────────
+        const sm = new SecretsManagerClient({ region });
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-        const scan = await ddb.send(new ScanCommand({
+        const registryScan = await ddb.send(new ScanCommand({
           TableName: workspaceRegistryTable!,
           FilterExpression: 'workspace_slug = :slug AND #status = :active',
           ExpressionAttributeNames: { '#status': 'status' },
           ExpressionAttributeValues: { ':slug': slug, ':active': 'active' },
           Limit: 1,
         }));
-        const row = scan.Items?.[0];
-        if (!row) {
+        const registryRow = registryScan.Items?.[0];
+        if (!registryRow) {
           throw new CliError(
             `Workspace '${slug}' is not in the registry (or status != 'active'). `
             + `Run \`bgagent linear setup ${slug}\` or \`bgagent linear add-workspace ${slug}\` first.`,
           );
         }
-        const workspaceId = row.linear_workspace_id as string;
+        const workspaceId = registryRow.linear_workspace_id as string;
+        const oauthSecretArn = registryRow.oauth_secret_arn as string;
 
-        console.log(`bgagent linear link-user — workspace '${slug}'`);
-        console.log(`  region:       ${region}`);
-        console.log(`  workspace id: ${workspaceId}`);
+        // ─── Query Linear members ──────────────────────────────────────
+        process.stdout.write('  → Querying Linear for workspace members...');
+        const oauthSecret = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
+        const stored = JSON.parse(oauthSecret.SecretString ?? '{}') as { access_token?: string };
+        if (!stored.access_token) {
+          console.log(' ✗');
+          throw new CliError(`OAuth secret '${oauthSecretArn}' has no access_token. Re-run setup.`);
+        }
+        const members = await queryLinearWorkspaceMembers(`Bearer ${stored.access_token}`);
+        if (!members || members.length === 0) {
+          console.log(' ✗');
+          throw new CliError('Linear API returned no workspace members. Token may be expired or scope insufficient.');
+        }
+        const humans = members.filter((m) => !(m.email ?? '').endsWith('@oauthapp.linear.app'));
+        console.log(` ✓ (${humans.length} member${humans.length === 1 ? '' : 's'})`);
+        if (humans.length === 0) {
+          throw new CliError('No human users found in this workspace. Add teammates in Linear first.');
+        }
+
+        // ─── Picker ───────────────────────────────────────────────────
         console.log();
-
-        // ─── Linear user UUID ──────────────────────────────────────────
-        let linearUserId = (opts.linearUserId ?? '').trim();
-        if (!linearUserId) {
-          console.log('  Find your Linear user UUID:');
-          console.log('    • Trigger an issue with the label and grep CloudWatch logs');
-          console.log('      for "no linked platform user" — the warning prints linear_user_id.');
-          console.log('    • Or query Linear: GET https://api.linear.app/graphql with');
-          console.log('      `query { viewer { id } }` while authenticated as that user.');
-          console.log();
-          linearUserId = (await promptLine('  Linear user UUID')).trim();
-        }
-        if (!UUID_RE.test(linearUserId)) {
-          throw new CliError(
-            `Invalid Linear user UUID '${linearUserId}'. Expected the 36-char canonical UUID form, `
-            + 'e.g. \'91999ba0-3b4e-48d3-ad5e-9bc5f9aba200\'.',
-          );
-        }
-
-        // ─── Platform user (Cognito sub) ───────────────────────────────
-        const platformUserId = (opts.platformUserId ?? callerCognitoSub).trim();
-        if (!platformUserId) {
-          throw new CliError('Platform user (Cognito sub) is required.');
-        }
-
-        // ─── Confirm + write ───────────────────────────────────────────
-        const linearIdentity = `${workspaceId}#${linearUserId}`;
-        console.log(`  Will link Linear identity '${linearIdentity}'`);
-        console.log(`  to platform user '${platformUserId}'.`);
+        console.log(`  Workspace '${slug}' members:`);
+        humans.forEach((m, i) => {
+          const email = m.email ? ` (${m.email})` : '';
+          console.log(`    ${i + 1}. ${m.name ?? m.id}${email}`);
+        });
         console.log();
-        const confirm = (await promptLine('  Continue? [y/N]')).trim().toLowerCase();
-        if (confirm !== 'y' && confirm !== 'yes') {
-          console.log('  Aborted.');
-          return;
+        const pickRaw = (await promptLine(`  Which one is the teammate? [1-${humans.length}]`)).trim();
+        const pickIdx = parseInt(pickRaw, 10) - 1;
+        if (Number.isNaN(pickIdx) || pickIdx < 0 || pickIdx >= humans.length) {
+          throw new CliError(`Invalid selection '${pickRaw}'.`);
         }
+        const picked = humans[pickIdx];
+        const pickedLabel = `${picked.name ?? picked.id}${picked.email ? ` (${picked.email})` : ''}`;
 
-        const now = new Date().toISOString();
+        // ─── Write pending#<code> + print handoff ──────────────────────
+        const code = generateInviteCode();
+        const ttl = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
         await ddb.send(new PutCommand({
           TableName: userMappingTable!,
           Item: {
-            linear_identity: linearIdentity,
-            platform_user_id: platformUserId,
+            linear_identity: `pending#${code}`,
+            status: 'pending',
             linear_workspace_id: workspaceId,
-            linear_user_id: linearUserId,
-            linked_at: now,
-            status: 'active',
-            link_method: 'manual_cli',
+            linear_workspace_slug: slug,
+            linear_user_id: picked.id,
+            linear_user_name: picked.name ?? '',
+            linear_user_email: picked.email ?? '',
+            invited_at: new Date().toISOString(),
+            invited_by_platform_user_id: callerCognitoSub,
+            ttl,
           },
         }));
-
         console.log();
-        console.log(`✅ Linked.`);
+        console.log('✅ Invite created.');
         console.log();
-        console.log(`Tasks triggered by Linear user ${linearUserId} in workspace '${slug}'`);
-        console.log('will now be attributed to platform user ' + platformUserId + '.');
+        console.log('  Send this to the teammate (Slack/email/etc):');
+        console.log();
+        console.log(`      bgagent linear link ${code}`);
+        console.log();
+        console.log(`  Picked Linear user: ${pickedLabel}`);
+        console.log(`  Code expires:       ${new Date(ttl * 1000).toISOString()} (24h)`);
+        console.log();
+        console.log('  The teammate sees the Linear identity above and confirms before the');
+        console.log('  mapping is written. If you picked the wrong member, the teammate aborts.');
       }),
   );
 
@@ -1532,6 +1592,136 @@ interface LinearOrganization {
   readonly name?: string;
   /** Linear urlKey, e.g. "acme" — Phase 2.0b: used as the workspace slug. */
   readonly urlKey?: string;
+}
+
+/** Workspace member surfaced by Linear's `users` GraphQL query. */
+interface LinearWorkspaceMember {
+  readonly id: string;
+  readonly name?: string;
+  readonly email?: string;
+}
+
+/**
+ * Query the workspace's human members. Used by `bgagent linear link-user`'s
+ * picker — surfaces the list of Linear users the OAuth bot can see, so the
+ * admin (or self-linker) can pick the right human without typing UUIDs.
+ *
+ * Returns null on API failure (logged + caller throws CliError). Filters
+ * out the synthetic `@oauthapp.linear.app` bot user happens at the call
+ * site since it's policy ("don't pick the bot") not a transport concern.
+ */
+async function queryLinearWorkspaceMembers(
+  authorizationHeader: string,
+): Promise<LinearWorkspaceMember[] | null> {
+  try {
+    const res = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authorizationHeader,
+      },
+      body: JSON.stringify({
+        // first:100 caps the picker at the first 100 members. Workspaces
+        // larger than that are rare for ABCA's target use case (small
+        // dev teams); pagination is a v1.x followup if it ever bites.
+        query: '{ users(first: 100, filter: { active: { eq: true } }) { nodes { id name email } } }',
+      }),
+    });
+    if (!res.ok) {
+      console.log(`  ⚠ Linear API returned ${res.status}`);
+      return null;
+    }
+    const body = await res.json() as { data?: { users?: { nodes?: LinearWorkspaceMember[] } } };
+    return body.data?.users?.nodes ?? [];
+  } catch (err) {
+    console.log(`  ⚠ Could not query Linear workspace members: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Run the self-link picker inline at the end of `setup` / `add-workspace`.
+ * Lists workspace humans, asks the caller to pick themselves, writes the
+ * mapping row using their own Cognito sub. Returns true on success, false
+ * if the user aborts (so the caller can print a follow-up reminder).
+ *
+ * This is the "good UX so admins don't have a separate command" path.
+ * Teammate linking is a different command (`invite-user` + `link <code>`).
+ */
+async function runSelfLinkPicker(args: {
+  ddb: DynamoDBDocumentClient;
+  userMappingTable: string;
+  accessToken: string;
+  workspaceId: string;
+  slug: string;
+  cognitoSub: string;
+  linkMethod: string;
+}): Promise<boolean> {
+  process.stdout.write('  → Querying Linear members so you can pick yourself...');
+  const members = await queryLinearWorkspaceMembers(`Bearer ${args.accessToken}`);
+  if (!members || members.length === 0) {
+    console.log(' ✗');
+    console.log('  ⚠ Could not list workspace members; skipping self-link.');
+    console.log(`    Run \`bgagent linear link-user-self ${args.slug}\` later, or label an issue and follow the warning.`);
+    return false;
+  }
+  const humans = members.filter((m) => !(m.email ?? '').endsWith('@oauthapp.linear.app'));
+  console.log(` ✓ (${humans.length} member${humans.length === 1 ? '' : 's'})`);
+  if (humans.length === 0) {
+    console.log('  ⚠ No human users in workspace yet; skipping self-link.');
+    return false;
+  }
+  console.log();
+  console.log('  Pick your Linear identity in this workspace:');
+  humans.forEach((m, i) => {
+    const email = m.email ? ` (${m.email})` : '';
+    console.log(`    ${i + 1}. ${m.name ?? m.id}${email}`);
+  });
+  console.log();
+  const pickRaw = (await promptLine(`  Which one is you? [1-${humans.length}]`)).trim();
+  const pickIdx = parseInt(pickRaw, 10) - 1;
+  if (Number.isNaN(pickIdx) || pickIdx < 0 || pickIdx >= humans.length) {
+    console.log(`  ⚠ Invalid selection '${pickRaw}'; skipping self-link.`);
+    console.log('    Re-run setup or pick yourself later via the picker that fires on first failed trigger.');
+    return false;
+  }
+  const picked = humans[pickIdx];
+  await args.ddb.send(new PutCommand({
+    TableName: args.userMappingTable,
+    Item: {
+      linear_identity: `${args.workspaceId}#${picked.id}`,
+      platform_user_id: args.cognitoSub,
+      linear_workspace_id: args.workspaceId,
+      linear_user_id: picked.id,
+      linked_at: new Date().toISOString(),
+      status: 'active',
+      link_method: args.linkMethod,
+    },
+  }));
+  const label = `${picked.name ?? picked.id}${picked.email ? ` (${picked.email})` : ''}`;
+  console.log(`  ✓ Linked Linear user ${label} → your platform user`);
+  return true;
+}
+
+/**
+ * Generate a short, human-typeable invite code for the teammate-invite
+ * flow. `link-` prefix makes it grep-friendly when an operator pastes it
+ * into chat alongside the command. 8 random chars from a 31-char alphabet
+ * = 40 bits of entropy — over a 24h TTL window with ~10 codes outstanding,
+ * collision probability is negligible.
+ *
+ * Alphabet excludes ambiguous glyphs (0/O, 1/l/I) so codes copy-pasted
+ * across fonts don't get mistyped.
+ */
+function generateInviteCode(): string {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let out = 'link-';
+  for (const b of bytes) {
+    out += alphabet[b % alphabet.length];
+  }
+  return out;
 }
 
 /**

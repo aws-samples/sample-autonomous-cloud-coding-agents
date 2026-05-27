@@ -79,25 +79,7 @@ bgagent linear update-webhook-secret <slug>
 
 Paste the secret at the prompt. ABCA stores it on the workspace's per-workspace OAuth bundle — the receiver Lambda looks it up by `organizationId` at verify time.
 
-### 6. Link your Linear identity to your platform user
-
-```bash
-bgagent linear link-user <slug>
-```
-
-You'll be prompted for your **Linear user UUID in this workspace**. Find it by running `query { viewer { id } }` against `https://api.linear.app/graphql` while logged in as yourself, or trigger an issue first and grep CloudWatch for `linear_user_id` in the resulting "no linked platform user" warning.
-
-The command writes a row mapping `(workspace, linear-user) → your Cognito sub`. Without this row, **every Linear-triggered task you submit is silently dropped** — see [Why this step exists](#why-link-user-is-required) below.
-
-For each teammate who'll trigger tasks from Linear, run `link-user` once with their Linear UUID and Cognito sub:
-
-```bash
-bgagent linear link-user <slug> \
-  --linear-user-id <their-linear-uuid> \
-  --platform-user-id <their-cognito-sub>
-```
-
-### 7. Onboard a project
+### 6. Onboard a project
 
 ```bash
 bgagent linear list-projects --slug <slug>     # find the project UUID
@@ -108,15 +90,31 @@ Default trigger label is `bgagent`; pass `--label <name>` to override.
 
 Optional flags on `onboard-project`: `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
 
-### 8. Test
+### 7. Test
 
 Apply the trigger label to a Linear issue in the onboarded project. The agent should start within ~30 seconds, post a `🤖 Starting on this issue…` comment, then a PR link when ready.
 
-## Why `link-user` is required
+## Inviting teammates
 
-ABCA's `actor=app` OAuth flow installs the Linear app under a synthetic **bot user** (e.g. `<uuid>@oauthapp.linear.app`). Linear's `viewer` query during `setup` returns this bot user's UUID — not the human admin who clicked Authorize. So we can't auto-link the admin from the OAuth dance the way we could under v1's PAK flow (where the API token's owner *was* the human).
+The setup walkthrough auto-links **the person running the wizard**. To onboard additional teammates so they can trigger tasks from Linear:
 
-`link-user` is the explicit, no-magic mapping step. One row per human who'll trigger tasks from Linear, per workspace. Run it once per teammate; the row never expires.
+```bash
+bgagent linear invite-user <slug>
+```
+
+The admin picks the teammate from a Linear member picker. The CLI generates a one-time code (24h TTL) and prints a command to send to the teammate (Slack/email/etc). The teammate runs:
+
+```bash
+bgagent linear link <code>
+```
+
+The CLI shows them the Linear identity name+email and asks for confirmation **before** writing the mapping row. If the admin picked the wrong member, the teammate sees the mismatch and aborts.
+
+### Why this two-step handshake
+
+ABCA's `actor=app` OAuth flow installs the Linear app under a synthetic **bot user** (e.g. `<uuid>@oauthapp.linear.app`). Linear's `viewer` query during `setup` returns this bot user — not the human who clicked Authorize. Setup gets around this by showing a member picker so the admin can self-link inline.
+
+For teammates, the admin can't authenticate as them — so `invite-user` separates the two halves of the binding: admin asserts the Linear identity (picker), teammate confirms with their own Cognito-authenticated CLI session. No PAKs change hands; no admin can silently misattribute since the teammate sees the identity before confirming.
 
 ## How webhook signature verification works
 
