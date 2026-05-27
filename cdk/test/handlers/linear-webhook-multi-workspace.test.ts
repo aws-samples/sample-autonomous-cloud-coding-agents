@@ -68,8 +68,8 @@ process.env.LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME = 'linear-processor';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
 import { handler } from '../../src/handlers/linear-webhook';
-import { invalidateLinearSecretCache } from '../../src/handlers/shared/linear-verify';
 import { invalidateLinearOauthCache } from '../../src/handlers/shared/linear-oauth-resolver';
+import { invalidateLinearSecretCache } from '../../src/handlers/shared/linear-verify';
 
 const STACK_WIDE_SECRET = 'lin_wh_stackwide_AAAAAAAAAAAAAAAAAA';
 const WORKSPACE_A_SECRET = 'lin_wh_workspaceA_BBBBBBBBBBBBBBBBBB';
