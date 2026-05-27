@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {
+    "description": "### High Level Architecture\n\n#### Application type\nServerless event-driven autonomous coding agent platform deployed on AWS (API + orchestrator + isolated compute)\n\n#### Layers\n- Input layer: REST API (API Gateway + Cognito + WAFv2), Slack integration, Linear integration, Webhook (HMAC)\n- Orchestration layer: Lambda Durable Functions driving task state machine (admission, hydration, session mgmt, finalization)\n- Compute layer: Isolated MicroVM sessions (Bedrock AgentCore Runtime / optional ECS Fargate) running Python agent with Claude Agent SDK\n- Data layer: DynamoDB tables (tasks, events, approvals, concurrency, repos, webhooks), S3 (attachments, traces), Secrets Manager, AgentCore Memory\n- Integration layer: GitHub (clone/push/PR via PAT), Amazon Bedrock (LLM inference), DNS Firewall (egress control)\n\n#### Boundaries\n- Internet to API Gateway (WAFv2 protected, Cognito JWT or HMAC auth)\n- API Gateway Lambda handlers to Orchestrator Lambda (async invoke)\n- Orchestrator to AgentCore Runtime (SigV4 invoke_agent_runtime across VPC boundary)\n- AgentCore MicroVM to external services (NAT Gateway, DNS Firewall allowlist: GitHub, npm, PyPI, AWS)\n- Agent to Bedrock Runtime (VPC endpoint, model invocation for code generation)\n\n#### Technology components\n- AWS CDK (TypeScript) - Infrastructure as Code, single stack deployment\n- Python 3.x + Claude Agent SDK + FastAPI - Agent runtime in MicroVM container\n- TypeScript + Node.js 24 - Lambda handlers, orchestrator, CLI\n- Amazon Bedrock (Claude Sonnet 4/Haiku/Opus) - LLM inference via cross-region profiles\n- DynamoDB - Task state, events, approvals, concurrency, repo config, webhooks\n- Amazon Bedrock AgentCore Runtime - MicroVM isolation, session lifecycle (Firecracker)\n- Amazon Bedrock AgentCore Memory - Cross-session semantic/episodic memory\n- Cedar policy engine (WASM Lambda layer) - Tool-call access control and HITL gates\n\n#### Deployment architecture\n- Single AWS account, single CDK stack (backgroundagent-dev)\n- VPC with private subnets (AgentCore Runtime), public subnets (NAT Gateway)\n- VPC Endpoints: S3, DynamoDB, ECR, CloudWatch, Secrets Manager, Bedrock Runtime, STS\n- DNS Firewall with domain allowlist (observation mode default)\n- Single NAT Gateway for internet egress (configurable multi-AZ)\n\n#### APIs\n\n| Endpoint | Method | Purpose |\n|---|---|---|\n| /v1/tasks | POST | Create coding task (new_task, pr_iteration, pr_review) |\n| /v1/tasks | GET | List user tasks (paginated, filterable) |\n| /v1/tasks/{id} | GET | Get task details with error classification |\n| /v1/tasks/{id} | DELETE | Cancel task (stops session, releases concurrency) |\n| /v1/tasks/{id}/events | GET | Task audit trail (state transitions, events) |\n| /v1/tasks/{id}/approve | POST | Approve Cedar HITL gate |\n| /v1/tasks/{id}/deny | POST | Deny Cedar HITL gate |\n| /v1/webhooks/tasks | POST | Create task via HMAC webhook |\n\n#### Security relevant components\n- Amazon Cognito User Pool (JWT auth, no MFA in dev) + HMAC-SHA256 webhooks\n- Bedrock Guardrails (PROMPT_ATTACK filter, fail-closed input screening at submission and hydration)\n- Cedar policy engine (PreToolUse/PostToolUse hooks, hard/soft deny, HITL approval gates)\n- MicroVM session isolation (Firecracker, per-task compute/memory/filesystem)\n- DNS Firewall domain allowlisting + Security Group TCP 443 only egress\n- Output secret scanner (PostToolUse redaction of AWS keys, tokens, private keys)\n- WAFv2 (CRS, known bad inputs, IP rate limit 1000/5min)\n\n### Low Level Architecture\n- API Gateway REST API (v1 stage) with Cognito authorizer and REQUEST authorizer for webhooks\n- WAFv2 Web ACL with AWS Managed Rules (CRS, KnownBadInputs) and IP rate limiting\n- Cognito User Pool (email sign-in, SRP/password auth flows, no MFA)\n- Lambda handlers: CreateTask, GetTask, ListTasks, CancelTask, GetTaskEvents, ApproveTask, DenyTask, GetPending, NudgeTask, ConfirmUploads, GetTraceUrl, WebhookAuthorizer, WebhookCreateTask, GetPolicies\n- TaskOrchestrator Lambda (Durable Functions, checkpoint/replay, 30s poll interval)\n- AgentCore Runtime (Docker image from agent/Dockerfile, 8h max lifetime, /invocations + /ping endpoints)\n- FastAPI server (port 8080) spawning background thread for pipeline execution\n- Pipeline stages: setup_repo, assemble_prompt, run_agent (Claude Agent SDK), post_hooks (ensure_committed, ensure_pr, verify_build)\n- DynamoDB Tables: TaskTable (GSI: UserStatus, Status, Idempotency), TaskEventsTable (DDB Streams to FanOut + ApprovalMetrics), TaskApprovalsTable, UserConcurrencyTable, RepoTable, WebhookTable, TaskNudgesTable, SlackInstallationTable, SlackUserMappingTable, LinearProjectMappingTable, LinearUserMappingTable\n- S3 Buckets: AttachmentsBucket (versioned, 90-day lifecycle), TraceArtifactsBucket (7-day TTL)\n- Secrets Manager: GitHub PAT, Slack signing/client secrets, webhook secrets (bgagent/webhook/*), Linear API token\n- Bedrock Guardrail (InputGuardrail, PROMPT_ATTACK MEDIUM strength)\n- Cedar WASM Lambda Layer for policy evaluation\n- AgentCore Memory (semantic knowledge + episodic strategies, per-repo namespaces)\n- SlackIntegration (commands, events, interactions, OAuth, notify via DDB Streams fan-out)\n- LinearIntegration (webhook processor, project/user mapping tables)\n- ConcurrencyReconciler (15-min schedule, drift correction)\n- StrandedTaskReconciler (catches orphaned SUBMITTED/HYDRATING tasks)\n- PendingUploadCleanup (30-min auto-cancel for unconfirmed uploads)\n- TaskDashboard (CloudWatch dashboard for operational monitoring)\n- VPC: Private subnets + NAT Gateway + VPC Endpoints + DNS Firewall rule group"
+  },
+  "dataflow": {},
+  "assumptions": [
+    {
+      "id": "74ea3e6a-cb5e-4bf0-bae7-ad02cf879f6b",
+      "numericId": 1,
+      "content": "The AgentCore Runtime is the primary compute backend; ECS Fargate is commented out and not actively deployed.",
+      "tags": ["compute", "deployment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The ECS cluster construct import is commented out in agent.ts. The ECS strategy code exists but the CDK stack does not instantiate it. AgentCore is the only active compute path."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "4e011961-972d-4af8-86c3-a89e8936a8b7",
+      "numericId": 2,
+      "content": "DNS Firewall is deployed in observation mode (ALERT only, not BLOCK) based on default configuration.",
+      "tags": ["network-security", "deployment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The DnsFirewall construct is instantiated with observationMode: true. Non-allowlisted domains are logged but not blocked. Enforcement requires explicit operator opt-in."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "0f8a255d-2dfe-46ce-b65e-ef4a7af596b9",
+      "numericId": 3,
+      "content": "A single shared GitHub PAT is used for all repositories; per-repo scoped tokens are not yet implemented.",
+      "tags": ["credentials", "security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "One Secrets Manager secret (GitHubTokenSecret) stores the PAT. The orchestrator passes it to all agent sessions regardless of repo. GitHub App integration is listed as planned in the roadmap."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "38b03062-eabc-40a5-b65c-0335f1ac4483",
+      "numericId": 4,
+      "content": "The orchestrator uses Lambda Durable Functions for checkpoint/replay, enabling hours-long task monitoring without compute charges.",
+      "tags": ["orchestration", "compute", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Confirmed in ORCHESTRATOR.md and task-orchestrator.ts. The orchestrator polls every 30s via waitForCondition, suspending between polls. Execution duration supports up to 1 year."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "47b76c58-8cd1-41ca-a9cf-e00df97f6978",
+      "numericId": 5,
+      "content": "All DynamoDB tables use on-demand capacity mode with PITR enabled and 90-day TTL for task data.",
+      "tags": ["data-storage", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "SECURITY.md confirms PITR on all tables. Task retention defaults to 90 days (TASK_RETENTION_DAYS env var). On-demand mode inferred from absence of provisioned capacity in constructs."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "4487156c-9095-4b33-af6f-f7daa3f0edea",
+      "numericId": 6,
+      "content": "The agent container image must fit within 2GB (AgentCore hard limit) including OS, runtimes, and agent code.",
+      "tags": ["compute", "constraints", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "COMPUTE.md documents the 2GB non-adjustable image limit. The Dockerfile builds from repo root to include contracts/constants.json. Repos exceeding this limit require ECS backend."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "3daeb1ca-b5d3-45c1-bc04-6f607ab1cc21",
+      "numericId": 7,
+      "content": "Slack and Linear integrations are always deployed but require post-deploy secret population to become functional.",
+      "tags": ["integration", "deployment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Both SlackIntegration and LinearIntegration constructs are unconditionally instantiated. Secrets (signing secret, client secret, API tokens) are created empty and populated after deployment."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    },
+    {
+      "id": "c541135a-c1d0-4ed9-95e4-0b2a0026183a",
+      "numericId": 8,
+      "content": "The TaskEventsTable DynamoDB Stream has exactly two consumers (FanOutConsumer and ApprovalMetricsPublisher); adding a third requires migration to Kinesis Data Streams.",
+      "tags": ["data-flow", "constraints", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Noted in the CDK stack comments and task-events-table.ts. DynamoDB Streams supports max 2 Lambda consumers per stream. A third consumer would require Kinesis Data Streams for DynamoDB."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-architecture-agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [],
+  "mitigationLinks": []
+}

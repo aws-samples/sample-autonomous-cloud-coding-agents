@@ -1,0 +1,246 @@
+{
+  "type": "graph",
+  "id": "default_graph",
+  "status": "completed",
+  "completed_nodes": [
+    "dataflow",
+    "threat_model",
+    "architecture",
+    "architecture_diagram",
+    "dataflow_diagram",
+    "application_info",
+    "threats",
+    "mitigations"
+  ],
+  "failed_nodes": [],
+  "interrupted_nodes": [],
+  "node_results": {
+    "application_info": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Application analysis complete. Output written to `./.threat-composer/20260526-1924/components/applicationInfo.tc.json` and validated against the Threat Composer v1 schema. The application is ABCA (Autonomous Background Coding Agents on AWS), a self-hosted platform that runs autonomous coding agents in isolated MicroVM environments on AWS, accepting tasks via CLI/webhooks/Slack and producing pull requests autonomously."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 214593,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 123070,
+        "outputTokens": 2611,
+        "totalTokens": 125681
+      },
+      "accumulated_metrics": {
+        "latencyMs": 57881
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "architecture": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Architecture analysis complete. Output written to `./.threat-composer/20260526-1924/components/architectureDescription.tc.json` and validated against the Threat Composer v1 schema. The application is a serverless event-driven autonomous coding agent platform on AWS with an API Gateway REST API (Cognito + HMAC auth, WAFv2), Lambda Durable Functions orchestrator driving a task state machine, isolated MicroVM compute via Bedrock AgentCore Runtime running a Python/FastAPI agent with Claude Agent SDK, DynamoDB for state persistence, S3 for attachments/traces, Cedar policy engine for tool-call access control, Bedrock Guardrails for input screening, and integrations with GitHub, Slack, and Linear."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 265824,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 494997,
+        "outputTokens": 5018,
+        "totalTokens": 500015
+      },
+      "accumulated_metrics": {
+        "latencyMs": 114052
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "architecture_diagram": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Architecture diagram generated successfully and saved to `./.threat-composer/20260526-1924/components/architectureDiagram.svg`."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 86593,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 80374,
+        "outputTokens": 3653,
+        "totalTokens": 84027
+      },
+      "accumulated_metrics": {
+        "latencyMs": 52364
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "dataflow": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Dataflow analysis complete. Output written to `./.threat-composer/20260526-1924/components/dataflowDescription.tc.json` and validated against the Threat Composer v1 schema. The analysis identifies 4 human actors, 5 external entities, 7 processes, 7 data stores, 5 trust boundaries, and 15 data flows covering the full lifecycle from task submission through agent execution to notification delivery, with 6 assumptions documenting key dataflow characteristics including the shared GitHub PAT blast radius, DynamoDB-mediated orchestrator-agent communication, and dual-point guardrail screening."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 281055,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 643337,
+        "outputTokens": 4527,
+        "totalTokens": 647864
+      },
+      "accumulated_metrics": {
+        "latencyMs": 130273
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "dataflow_diagram": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Data Flow Diagram generated successfully at `./.threat-composer/20260526-1924/components/dataflowDiagram.svg` with all 15 data flows (DF-01 through DF-15), 4 human actors, 5 external entities, 7 processes, 7 data stores, and 4 trust boundaries visualized."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 21618,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 18194,
+        "outputTokens": 1592,
+        "totalTokens": 19786
+      },
+      "accumulated_metrics": {
+        "latencyMs": 21101
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "threats": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "STRIDE analysis complete. Output written to `./.threat-composer/20260526-1924/components/threats.tc.json` and validated against the Threat Composer v1 schema. The analysis identified 21 threats (9 High, 12 Medium priority) across all STRIDE categories covering the key attack surfaces: credential compromise (shared GitHub PAT blast radius), prompt injection (direct and indirect via GitHub/Linear content), data exfiltration (DNS Firewall observation mode), supply chain attacks (malicious dependencies), denial of service (resource exhaustion), authentication weaknesses (no MFA), memory poisoning (AgentCore Memory), and audit trail tampering. Six assumptions document key security control effectiveness uncertainties including Guardrail strength, IAM scoping, Cedar enforcement completeness, and reconciler timing gaps."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 397013,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 204833,
+        "outputTokens": 25323,
+        "totalTokens": 230156
+      },
+      "accumulated_metrics": {
+        "latencyMs": 395971
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "mitigations": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Defender agent analysis complete. Output written to `./.threat-composer/20260526-1924/components/mitigations.tc.json` and validated against the Threat Composer v1 schema. Generated 27 mitigations covering all 21 threats (9 HIGH, 12 MEDIUM priority) with 37 mitigation-to-threat links. Key mitigations include: GitHub App installation tokens for PAT blast radius reduction, DNS Firewall enforcement mode activation, secondary prompt injection classifiers, MFA enablement, memory poisoning defenses with provenance validation and confidence decay, npm/pip --ignore-scripts for supply chain protection, per-session Bedrock token budgets, independent sidecar audit logging, and HITL approval enrichment with deny-by-default timeouts."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 200446,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 99644,
+        "outputTokens": 10736,
+        "totalTokens": 110380
+      },
+      "accumulated_metrics": {
+        "latencyMs": 199653
+      },
+      "execution_count": 1,
+      "interrupts": []
+    },
+    "threat_model": {
+      "result": {
+        "type": "agent_result",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "text": "Threat model assembled and validated successfully at `./.threat-composer/20260526-1924/threatmodel.tc.json` — contains 21 threats, 27 mitigations, and 27 assumptions, all conforming to the Threat Composer v1 schema."
+            }
+          ]
+        },
+        "stop_reason": "end_turn"
+      },
+      "execution_time": 8506,
+      "status": "completed",
+      "accumulated_usage": {
+        "inputTokens": 6135,
+        "outputTokens": 524,
+        "totalTokens": 6659
+      },
+      "accumulated_metrics": {
+        "latencyMs": 8090
+      },
+      "execution_count": 1,
+      "interrupts": []
+    }
+  },
+  "next_nodes_to_execute": [],
+  "current_task": "Analyze local directory: ./.",
+  "execution_order": [
+    "application_info",
+    "architecture",
+    "architecture_diagram",
+    "dataflow",
+    "dataflow_diagram",
+    "threats",
+    "mitigations",
+    "threat_model"
+  ],
+  "_internal_state": {
+    "interrupt_state": {
+      "interrupts": {},
+      "context": {},
+      "activated": false
+    }
+  }
+}

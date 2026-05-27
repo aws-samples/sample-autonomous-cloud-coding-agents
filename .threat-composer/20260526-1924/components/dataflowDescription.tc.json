@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {},
+  "dataflow": {
+    "description": "### Human actors\n\n- **Developer/Operator** - Submits coding tasks via CLI (bgagent), approves/denies Cedar HITL gates, reviews PRs\n- **Slack User** - Submits tasks via /bgagent slash command, receives notifications in threads\n- **Linear User** - Triggers tasks by applying labels to Linear issues\n- **Platform Admin** - Deploys CDK stack, manages repo onboarding, configures Cedar policies\n\n### External entities\n\n- **GitHub** - Source code hosting (clone/push/PR), issue/PR context fetching, webhook events\n- **Amazon Bedrock** - LLM inference (Claude models), Guardrails (prompt attack screening), AgentCore Runtime (MicroVM), AgentCore Memory\n- **Slack API** - OAuth, slash commands, events, interactions, message posting\n- **Linear API** - Webhook delivery, issue reactions, comment posting\n- **Package registries** - npm, PyPI (egress from MicroVM for dependency installation)\n\n### Processes\n\n- **API Gateway + Lambda Handlers** - REST API request processing (create/get/list/cancel tasks, approve/deny gates, webhooks)\n- **Task Orchestrator** - Lambda Durable Functions driving task state machine (admission, hydration, session start, poll, finalize)\n- **Agent Runtime (MicroVM)** - FastAPI server in AgentCore MicroVM executing the coding pipeline (repo setup, prompt assembly, Claude SDK agent loop, post-hooks)\n- **Cedar Policy Engine** - WASM Lambda layer evaluating tool-call permissions (PreToolUse/PostToolUse hooks)\n- **Fan-out Consumer** - DDB Streams Lambda routing task events to Slack, GitHub comments, and email channels\n- **Reconcilers** - Scheduled Lambdas (ConcurrencyReconciler, StrandedTaskReconciler, PendingUploadCleanup)\n- **Slack/Linear Integration Lambdas** - Command processing, event handling, OAuth, webhook verification\n\n### Data stores\n\n| Store | Type | High-Value (Y/N) |\n|---|---|---|\n| TaskTable (DynamoDB) | NoSQL - task state, results, metadata | Y |\n| TaskEventsTable (DynamoDB + Streams) | NoSQL - audit trail, state transitions | Y |\n| TaskApprovalsTable (DynamoDB) | NoSQL - Cedar HITL approval requests/decisions | Y |\n| Secrets Manager | Secret store - GitHub PAT, Slack secrets, webhook secrets, Linear token | Y |\n| AttachmentsBucket (S3) | Object store - user-uploaded files (versioned, 90-day lifecycle) | N |\n| TraceArtifactsBucket (S3) | Object store - agent trajectory traces (7-day TTL) | N |\n| AgentCore Memory | Managed semantic store - per-repo episodes and learnings | N |\n\n### Trust boundaries\n\n| Zone | Elements | Trust Level |\n|---|---|---|\n| Internet/Untrusted | Users, Slack, Linear, GitHub webhooks | Untrusted - all input screened |\n| API Gateway (WAFv2) | REST endpoints, Cognito authorizer, HMAC authorizer | Perimeter - authenticated requests only |\n| AWS Account (Lambda) | Orchestrator, Handlers, Cedar engine, Fan-out | Trusted compute - IAM-scoped |\n| VPC Private Subnets (MicroVM) | AgentCore Runtime, Agent process, cloned repos | Isolated compute - per-task filesystem, DNS Firewall |\n| External APIs | GitHub API, Bedrock API, package registries | Semi-trusted - egress-controlled via allowlist |\n\n### Data flows\n\n| Flow ID | Description | Source | Target | Trust Boundaries Crossed | Assets |\n|---|---|---|---|---|---|\n| DF-01 | User submits task via CLI/API | Developer | API Gateway | Internet to Perimeter | Task description, repo URL, Cognito JWT |\n| DF-02 | Webhook task submission (HMAC) | External system | API Gateway | Internet to Perimeter | Task payload, HMAC signature |\n| DF-03 | Slack slash command task creation | Slack User | Slack Integration Lambda | Internet to Perimeter | Command text, Slack signing secret |\n| DF-04 | Linear label-triggered task | Linear API | Linear Webhook Lambda | Internet to Perimeter | Issue metadata, webhook signature |\n| DF-05 | Orchestrator invokes AgentCore | Task Orchestrator | AgentCore Runtime | Lambda to VPC Private | Hydrated context, GitHub token, Cedar policies |\n| DF-06 | Agent clones repo and pushes code | Agent Runtime | GitHub | VPC to Internet (NAT) | Git operations, GitHub PAT |\n| DF-07 | Agent calls Bedrock for inference | Agent Runtime | Amazon Bedrock | VPC to Bedrock (VPC Endpoint) | Prompts, code context, model responses |\n| DF-08 | Guardrail screens user input | Orchestrator Lambda | Bedrock Guardrails | Within AWS Account | User prompt, issue/PR content |\n| DF-09 | Agent writes task state to DDB | Agent Runtime | TaskTable | VPC to DynamoDB (VPC Endpoint) | Task status, results, heartbeat |\n| DF-10 | Agent writes memory episodes | Agent Runtime | AgentCore Memory | VPC to Bedrock AgentCore | Task outcomes, repo learnings |\n| DF-11 | Fan-out posts to Slack/GitHub | Fan-out Consumer | Slack API / GitHub API | Lambda to Internet | Task events, PR URLs, status updates |\n| DF-12 | User approves/denies HITL gate | Developer | API Gateway | Internet to Perimeter | Approval decision, scope, request_id |\n| DF-13 | Orchestrator reads GitHub context | Task Orchestrator | GitHub API | Lambda to Internet | Issue/PR bodies, comments, diffs |\n| DF-14 | Agent uploads trace artifacts | Agent Runtime | TraceArtifactsBucket | VPC to S3 (VPC Endpoint) | Compressed trajectory JSONL |\n| DF-15 | Agent downloads attachments | Agent Runtime | AttachmentsBucket | VPC to S3 (VPC Endpoint) | User-uploaded files (integrity-verified) |"
+  },
+  "assumptions": [
+    {
+      "id": "f9ad7fa4-c7e4-4e42-a725-8478722742a6",
+      "numericId": 1,
+      "content": "The GitHub PAT passed to the MicroVM has broad repo access; compromise of one session exposes all onboarded repositories.",
+      "tags": ["credentials", "blast-radius", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "A single GitHub PAT from Secrets Manager is injected into every agent session. The token is set as GITHUB_TOKEN env var inside the container. No per-repo scoping exists today."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-dataflow-agent"
+        }
+      ]
+    },
+    {
+      "id": "65d54718-582b-4151-9d01-c57f7f4b0cd0",
+      "numericId": 2,
+      "content": "The orchestrator Lambda has network access to GitHub API for context hydration (issue/PR fetching) without VPC constraints.",
+      "tags": ["network", "data-flow", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Context hydration in the orchestrator Lambda fetches GitHub issues and PRs directly via HTTPS. Lambda runs outside the VPC (no VPC config observed on handler Lambdas), so DNS Firewall does not apply to these calls."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-dataflow-agent"
+        }
+      ]
+    },
+    {
+      "id": "43190ff3-73e1-4cd4-99f3-6793f5f1816d",
+      "numericId": 3,
+      "content": "DynamoDB Streams deliver task events to exactly one fan-out consumer which routes to Slack, GitHub, and email channels.",
+      "tags": ["data-flow", "notifications", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The FanOutConsumer Lambda processes TaskEventsTable DDB Stream records and dispatches to Slack (threaded messages), GitHub (edit-in-place comment), and email (stub). A second consumer handles approval metrics."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-dataflow-agent"
+        }
+      ]
+    },
+    {
+      "id": "6033fac0-3e39-4f35-9ad3-88543d00c353",
+      "numericId": 4,
+      "content": "The agent runtime communicates task progress back to the orchestrator exclusively via DynamoDB writes (no direct callback).",
+      "tags": ["data-flow", "orchestration", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The orchestrator polls TaskTable every 30s via waitForCondition. The agent writes status, heartbeat, and terminal results to DynamoDB. There is no direct HTTP callback from agent to orchestrator."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-dataflow-agent"
+        }
+      ]
+    },
+    {
+      "id": "180e8a56-cc43-4404-8152-534c56da74bc",
+      "numericId": 5,
+      "content": "Cedar HITL approval polling occurs within the agent MicroVM process, blocking the agent turn until a decision or timeout.",
+      "tags": ["approval-flow", "data-flow", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The PreToolUse hook writes an approval row to TaskApprovalsTable, transitions task to AWAITING_APPROVAL, then polls the row every 2-5s from within the agent process. The user approves via the REST API which updates the row."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-dataflow-agent"
+        }
+      ]
+    },
+    {
+      "id": "20885713-5da3-41ef-b5a3-d4b60e7b1280",
+      "numericId": 6,
+      "content": "Bedrock Guardrail screening is applied at two points: task submission (user prompt) and context hydration (when GitHub issue/PR content is present).",
+      "tags": ["security", "data-flow", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The screenWithGuardrail function is called during hydrateContext for PR tasks (always) and new_task (when issue content exists). Fail-closed: GuardrailScreeningError propagates and fails the task rather than allowing unscreened content."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-dataflow-agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [],
+  "mitigationLinks": []
+}
