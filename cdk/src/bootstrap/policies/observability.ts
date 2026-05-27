@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-/* eslint-disable @cdklabs/no-literal-partition */
 // ARN partitions are intentionally literal — this policy is a bootstrap
 // template matching the exact resource patterns in DEPLOYMENT_ROLES.md.
 

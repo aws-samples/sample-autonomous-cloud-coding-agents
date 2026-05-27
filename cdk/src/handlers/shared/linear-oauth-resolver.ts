@@ -59,7 +59,7 @@ const REFRESH_THRESHOLD_SECONDS = 60;
  *  row blocks resolution rather than silently granting access. */
 type RegistryRowStatus = 'active' | 'revoked';
 
-interface RegistryRow {
+export interface RegistryRow {
   readonly linear_workspace_id: string;
   readonly workspace_slug: string;
   readonly oauth_secret_arn: string;
@@ -80,6 +80,17 @@ export interface StoredOauthToken {
   readonly installed_at: string;
   readonly updated_at: string;
   readonly installed_by_platform_user_id: string;
+  /** Per-workspace Linear webhook signing secret (`lin_wh_…`).
+   *
+   *  Linear generates a fresh signing secret per webhook subscription, and
+   *  webhook subscriptions are workspace-scoped — so a single stack-wide
+   *  signing secret can't verify events from multiple workspaces. The
+   *  webhook receiver looks this up by orgId at verify time.
+   *
+   *  Optional for back-compat: tokens written before the per-workspace
+   *  signing flow won't have it, and the receiver falls back to the
+   *  stack-wide `LINEAR_WEBHOOK_SECRET_ARN` for those installs. */
+  readonly webhook_signing_secret?: string;
 }
 
 export interface ResolverOptions {
@@ -198,7 +209,7 @@ export async function resolveLinearOauthToken(
   };
 }
 
-async function getRegistryRow(
+export async function getRegistryRow(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   linearWorkspaceId: string,
@@ -280,7 +291,7 @@ const STORED_OAUTH_TOKEN_REQUIRED_FIELDS: ReadonlyArray<keyof StoredOauthToken> 
   'installed_by_platform_user_id',
 ];
 
-async function getOauthSecret(
+export async function getOauthSecret(
   sm: SecretsManagerClient,
   secretArn: string,
 ): Promise<StoredOauthToken | null> {

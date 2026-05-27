@@ -6,7 +6,7 @@ title: Linear setup guide
 
 This guide walks through setting up the ABCA Linear integration. Once configured, applying the `bgagent` label to an issue in a mapped Linear project triggers an autonomous task. The agent posts progress comments back on the Linear issue as it works.
 
-> **Phase 2.0b** — ABCA now authenticates to Linear via OAuth (`actor=app`) instead of a personal API key. One OAuth app per ABCA deployment, one credential provider per Linear workspace. Personal API keys are no longer supported (see [Migration from 2.0a (PAK) to 2.0b (OAuth)](#migration-from-20a-pak-to-20b-oauth) below).
+> **Phase 2.0b** — ABCA now authenticates to Linear via OAuth (`actor=app`) instead of a personal API key. One per-workspace OAuth secret in AWS Secrets Manager, one OAuth app (or one per workspace, your choice). Personal API keys are no longer supported (see [Migration from 2.0a (PAK) to 2.0b (OAuth)](#migration-from-20a-pak-to-20b-oauth) below).
 
 ## Prerequisites
 
@@ -18,37 +18,22 @@ This guide walks through setting up the ABCA Linear integration. Once configured
 
 ## How it works
 
-1. A Linear-workspace admin creates a Linear OAuth app, registers it as an AgentCore Identity credential provider, and authorizes it on the workspace via `bgagent linear setup`. The workspace's OAuth token lives in the AgentCore Identity vault, keyed on `userId=linear-workspace-<organizationId>`. **One install per workspace, used by all teammates** — this matches the v1 personal-API-key semantics.
+1. A Linear-workspace admin creates a Linear OAuth app and authorizes it on the workspace via `bgagent linear setup`. The workspace's OAuth token (access + refresh) is stored in a per-workspace Secrets Manager secret named `bgagent-linear-oauth-<slug>`. **One install per workspace, used by all teammates** — this matches the v1 personal-API-key semantics.
 2. A user adds the `bgagent` label (configurable per project) to a Linear issue.
 3. Linear fires a webhook to `POST /v1/linear/webhook`. ABCA verifies the HMAC signature and dedups retries.
-4. A processor Lambda looks up the Linear `organizationId` in `LinearWorkspaceRegistryTable` to find the credential provider name, retrieves the workspace's OAuth token via AgentCore Identity, then resolves the project → repo mapping and creates a task with `channel_source: 'linear'`.
-5. The agent clones the repo, writes `.mcp.json` with Linear's hosted MCP server, and runs. It uses `mcp__linear-server__save_comment` / `mcp__linear-server__update_issue` to post updates as `bgagent[bot]` (the OAuth app's identity).
+4. A processor Lambda looks up the Linear `organizationId` in `LinearWorkspaceRegistryTable` to find that workspace's OAuth secret ARN, reads the secret, refreshes the access token if expiring, then resolves the project → repo mapping and creates a task with `channel_source: 'linear'`.
+5. The agent clones the repo, writes `.mcp.json` with Linear's hosted MCP server using the freshly-resolved access token, and runs. It uses `mcp__linear-server__save_comment` / `mcp__linear-server__update_issue` to post updates as `bgagent[bot]` (the OAuth app's identity).
 6. The agent opens a PR on GitHub and adds a final comment to the Linear issue with the PR link.
 
 **Trigger**: only Linear issues with the configured label in a mapped project create tasks. Issues without the label, or in unmapped projects, are ignored. Label removal does not cancel a running task.
 
-**Multi-workspace**: a single ABCA deployment can serve multiple Linear workspaces. Each workspace gets its own AgentCore credential provider via `bgagent linear add-workspace`.
+**Multi-workspace**: a single ABCA deployment can serve multiple Linear workspaces. Each workspace gets its own per-workspace OAuth secret via `bgagent linear add-workspace`. See [Adding additional Linear workspaces](#adding-additional-linear-workspaces) for details, including the per-workspace OAuth-app option needed when Linear apps are kept private.
+
+> **Phase 2.0a (parked).** The previous design routed OAuth through AgentCore Identity credential providers. That path is parked — Phase 2.0b-O2 (shipped) reads Secrets Manager directly because AgentCore Identity's `USER_FEDERATION` flow has an open service-side bug. The setup steps below describe the shipped flow only.
 
 ## Step-by-step setup
 
-### Step 1: Create the AgentCore credential provider
-
-The credential provider is an AWS-side OAuth2 client registration. It generates the **AWS-hosted callback URL** that Linear will redirect the browser to during consent — without this URL, you can't complete Step 2.
-
-```bash
-bgagent linear oauth-register-workspace <workspace-slug>
-```
-
-Where `<workspace-slug>` is the Linear `urlKey` of the workspace (e.g. `acme` from `https://linear.app/acme/...`). The command prompts for the Linear OAuth app's `clientId` and `clientSecret` — you don't have these yet, so first create the Linear OAuth app in Step 2 below, then come back and finish this step. Either order works; just pair them.
-
-The command:
-- Calls `aws bedrock-agentcore-control create-oauth2-credential-provider` with `credentialProviderVendor='CustomOauth2'` (Linear is not a built-in vendor, so the command supplies an explicit `authorizationServerMetadata` block — Linear has no `.well-known/openid-configuration`).
-- Prints the AWS-hosted callback URL you'll paste into Linear's app form.
-- Records the provider name (`linear-oauth-<workspace-slug>`) for `bgagent linear setup` to use later.
-
-> **Why AWS hosts the callback.** Earlier ABCA designs (and most third-party docs at the time of writing) assumed the integrator hosted their own callback service. AgentCore Identity actually proxies the callback itself; the URL it surfaces in `create-oauth2-credential-provider` response (`callbackUrl`) is what Linear redirects to, **not** an URL you control. The `resourceOauth2ReturnUrl` you pass to `get_resource_oauth2_token` is just where AWS sends the **browser** after AWS finishes the code-exchange — typically a localhost URL that `bgagent linear setup` listens on for that one redirect.
-
-### Step 2: Create the Linear OAuth app
+### Step 1: Create the Linear OAuth app
 
 Run:
 
@@ -56,58 +41,54 @@ Run:
 bgagent linear app-template
 ```
 
-This prints the exact field values to paste into Linear's OAuth app form. Open [Linear Settings → API → New application](https://linear.app/settings/api/applications/new) and fill in the fields the template lists. Critical fields (each gates the `actor=app` agent flow — without them Linear surfaces a misleading "Invalid redirect_uri" error):
+This prints the exact field values to paste into Linear's OAuth app form. Open [Linear Settings → API → New application](https://linear.app/settings/api/applications/new) (make sure you're signed into the workspace where you want the app to live — use Linear's workspace switcher in the sidebar if needed) and fill in the fields the template lists. Critical fields (each gates the `actor=app` agent flow — without them Linear surfaces a misleading "Invalid redirect_uri" error):
 
 - **GitHub username**: must end with the literal `[bot]` suffix (e.g., `bgagent[bot]`)
 - **Webhooks**: toggle ON (the URL value can be a placeholder; we don't subscribe to events for the OAuth flow itself)
-- **Callback URLs**: paste the AWS-hosted URL from Step 1 on a single line. Wildcards are not accepted; if you have multiple environments, register each URL fully.
+- **Callback URLs**: `http://localhost:8080/oauth/callback` — the localhost server `bgagent linear setup` listens on for the redirect. Wildcards are not accepted; if you serve setup from multiple machines, register each callback URL fully.
+- **Public**: leave OFF unless you plan to install this app in multiple Linear workspaces — see [Adding additional Linear workspaces](#adding-additional-linear-workspaces) for the trade-offs.
 
-If you ran Step 1 first, pass the AWS callback URL to the template so it's filled in:
-
-```bash
-bgagent linear app-template --aws-callback-url "<paste from Step 1 output>"
-```
+> **Note.** The `app-template` command currently prints a placeholder for the AWS-hosted callback URL referencing the parked Phase 2.0a flow. The actual callback for the shipped Phase 2.0b-O2 flow is `http://localhost:8080/oauth/callback`. The template will be updated to print this value once the parked path is removed; for now, override the placeholder when you paste into Linear.
 
 Click **Save**, then copy the **Client ID** and **Client Secret** from the app's detail page.
 
-### Step 3: Finish Step 1 — paste Linear secrets
-
-Return to the terminal where Step 1 is paused at the `Client ID:` prompt and paste the values you copied from Linear. The credential provider is now wired up.
-
-### Step 4: Authorize via OAuth
+### Step 2: Authorize via OAuth
 
 ```bash
-bgagent linear setup
+bgagent linear setup <workspace-slug>
 ```
+
+Where `<workspace-slug>` is the Linear `urlKey` of the workspace (e.g. `acme` from `https://linear.app/acme/...`).
 
 The wizard:
 
-1. Looks up the credential provider you registered in Step 1.
-2. Starts an ephemeral HTTPS server on `localhost:8443` with a self-signed cert. **Your browser will warn about the cert** — click through, it's local-only.
-3. Calls `get_resource_oauth2_token` with `customParameters={'actor': 'app'}` and opens the returned `authorizationUrl` in your default browser.
-4. You authorize the OAuth app on the Linear consent screen.
-5. AWS handles the code-exchange with Linear behind the scenes, then redirects your browser to `https://localhost:8443/oauth/callback?session_id=...`.
-6. The wizard captures the `session_id`, polls for the access token (5s/600s timeout), then queries Linear's `viewer { id, organization { id, urlKey } }` to record workspace metadata in `LinearWorkspaceRegistryTable`.
+1. Prompts for the **Client ID** and **Client Secret** you copied at the end of Step 1 (or pass them via `--client-id` / `--client-secret`).
+2. Generates a PKCE code verifier + challenge and starts an ephemeral HTTP server on `localhost:8080` to listen for the callback.
+3. Opens Linear's authorization URL in your browser. **Make sure your browser is currently signed into the right workspace** (use Linear's workspace switcher if needed); this is the workspace the app is being installed in.
+4. You authorize the OAuth app on the Linear consent screen — Linear redirects to `http://localhost:8080/oauth/callback?code=...&state=...`.
+5. The wizard exchanges the code for an `access_token` + `refresh_token`, queries Linear's `viewer { id, organization { id, urlKey } }`, and:
+   - Creates `bgagent-linear-oauth-<slug>` in Secrets Manager with the full token bundle (access, refresh, expires_at, scope, client_id, client_secret, workspace metadata).
+   - Writes a row into `LinearWorkspaceRegistryTable` with `(linear_workspace_id, workspace_slug, oauth_secret_arn, status='active')`.
+   - Auto-links you in `LinearUserMappingTable` so tasks you trigger via Linear get attributed to your Cognito user.
+6. Then prompts for the **webhook signing secret** — see Step 3 below for where to find it.
 
-The OAuth token is stored in the AWS-managed token vault under `userId=linear-workspace-<organizationId>`. **All teammates' Linear-triggered tasks share this single token** — that's by design (matches the v1 PAK semantics, just with a revocable / scoped credential and audit trail).
+> **Where the OAuth token lives.** Stored in Secrets Manager at `bgagent-linear-oauth-<slug>`, with `client_id` + `client_secret` co-located in the same secret so Lambda-side refresh works without per-Lambda env vars. Lambdas refresh on demand and write the rotated token back; the agent runtime has read-only access (S1 hardening — untrusted repo code can't overwrite tokens).
 
-### Step 5: Configure the Linear webhook
+### Step 3: Configure the Linear webhook
 
-In [Linear Settings → API](https://linear.app/settings/api) → **Webhooks** → **+**:
+While `bgagent linear setup` is paused at the `Webhook signing secret:` prompt, open [Linear Settings → API](https://linear.app/settings/api) → **Webhooks** → **+**:
 
-- **URL**: paste the URL `bgagent linear setup` printed at the end of Step 4 (looks like `https://<your-api-id>.execute-api.<region>.amazonaws.com/v1/linear/webhook`)
+- **URL**: `https://<your-api-id>.execute-api.<region>.amazonaws.com/v1/linear/webhook` — find this in the CloudFormation stack's `ApiUrl` output, or look up your API Gateway in the AWS console
 - **Resource types**: check **Issues** only
 - **Team**: whichever team owns the projects you'll map to ABCA (or all teams)
 
-Save, then open the webhook's detail page and copy the **signing secret**. Run:
+Save, then open the webhook's detail page and copy the **signing secret** (starts with `lin_wh_`). Paste it back into the terminal where setup is paused.
 
-```bash
-bgagent linear setup --webhook-secret <paste>
-```
+> **Where the signing secret is stored.** `bgagent linear setup` stores the signing secret on the workspace's per-workspace OAuth bundle (`bgagent-linear-oauth-<slug>`), where the webhook receiver looks it up by `organizationId` at verify time. On the first install, it's also mirrored into the stack-wide `LinearWebhookSecret` for back-compat with single-workspace deployments — see [How webhook signature verification works](#how-webhook-signature-verification-works) for the full story.
 
-This stores the secret in `LinearWebhookSecret`. (Webhook signing is independent of OAuth — it's how Linear authenticates inbound calls to your API Gateway, separate from how the agent authenticates outbound calls to Linear.)
+> **Re-running setup later** skips the webhook prompt if the signing secret is already configured. To rotate the signing secret without re-running the OAuth dance, use [`bgagent linear update-webhook-secret <slug>`](#webhook-signature-verification-fails-repeatedly).
 
-### Step 6: Onboard a Linear project
+### Step 4: Onboard a Linear project
 
 Map a Linear project UUID to the GitHub repo you want tasks routed to:
 
@@ -132,7 +113,7 @@ bgagent linear list-projects
 
 Copy the `id` of the project you want to onboard. `onboard-project` validates the UUID format and will reject the truncated slug version with a pointer back to this command.
 
-### Step 7: Link your Linear account (optional but recommended)
+### Step 5: Link your Linear account (optional but recommended)
 
 ABCA needs to know which platform user a Linear actor maps to so triggered tasks are attributed correctly (concurrency caps, billing, `bgagent list`).
 
@@ -157,27 +138,70 @@ ABCA needs to know which platform user a Linear actor maps to so triggered tasks
 
 - **Self-service (planned, v2.x):** a comment-driven `@bgagent link` flow that exchanges a code for a row write — `bgagent linear link <code>` exists in v1 but is non-functional until the Linear-side code generator ships.
 
-### Step 8: Test it
+### Step 6: Test it
 
 Add the `bgagent` label to a Linear issue in a mapped project. Within a few seconds:
 
 - The Linear webhook Lambda logs an `INFO` entry and invokes the processor.
-- The processor looks up `LinearWorkspaceRegistryTable` by the webhook's `organizationId`, retrieves the workspace's OAuth token via AgentCore Identity, and creates a task in `TaskTable` with `channel_source: 'linear'`.
+- The processor looks up `LinearWorkspaceRegistryTable` by the webhook's `organizationId`, reads the workspace's OAuth secret from Secrets Manager (refreshing the access token if expiring), and creates a task in `TaskTable` with `channel_source: 'linear'`.
 - The agent container starts, clones the repo, and posts a `🤖 Starting on this issue…` comment as `bgagent[bot]`.
 - When the agent opens a PR, another comment appears with the PR link and the issue transitions to `In Review` (if that state exists).
 - On completion or failure, a final status comment is posted.
 
 ## Adding additional Linear workspaces
 
-A single ABCA deployment can serve multiple Linear workspaces. Each workspace gets its own credential provider and OAuth install:
+A single ABCA deployment can serve multiple Linear workspaces. Once you've completed initial `bgagent linear setup` for one workspace, additional workspaces use the lighter `add-workspace` command:
 
 ```bash
 bgagent linear add-workspace <workspace-slug>
 ```
 
-This re-runs Steps 1, 2, and 4 of the setup (asks for a new clientId/secret pair, creates a `linear-oauth-<workspace-slug>` provider, runs the OAuth dance against the new workspace). You'll need to create a separate Linear OAuth app for each workspace — Linear apps are workspace-scoped at install time even though the same OAuth credentials *could* technically install in multiple workspaces. Per-workspace apps give cleaner revocation and per-workspace branding.
+This:
 
-The 50-credential-provider-per-account quota in AgentCore is the practical ceiling for multi-tenant deployments.
+- Prompts for the OAuth Client ID — defaults to the existing workspace's value (Enter to reuse, or paste a different one for a per-workspace OAuth app)
+- Prompts for the Client Secret if you supplied a new Client ID; otherwise reuses the existing one
+- Runs the OAuth dance against the new workspace
+- Creates `bgagent-linear-oauth-<slug>` in Secrets Manager and writes a registry row
+- **Prompts for the webhook signing secret** — Linear generates a fresh signing secret per webhook subscription, and webhook subscriptions are workspace-scoped, so each workspace must configure its own webhook in Linear and bring its own signing secret
+- Refuses to silently overwrite an already-onboarded workspace's registry row (use `setup` to re-authorize an existing workspace)
+
+### One OAuth app for all workspaces vs. one per workspace
+
+Linear OAuth apps are **workspace-scoped at install time**:
+
+- A **private** Linear OAuth app (default) can only be authorized from the workspace that created it. Trying to install it in a second workspace returns `Could not find OAuth client with clientId <id>`.
+- A **public** Linear OAuth app can be authorized from any workspace by anyone with the install URL. The client_secret is still yours; "public" only means "anyone can run the consent flow." For a self-hosted ABCA install this is usually fine.
+
+Pick one of:
+
+**Option A: Single shared OAuth app (recommended for personal demos and single-org setups).** In your initial workspace's Linear settings, edit the OAuth app and toggle **Public: ON**. Then `bgagent linear add-workspace <new-slug>` works without `--client-id`. Cleanest UX, single point of revocation.
+
+**Option B: Separate OAuth app per workspace (recommended for multi-org / production setups).** Create a new OAuth app in each new workspace's Linear settings (Step 1 above), then pass the new credentials explicitly:
+
+```bash
+bgagent linear add-workspace <new-slug> \
+  --client-id <new-id> --client-secret <new-secret>
+```
+
+Per-workspace apps give cleaner revocation, per-workspace branding, and isolation if one workspace's credentials leak. Each new app needs its own callback URL (`http://localhost:8080/oauth/callback`) and its own `bgagent[bot]` GitHub username.
+
+There's no AWS-side ceiling on the number of installable workspaces — each is just an SM secret + DDB row. Practical limits are Linear's API rate limits and per-workspace operator overhead.
+
+## How webhook signature verification works
+
+Linear generates a fresh signing secret **per webhook subscription**, and webhook subscriptions are **workspace-scoped**. There's no Linear-side mechanism to share one signing secret across multiple workspaces. So multi-workspace ABCA installs need each workspace's signing secret stored separately, indexed by `organizationId` (the workspace UUID embedded in the webhook payload).
+
+ABCA stores each workspace's signing secret on its per-workspace OAuth bundle (`bgagent-linear-oauth-<slug>`, alongside the access/refresh tokens). The webhook receiver runs this verification flow on each event:
+
+1. Parse the body to extract `organizationId` (untrusted at this point — only used to select which secret to verify against, never trusted before the signature passes).
+2. Look up the registry row for that `organizationId`. If `status='active'` and the OAuth bundle has a `webhook_signing_secret` field:
+   - Verify the HMAC. If it matches → event is trusted, dispatch to the processor.
+   - If it doesn't match → reject 401. **No fallback** to the stack-wide secret — that would let an attacker bypass the per-workspace secret by signing with whatever the stack-wide one happens to be.
+3. If the registry has no row, or the OAuth bundle lacks `webhook_signing_secret` (pre-migration single-workspace install), fall back to the stack-wide `LinearWebhookSecret` and verify against that. If it matches → trusted; if not → 401.
+
+The fallback path keeps existing single-workspace deployments working without re-onboarding. The migration to the per-workspace shape happens automatically the next time you run `bgagent linear setup <slug>` — it reads the existing stack-wide secret and mirrors it onto the workspace's OAuth bundle without re-prompting.
+
+**Trust model.** The `organizationId` in the body is attacker-controlled — they can claim any workspace. But it only **selects** which secret to verify against; an attacker still needs the matching signing secret to forge a valid signature, which they don't have. Cross-workspace impersonation is prevented by the no-fallback-on-mismatch rule above.
 
 ## Usage
 
@@ -205,7 +229,7 @@ Use `bgagent cancel <task-id>`. Removing the Linear label does not cancel a runn
 
 ### "Linear actor has no linked platform user — skipping task creation"
 
-The Linear user who applied the label hasn't been mapped to a Cognito user. See [Step 7](#step-7-link-your-linear-account-optional-but-recommended).
+The Linear user who applied the label hasn't been mapped to a Cognito user. See [Step 5](#step-5-link-your-linear-account-optional-but-recommended).
 
 ### "Invalid redirect_uri parameter for the application" during Step 4
 
@@ -219,14 +243,32 @@ Re-run `bgagent linear setup` after fixing.
 
 ### Agent doesn't post comments to Linear
 
-1. Verify the OAuth credential provider exists: `aws bedrock-agentcore-control list-oauth2-credential-providers --region <region>` — look for `linear-oauth-<workspace-slug>`.
-2. Verify the workspace is registered: scan `LinearWorkspaceRegistryTable`.
+1. Verify the per-workspace OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-linear-oauth-<workspace-slug> --region <region>`.
+2. Verify the workspace is registered: scan `LinearWorkspaceRegistryTable` and confirm the row's `oauth_secret_arn` matches the secret from step 1 and `status = 'active'`.
 3. Check the agent container logs for `Linear MCP configured at …` — absence means `channel_source` wasn't set on the task or the workspace lookup failed.
-4. Check for `WARN linear_reactions: HTTP 401 from Linear` in CloudWatch — usually means the OAuth token in the vault has been revoked from the Linear side. Re-run `bgagent linear setup` to re-authorize.
+4. Check for `WARN linear_reactions: HTTP 401 from Linear` in CloudWatch — usually means the refresh token has been revoked from the Linear side, or the workspace admin uninstalled the app. Re-run `bgagent linear setup <slug>` to re-authorize.
+5. Check for `resolve_linear_api_token: invalid_grant` in CloudWatch — Linear permanently rejected the refresh token (rotation race or revocation). Re-run `bgagent linear setup <slug>` to issue a new refresh token.
 
 ### Webhook signature verification fails repeatedly
 
-The signing secret in Secrets Manager doesn't match the webhook. Re-run `bgagent linear setup --webhook-secret <new-secret>` and paste the secret from the webhook's detail page (not the OAuth app page).
+Most likely the signing secret stored on this workspace's OAuth bundle doesn't match the webhook subscription that Linear is sending from. Run:
+
+```bash
+bgagent linear update-webhook-secret <slug>
+```
+
+Paste the current signing secret from Linear's webhook detail page. This works for any installed workspace — it skips the OAuth dance entirely (Linear refuses to re-issue codes for already-installed apps) and just updates the per-workspace `webhook_signing_secret` field on the SM bundle.
+
+To inspect what's currently stored:
+
+```bash
+aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug> --query SecretString --output text | jq .webhook_signing_secret
+```
+
+Other failure modes:
+
+- **You rotated the signing secret in Linear but never updated ABCA** — same fix as above.
+- **You're running multi-workspace and the wrong webhook (from a different workspace) is targeting your ABCA endpoint** — check the `organizationId` field in the failing webhook's payload (CloudWatch log on the receiver Lambda) against the registry table. If it doesn't match any registered workspace and the stack-wide secret also doesn't match, you have a webhook configured in a Linear workspace you haven't onboarded — either onboard it via `add-workspace` or remove the webhook in Linear.
 
 ## Migration from 2.0a (PAK) to 2.0b (OAuth)
 
@@ -285,19 +327,19 @@ Linear's API rate limits per OAuth-installed app, per workspace:
 
 A typical task makes ~10 Linear API calls (one starting comment, one PR comment, one state transition, one final comment), nowhere near the ceiling. Heavy users should monitor the `X-RateLimit-Requests-Remaining` header in agent logs.
 
-AgentCore Identity quotas worth knowing:
+AWS quotas worth knowing:
 
 | Metric | Limit |
 |--------|-------|
-| OAuth2 credential providers per account-region | 50 |
-| Workload identities per account-region | (check Service Quotas console) |
+| Secrets Manager secrets per region | 500,000 (soft) |
+| Secrets Manager `GetSecretValue` ops/sec | 10,000 |
 
-Token refresh: Linear access tokens expire in 24h (since April 2026). AgentCore Identity auto-refreshes via the stored refresh token; the agent's `get_resource_oauth2_token` call returns a fresh token transparently.
+Token refresh: Linear access tokens expire in 24h (since April 2026). The webhook processor and orchestrator auto-refresh via the stored `refresh_token` and write the rotated token back to Secrets Manager. Race recovery: if Linear returns `invalid_grant` (a concurrent caller already refreshed), the resolver re-reads the secret and uses the freshly-rotated token without a second `/oauth/token` POST.
 
 ## What's out of scope in v1.x
 
 - **Comment-driven task triggers**: only labels trigger tasks. Comment commands (e.g. `@bgagent fix this`) are v2+.
-- **Self-service user linking**: see Step 7 — admins must insert mapping rows manually until v2.x ships the `@bgagent link` comment flow.
+- **Self-service user linking**: see Step 5 — admins must insert mapping rows manually until v2.x ships the `@bgagent link` comment flow.
 - **Attachments**: tickets are text-only. Linear attachments (mockups, screenshots) are planned via S3 pre-fetch.
 - **Per-issue status polling**: use `bgagent status` or watch the Linear issue comments.
 

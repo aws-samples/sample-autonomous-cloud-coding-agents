@@ -39,6 +39,8 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 
 ### Common mistakes
 
+- **Starting implementation without an approved GitHub issue** — Conversational approval ("yes, do it", "go ahead", "start with X") is NOT governance approval. The correct sequence is: create a GitHub issue with acceptance criteria → get the `approved` label from an admin → self-assign → comment "Starting implementation" → then begin work. Even if the user explicitly directs the work in conversation, create the durable artifact (issue) first. See [ADR-003](./docs/decisions/003-contribution-governance.md).
+- **Creating branches without an issue reference** — Branch names must follow the pattern `(feat|fix|chore|docs)/<issue-number>-short-description`. A branch without an issue number is unauthorized work. Example: `feat/148-operational-knowledge-stack`.
 - Editing **`docs/src/content/docs/`** instead of **`docs/guides/`** or **`docs/design/`** — content is generated; sync from sources.
 - Adding or editing files in **`docs/design/`** or **`docs/guides/`** without running **`cd docs && node scripts/sync-starlight.mjs`** — CI will reject ("Fail build on mutation") because the Starlight mirror files in `docs/src/content/docs/` are stale. Always commit the regenerated mirrors alongside source changes.
 - Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.

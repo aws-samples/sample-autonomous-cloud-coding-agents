@@ -18,10 +18,14 @@
  */
 
 import * as crypto from 'crypto';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { getOauthSecret, getRegistryRow } from './linear-oauth-resolver';
 import { logger } from './logger';
 
 const sm = new SecretsManagerClient({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 /** Prefix for Linear-related secrets in Secrets Manager. */
 export const LINEAR_SECRET_PREFIX = 'bgagent/linear/';
@@ -149,4 +153,59 @@ export async function verifyLinearRequest(
   if (!fresh) return false;
   if (fresh === cached) return false;
   return verifyLinearSignature(fresh, signature, body);
+}
+
+/**
+ * Verify a Linear webhook request against the **per-workspace** signing
+ * secret stored alongside the workspace's OAuth token bundle.
+ *
+ * Linear generates a fresh signing secret per webhook subscription, and
+ * webhook subscriptions are workspace-scoped — so a stack-wide signing
+ * secret cannot verify events from multiple workspaces. This path:
+ *
+ *   1. Looks up the registry row keyed on `linear_workspace_id` (the
+ *      orgId from the webhook payload — claimed, not yet trusted).
+ *   2. Reads the per-workspace OAuth secret to extract
+ *      `webhook_signing_secret`.
+ *   3. Verifies the HMAC signature against that secret.
+ *
+ * The orgId is untrusted input from the webhook body; an attacker can
+ * claim any orgId. But it only **selects which secret to verify
+ * against** — they still need the correct signing secret to forge a
+ * valid signature, which they don't have. The trust model is
+ * preserved.
+ *
+ * Returns:
+ * - `'verified'` — signature matches the per-workspace secret. Caller
+ *   trusts the body.
+ * - `'mismatch'` — registry row + secret were found, but the signature
+ *   doesn't match. Caller MUST reject (do not fall back to stack-wide;
+ *   that would let an attacker bypass the per-workspace secret by
+ *   tricking us into re-checking against the stack-wide one).
+ * - `'no-per-workspace-secret'` — registry miss, secret missing, or
+ *   `webhook_signing_secret` field absent in the secret JSON. Caller
+ *   should fall back to the stack-wide secret for back-compat.
+ *
+ * @param registryTableName - DynamoDB table for `LinearWorkspaceRegistryTable`.
+ * @param linearWorkspaceId - the claimed `organizationId` from the body.
+ * @param signature - the `Linear-Signature` header value.
+ * @param body - the raw request body string.
+ */
+export async function verifyLinearRequestForWorkspace(
+  registryTableName: string,
+  linearWorkspaceId: string,
+  signature: string,
+  body: string,
+): Promise<'verified' | 'mismatch' | 'no-per-workspace-secret'> {
+  const row = await getRegistryRow(ddb, registryTableName, linearWorkspaceId);
+  if (!row || row.status !== 'active') {
+    return 'no-per-workspace-secret';
+  }
+  const stored = await getOauthSecret(sm, row.oauth_secret_arn);
+  if (!stored || !stored.webhook_signing_secret) {
+    return 'no-per-workspace-secret';
+  }
+  return verifyLinearSignature(stored.webhook_signing_secret, signature, body)
+    ? 'verified'
+    : 'mismatch';
 }
