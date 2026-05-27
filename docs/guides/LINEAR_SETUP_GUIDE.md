@@ -247,10 +247,24 @@ Re-run `bgagent linear setup` after fixing.
 
 ### Webhook signature verification fails repeatedly
 
-Most likely the signing secret stored on this workspace's OAuth bundle doesn't match the webhook subscription that Linear is sending from. Two cases:
+Most likely the signing secret stored on this workspace's OAuth bundle doesn't match the webhook subscription that Linear is sending from. Run:
 
-1. **Single-workspace install, signing secret rotated in Linear:** re-run `bgagent linear setup <slug> --rotate-webhook-secret` and paste the new value from the Linear webhook detail page.
-2. **Multi-workspace install, wrong workspace's secret pasted during onboarding:** check the workspace's secret with `aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug>` and confirm the `webhook_signing_secret` field matches what Linear shows on that workspace's webhook detail page. If wrong, re-run `bgagent linear add-workspace <slug>` (or `setup --rotate-webhook-secret` to re-prompt without re-running the OAuth dance — currently only `setup` supports rotation; multi-workspace rotation is a planned enhancement).
+```bash
+bgagent linear update-webhook-secret <slug>
+```
+
+Paste the current signing secret from Linear's webhook detail page. This works for any installed workspace — it skips the OAuth dance entirely (Linear refuses to re-issue codes for already-installed apps) and just updates the per-workspace `webhook_signing_secret` field on the SM bundle.
+
+To inspect what's currently stored:
+
+```bash
+aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug> --query SecretString --output text | jq .webhook_signing_secret
+```
+
+Other failure modes:
+
+- **You rotated the signing secret in Linear but never updated ABCA** — same fix as above.
+- **You're running multi-workspace and the wrong webhook (from a different workspace) is targeting your ABCA endpoint** — check the `organizationId` field in the failing webhook's payload (CloudWatch log on the receiver Lambda) against the registry table. If it doesn't match any registered workspace and the stack-wide secret also doesn't match, you have a webhook configured in a Linear workspace you haven't onboarded — either onboard it via `add-workspace` or remove the webhook in Linear.
 
 ## Migration from 2.0a (PAK) to 2.0b (OAuth)
 

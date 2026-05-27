@@ -954,6 +954,94 @@ export function makeLinearCommand(): Command {
   );
 
   linear.addCommand(
+    new Command('update-webhook-secret')
+      .description('Update the per-workspace webhook signing secret without re-running OAuth')
+      .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .action(async (slug: string, opts) => {
+        // Use case: rotation, recovery from misconfig, or first-time
+        // configuration after Linear regenerated the signing secret.
+        // The OAuth dance can't be re-run when the app is already
+        // installed in the workspace (Linear returns access_denied),
+        // so this command sidesteps it entirely — read the existing
+        // OAuth bundle, swap the signing-secret field, write it back.
+        if (!SLUG_RE.test(slug)) {
+          throw new CliError(
+            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
+            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+          );
+        }
+        const config = loadConfig();
+        const region = opts.region || config.region;
+
+        const sm = new SecretsManagerClient({ region });
+        const secretName = linearOauthSecretName(slug);
+
+        // ─── Read existing bundle ───────────────────────────────────
+        let stored: StoredLinearOauthToken;
+        try {
+          const value = await sm.send(new GetSecretValueCommand({ SecretId: secretName }));
+          if (!value.SecretString) {
+            throw new CliError(
+              `Secret '${secretName}' has no SecretString. Run \`bgagent linear setup ${slug}\` to install fresh.`,
+            );
+          }
+          stored = JSON.parse(value.SecretString) as StoredLinearOauthToken;
+        } catch (err) {
+          const errorName = (err as { name?: string }).name;
+          if (errorName === 'ResourceNotFoundException') {
+            throw new CliError(
+              `Workspace '${slug}' is not installed (no Secrets Manager secret '${secretName}'). `
+              + `Run \`bgagent linear setup ${slug}\` or \`bgagent linear add-workspace ${slug}\` first.`,
+            );
+          }
+          if (err instanceof CliError) throw err;
+          throw new CliError(
+            `Could not read existing OAuth bundle: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (!stored.access_token || !stored.workspace_id) {
+          throw new CliError(
+            `Secret '${secretName}' is missing required fields (access_token / workspace_id). `
+            + `Bundle may be corrupted; re-run \`bgagent linear setup ${slug}\` to rebuild.`,
+          );
+        }
+
+        console.log(`bgagent linear update-webhook-secret — workspace '${slug}'`);
+        console.log(`  region: ${region}`);
+        console.log(`  current webhook_signing_secret: ${stored.webhook_signing_secret ? 'set' : 'not set'}`);
+        console.log();
+        console.log('  Paste the new signing secret from Linear → Settings → API → Webhooks');
+        console.log(`  (signed into '${slug}'). Open the webhook detail page and copy the signing secret.`);
+        console.log();
+
+        // ─── Prompt for new secret ──────────────────────────────────
+        const webhookSigningSecret = (await promptSecret('  Webhook signing secret (lin_wh_…): ')).trim();
+        if (!webhookSigningSecret) {
+          throw new CliError('Webhook signing secret is required.');
+        }
+        if (!webhookSigningSecret.startsWith('lin_wh_')) {
+          throw new CliError(
+            'Webhook signing secrets start with \'lin_wh_\'. Got something different — re-check the Linear webhook detail page.',
+          );
+        }
+
+        // ─── Write back ─────────────────────────────────────────────
+        const merged: StoredLinearOauthToken = {
+          ...stored,
+          webhook_signing_secret: webhookSigningSecret,
+          updated_at: new Date().toISOString(),
+        };
+        await upsertOauthSecret(sm, secretName, merged, slug);
+
+        console.log();
+        console.log(`✅ Updated webhook signing secret for '${slug}'.`);
+        console.log();
+        console.log('Next webhook event from this workspace will verify against the new secret.');
+      }),
+  );
+
+  linear.addCommand(
     new Command('onboard-project')
       .description('Map a Linear project to a GitHub repository (admin IAM required)')
       .argument('<linear-project-id>', 'Linear project UUID')
