@@ -202,48 +202,46 @@
   dependencies:
     yaml "^2.8.2"
 
-"@aws-cdk/asset-awscli-v1@2.2.263":
-  version "2.2.263"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/asset-awscli-v1/-/asset-awscli-v1-2.2.263.tgz#dd47eea2a730fad02cc405b5b6b6b58db44d2fb6"
-  integrity sha512-X9JvcJhYcb7PHs8R7m4zMablO5C9PGb/hYfLnxds9h/rKJu6l7MiXE/SabCibuehxPnuO/vk+sVVJiUWrccarQ==
+"@aws-cdk/asset-awscli-v1@2.2.273":
+  version "2.2.273"
+  resolved "https://registry.yarnpkg.com/@aws-cdk/asset-awscli-v1/-/asset-awscli-v1-2.2.273.tgz#81efd05df3f44c5e604f1d43c4b48e12874b0bd3"
+  integrity sha512-X57HYUtHt9BQrlrzUNcMyRsDUCoakYNnY6qh5lNwRCHPtQoTfXmuISkfLk0AjLkcbS5lw1LLTQFiQhTDXfiTvg==
 
 "@aws-cdk/asset-node-proxy-agent-v6@^2.1.1":
   version "2.1.1"
   resolved "https://registry.yarnpkg.com/@aws-cdk/asset-node-proxy-agent-v6/-/asset-node-proxy-agent-v6-2.1.1.tgz#184f980024d67ad60bdc52ab88c59c73fa070346"
   integrity sha512-We4bmHaowOPHr+IQR4/FyTGjRfjgBj4ICMjtqmJeBDWad3Q/6St12NT07leNtyuukv2qMhtSZJQorD8KpKTwRA==
 
-"@aws-cdk/aws-bedrock-agentcore-alpha@2.238.0-alpha.0":
-  version "2.238.0-alpha.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-agentcore-alpha/-/aws-bedrock-agentcore-alpha-2.238.0-alpha.0.tgz#daf9b1ef5faf0aaa048ffce0d5931c2b09f03516"
-  integrity sha512-UnZEWCcTJUlINHZOX0EJw4sA9cyjvioEUtFFrC5Y93PrkFI3aaYqHchq3hSo35GgjYEwQ94kSghgLYxfJZ9B2w==
+"@aws-cdk/aws-bedrock-agentcore-alpha@2.257.0-alpha.0":
+  version "2.257.0-alpha.0"
+  resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-agentcore-alpha/-/aws-bedrock-agentcore-alpha-2.257.0-alpha.0.tgz#8040931f4dae22ce3f971772edc3cb823e75c648"
+  integrity sha512-NRxCj9ge31qyUEmHJqjMIGqbwcB2n5VZIjpu6ClODsVhN1tSJl4U2zZ94bJ+xbsmmYqpltf10kzEE8pRyLwkmA==
 
-"@aws-cdk/aws-bedrock-alpha@2.238.0-alpha.0":
-  version "2.238.0-alpha.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-alpha/-/aws-bedrock-alpha-2.238.0-alpha.0.tgz#948e6113514908361770491f1e53948e972c14d4"
-  integrity sha512-UkT05iwWxPaGWbnqeZHyMAtR+wDbLnStV8vO1EqpWui/iUbuCFrAG0RROayplQ+8FsZiz9Ogre9hZT/WDJXfXw==
+"@aws-cdk/aws-bedrock-alpha@2.257.0-alpha.0":
+  version "2.257.0-alpha.0"
+  resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-alpha/-/aws-bedrock-alpha-2.257.0-alpha.0.tgz#ba6a1bc947f63c4006d89c88b12821b3dca934c4"
+  integrity sha512-7NZ6dDrs1aPzESh3PWgTkP6HiCWDx2fdQw8iNZGbjRakbOimjLrTaXlwlCQhcd/7hnZ8oaH30gbxW8LzM0tghQ==
 
-"@aws-cdk/cloud-assembly-api@^2.2.0":
-  version "2.2.1"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/cloud-assembly-api/-/cloud-assembly-api-2.2.1.tgz#43884b6637c002731115ff922bd256dd8b231ef5"
-  integrity sha512-24ARpDQzF39UTickUgDH6RIs5otPG4aaKJZ93XUSNwiPSR9T+h7gXSF982+NZVYK+7SetQaqrVbm4lcF6dmXWw==
+"@aws-cdk/cloud-assembly-api@^2.2.4":
+  version "2.2.4"
+  resolved "https://registry.yarnpkg.com/@aws-cdk/cloud-assembly-api/-/cloud-assembly-api-2.2.4.tgz#ad5ecf178fa6aa65039b253dd7e7f8d41e7a98c4"
+  integrity sha512-ob4M97DuBQ3HpwtUD6Wosuc731pPbqQuNGZuZfRBEcaOwEsJFwbXkZJC0M4JaDUqi2c50uLHkR346v6wIn5GDg==
   dependencies:
-    jsonschema "~1.4.1"
-    semver "^7.7.4"
+    jsonschema "^1.5.0"
+    semver "^7.8.0"
 
-"@aws-cdk/cloud-assembly-schema@^53.0.0":
-  version "53.11.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/cloud-assembly-schema/-/cloud-assembly-schema-53.11.0.tgz#c1d44c0e834d94e7d6415d66962e96b0a81870f6"
-  integrity sha512-sAkcWQz2hvblIDHe5pFXxyIPZuhDaYowGIpASK+LSDvknBpP7+y3fib/FMpSPQdyI6ZOmJPEQOnz553H7mPnBA==
+"@aws-cdk/cloud-assembly-schema@^53.25.0":
+  version "53.27.0"
+  resolved "https://registry.yarnpkg.com/@aws-cdk/cloud-assembly-schema/-/cloud-assembly-schema-53.27.0.tgz#7d1b1f3fc133adb1aff753542601f6d2b54c1aa7"
+  integrity sha512-OTxe/L2Vc60r2nYih7kFaFpn93sa7shJu9T0tQZsryeDE3HHOAuazKNmS6tLInOjJjVx/dvM5XGyUA+lZAiKxA==
   dependencies:
-    jsonschema "~1.4.1"
-    semver "^7.7.4"
+    jsonschema "^1.5.0"
+    semver "^7.8.0"
 
-"@aws-cdk/mixins-preview@2.238.0-alpha.0":
-  version "2.238.0-alpha.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/mixins-preview/-/mixins-preview-2.238.0-alpha.0.tgz#276e7ff893b7da0ef9ea38fe5916bfa24417a67c"
-  integrity sha512-rnF4IiA7Dt1KXSq8S1El8XBthVrEwrg05DHi1dLV6yUIvfxu9EsvPZFrXAPqzem+3+HIw06Ux62CkTnyqCtotA==
-  dependencies:
-    minimatch "^3.1.2"
+"@aws-cdk/mixins-preview@2.257.0-alpha.0":
+  version "2.257.0-alpha.0"
+  resolved "https://registry.yarnpkg.com/@aws-cdk/mixins-preview/-/mixins-preview-2.257.0-alpha.0.tgz#8a62483b492682cfe52604b94696283fc9f27584"
+  integrity sha512-h4IQTJCN3K2hqOWIJg7hOZkWDsbRuQHPIvgYq8IZsd/iHeDghkIS6XPrw3U6srG25XQcn2pSHpSvA1L7Ob9eWA==
 
 "@aws-crypto/crc32@5.2.0":
   version "5.2.0"
@@ -6279,15 +6277,15 @@ astronomical@^3.0.0:
   dependencies:
     meriyah "^6.0.3"
 
-aws-cdk-lib@^2.238.0:
-  version "2.246.0"
-  resolved "https://registry.yarnpkg.com/aws-cdk-lib/-/aws-cdk-lib-2.246.0.tgz#77cbcdd367e3ed96b42fec9e89a6fd498b04ff93"
-  integrity sha512-7OtF95mss9dWohopCNQKAlNFrMJwgOIvNTNgoOWWcKhULBf6UxKCaf6ATlnuysIWRGf2DHgcval/4+yySOKRBw==
+aws-cdk-lib@^2.257.0:
+  version "2.257.0"
+  resolved "https://registry.yarnpkg.com/aws-cdk-lib/-/aws-cdk-lib-2.257.0.tgz#0354efdbc7a236e5e4ca5c3288e71ee4a766da0a"
+  integrity sha512-GoHfWklrBJcMwLtDlY64pvaT7cD2KyDXC8sik89DR6jHl6nQsBtYTKSJCM+C/k4jgXaecbv8myNX75FySejq0A==
   dependencies:
-    "@aws-cdk/asset-awscli-v1" "2.2.263"
+    "@aws-cdk/asset-awscli-v1" "2.2.273"
     "@aws-cdk/asset-node-proxy-agent-v6" "^2.1.1"
-    "@aws-cdk/cloud-assembly-api" "^2.2.0"
-    "@aws-cdk/cloud-assembly-schema" "^53.0.0"
+    "@aws-cdk/cloud-assembly-api" "^2.2.4"
+    "@aws-cdk/cloud-assembly-schema" "^53.25.0"
     "@balena/dockerignore" "^1.0.2"
     case "1.6.3"
     fs-extra "^11.3.3"
@@ -6501,10 +6499,10 @@ ccount@^2.0.0:
   resolved "https://registry.yarnpkg.com/ccount/-/ccount-2.0.1.tgz#17a3bf82302e0870d6da43a01311a8bc02a3ecf5"
   integrity sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==
 
-cdk-nag@^2.37.55:
-  version "2.37.55"
-  resolved "https://registry.yarnpkg.com/cdk-nag/-/cdk-nag-2.37.55.tgz#438f6bb99a08bedee8c8067a0a16ede952a5f10e"
-  integrity sha512-xcAkygwbph3pp7N0UEzJBmXUH/MIsluV7DYJSeZ/V3yCr0Y0QaRGO298WyD6mi4K+Rmnpl+EJoWUxcOblOqLKA==
+cdk-nag@^2.38.2:
+  version "2.38.2"
+  resolved "https://registry.yarnpkg.com/cdk-nag/-/cdk-nag-2.38.2.tgz#49e23b36d9d999af793ffcffe6b4f8e84d6d462c"
+  integrity sha512-Ddim1r8IwAPQn95KB2owbHoU4YHveHg4PfM+k7TdcANqfVmoHem6cTFMpcIuoDM16BkQQ+xshxYxZgcAoeVKGw==
 
 chalk@^4.1.2:
   version "4.1.2"
@@ -8517,11 +8515,6 @@ jsonschema@^1.5.0:
   resolved "https://registry.yarnpkg.com/jsonschema/-/jsonschema-1.5.0.tgz#f6aceb1ab9123563dd901d05f81f9d4883d3b7d8"
   integrity sha512-K+A9hhqbn0f3pJX17Q/7H6yQfD/5OXgdrR5UE12gMXCiN9D5Xq2o5mddV2QEcX/bjla99ASsAAQUyMCCRWAEhw==
 
-jsonschema@~1.4.1:
-  version "1.4.1"
-  resolved "https://registry.yarnpkg.com/jsonschema/-/jsonschema-1.4.1.tgz#cc4c3f0077fb4542982973d8a083b6b34f482dab"
-  integrity sha512-S6cATIPVv1z0IlxdN+zUk5EPjkGCdnhN4wVSBlvoUO1tOLJootbo9CquNJmbIh4yikWHiUedhRYrNPn1arpEmQ==
-
 keyv@^4.5.4:
   version "4.5.4"
   resolved "https://registry.yarnpkg.com/keyv/-/keyv-4.5.4.tgz#a879a99e29452f942439f2a405e3af8b31d4de93"
@@ -9292,7 +9285,7 @@ minimatch@^10.2.2, minimatch@^10.2.3, minimatch@^10.2.4, "minimatch@^9.0.3 || ^1
   dependencies:
     brace-expansion "^5.0.5"
 
-minimatch@^3.0.4, minimatch@^3.1.1, minimatch@^3.1.2:
+minimatch@^3.0.4, minimatch@^3.1.1:
   version "3.1.5"
   resolved "https://registry.yarnpkg.com/minimatch/-/minimatch-3.1.5.tgz#580c88f8d5445f2bd6aa8f3cadefa0de79fbd69e"
   integrity sha512-VgjWUsnnT6n+NUk6eZq77zeFdpW2LWDzP6zFGrCbHXiYNul5Dzqk2HHQ5uFH2DNW5Xbp8+jVzaeNt94ssEEl4w==
@@ -10154,7 +10147,7 @@ semver@^7.3.8, semver@^7.5.3, semver@^7.5.4, semver@^7.6.2, semver@^7.7.2, semve
   resolved "https://registry.yarnpkg.com/semver/-/semver-7.7.4.tgz#28464e36060e991fa7a11d0279d2d3f3b57a7e8a"
   integrity sha512-vFKC2IEtQnVhpT78h1Yp8wzwrf8CM+MzKMHGJZfBtzhZNycRFnXsHk6E5TxIkkMsgNS7mdX3AGB7x2QM2di4lA==
 
-semver@^7.7.1:
+semver@^7.7.1, semver@^7.8.0:
   version "7.8.1"
   resolved "https://registry.yarnpkg.com/semver/-/semver-7.8.1.tgz#bf4970b5e70fda0686363cc18bfe8805d5ed957e"
   integrity sha512-rkVq3IXh+4FDGch+KwzX3aV9W3kO54GyEgpvBzSyctDA6Xtd7RJQV1xmXbeQp5v7+VzLOfVqiutSE6GICgPFvg==

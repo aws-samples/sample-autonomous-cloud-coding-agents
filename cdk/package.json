@@ -14,9 +14,9 @@
     "synth:quiet": "npx cdk synth -q"
   },
   "dependencies": {
-    "@aws-cdk/aws-bedrock-agentcore-alpha": "2.238.0-alpha.0",
-    "@aws-cdk/aws-bedrock-alpha": "2.238.0-alpha.0",
-    "@aws-cdk/mixins-preview": "2.238.0-alpha.0",
+    "@aws-cdk/aws-bedrock-agentcore-alpha": "2.257.0-alpha.0",
+    "@aws-cdk/aws-bedrock-alpha": "2.257.0-alpha.0",
+    "@aws-cdk/mixins-preview": "2.257.0-alpha.0",
     "@aws-sdk/client-bedrock-agentcore": "^3.1046.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1021.0",
     "@aws-sdk/client-dynamodb": "^3.1021.0",
@@ -29,8 +29,8 @@
     "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@aws/durable-execution-sdk-js": "^1.1.0",
     "@cedar-policy/cedar-wasm": "4.10.0",
-    "aws-cdk-lib": "^2.238.0",
-    "cdk-nag": "^2.37.55",
+    "aws-cdk-lib": "^2.257.0",
+    "cdk-nag": "^2.38.2",
     "constructs": "^10.3.0",
     "pdf-parse": "^1.1.1",
     "js-yaml": "^4.1.1",
@@ -88,6 +88,9 @@
     ],
     "watchPathIgnorePatterns": [
       "/node_modules/"
+    ],
+    "setupFilesAfterEnv": [
+      "aws-cdk-lib/testhelpers/jest-autoclean"
     ],
     "reporters": [
       "default",
