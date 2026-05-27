@@ -103,44 +103,11 @@ Go to **your-project → Settings** in the Vercel dashboard.
 
 > **Using a different provider?** Skip Steps 1–2 and follow your provider's instructions to publish `deployment_status` events to GitHub. For Amplify Hosting, that's automatic when the app is connected via GitHub. For self-hosted CI, add a `gh api repos/.../deployments` step at the end of your deploy job. Then continue with Step 3.
 
-### Step 3 — Onboard the repo to ABCA
-
-ABCA needs to know the repo is allowed to receive tasks. Two writes:
-
-#### 3a. Register the repo in `RepoTable`
-
-There's no CLI helper today; do a direct DDB put. Replace the table name with your stack's value (`aws cloudformation describe-stacks ... RepoTableName`):
-
-```bash
-aws dynamodb put-item --region us-east-1 \
-  --table-name <RepoTableName> \
-  --item '{
-    "repo": {"S": "your-org/your-repo"},
-    "status": {"S": "active"},
-    "onboarded_at": {"S": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"},
-    "updated_at": {"S": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}
-  }'
-```
-
-#### 3b. Map a Linear project → this repo
-
-```bash
-# Find the Linear project UUID
-bgagent linear list-projects
-
-# Map it to the repo
-bgagent linear onboard-project <linear-project-uuid> \
-  --repo your-org/your-repo \
-  --label abca
-```
-
-The `--label` controls which Linear label triggers a task. Defaults to `bgagent`; the demo uses `abca`. Use any label you like — it just has to match what users will apply on Linear issues.
-
-### Step 4 — Configure the GitHub webhook
+### Step 3 — Configure the GitHub webhook
 
 This wires deploys back to ABCA's screenshot pipeline.
 
-#### 4a. Get the webhook config
+#### 3a. Get the webhook config
 
 ```bash
 bgagent github webhook-info
@@ -148,7 +115,7 @@ bgagent github webhook-info
 
 The CLI prints the webhook URL and the values to paste into GitHub.
 
-#### 4b. Add the webhook on the GitHub repo
+#### 3b. Add the webhook on the GitHub repo
 
 1. Open `https://github.com/<your-org>/<your-repo>/settings/hooks`.
 2. Click **Add webhook**.
@@ -161,7 +128,7 @@ The CLI prints the webhook URL and the values to paste into GitHub.
    - **Active**: ✓
 4. **Add webhook**. GitHub fires a `ping` event right away — under "Recent Deliveries" you should see ✅ within seconds.
 
-#### 4c. Mirror the signing secret into AWS
+#### 3c. Mirror the signing secret into AWS
 
 ```bash
 bgagent github set-webhook-secret
@@ -169,7 +136,7 @@ bgagent github set-webhook-secret
 
 Paste the same secret you used in 4b. The CLI writes it to the stack's `GitHubWebhookSecret` Secrets Manager entry, where the receiver Lambda reads it for HMAC verification.
 
-### Step 5 — Smoke test
+### Step 4 — Smoke test
 
 1. Open a Linear issue in your mapped project (e.g. "Update homepage heading"). It will get a Linear identifier like `ABCA-42`.
 2. Add the `abca` label.
@@ -241,7 +208,7 @@ You forgot Step 2's "Vercel Authentication: Disabled" toggle. Toggle it off, pus
 
 ## Production hardening (followups)
 
-The demo configuration optimizes for "look, it works" rather than security posture. Before using this on a real product:
+Before using this on a real product:
 
 1. **Re-enable Vercel Standard Protection** (or your provider's equivalent) + signed bypass token; teach the screenshot processor to inject the bypass on preview URLs (followup).
 2. **Scope IAM down from `bedrock-agentcore:*`** to the specific Browser action set (followup, tracked).
