@@ -78,7 +78,9 @@ While `bgagent linear setup` is paused at the `Webhook signing secret:` prompt, 
 - **Resource types**: check **Issues** only
 - **Team**: whichever team owns the projects you'll map to ABCA (or all teams)
 
-Save, then open the webhook's detail page and copy the **signing secret** (starts with `lin_wh_`). Paste it back into the terminal where setup is paused. The wizard stores it in `LinearWebhookSecret` (one secret per ABCA stack — shared across all installed workspaces).
+Save, then open the webhook's detail page and copy the **signing secret** (starts with `lin_wh_`). Paste it back into the terminal where setup is paused.
+
+> **Where the signing secret is stored.** `bgagent linear setup` stores the signing secret on the workspace's per-workspace OAuth bundle (`bgagent-linear-oauth-<slug>`), where the webhook receiver looks it up by `organizationId` at verify time. On the first install, it's also mirrored into the stack-wide `LinearWebhookSecret` for back-compat with single-workspace deployments — see [How webhook signature verification works](#how-webhook-signature-verification-works) for the full story.
 
 > **Re-running setup later** skips the webhook prompt if the signing secret is already configured. Pass `--rotate-webhook-secret` to re-prompt (e.g. after rotating the secret in Linear).
 
@@ -152,10 +154,11 @@ bgagent linear add-workspace <workspace-slug>
 
 This:
 
-- Auto-detects the OAuth app's `client_id`/`client_secret` from any existing active workspace's per-workspace secret (no re-prompt)
+- Prompts for the OAuth Client ID — defaults to the existing workspace's value (Enter to reuse, or paste a different one for a per-workspace OAuth app)
+- Prompts for the Client Secret if you supplied a new Client ID; otherwise reuses the existing one
 - Runs the OAuth dance against the new workspace
 - Creates `bgagent-linear-oauth-<slug>` in Secrets Manager and writes a registry row
-- **Skips the webhook signing secret prompt** — the same signing secret covers all workspaces against the same ABCA receiver URL
+- **Prompts for the webhook signing secret** — Linear generates a fresh signing secret per webhook subscription, and webhook subscriptions are workspace-scoped, so each workspace must configure its own webhook in Linear and bring its own signing secret
 - Refuses to silently overwrite an already-onboarded workspace's registry row (use `setup` to re-authorize an existing workspace)
 
 ### One OAuth app for all workspaces vs. one per workspace
@@ -179,6 +182,22 @@ bgagent linear add-workspace <new-slug> \
 Per-workspace apps give cleaner revocation, per-workspace branding, and isolation if one workspace's credentials leak. Each new app needs its own callback URL (`http://localhost:8080/oauth/callback`) and its own `bgagent[bot]` GitHub username.
 
 There's no AWS-side ceiling on the number of installable workspaces — each is just an SM secret + DDB row. Practical limits are Linear's API rate limits and per-workspace operator overhead.
+
+## How webhook signature verification works
+
+Linear generates a fresh signing secret **per webhook subscription**, and webhook subscriptions are **workspace-scoped**. There's no Linear-side mechanism to share one signing secret across multiple workspaces. So multi-workspace ABCA installs need each workspace's signing secret stored separately, indexed by `organizationId` (the workspace UUID embedded in the webhook payload).
+
+ABCA stores each workspace's signing secret on its per-workspace OAuth bundle (`bgagent-linear-oauth-<slug>`, alongside the access/refresh tokens). The webhook receiver runs this verification flow on each event:
+
+1. Parse the body to extract `organizationId` (untrusted at this point — only used to select which secret to verify against, never trusted before the signature passes).
+2. Look up the registry row for that `organizationId`. If `status='active'` and the OAuth bundle has a `webhook_signing_secret` field:
+   - Verify the HMAC. If it matches → event is trusted, dispatch to the processor.
+   - If it doesn't match → reject 401. **No fallback** to the stack-wide secret — that would let an attacker bypass the per-workspace secret by signing with whatever the stack-wide one happens to be.
+3. If the registry has no row, or the OAuth bundle lacks `webhook_signing_secret` (pre-migration single-workspace install), fall back to the stack-wide `LinearWebhookSecret` and verify against that. If it matches → trusted; if not → 401.
+
+The fallback path keeps existing single-workspace deployments working without re-onboarding. To migrate a single-workspace install to the per-workspace shape, run `bgagent linear setup <slug> --rotate-webhook-secret` once — the wizard will mirror the secret onto the OAuth bundle.
+
+**Trust model.** The `organizationId` in the body is attacker-controlled — they can claim any workspace. But it only **selects** which secret to verify against; an attacker still needs the matching signing secret to forge a valid signature, which they don't have. Cross-workspace impersonation is prevented by the no-fallback-on-mismatch rule above.
 
 ## Usage
 
@@ -228,7 +247,10 @@ Re-run `bgagent linear setup` after fixing.
 
 ### Webhook signature verification fails repeatedly
 
-The signing secret in Secrets Manager doesn't match the webhook. Re-run `bgagent linear setup --webhook-secret <new-secret>` and paste the secret from the webhook's detail page (not the OAuth app page).
+Most likely the signing secret stored on this workspace's OAuth bundle doesn't match the webhook subscription that Linear is sending from. Two cases:
+
+1. **Single-workspace install, signing secret rotated in Linear:** re-run `bgagent linear setup <slug> --rotate-webhook-secret` and paste the new value from the Linear webhook detail page.
+2. **Multi-workspace install, wrong workspace's secret pasted during onboarding:** check the workspace's secret with `aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug>` and confirm the `webhook_signing_secret` field matches what Linear shows on that workspace's webhook detail page. If wrong, re-run `bgagent linear add-workspace <slug>` (or `setup --rotate-webhook-secret` to re-prompt without re-running the OAuth dance — currently only `setup` supports rotation; multi-workspace rotation is a planned enhancement).
 
 ## Migration from 2.0a (PAK) to 2.0b (OAuth)
 

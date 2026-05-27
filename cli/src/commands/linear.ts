@@ -571,11 +571,44 @@ export function makeLinearCommand(): Command {
         const adminLabel = identity.viewer.name ?? identity.viewer.email ?? identity.viewer.id;
         console.log(`  ✓ Linked Linear user ${adminLabel} → platform user`);
 
-        // ─── Step 6: Webhook signing secret (workspace-independent) ───
-        const alreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
+        // ─── Step 6: Webhook signing secret (per-workspace + stack-wide) ───
+        //
+        // Webhook subscriptions in Linear are workspace-scoped, and Linear
+        // generates a fresh signing secret per subscription. To verify
+        // events from N workspaces we need N signing secrets, looked up
+        // by orgId. We store the workspace's signing secret on its OAuth
+        // bundle (per-workspace path) AND mirror to the stack-wide secret
+        // (back-compat path) when (a) it's the first install (stack-wide
+        // is empty), or (b) the user explicitly asked to rotate.
+        //
+        // The webhook receiver tries per-workspace first and falls back
+        // to the stack-wide secret, so existing installs keep working
+        // without re-onboarding. Multi-workspace installs need each
+        // workspace to own its own per-workspace signing secret — only
+        // the FIRST install can populate the stack-wide one usefully.
+        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
+        let webhookSigningSecret: string | undefined;
 
-        if (alreadyConfigured && !opts.rotateWebhookSecret) {
-          console.log('  ✓ Webhook signing secret already configured (use --rotate-webhook-secret to update)');
+        if (stackWideAlreadyConfigured && !opts.rotateWebhookSecret) {
+          // Two ways into this branch:
+          //   1. Re-running setup on an existing single-workspace install.
+          //      The stack-wide secret IS this workspace's signing
+          //      secret — seed the per-workspace field from it for
+          //      auto-migration to the new shape.
+          //   2. Re-running setup on the FIRST workspace of a future
+          //      multi-workspace install. Same story — stack-wide is
+          //      already correct for this workspace.
+          // In either case, lifting the stack-wide value into the
+          // per-workspace bundle is correct.
+          console.log('  ✓ Webhook signing secret already configured stack-wide (mirroring to per-workspace)');
+          try {
+            const value = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn! }));
+            if (value.SecretString && value.SecretString.startsWith('lin_wh_')) {
+              webhookSigningSecret = value.SecretString;
+            }
+          } catch (err) {
+            console.log(`  ⚠ Could not read stack-wide secret to mirror: ${err instanceof Error ? err.message : String(err)}`);
+          }
         } else {
           const apiBaseUrl = config.api_url.replace(/\/+$/, '');
           console.log();
@@ -593,11 +626,33 @@ export function makeLinearCommand(): Command {
               'Webhook signing secrets start with \'lin_wh_\'. Got something different — re-check the Linear webhook detail page.',
             );
           }
-          await sm.send(new PutSecretValueCommand({
-            SecretId: webhookSecretArn!,
-            SecretString: webhookSecret,
-          }));
-          console.log('  ✓ Stored webhook signing secret');
+          // Stack-wide write is only meaningful for the FIRST install
+          // (back-compat fallback). Subsequent workspaces would overwrite
+          // the first workspace's secret, so we only write stack-wide if
+          // it's not already configured. The per-workspace write below
+          // is what actually drives multi-workspace verification.
+          if (!stackWideAlreadyConfigured) {
+            await sm.send(new PutSecretValueCommand({
+              SecretId: webhookSecretArn!,
+              SecretString: webhookSecret,
+            }));
+            console.log('  ✓ Stored webhook signing secret (stack-wide back-compat)');
+          } else {
+            console.log('  ✓ Captured webhook signing secret (per-workspace only — stack-wide left as-is for back-compat)');
+          }
+          webhookSigningSecret = webhookSecret;
+        }
+
+        // Mirror into the per-workspace OAuth secret so the receiver can
+        // look it up by orgId. Re-upsert with the merged payload.
+        if (webhookSigningSecret) {
+          const merged: StoredLinearOauthToken = {
+            ...stored,
+            webhook_signing_secret: webhookSigningSecret,
+            updated_at: new Date().toISOString(),
+          };
+          await upsertOauthSecret(sm, secretName, merged, slug);
+          console.log('  ✓ Mirrored signing secret to per-workspace OAuth bundle');
         }
 
         // ─── Done ──────────────────────────────────────────────────────
@@ -856,14 +911,42 @@ export function makeLinearCommand(): Command {
         const adminLabel = identity.viewer.name ?? identity.viewer.email ?? identity.viewer.id;
         console.log(`  ✓ Linked Linear user ${adminLabel} → platform user`);
 
+        // ─── Per-workspace webhook signing secret ──────────────────────
+        // Linear webhook subscriptions are workspace-scoped, with a fresh
+        // signing secret per subscription. Each workspace needs to own
+        // its own signing secret so the receiver can verify by orgId.
+        // Always prompt — there's no shared secret we can reuse.
+        const apiBaseUrl = config.api_url.replace(/\/+$/, '');
+        console.log();
+        console.log(`  Webhook signing secret needed for '${slug}'.`);
+        console.log(`  In Linear (signed into '${slug}') → Settings → API → Webhooks, create a webhook pointing at:`);
+        console.log(`    ${apiBaseUrl}/linear/webhook`);
+        console.log('  Subscribe to: Issues. Copy the signing secret from the webhook detail page.');
+        console.log();
+        const webhookSigningSecret = (await promptSecret('  Webhook signing secret (lin_wh_…): ')).trim();
+        if (!webhookSigningSecret) {
+          throw new CliError('Webhook signing secret is required.');
+        }
+        if (!webhookSigningSecret.startsWith('lin_wh_')) {
+          throw new CliError(
+            'Webhook signing secrets start with \'lin_wh_\'. Got something different — re-check the Linear webhook detail page.',
+          );
+        }
+
+        // Re-upsert the OAuth secret with the signing secret merged in.
+        // We don't touch the stack-wide secret here — that's reserved
+        // for the FIRST install (back-compat fallback).
+        const merged: StoredLinearOauthToken = {
+          ...stored,
+          webhook_signing_secret: webhookSigningSecret,
+          updated_at: new Date().toISOString(),
+        };
+        await upsertOauthSecret(sm, secretName, merged, slug);
+        console.log('  ✓ Stored webhook signing secret on per-workspace OAuth bundle');
+
         // ─── Done ──────────────────────────────────────────────────────
         console.log();
         console.log('✅ Workspace added.');
-        console.log();
-        console.log('Note: webhook signing secret was NOT prompted — it is shared across all');
-        console.log('workspaces installed against the same Linear OAuth app. If this is the first');
-        console.log('time installing in a new Linear team that has its own OAuth app, run');
-        console.log('`bgagent linear setup` instead so the webhook signing secret gets configured.');
         console.log();
         console.log('Next: onboard a project from this workspace:');
         console.log('  bgagent linear onboard-project <linear-project-id> --repo owner/repo');

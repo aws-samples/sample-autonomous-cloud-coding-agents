@@ -86,6 +86,19 @@ export interface StoredLinearOauthToken {
   readonly updated_at: string;
   /** Cognito sub of the admin who ran `bgagent linear setup`. Audit only. */
   readonly installed_by_platform_user_id: string;
+  /**
+   * Per-workspace Linear webhook signing secret (`lin_wh_…`).
+   *
+   * Linear generates a fresh signing secret per webhook subscription, and
+   * webhook subscriptions are workspace-scoped — so a single stack-wide
+   * signing secret can't verify events from multiple workspaces. The
+   * webhook receiver looks this up by orgId at verify time.
+   *
+   * Optional for back-compat: tokens written before the per-workspace
+   * signing flow won't have it, and the receiver falls back to the
+   * stack-wide `LINEAR_WEBHOOK_SECRET_ARN` for those installs.
+   */
+  readonly webhook_signing_secret?: string;
 }
 
 /**

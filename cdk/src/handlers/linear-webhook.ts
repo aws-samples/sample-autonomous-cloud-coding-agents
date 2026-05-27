@@ -21,7 +21,11 @@ import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { isWebhookTimestampFresh, verifyLinearRequest } from './shared/linear-verify';
+import {
+  isWebhookTimestampFresh,
+  verifyLinearRequest,
+  verifyLinearRequestForWorkspace,
+} from './shared/linear-verify';
 import { logger } from './shared/logger';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -30,6 +34,10 @@ const lambdaClient = new LambdaClient({});
 const WEBHOOK_SECRET_ARN = process.env.LINEAR_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME!;
 const PROCESSOR_FUNCTION_NAME = process.env.LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME!;
+/** Optional. When unset, the per-workspace signing-secret path is skipped
+ *  and only the stack-wide secret is consulted (back-compat for installs
+ *  predating per-workspace secrets). */
+const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
 /**
  * Dedup window (seconds). Must exceed Linear's full retry horizon: first
@@ -79,11 +87,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(401, { error: 'Missing signature' });
     }
 
-    if (!await verifyLinearRequest(WEBHOOK_SECRET_ARN, signature, event.body)) {
-      logger.warn('Invalid Linear webhook signature');
-      return jsonResponse(401, { error: 'Invalid signature' });
-    }
-
+    // Parse body ONCE — we peek at the orgId before signature verification
+    // so we can pick the right per-workspace signing secret. The orgId is
+    // untrusted at this point; it only selects WHICH secret to verify
+    // against. An attacker can claim any orgId but still needs the
+    // matching signing secret to forge a valid signature.
     let payload: LinearWebhookEnvelope;
     try {
       payload = JSON.parse(event.body) as LinearWebhookEnvelope;
@@ -92,6 +100,39 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         error: err instanceof Error ? err.message : String(err),
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
+    }
+
+    // Try the per-workspace secret first. Falls through to the stack-wide
+    // path if (a) registry table not configured, (b) no orgId in body,
+    // (c) workspace not in registry, or (d) workspace's stored secret
+    // lacks `webhook_signing_secret`. Per-workspace MISMATCH is fatal —
+    // do NOT fall back, that would let an attacker bypass per-workspace
+    // signatures by also matching the stack-wide one.
+    let verified = false;
+    if (WORKSPACE_REGISTRY_TABLE && payload.organizationId) {
+      const result = await verifyLinearRequestForWorkspace(
+        WORKSPACE_REGISTRY_TABLE,
+        payload.organizationId,
+        signature,
+        event.body,
+      );
+      if (result === 'verified') {
+        verified = true;
+      } else if (result === 'mismatch') {
+        logger.warn('Linear webhook signature mismatch against per-workspace secret', {
+          linear_workspace_id: payload.organizationId,
+        });
+        return jsonResponse(401, { error: 'Invalid signature' });
+      }
+      // 'no-per-workspace-secret' falls through to the stack-wide path
+      // below — back-compat for installs predating per-workspace secrets.
+    }
+
+    if (!verified && !await verifyLinearRequest(WEBHOOK_SECRET_ARN, signature, event.body)) {
+      logger.warn('Invalid Linear webhook signature', {
+        linear_workspace_id: payload.organizationId,
+      });
+      return jsonResponse(401, { error: 'Invalid signature' });
     }
 
     if (!isWebhookTimestampFresh(payload.webhookTimestamp)) {
