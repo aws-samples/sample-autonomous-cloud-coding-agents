@@ -1022,7 +1022,19 @@ export function makeLinearCommand(): Command {
         }
 
         if (rows.length === 0) {
-          console.log('No Linear projects visible to any installed workspace.');
+          // The Linear API call succeeded for every workspace (otherwise the
+          // continue-on-error branches above would have logged), so the
+          // workspaces are reachable — they just don't have any projects.
+          // Surface that explicitly so the user doesn't read "No projects
+          // visible" as an OAuth-scope or IAM problem and start chasing
+          // ghosts.
+          if (slugs.length === 1) {
+            console.log(`Workspace '${slugs[0]}' has no projects yet.`);
+            console.log(`Create one in Linear (https://linear.app/${slugs[0]}/), then re-run.`);
+          } else {
+            console.log(`No projects found in any of: ${slugs.join(', ')}.`);
+            console.log('Create a project in at least one workspace, then re-run.');
+          }
           return;
         }
 
