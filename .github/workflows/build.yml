@@ -170,18 +170,28 @@ jobs:
         with:
           path: agent/.venv
           key: agent-venv-${{ runner.os }}-${{ hashFiles('agent/uv.lock') }}
+      - name: Cache Jest transforms
+        id: cache-jest
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: cdk/.jest-cache
+          key: jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-${{ github.sha }}
+          restore-keys: |
+            jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-
       - name: Install dependencies
         env:
           CACHE_NODE: ${{ steps.cache-node-modules.outputs.cache-hit }}
           CACHE_VENV: ${{ steps.cache-agent-venv.outputs.cache-hit }}
+          CACHE_JEST: ${{ steps.cache-jest.outputs.cache-hit }}
         run: |
           echo "::group::Cache status"
-          echo "node_modules cache: ${CACHE_NODE:-MISS}"
-          echo "agent .venv cache: ${CACHE_VENV:-MISS}"
+          echo "node_modules: ${CACHE_NODE:-MISS}"
+          echo "agent .venv:  ${CACHE_VENV:-MISS}"
+          echo "jest transforms: ${CACHE_JEST:-MISS}"
           echo "::endgroup::"
           SECONDS=0
           mise run install
-          echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss})"
+          echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
       - name: build
         run: |
           SECONDS=0
