@@ -238,7 +238,7 @@ const PDF_EXTRACT_TIMEOUT_MS = 15_000;
 
 async function extractPdfText(content: Buffer, filename: string): Promise<string> {
   // Dynamic import — pdf-parse is only used for PDF attachments.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   let pdfParseFn: (data: Buffer, options?: { max?: number }) => Promise<{ text: string }>;
   try {
     // pdf-parse uses a default export; handle both CJS and ESM module shapes.

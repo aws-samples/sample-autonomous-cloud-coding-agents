@@ -805,7 +805,7 @@ export async function routeEvent(
   }
   // Parallelism is bounded by the dispatcher list (at most 3 channels),
   // not by program input, so the unbounded-parallelism lint does not apply.
-  // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
+
   const results = await Promise.allSettled(tasks);
 
   const dispatched: NotificationChannel[] = [];
