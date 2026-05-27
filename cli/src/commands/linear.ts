@@ -690,10 +690,10 @@ export function makeLinearCommand(): Command {
             + 'then re-run `bgagent linear add-workspace` for additional workspaces.',
           );
         }
-        console.log(` ✓ (found '${existing.sourceSlug}')`);
+        console.log(' ✓');
         console.log();
         console.log('  Linear OAuth credentials. Press Enter to reuse the existing app, or paste new values');
-        console.log(`  (e.g. when ${existing.sourceSlug}'s app is private and you created a new one in '${slug}').`);
+        console.log('  (the existing app may be private to its origin workspace and not authorize cross-install).');
         const clientId = await promptLine('  Linear Client ID', existing.clientId);
         const sameAsExisting = clientId === existing.clientId;
         const clientSecret = sameAsExisting
