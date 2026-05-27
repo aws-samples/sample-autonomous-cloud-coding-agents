@@ -1,0 +1,796 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {},
+  "dataflow": {},
+  "threats": [
+    {
+      "id": "db3db729-5fbe-435f-8b74-59c863c6da23",
+      "numericId": 1,
+      "threatSource": "internet-based actor",
+      "prerequisites": "with knowledge of a valid user's email address",
+      "threatAction": "exploit the absence of MFA on the Cognito User Pool to perform credential stuffing or password spraying attacks against the authentication endpoint",
+      "threatImpact": "unauthorized access to the platform allowing the attacker to submit malicious coding tasks, view task results, and access repository information",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["Cognito User Pool", "TaskTable", "GitHub repositories"],
+      "statement": "An internet-based actor with knowledge of a valid user's email address can exploit the absence of MFA on the Cognito User Pool to perform credential stuffing or password spraying attacks against the authentication endpoint, which leads to unauthorized access to the platform allowing the attacker to submit malicious coding tasks, view task results, and access repository information, resulting in reduced confidentiality, integrity of Cognito User Pool, TaskTable, GitHub repositories.",
+      "status": "threatIdentified",
+      "tags": ["DF-01", "API Gateway", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S"]
+        },
+        {
+          "key": "Comments",
+          "value": "Cognito is configured without MFA (explicitly noted in security docs). SRP/password auth flows are enabled. WAFv2 rate limiting (1000/5min) provides some protection but may not be sufficient against distributed attacks. Successful authentication grants full API access including task creation which triggers autonomous code execution."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "deceb00c-7311-4cb4-a6ac-7771fe117b2c",
+      "numericId": 2,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who has compromised a webhook secret from Secrets Manager (bgagent/webhook/*)",
+      "threatAction": "forge valid HMAC-SHA256 signatures to submit arbitrary task payloads via the webhook endpoint",
+      "threatImpact": "execution of unauthorized coding tasks against any onboarded repository, potentially injecting malicious code into production codebases",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["GitHub repositories", "TaskTable", "agent compute resources"],
+      "statement": "An internet-based actor who has compromised a webhook secret from Secrets Manager (bgagent/webhook/*) can forge valid HMAC-SHA256 signatures to submit arbitrary task payloads via the webhook endpoint, which leads to execution of unauthorized coding tasks against any onboarded repository, potentially injecting malicious code into production codebases, resulting in reduced integrity, confidentiality of GitHub repositories, TaskTable, agent compute resources.",
+      "status": "threatIdentified",
+      "tags": ["DF-02", "Webhook", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S", "T"]
+        },
+        {
+          "key": "Comments",
+          "value": "Webhook secrets are stored in Secrets Manager but if leaked (e.g., via misconfigured IAM, insider threat, or log exposure), an attacker can submit tasks that appear legitimate. The shared GitHub PAT means any submitted task can target any onboarded repo."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "66b0d8d9-3c92-4090-b015-ae003ae1e438",
+      "numericId": 3,
+      "threatSource": "malicious actor",
+      "prerequisites": "with access to a GitHub repository that is onboarded to the platform",
+      "threatAction": "craft a prompt injection payload within a GitHub issue body or PR description that bypasses Bedrock Guardrails and manipulates the agent into executing unintended actions",
+      "threatImpact": "the agent performing unauthorized operations such as exfiltrating secrets, modifying unrelated files, or pushing malicious code to other branches",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["GitHub repositories", "GitHub PAT", "agent runtime"],
+      "statement": "A malicious actor with access to a GitHub repository that is onboarded to the platform can craft a prompt injection payload within a GitHub issue body or PR description that bypasses Bedrock Guardrails and manipulates the agent into executing unintended actions, which leads to the agent performing unauthorized operations such as exfiltrating secrets, modifying unrelated files, or pushing malicious code to other branches, resulting in reduced integrity, confidentiality of GitHub repositories, GitHub PAT, agent runtime.",
+      "status": "threatIdentified",
+      "tags": ["DF-13", "DF-07", "Prompt Injection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "The orchestrator fetches GitHub issue/PR content (DF-13) and passes it to the agent. While Bedrock Guardrails screen for PROMPT_ATTACK at MEDIUM strength, sophisticated indirect prompt injections embedded in code comments, issue descriptions, or PR review comments may evade detection. The agent has the shared GitHub PAT and can push to any onboarded repo."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "abe02f3b-ce86-451b-a534-98d5c503dc25",
+      "numericId": 4,
+      "threatSource": "compromised agent session",
+      "prerequisites": "with access to the shared GitHub PAT injected as GITHUB_TOKEN environment variable",
+      "threatAction": "use the PAT to access, clone, or push to any repository the token has permissions for, beyond the intended target repository",
+      "threatImpact": "unauthorized access to source code across all onboarded repositories, potential code injection into unrelated projects",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["GitHub repositories", "GitHub PAT", "source code"],
+      "statement": "A compromised agent session with access to the shared GitHub PAT injected as GITHUB_TOKEN environment variable can use the PAT to access, clone, or push to any repository the token has permissions for, beyond the intended target repository, which leads to unauthorized access to source code across all onboarded repositories, potential code injection into unrelated projects, resulting in reduced confidentiality, integrity of GitHub repositories, GitHub PAT, source code.",
+      "status": "threatIdentified",
+      "tags": ["DF-06", "GitHub PAT", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["E", "I"]
+        },
+        {
+          "key": "Comments",
+          "value": "This is a critical blast radius issue. A single shared PAT with broad repo access is injected into every MicroVM session. If an agent is manipulated (via prompt injection or malicious repo content), it can access all repos the PAT covers. Per-repo scoped tokens are listed as a roadmap item but not yet implemented."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "44e3267d-2cdf-46eb-8323-a032af2a08e4",
+      "numericId": 5,
+      "threatSource": "malicious actor",
+      "prerequisites": "who can submit tasks or influence repository content",
+      "threatAction": "exploit the DNS Firewall observation-only mode to exfiltrate data from the MicroVM to arbitrary external domains via HTTPS",
+      "threatImpact": "exfiltration of source code, secrets, or task context from the isolated compute environment to attacker-controlled infrastructure",
+      "impactedGoal": ["confidentiality"],
+      "impactedAssets": ["source code", "GitHub PAT", "task context data"],
+      "statement": "A malicious actor who can submit tasks or influence repository content can exploit the DNS Firewall observation-only mode to exfiltrate data from the MicroVM to arbitrary external domains via HTTPS, which leads to exfiltration of source code, secrets, or task context from the isolated compute environment to attacker-controlled infrastructure, resulting in reduced confidentiality of source code, GitHub PAT, task context data.",
+      "status": "threatIdentified",
+      "tags": ["DF-06", "DNS Firewall", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I"]
+        },
+        {
+          "key": "Comments",
+          "value": "DNS Firewall is deployed in observation mode (ALERT only, not BLOCK) by default. The agent MicroVM has NAT Gateway egress. While Security Groups restrict to TCP 443, any HTTPS endpoint is reachable. An attacker who manipulates the agent (via prompt injection or malicious dependencies) can exfiltrate data to any domain."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "3e6923a3-ab43-4039-ad11-d2103a4000d7",
+      "numericId": 6,
+      "threatSource": "malicious actor",
+      "prerequisites": "with the ability to publish packages to npm or PyPI",
+      "threatAction": "perform a dependency confusion or typosquatting attack by publishing a malicious package that the agent installs during repository setup",
+      "threatImpact": "arbitrary code execution within the agent MicroVM, potentially leading to credential theft, data exfiltration, or code tampering",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["agent runtime", "GitHub PAT", "source code"],
+      "statement": "A malicious actor with the ability to publish packages to npm or PyPI can perform a dependency confusion or typosquatting attack by publishing a malicious package that the agent installs during repository setup, which leads to arbitrary code execution within the agent MicroVM, potentially leading to credential theft, data exfiltration, or code tampering, resulting in reduced integrity, confidentiality of agent runtime, GitHub PAT, source code.",
+      "status": "threatIdentified",
+      "tags": ["DF-06", "Package registries", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "The agent MicroVM has egress access to npm and PyPI (listed in DNS Firewall allowlist). During setup_repo, the agent installs dependencies. A supply chain attack via malicious packages would execute within the MicroVM which has the GitHub PAT and network access. MicroVM isolation limits blast radius to the single session but the PAT provides cross-repo access."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "410c9dc1-1ac5-46ab-bf0f-a632260fb189",
+      "numericId": 7,
+      "threatSource": "internal actor",
+      "prerequisites": "with IAM permissions to read Secrets Manager secrets",
+      "threatAction": "retrieve the shared GitHub PAT, Slack secrets, or webhook secrets directly from Secrets Manager",
+      "threatImpact": "full access to all onboarded GitHub repositories, ability to impersonate the platform on Slack, and ability to forge webhook requests",
+      "impactedGoal": ["confidentiality", "integrity"],
+      "impactedAssets": ["Secrets Manager", "GitHub PAT", "Slack secrets", "webhook secrets"],
+      "statement": "An internal actor with IAM permissions to read Secrets Manager secrets can retrieve the shared GitHub PAT, Slack secrets, or webhook secrets directly from Secrets Manager, which leads to full access to all onboarded GitHub repositories, ability to impersonate the platform on Slack, and ability to forge webhook requests, resulting in reduced confidentiality, integrity of Secrets Manager, GitHub PAT, Slack secrets, webhook secrets.",
+      "status": "threatIdentified",
+      "tags": ["Secrets Manager", "Insider threat", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Single-tenant deployment means AWS account administrators have implicit access to all secrets. The GitHub PAT is particularly high-value as it provides access to all onboarded repos. No secret rotation policy is documented. Multiple Lambda roles require Secrets Manager read access."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "4f4fc2f3-7b9e-4916-b866-7deec47d379f",
+      "numericId": 8,
+      "threatSource": "internet-based actor",
+      "prerequisites": "with a network path to the API Gateway",
+      "threatAction": "submit a large volume of task creation requests that each trigger agent sessions consuming compute, DynamoDB writes, and Bedrock inference",
+      "threatImpact": "resource exhaustion causing denial of service for legitimate users and significant unexpected AWS costs",
+      "impactedGoal": ["availability"],
+      "impactedAssets": ["AgentCore Runtime", "DynamoDB tables", "Bedrock inference quota", "AWS billing"],
+      "statement": "An internet-based actor with a network path to the API Gateway can submit a large volume of task creation requests that each trigger agent sessions consuming compute, DynamoDB writes, and Bedrock inference, which leads to resource exhaustion causing denial of service for legitimate users and significant unexpected AWS costs, resulting in reduced availability of AgentCore Runtime, DynamoDB tables, Bedrock inference quota, AWS billing.",
+      "status": "threatIdentified",
+      "tags": ["DF-01", "DF-02", "DoS", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["D"]
+        },
+        {
+          "key": "Comments",
+          "value": "While WAFv2 rate limits at 1000 requests per 5 minutes and UserConcurrencyTable enforces per-user limits, each task triggers expensive downstream operations (8h max MicroVM, Bedrock inference). A compromised account or leaked webhook secret could submit many tasks. The ConcurrencyReconciler runs only every 15 minutes, leaving a window for burst abuse."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "f93e750e-b789-4d07-be98-3bd04e554f5e",
+      "numericId": 9,
+      "threatSource": "malicious actor",
+      "prerequisites": "who controls content in a GitHub issue or PR that triggers a task",
+      "threatAction": "embed malicious instructions in code comments or PR review feedback that the agent interprets as legitimate coding instructions",
+      "threatImpact": "the agent introducing backdoors, vulnerabilities, or data exfiltration code into the target repository's pull request",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["GitHub repositories", "pull requests", "source code integrity"],
+      "statement": "A malicious actor who controls content in a GitHub issue or PR that triggers a task can embed malicious instructions in code comments or PR review feedback that the agent interprets as legitimate coding instructions, which leads to the agent introducing backdoors, vulnerabilities, or data exfiltration code into the target repository's pull request, resulting in reduced integrity of GitHub repositories, pull requests, source code integrity.",
+      "status": "threatIdentified",
+      "tags": ["DF-13", "DF-07", "Indirect injection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T"]
+        },
+        {
+          "key": "Comments",
+          "value": "Indirect prompt injection via repository content is a key risk for autonomous coding agents. The Guardrail screens at MEDIUM strength which balances false positives vs security. Sophisticated injections disguised as legitimate code patterns or documentation may pass screening. The pr_iteration task type specifically processes PR review comments which are user-controlled."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "a444628d-b51b-4402-8960-6c31afed4b58",
+      "numericId": 10,
+      "threatSource": "compromised agent process",
+      "prerequisites": "running within the MicroVM with DynamoDB write access via VPC endpoint",
+      "threatAction": "tamper with task state records in DynamoDB to mark malicious tasks as successful or manipulate the orchestrator's polling logic",
+      "threatImpact": "corrupted task audit trail, orchestrator making incorrect decisions based on falsified state, and potential bypass of finalization checks",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["TaskTable", "TaskEventsTable", "task audit trail"],
+      "statement": "A compromised agent process running within the MicroVM with DynamoDB write access via VPC endpoint can tamper with task state records in DynamoDB to mark malicious tasks as successful or manipulate the orchestrator's polling logic, which leads to corrupted task audit trail, orchestrator making incorrect decisions based on falsified state, and potential bypass of finalization checks, resulting in reduced integrity of TaskTable, TaskEventsTable, task audit trail.",
+      "status": "threatIdentified",
+      "tags": ["DF-09", "DynamoDB", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T"]
+        },
+        {
+          "key": "Comments",
+          "value": "The agent runtime writes directly to DynamoDB (task status, heartbeat, results). If the agent process is compromised, it could write arbitrary data to the task record. The orchestrator trusts DynamoDB state for decision-making. IAM scoping should limit writes to the specific task partition key but this needs verification."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "cebccf55-f43c-439b-ac4a-37fe6c4154f1",
+      "numericId": 11,
+      "threatSource": "malicious actor",
+      "prerequisites": "who can influence the content stored in AgentCore Memory for a repository",
+      "threatAction": "poison the semantic memory store with misleading learnings that cause future agent sessions to produce vulnerable or malicious code",
+      "threatImpact": "persistent compromise affecting all future tasks for the poisoned repository, with the agent repeatedly introducing vulnerabilities based on corrupted memory",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["AgentCore Memory", "future task outputs", "source code"],
+      "statement": "A malicious actor who can influence the content stored in AgentCore Memory for a repository can poison the semantic memory store with misleading learnings that cause future agent sessions to produce vulnerable or malicious code, which leads to persistent compromise affecting all future tasks for the poisoned repository, with the agent repeatedly introducing vulnerabilities based on corrupted memory, resulting in reduced integrity of AgentCore Memory, future task outputs, source code.",
+      "status": "threatIdentified",
+      "tags": ["DF-10", "AgentCore Memory", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T"]
+        },
+        {
+          "key": "Comments",
+          "value": "The agent writes episodic memories and learnings to AgentCore Memory (DF-10). If an attacker can manipulate what gets stored (via prompt injection in a single session), those poisoned memories persist and influence all future sessions for that repo namespace. The documentation mentions provenance tagging and poisoning defenses but effectiveness depends on implementation."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "06996bcb-6cac-4d16-b253-071d41cd81bc",
+      "numericId": 12,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who has compromised a Slack workspace where the bot is installed",
+      "threatAction": "submit malicious coding tasks via the /bgagent slash command impersonating a legitimate Slack user",
+      "threatImpact": "unauthorized task execution against onboarded repositories with the attacker's instructions being processed as legitimate user requests",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["GitHub repositories", "agent compute resources", "task integrity"],
+      "statement": "An internet-based actor who has compromised a Slack workspace where the bot is installed can submit malicious coding tasks via the /bgagent slash command impersonating a legitimate Slack user, which leads to unauthorized task execution against onboarded repositories with the attacker's instructions being processed as legitimate user requests, resulting in reduced integrity, confidentiality of GitHub repositories, agent compute resources, task integrity.",
+      "status": "threatIdentified",
+      "tags": ["DF-03", "Slack", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["S"]
+        },
+        {
+          "key": "Comments",
+          "value": "Slack signing secret verification authenticates that requests come from Slack, but does not prevent a compromised Slack account from submitting tasks. The SlackUserMappingTable maps Slack users to platform users. If a Slack account is compromised, the attacker inherits that user's task submission capabilities."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "7965b4ec-3907-4df7-986d-5d60e8422272",
+      "numericId": 13,
+      "threatSource": "malicious actor",
+      "prerequisites": "with access to submit tasks to the platform",
+      "threatAction": "craft misleading task descriptions that trigger Cedar HITL approval requests framed to trick the human reviewer into approving dangerous operations",
+      "threatImpact": "human approver unknowingly authorizing destructive or exfiltration operations such as force-pushing to main branch or accessing sensitive files",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["GitHub repositories", "Cedar HITL approval process"],
+      "statement": "A malicious actor with access to submit tasks to the platform can craft misleading task descriptions that trigger Cedar HITL approval requests framed to trick the human reviewer into approving dangerous operations, which leads to human approver unknowingly authorizing destructive or exfiltration operations such as force-pushing to main branch or accessing sensitive files, resulting in reduced integrity of GitHub repositories, Cedar HITL approval process.",
+      "status": "threatIdentified",
+      "tags": ["DF-12", "Cedar HITL", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "Cedar HITL gates are a key security control but their effectiveness depends on the human reviewer understanding the full context of what they are approving. If the approval request metadata is insufficient or the agent has been manipulated to present misleading justifications, the human may approve dangerous operations."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "4063a5d5-fa98-472c-ad0f-7a518284aa29",
+      "numericId": 14,
+      "threatSource": "internet-based actor",
+      "prerequisites": "in a man-in-the-middle position between the orchestrator Lambda and GitHub API",
+      "threatAction": "intercept and modify GitHub issue/PR content during context hydration to inject malicious instructions into the task context",
+      "threatImpact": "the agent receiving tampered context containing prompt injection payloads not present in the original GitHub content",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["task context", "agent behavior", "GitHub repositories"],
+      "statement": "An internet-based actor in a man-in-the-middle position between the orchestrator Lambda and GitHub API can intercept and modify GitHub issue/PR content during context hydration to inject malicious instructions into the task context, which leads to the agent receiving tampered context containing prompt injection payloads not present in the original GitHub content, resulting in reduced integrity of task context, agent behavior, GitHub repositories.",
+      "status": "threatIdentified",
+      "tags": ["DF-13", "Context hydration", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T"]
+        },
+        {
+          "key": "Comments",
+          "value": "The orchestrator Lambda fetches GitHub content directly over the internet (not through VPC/VPC endpoint). While HTTPS provides transport encryption, certificate pinning is unlikely. The Lambda runs outside the VPC so DNS Firewall does not apply. A compromised DNS or BGP hijack could redirect GitHub API calls."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "e6711220-dced-4353-b739-6757912d5e8f",
+      "numericId": 15,
+      "threatSource": "malicious actor",
+      "prerequisites": "who has gained access to the fan-out consumer Lambda execution context",
+      "threatAction": "manipulate notification messages sent to Slack and GitHub to deliver phishing links or misleading status updates to developers",
+      "threatImpact": "developers trusting fraudulent notifications and clicking malicious links, approving compromised PRs, or taking incorrect actions",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["Slack notifications", "GitHub comments", "developer trust"],
+      "statement": "A malicious actor who has gained access to the fan-out consumer Lambda execution context can manipulate notification messages sent to Slack and GitHub to deliver phishing links or misleading status updates to developers, which leads to developers trusting fraudulent notifications and clicking malicious links, approving compromised PRs, or taking incorrect actions, resulting in reduced integrity, confidentiality of Slack notifications, GitHub comments, developer trust.",
+      "status": "threatIdentified",
+      "tags": ["DF-11", "Fan-out Consumer", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "S"]
+        },
+        {
+          "key": "Comments",
+          "value": "The fan-out consumer processes DDB Stream events and posts to Slack and GitHub. If the Lambda is compromised or if task event data is tampered with in DynamoDB, the notifications could contain malicious content. Developers may trust these automated messages implicitly since they come from the platform's bot identity."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "43f9fe2e-0fef-4166-96a8-820a3b90b132",
+      "numericId": 16,
+      "threatSource": "compromised agent process",
+      "prerequisites": "running in a MicroVM with Bedrock VPC endpoint access",
+      "threatAction": "make excessive LLM inference calls to Amazon Bedrock using the session's IAM credentials, consuming model invocation quotas",
+      "threatImpact": "denial of service for other agent sessions due to throttled Bedrock quotas and unexpected financial charges to the AWS account",
+      "impactedGoal": ["availability"],
+      "impactedAssets": ["Bedrock inference quota", "AWS billing", "other agent sessions"],
+      "statement": "A compromised agent process running in a MicroVM with Bedrock VPC endpoint access can make excessive LLM inference calls to Amazon Bedrock using the session's IAM credentials, consuming model invocation quotas, which leads to denial of service for other agent sessions due to throttled Bedrock quotas and unexpected financial charges to the AWS account, resulting in reduced availability of Bedrock inference quota, AWS billing, other agent sessions.",
+      "status": "threatIdentified",
+      "tags": ["DF-07", "Bedrock", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["D"]
+        },
+        {
+          "key": "Comments",
+          "value": "The agent MicroVM has IAM credentials for Bedrock model invocation via VPC endpoint. A compromised agent could make rapid inference calls. Bedrock quotas are account-level, so one abusive session could exhaust quotas for all concurrent sessions. The 8-hour max session lifetime provides an upper bound on abuse duration."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "e9697c90-62e0-41d5-9499-f0031c533739",
+      "numericId": 17,
+      "threatSource": "malicious actor",
+      "prerequisites": "who can submit a task with a crafted repository URL",
+      "threatAction": "specify a repository containing malicious build scripts or package.json postinstall hooks that execute during the agent's setup_repo phase",
+      "threatImpact": "arbitrary code execution in the MicroVM during dependency installation, enabling credential theft or lateral movement via the GitHub PAT",
+      "impactedGoal": ["integrity", "confidentiality"],
+      "impactedAssets": ["agent runtime", "GitHub PAT", "other repositories"],
+      "statement": "A malicious actor who can submit a task with a crafted repository URL can specify a repository containing malicious build scripts or package.json postinstall hooks that execute during the agent's setup_repo phase, which leads to arbitrary code execution in the MicroVM during dependency installation, enabling credential theft or lateral movement via the GitHub PAT, resulting in reduced integrity, confidentiality of agent runtime, GitHub PAT, other repositories.",
+      "status": "threatIdentified",
+      "tags": ["DF-06", "DF-05", "Malicious repo", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "The agent clones the target repo and runs setup steps (npm install, pip install, etc.) which can execute arbitrary scripts defined in package.json postinstall hooks, Makefiles, or setup.py. While the MicroVM provides isolation, the shared GitHub PAT is available as an environment variable and can be exfiltrated if DNS Firewall is in observation mode."
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "33f0672c-8eba-4ce9-8305-a2bc5299112c",
+      "numericId": 18,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who can observe task event notifications in Slack channels or GitHub comments",
+      "threatAction": "gather sensitive information about repository structure, task descriptions, and internal system behavior from notification content",
+      "threatImpact": "information disclosure enabling reconnaissance for more targeted attacks against the platform or the repositories it manages",
+      "impactedGoal": ["confidentiality"],
+      "impactedAssets": ["task metadata", "repository information", "system internals"],
+      "statement": "An internet-based actor who can observe task event notifications in Slack channels or GitHub comments can gather sensitive information about repository structure, task descriptions, and internal system behavior from notification content, which leads to information disclosure enabling reconnaissance for more targeted attacks against the platform or the repositories it manages, resulting in reduced confidentiality of task metadata, repository information, system internals.",
+      "status": "threatIdentified",
+      "tags": ["DF-11", "Information disclosure", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["I"]
+        },
+        {
+          "key": "Comments",
+          "value": "Fan-out notifications to Slack and GitHub may contain task descriptions, error stack traces, PR URLs, and status details. If Slack channels are not properly restricted or GitHub repos are public, this information could be accessible to unauthorized parties. Error messages may reveal internal architecture details."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "ecad4287-e35c-4457-9b48-c82ed5f7c443",
+      "numericId": 19,
+      "threatSource": "malicious actor",
+      "prerequisites": "with access to the Linear workspace integrated with the platform",
+      "threatAction": "apply the trigger label to a Linear issue containing prompt injection payloads in the issue title or description to initiate a malicious task",
+      "threatImpact": "autonomous execution of attacker-controlled instructions by the coding agent against the mapped repository",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["GitHub repositories", "agent runtime", "task integrity"],
+      "statement": "A malicious actor with access to the Linear workspace integrated with the platform can apply the trigger label to a Linear issue containing prompt injection payloads in the issue title or description to initiate a malicious task, which leads to autonomous execution of attacker-controlled instructions by the coding agent against the mapped repository, resulting in reduced integrity of GitHub repositories, agent runtime, task integrity.",
+      "status": "threatIdentified",
+      "tags": ["DF-04", "Linear", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["T", "S"]
+        },
+        {
+          "key": "Comments",
+          "value": "Linear integration triggers tasks when labels are applied to issues. Any Linear workspace member who can apply labels can trigger task execution. The issue content becomes the task description and is processed by the agent. While Guardrails screen the content, this is another indirect injection vector."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "1f3ec246-7707-4264-9bda-b1e8a8934ad1",
+      "numericId": 20,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who can trigger many concurrent tasks that enter AWAITING_APPROVAL state",
+      "threatAction": "flood the Cedar HITL approval queue with requests, overwhelming the human reviewer and causing approval fatigue",
+      "threatImpact": "approval fatigue leading to dangerous operations being approved without proper review, or legitimate tasks timing out",
+      "impactedGoal": ["integrity", "availability"],
+      "impactedAssets": ["Cedar HITL approval process", "task execution", "security controls"],
+      "statement": "An internet-based actor who can trigger many concurrent tasks that enter AWAITING_APPROVAL state can flood the Cedar HITL approval queue with requests, overwhelming the human reviewer and causing approval fatigue, which leads to approval fatigue leading to dangerous operations being approved without proper review, or legitimate tasks timing out, resulting in reduced integrity, availability of Cedar HITL approval process, task execution, security controls.",
+      "status": "threatIdentified",
+      "tags": ["DF-12", "Cedar HITL", "DoS", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["D", "E"]
+        },
+        {
+          "key": "Comments",
+          "value": "The HITL approval mechanism relies on human attention as a security control. If an attacker can generate many approval requests (via multiple tasks or tasks that trigger many tool calls requiring approval), the human reviewer may experience fatigue and approve requests without careful review. This is a social engineering attack against the security control itself."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "4c32e91c-fd4c-475a-9eb8-86fc9411b9b3",
+      "numericId": 21,
+      "threatSource": "compromised agent process",
+      "prerequisites": "with write access to the TraceArtifactsBucket via S3 VPC endpoint",
+      "threatAction": "write falsified or incomplete trace artifacts that conceal malicious actions taken during the agent session",
+      "threatImpact": "inability to perform forensic analysis of compromised sessions, loss of audit trail for security investigations",
+      "impactedGoal": ["integrity"],
+      "impactedAssets": ["TraceArtifactsBucket", "audit trail", "forensic capability"],
+      "statement": "A compromised agent process with write access to the TraceArtifactsBucket via S3 VPC endpoint can write falsified or incomplete trace artifacts that conceal malicious actions taken during the agent session, which leads to inability to perform forensic analysis of compromised sessions, loss of audit trail for security investigations, resulting in reduced integrity of TraceArtifactsBucket, audit trail, forensic capability.",
+      "status": "threatIdentified",
+      "tags": ["DF-14", "Trace artifacts", "AI Generated"],
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": ["R", "T"]
+        },
+        {
+          "key": "Comments",
+          "value": "The agent uploads its own trace artifacts (compressed trajectory JSONL). A compromised agent could omit or falsify trace entries to hide malicious actions. The 7-day TTL on the bucket means evidence is automatically deleted. Without independent logging of agent actions, the trace is the primary forensic record."
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "cb90deb5-a296-43f3-a495-f4e6f3f880ba",
+      "numericId": 1,
+      "content": "The output secret scanner (PostToolUse) catches common credential patterns but may miss novel or obfuscated secret formats.",
+      "tags": ["security-controls", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The PostToolUse hook scans for AWS keys, tokens, and private keys. However, regex-based scanning cannot catch all credential formats (e.g., base64-encoded secrets, split across multiple outputs, or novel token formats). This affects the reliability of the exfiltration prevention control."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "0b0d08a9-ee23-4813-8079-34d51eecd844",
+      "numericId": 2,
+      "content": "The MicroVM IAM role has DynamoDB write access scoped to the specific task partition key, not broad table-level write access.",
+      "tags": ["IAM", "least-privilege", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "This assumption affects the blast radius of a compromised agent session. If IAM policies scope DynamoDB writes to the task's own partition key, a compromised agent cannot tamper with other tasks' records. If scoping is at the table level, cross-task tampering is possible. The exact IAM policy needs verification."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "8e765518-1032-48ad-bdd1-2ab339b12c31",
+      "numericId": 3,
+      "content": "Bedrock Guardrails PROMPT_ATTACK filter at MEDIUM strength provides reasonable but not comprehensive protection against prompt injection.",
+      "tags": ["guardrails", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "MEDIUM strength balances false positives (blocking legitimate coding tasks that discuss security) against false negatives (missing sophisticated injections). Indirect injections embedded in code, documentation, or issue comments are particularly challenging to detect as they resemble legitimate content."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "50a5a6bf-88af-4740-8c86-f0015ebd1901",
+      "numericId": 4,
+      "content": "The Cedar policy engine correctly enforces tool-call restrictions and there are no bypass paths that skip PreToolUse/PostToolUse hooks.",
+      "tags": ["Cedar", "policy-enforcement", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The threat model assumes Cedar enforcement is correctly implemented in the agent SDK integration. If there are code paths where tools can be invoked without triggering the Cedar hooks (e.g., direct subprocess calls, dynamic tool loading), the access control would be bypassed."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "a5e2e60a-4499-4fae-9c09-79b026992eb1",
+      "numericId": 5,
+      "content": "WAFv2 rate limiting at 1000 requests per 5 minutes is the only API-level throttling; no per-user or per-IP adaptive rate limiting exists.",
+      "tags": ["rate-limiting", "WAF", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The WAFv2 configuration uses a fixed IP rate limit. This may be insufficient against distributed attacks or authenticated abuse. Per-user concurrency limits exist at the task level but not at the API request level."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    },
+    {
+      "id": "770007a9-389b-4509-b6fb-7fa448628d97",
+      "numericId": 6,
+      "content": "The StrandedTaskReconciler and ConcurrencyReconciler provide eventual consistency but leave windows of 15-30 minutes where orphaned resources may persist.",
+      "tags": ["reconciliation", "availability", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Reconcilers run on 15-minute schedules. During the interval between runs, stranded tasks consume concurrency slots and orphaned MicroVMs consume compute. An attacker could exploit this window for burst resource consumption."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-stride-agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [
+    {
+      "type": "Threat",
+      "assumptionId": "cb90deb5-a296-43f3-a495-f4e6f3f880ba",
+      "linkedId": "44e3267d-2cdf-46eb-8323-a032af2a08e4"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "0b0d08a9-ee23-4813-8079-34d51eecd844",
+      "linkedId": "a444628d-b51b-4402-8960-6c31afed4b58"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "8e765518-1032-48ad-bdd1-2ab339b12c31",
+      "linkedId": "66b0d8d9-3c92-4090-b015-ae003ae1e438"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "8e765518-1032-48ad-bdd1-2ab339b12c31",
+      "linkedId": "f93e750e-b789-4d07-be98-3bd04e554f5e"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "50a5a6bf-88af-4740-8c86-f0015ebd1901",
+      "linkedId": "7965b4ec-3907-4df7-986d-5d60e8422272"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "a5e2e60a-4499-4fae-9c09-79b026992eb1",
+      "linkedId": "4f4fc2f3-7b9e-4916-b866-7deec47d379f"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "770007a9-389b-4509-b6fb-7fa448628d97",
+      "linkedId": "4f4fc2f3-7b9e-4916-b866-7deec47d379f"
+    }
+  ],
+  "mitigations": [],
+  "mitigationLinks": []
+}
