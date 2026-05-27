@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "aws": {
-    "model_id": "global.anthropic.claude-sonnet-4-20250514-v1:0",
+    "model_id": "global.anthropic.claude-opus-4-6-v1",
     "region": "us-east-1",
     "profile": "alkrok-Admin"
   },
