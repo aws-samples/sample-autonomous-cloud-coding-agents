@@ -22,6 +22,10 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { reportIssueFailure } from './shared/linear-feedback';
+import {
+  probeLinearIssueContext,
+  renderIssueContextHint,
+} from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import type { Attachment } from './shared/types';
@@ -252,8 +256,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const taskDescription = buildTaskDescription(issue);
-
   const channelMetadata: Record<string, string> = {
     linear_issue_id: issue.id,
     linear_workspace_id: workspaceId,
@@ -270,11 +272,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // and stash it on the task record. The agent runtime reads it directly
   // (no registry lookup at task-execution time). If the workspace isn't
   // onboarded the agent's outbound Linear MCP simply skips.
+  let contextHint = '';
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (resolved) {
       channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
       channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
+      // Best-effort presence probe: ask Linear once whether the issue has
+      // paperclip attachments or sits in a project with documents. The agent
+      // will fetch the actual content via the Linear MCP at runtime — this
+      // step only flags that there's something worth fetching.
+      const probe = await probeLinearIssueContext(resolved.accessToken, issue.id);
+      contextHint = renderIssueContextHint(probe);
     } else {
       logger.warn('Linear workspace not in registry — agent will run without Linear MCP', {
         linear_workspace_id: workspaceId,
@@ -282,6 +291,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
     }
   }
+
+  const taskDescription = buildTaskDescription(issue, contextHint);
 
   // Extract embedded image URLs from the issue description markdown.
   // These become URL attachments that are fetched and screened during context hydration.
@@ -395,12 +406,16 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
   return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
 }
 
-function buildTaskDescription(issue: LinearIssueEvent['data']): string {
+function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: string = ''): string {
   const parts: string[] = [];
   if (issue.identifier && issue.title) {
     parts.push(`${issue.identifier}: ${issue.title}`);
   } else if (issue.title) {
     parts.push(issue.title);
+  }
+  if (contextHint) {
+    parts.push('');
+    parts.push(contextHint);
   }
   if (issue.description && issue.description.trim()) {
     parts.push('');

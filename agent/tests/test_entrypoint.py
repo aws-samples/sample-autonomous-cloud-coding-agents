@@ -494,3 +494,106 @@ class TestBuildSystemPromptTaskType:
         assert "READ-ONLY" in prompt
         assert "must NOT modify" in prompt
         assert "55" in prompt
+
+
+# ---------------------------------------------------------------------------
+# _build_system_prompt — Linear channel addendum
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPromptLinearChannel:
+    """The Linear-channel addendum is appended only for channel_source=='linear'."""
+
+    def _setup(self) -> RepoSetup:
+        return RepoSetup(
+            repo_dir="/workspace/t1",
+            branch="b",
+            default_branch="main",
+            notes=[],
+        )
+
+    def test_no_addendum_when_channel_is_blank(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "Linear issue progress updates" not in prompt
+        assert "Linear context discovery" not in prompt
+
+    def test_no_addendum_for_slack_channel(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="slack",
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "Linear issue progress updates" not in prompt
+        assert "Linear context discovery" not in prompt
+
+    def test_addendum_present_for_linear_channel(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={
+                "linear_issue_id": "issue-uuid-1",
+                "linear_issue_identifier": "ABC-42",
+                "linear_project_id": "project-uuid-1",
+            },
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "Linear issue progress updates" in prompt
+        assert "Linear context discovery" in prompt
+        assert "ABC-42" in prompt
+
+    def test_linear_addendum_names_attachment_tools(self):
+        # The agent must know the exact MCP tool names — vague references
+        # would cause it to grope. Lock these in so a rename triggers the test.
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={"linear_issue_id": "issue-uuid-1"},
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        for tool in (
+            "mcp__linear-server__get_issue",
+            "mcp__linear-server__get_attachment",
+            "mcp__linear-server__extract_images",
+            "mcp__linear-server__list_documents",
+            "mcp__linear-server__get_document",
+            "mcp__linear-server__list_comments",
+        ):
+            assert tool in prompt, f"expected {tool} to be named in the Linear addendum"
+
+    def test_linear_addendum_inlines_issue_id_and_project_id(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={
+                "linear_issue_id": "issue-uuid-deadbeef",
+                "linear_project_id": "project-uuid-cafebabe",
+            },
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        # The agent shouldn't have to guess the ids — they're in the metadata,
+        # so we surface them directly in the prompt.
+        assert "issue-uuid-deadbeef" in prompt
+        assert "project-uuid-cafebabe" in prompt
