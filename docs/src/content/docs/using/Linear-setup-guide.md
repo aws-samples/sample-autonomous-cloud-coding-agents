@@ -86,7 +86,7 @@ Save, then open the webhook's detail page and copy the **signing secret** (start
 
 > **Where the signing secret is stored.** `bgagent linear setup` stores the signing secret on the workspace's per-workspace OAuth bundle (`bgagent-linear-oauth-<slug>`), where the webhook receiver looks it up by `organizationId` at verify time. On the first install, it's also mirrored into the stack-wide `LinearWebhookSecret` for back-compat with single-workspace deployments — see [How webhook signature verification works](#how-webhook-signature-verification-works) for the full story.
 
-> **Re-running setup later** skips the webhook prompt if the signing secret is already configured. Pass `--rotate-webhook-secret` to re-prompt (e.g. after rotating the secret in Linear).
+> **Re-running setup later** skips the webhook prompt if the signing secret is already configured. To rotate the signing secret without re-running the OAuth dance, use [`bgagent linear update-webhook-secret <slug>`](#webhook-signature-verification-fails-repeatedly).
 
 ### Step 4: Onboard a Linear project
 
@@ -199,7 +199,7 @@ ABCA stores each workspace's signing secret on its per-workspace OAuth bundle (`
    - If it doesn't match → reject 401. **No fallback** to the stack-wide secret — that would let an attacker bypass the per-workspace secret by signing with whatever the stack-wide one happens to be.
 3. If the registry has no row, or the OAuth bundle lacks `webhook_signing_secret` (pre-migration single-workspace install), fall back to the stack-wide `LinearWebhookSecret` and verify against that. If it matches → trusted; if not → 401.
 
-The fallback path keeps existing single-workspace deployments working without re-onboarding. To migrate a single-workspace install to the per-workspace shape, run `bgagent linear setup <slug> --rotate-webhook-secret` once — the wizard will mirror the secret onto the OAuth bundle.
+The fallback path keeps existing single-workspace deployments working without re-onboarding. The migration to the per-workspace shape happens automatically the next time you run `bgagent linear setup <slug>` — it reads the existing stack-wide secret and mirrors it onto the workspace's OAuth bundle without re-prompting.
 
 **Trust model.** The `organizationId` in the body is attacker-controlled — they can claim any workspace. But it only **selects** which secret to verify against; an attacker still needs the matching signing secret to forge a valid signature, which they don't have. Cross-workspace impersonation is prevented by the no-fallback-on-mismatch rule above.
 

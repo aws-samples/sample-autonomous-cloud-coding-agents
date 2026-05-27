@@ -355,7 +355,6 @@ export function makeLinearCommand(): Command {
       .option('--client-id <id>', 'Linear OAuth app Client ID (else prompted)')
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else prompted; prefer interactive)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
-      .option('--rotate-webhook-secret', 'Re-prompt for the webhook signing secret even if one is already configured')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
@@ -586,20 +585,18 @@ export function makeLinearCommand(): Command {
         // without re-onboarding. Multi-workspace installs need each
         // workspace to own its own per-workspace signing secret — only
         // the FIRST install can populate the stack-wide one usefully.
+        // If stack-wide is already populated, this is either a re-run
+        // of setup on the SAME workspace or the FIRST workspace of a
+        // future multi-workspace install. Either way the stored value
+        // is this workspace's signing secret — lift it into the
+        // per-workspace bundle without prompting (auto-migration to
+        // the new shape). Rotation is not setup's job: use
+        // `bgagent linear update-webhook-secret <slug>` to rotate the
+        // signing secret without re-running OAuth.
         const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
         let webhookSigningSecret: string | undefined;
 
-        if (stackWideAlreadyConfigured && !opts.rotateWebhookSecret) {
-          // Two ways into this branch:
-          //   1. Re-running setup on an existing single-workspace install.
-          //      The stack-wide secret IS this workspace's signing
-          //      secret — seed the per-workspace field from it for
-          //      auto-migration to the new shape.
-          //   2. Re-running setup on the FIRST workspace of a future
-          //      multi-workspace install. Same story — stack-wide is
-          //      already correct for this workspace.
-          // In either case, lifting the stack-wide value into the
-          // per-workspace bundle is correct.
+        if (stackWideAlreadyConfigured) {
           console.log('  ✓ Webhook signing secret already configured stack-wide (mirroring to per-workspace)');
           try {
             const value = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn! }));
@@ -626,20 +623,14 @@ export function makeLinearCommand(): Command {
               'Webhook signing secrets start with \'lin_wh_\'. Got something different — re-check the Linear webhook detail page.',
             );
           }
-          // Stack-wide write is only meaningful for the FIRST install
-          // (back-compat fallback). Subsequent workspaces would overwrite
-          // the first workspace's secret, so we only write stack-wide if
-          // it's not already configured. The per-workspace write below
-          // is what actually drives multi-workspace verification.
-          if (!stackWideAlreadyConfigured) {
-            await sm.send(new PutSecretValueCommand({
-              SecretId: webhookSecretArn!,
-              SecretString: webhookSecret,
-            }));
-            console.log('  ✓ Stored webhook signing secret (stack-wide back-compat)');
-          } else {
-            console.log('  ✓ Captured webhook signing secret (per-workspace only — stack-wide left as-is for back-compat)');
-          }
+          // First install: stamp BOTH stack-wide (back-compat fallback
+          // for installs predating per-workspace signing) and the
+          // per-workspace OAuth bundle (the verifier's primary path).
+          await sm.send(new PutSecretValueCommand({
+            SecretId: webhookSecretArn!,
+            SecretString: webhookSecret,
+          }));
+          console.log('  ✓ Stored webhook signing secret (stack-wide back-compat)');
           webhookSigningSecret = webhookSecret;
         }
 
