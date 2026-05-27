@@ -22,6 +22,8 @@ pids
 coverage
 *.lcov
 .nyc_output
+.jest-cache
+*.tsbuildinfo
 lib-cov
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 /test-reports/
