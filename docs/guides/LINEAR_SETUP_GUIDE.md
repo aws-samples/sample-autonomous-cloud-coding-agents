@@ -146,42 +146,88 @@ Add the `bgagent` label to a Linear issue in a mapped project. Within a few seco
 
 ## Adding additional Linear workspaces
 
-A single ABCA deployment can serve multiple Linear workspaces. Once you've completed initial `bgagent linear setup` for one workspace, additional workspaces use the lighter `add-workspace` command:
+A single ABCA deployment can serve multiple Linear workspaces. Once you've completed initial `bgagent linear setup` for one workspace, additional workspaces use the lighter `add-workspace` command — one OAuth dance per workspace plus per-workspace webhook configuration. There's no AWS-side ceiling on the number of installable workspaces (each is just an SM secret + DDB row); practical limits are Linear's API rate limits and per-workspace operator overhead.
 
-```bash
-bgagent linear add-workspace <workspace-slug>
-```
-
-This:
-
-- Prompts for the OAuth Client ID — defaults to the existing workspace's value (Enter to reuse, or paste a different one for a per-workspace OAuth app)
-- Prompts for the Client Secret if you supplied a new Client ID; otherwise reuses the existing one
-- Runs the OAuth dance against the new workspace
-- Creates `bgagent-linear-oauth-<slug>` in Secrets Manager and writes a registry row
-- **Prompts for the webhook signing secret** — Linear generates a fresh signing secret per webhook subscription, and webhook subscriptions are workspace-scoped, so each workspace must configure its own webhook in Linear and bring its own signing secret
-- Refuses to silently overwrite an already-onboarded workspace's registry row (use `setup` to re-authorize an existing workspace)
-
-### One OAuth app for all workspaces vs. one per workspace
+### Decide: one OAuth app for all workspaces, or one per workspace?
 
 Linear OAuth apps are **workspace-scoped at install time**:
 
 - A **private** Linear OAuth app (default) can only be authorized from the workspace that created it. Trying to install it in a second workspace returns `Could not find OAuth client with clientId <id>`.
 - A **public** Linear OAuth app can be authorized from any workspace by anyone with the install URL. The client_secret is still yours; "public" only means "anyone can run the consent flow." For a self-hosted ABCA install this is usually fine.
 
-Pick one of:
+Pick one approach before continuing:
 
-**Option A: Single shared OAuth app (recommended for personal demos and single-org setups).** In your initial workspace's Linear settings, edit the OAuth app and toggle **Public: ON**. Then `bgagent linear add-workspace <new-slug>` works without `--client-id`. Cleanest UX, single point of revocation.
+| Approach | When to use | Downside |
+|---|---|---|
+| **A: Single shared OAuth app (Public: ON)** | Personal demos, single-org setups | All workspaces revoke together |
+| **B: Separate OAuth app per workspace** | Multi-org or production setups | More Linear configuration per workspace |
 
-**Option B: Separate OAuth app per workspace (recommended for multi-org / production setups).** Create a new OAuth app in each new workspace's Linear settings (Step 1 above), then pass the new credentials explicitly:
+For Option A, edit your existing OAuth app in Linear settings and toggle **Public: ON** *before* running the steps below.
+
+### Step-by-step walkthrough
+
+**1. Decide the workspace `<slug>`.**
+
+The slug is the URL key from `https://linear.app/<slug>/...`. Find it in Linear → Settings → Workspace → URL key, or just look at any URL while logged into the workspace.
+
+**2. (Option B only) Create a new Linear OAuth app in the new workspace.**
+
+If you chose Option B, sign into the new workspace in your browser (Linear sidebar workspace switcher) and create a new OAuth app:
+
+- Open: `https://linear.app/<slug>/settings/api/applications/new`
+- Fill in the fields per `bgagent linear app-template`. Important values:
+  - **Callback URLs**: `http://localhost:8080/oauth/callback`
+  - **GitHub username**: must end with `[bot]` (e.g. `bgagent[bot]`)
+  - **Webhooks**: ON, URL `https://example.com/placeholder` (placeholder, real URL configured in step 4)
+- Save, copy the Client ID and Client Secret — you'll paste them in step 3.
+
+**3. Run `bgagent linear add-workspace`.**
 
 ```bash
-bgagent linear add-workspace <new-slug> \
-  --client-id <new-id> --client-secret <new-secret>
+bgagent linear add-workspace <slug>
 ```
 
-Per-workspace apps give cleaner revocation, per-workspace branding, and isolation if one workspace's credentials leak. Each new app needs its own callback URL (`http://localhost:8080/oauth/callback`) and its own `bgagent[bot]` GitHub username.
+The CLI:
 
-There's no AWS-side ceiling on the number of installable workspaces — each is just an SM secret + DDB row. Practical limits are Linear's API rate limits and per-workspace operator overhead.
+- Looks up the existing workspace and shows its OAuth Client ID as a default in `[brackets]`
+- For Option A: press Enter to reuse the existing app
+- For Option B: paste the new Client ID, then paste the new Client Secret when prompted
+- Opens your browser to Linear's consent screen — **make sure you're signed into the new workspace** (use Linear's workspace switcher if needed)
+- Authorize the app
+- The CLI writes the per-workspace OAuth secret + registry row, then pauses at the `Webhook signing secret:` prompt
+
+**4. Configure the workspace's webhook in Linear (in a new tab).**
+
+While `add-workspace` is paused at the signing-secret prompt:
+
+- Open: `https://linear.app/<slug>/settings/api/webhooks` → **+ New webhook**
+- **URL**: your stack's API endpoint, e.g. `https://<api-id>.execute-api.<region>.amazonaws.com/v1/linear/webhook` — find this in your CloudFormation stack's `ApiUrl` output
+- **Resource types**: check **Issues** only
+- **Team**: whichever team owns the projects you'll map (or all teams)
+- Save, then open the webhook detail page and copy the `lin_wh_…` signing secret
+
+**5. Paste the signing secret back into the CLI.**
+
+The CLI stores it on the workspace's per-workspace OAuth bundle. The webhook receiver looks it up by `organizationId` at verify time — see [How webhook signature verification works](#how-webhook-signature-verification-works) for the trust model.
+
+**6. Onboard a project from the new workspace.**
+
+```bash
+bgagent linear list-projects --slug <slug>     # find the project UUID
+bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca
+```
+
+**7. Test.**
+
+Apply the trigger label (`abca` in the example above) to a Linear issue in the onboarded project. The agent should start within ~30 seconds.
+
+### What if I skip step 4 (webhook configuration in Linear)?
+
+The OAuth install completes successfully, but Linear has no webhook to send events from. Triggering an issue in that workspace is silent — no events reach your API endpoint, no agent runs. Configuring the webhook is what makes the workspace actually trigger ABCA.
+
+### What if I made a mistake on the signing secret?
+
+Use [`bgagent linear update-webhook-secret <slug>`](#webhook-signature-verification-fails-repeatedly) to re-prompt and overwrite. Doesn't re-run the OAuth dance.
 
 ## How webhook signature verification works
 
