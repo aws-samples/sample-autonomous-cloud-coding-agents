@@ -245,11 +245,32 @@ export class LinearIntegration extends Construct {
         LINEAR_WEBHOOK_SECRET_ARN: this.webhookSecret.secretArn,
         LINEAR_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME: webhookProcessorFn.functionName,
+        // Per-workspace signing-secret lookup — selects the right
+        // workspace's `webhook_signing_secret` from the OAuth secret
+        // bundle so multi-workspace installs verify correctly. Receiver
+        // falls back to LINEAR_WEBHOOK_SECRET_ARN when this lookup
+        // misses (back-compat for single-workspace installs).
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
       bundling: commonBundling,
     });
     this.webhookSecret.grantRead(webhookFn);
     this.webhookDedupTable.grantReadWriteData(webhookFn);
+    this.workspaceRegistryTable.grantReadData(webhookFn);
+    // Read-only on the per-workspace OAuth secret prefix — we extract
+    // `webhook_signing_secret` for verification but never mutate; the
+    // CLI owns the lifecycle of these secrets.
+    webhookFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
     // --- Account linking (Cognito-authenticated) ---
