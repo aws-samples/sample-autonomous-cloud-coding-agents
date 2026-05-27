@@ -40,45 +40,59 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const LAMBDA_RESOLVER = path.join(REPO_ROOT, 'cdk', 'src', 'handlers', 'shared', 'linear-oauth-resolver.ts');
 const CLI_OAUTH = path.join(REPO_ROOT, 'cli', 'src', 'linear-oauth.ts');
 
-function extractInterfaceFields(source: string, interfaceName: string): string[] {
+interface InterfaceField {
+  readonly name: string;
+  readonly optional: boolean;
+}
+
+function extractInterfaceFields(source: string, interfaceName: string): InterfaceField[] {
   const reBlock = new RegExp(`export\\s+interface\\s+${interfaceName}\\s*\\{([\\s\\S]*?)\\n\\}`);
   const match = reBlock.exec(source);
   if (!match) {
     throw new Error(`Could not find interface ${interfaceName}`);
   }
   const body = match[1];
-  const fields: string[] = [];
+  const fields: InterfaceField[] = [];
   // Match `readonly <name>:` or `<name>:` field declarations. Skip
   // lines that are inside JSDoc comment blocks (start with `*`) or
-  // single-line comments (`//`).
+  // single-line comments (`//`). Capture the `?` to track optional.
   for (const rawLine of body.split('\n')) {
     const line = rawLine.trim();
     if (!line || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) continue;
-    const fieldMatch = /^(?:readonly\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\??\s*:/.exec(line);
+    const fieldMatch = /^(?:readonly\s+)?([a-zA-Z_][a-zA-Z0-9_]*)(\??)\s*:/.exec(line);
     if (fieldMatch) {
-      fields.push(fieldMatch[1]);
+      fields.push({ name: fieldMatch[1], optional: fieldMatch[2] === '?' });
     }
   }
   return fields;
 }
 
+function fieldNames(fields: InterfaceField[]): string[] {
+  return fields.map((f) => f.name).sort();
+}
+
+function requiredFieldNames(fields: InterfaceField[]): string[] {
+  return fields.filter((f) => !f.optional).map((f) => f.name).sort();
+}
+
 describe('StoredOauthToken / StoredLinearOauthToken cross-language parity', () => {
-  test('Lambda and CLI define the same set of fields', () => {
+  test('Lambda and CLI define the same set of fields with the same optionality', () => {
     const lambdaSource = fs.readFileSync(LAMBDA_RESOLVER, 'utf8');
     const cliSource = fs.readFileSync(CLI_OAUTH, 'utf8');
 
-    const lambdaFields = extractInterfaceFields(lambdaSource, 'StoredOauthToken').sort();
-    const cliFields = extractInterfaceFields(cliSource, 'StoredLinearOauthToken').sort();
+    const lambdaFields = extractInterfaceFields(lambdaSource, 'StoredOauthToken');
+    const cliFields = extractInterfaceFields(cliSource, 'StoredLinearOauthToken');
 
-    expect(lambdaFields).toEqual(cliFields);
-    // Sanity: at least 11 fields per the documented schema. Catches
-    // a regex parse failure that returns empty arrays.
-    expect(lambdaFields.length).toBeGreaterThanOrEqual(11);
+    expect(fieldNames(lambdaFields)).toEqual(fieldNames(cliFields));
+    expect(requiredFieldNames(lambdaFields)).toEqual(requiredFieldNames(cliFields));
+    // Sanity: at least 11 required fields per the documented schema.
+    // Catches a regex parse failure that returns empty arrays.
+    expect(requiredFieldNames(lambdaFields).length).toBeGreaterThanOrEqual(11);
   });
 
-  test('Lambda STORED_OAUTH_TOKEN_REQUIRED_FIELDS const matches the interface', () => {
+  test('Lambda STORED_OAUTH_TOKEN_REQUIRED_FIELDS const matches the interface\'s required fields', () => {
     const lambdaSource = fs.readFileSync(LAMBDA_RESOLVER, 'utf8');
-    const interfaceFields = extractInterfaceFields(lambdaSource, 'StoredOauthToken').sort();
+    const interfaceRequired = requiredFieldNames(extractInterfaceFields(lambdaSource, 'StoredOauthToken'));
 
     const constMatch = /STORED_OAUTH_TOKEN_REQUIRED_FIELDS:\s*ReadonlyArray<keyof StoredOauthToken>\s*=\s*\[([\s\S]*?)\];/.exec(lambdaSource);
     expect(constMatch).not.toBeNull();
@@ -86,6 +100,10 @@ describe('StoredOauthToken / StoredLinearOauthToken cross-language parity', () =
       .map((s) => s.replace(/'/g, ''))
       .sort();
 
-    expect(constFields).toEqual(interfaceFields);
+    // The const should list exactly the required (non-optional) fields.
+    // Optional fields like `webhook_signing_secret` (back-compat for
+    // installs predating per-workspace signing) MUST NOT be listed —
+    // doing so would reject every existing install on Lambda startup.
+    expect(constFields).toEqual(interfaceRequired);
   });
 });

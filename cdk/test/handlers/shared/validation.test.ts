@@ -384,11 +384,10 @@ describe('isValidUlid', () => {
   });
 
   test('rejects non-string input', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(isValidUlid(42 as any)).toBe(false);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     expect(isValidUlid(null as any)).toBe(false);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     expect(isValidUlid(undefined as any)).toBe(false);
   });
 });

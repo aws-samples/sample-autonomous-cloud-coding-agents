@@ -393,7 +393,7 @@ async function withTransientRetry<T>(
   label: string,
 ): Promise<T> {
   let attempt = 0;
-  // eslint-disable-next-line no-constant-condition
+
   while (true) {
     try {
       return await op();
