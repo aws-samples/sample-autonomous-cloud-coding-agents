@@ -129,10 +129,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // Race: Vercel posts `deployment_status` the moment its build finishes,
-  // which can be ~5-15s before the agent calls `gh pr create` for the
-  // same SHA. Retry the PR lookup with a small backoff so the screenshot
-  // doesn't get silently dropped on what is the common path.
+  // Race: managed providers (Vercel, Netlify, Amplify) post
+  // `deployment_status` the moment their build finishes, which can
+  // be ~5-15s before the agent calls `gh pr create` for the same SHA.
+  // Retry the PR lookup with a small backoff so the screenshot doesn't
+  // get silently dropped on what is the common path.
   const pr = await findPullRequestForShaWithRetry(repo, sha, token);
   if (!pr) {
     logger.info('No open PR found for SHA after retries — skipping screenshot post', { repo, sha });
@@ -255,9 +256,10 @@ interface OpenPr {
 
 /**
  * Wait for an open PR to exist for the given SHA, retrying with a
- * small backoff. Vercel commonly posts `deployment_status` before the
- * agent's `gh pr create` call lands (we've measured 5-15s gap), so a
- * single check would silently miss the common case.
+ * small backoff. Managed providers commonly post `deployment_status`
+ * before the agent's `gh pr create` call lands (we've measured 5-15s
+ * gap on Vercel; Netlify/Amplify behave similarly), so a single check
+ * would silently miss the common case.
  *
  * Schedule: 0s, 5s, 10s, 20s — covers the observed gap with one
  * generous bonus retry. Total max wait ~35s.
@@ -371,6 +373,6 @@ function renderLinearCommentBody(publicUrl: string, previewUrl: string): string 
     '',
     `Live preview: [${previewUrl}](${previewUrl})`,
     '',
-    '_Captured automatically by ABCA after the Vercel preview deploy finished._',
+    '_Captured automatically by ABCA after the deploy finished._',
   ].join('\n');
 }
