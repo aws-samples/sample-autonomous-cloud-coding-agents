@@ -430,27 +430,56 @@ function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: stri
  * Scans for standard markdown image references: `![alt](url)`.
  * Only HTTPS URLs are included (security: no HTTP, no data: URIs).
  * Capped at 10 images per issue to stay within attachment limits.
+ *
+ * Linear-hosted upload URLs (`uploads.linear.app`) are SKIPPED because
+ * they require the workspace's OAuth token to fetch — the orchestrator's
+ * URL-resolver runs unauthenticated and would fail closed with 401,
+ * killing the task before the agent ever starts. The agent picks these
+ * up at runtime via `mcp__linear-server__extract_images` (which mints
+ * fresh signed URLs) per the on-demand prompt addendum, so dropping
+ * them from the pre-fetch path doesn't lose coverage — it just shifts
+ * the fetch from "Lambda with no auth" to "agent with the OAuth token."
+ *
+ * Trade-off: Linear-hosted images skip the Bedrock Guardrail screening
+ * pass that runs at task-creation time. The description text itself is
+ * still screened via the input guardrail; the bytes are not. Acceptable
+ * for now — the agent treats those images as untrusted input anyway.
  */
 function extractImageUrlAttachments(description: string | undefined): Attachment[] {
   if (!description) return [];
 
   const imagePattern = /!\[[^\]]*\]\((https:\/\/[^)]+)\)/g;
   const attachments: Attachment[] = [];
+  let skippedLinearUploads = 0;
   let match: RegExpExecArray | null;
 
   while ((match = imagePattern.exec(description)) !== null) {
     if (attachments.length >= 10) break;
     const url = match[1];
+    if (isLinearUploadsUrl(url)) {
+      skippedLinearUploads += 1;
+      continue;
+    }
     attachments.push({ type: 'url', url });
   }
 
-  if (attachments.length > 0) {
+  if (attachments.length > 0 || skippedLinearUploads > 0) {
     logger.info('Extracted image URL attachments from Linear issue description', {
       count: attachments.length,
+      skipped_linear_uploads: skippedLinearUploads,
     });
   }
 
   return attachments;
+}
+
+function isLinearUploadsUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'uploads.linear.app' || host.endsWith('.uploads.linear.app');
+  } catch {
+    return false;
+  }
 }
 
 async function lookupPlatformUser(workspaceId: string, userId: string): Promise<string | null> {
