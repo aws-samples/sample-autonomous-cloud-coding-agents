@@ -160,19 +160,19 @@ jobs:
           node-version: 22.x
       - name: Cache node_modules
         id: cache-node-modules
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - name: Cache agent venv
         id: cache-agent-venv
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: agent/.venv
           key: agent-venv-${{ runner.os }}-${{ hashFiles('agent/uv.lock') }}
       - name: Cache Jest transforms
         id: cache-jest
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: cdk/.jest-cache
           key: jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-${{ github.sha }}
@@ -180,7 +180,7 @@ jobs:
             jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-
       - name: Cache TypeScript build info
         id: cache-tsc
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             cdk/tsconfig.tsbuildinfo
