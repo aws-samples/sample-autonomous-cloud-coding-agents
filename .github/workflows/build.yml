@@ -185,7 +185,7 @@ jobs:
           path: |
             cdk/tsconfig.tsbuildinfo
             cli/tsconfig.tsbuildinfo
-          key: tsc-${{ runner.os }}-${{ hashFiles('cdk/src/**', 'cli/src/**') }}
+          key: tsc-${{ runner.os }}-${{ hashFiles('cdk/src/**', 'cdk/tsconfig.json', 'cdk/tsconfig.dev.json', 'cli/src/**', 'cli/tsconfig.json') }}
           restore-keys: |
             tsc-${{ runner.os }}-
       - name: Install dependencies
