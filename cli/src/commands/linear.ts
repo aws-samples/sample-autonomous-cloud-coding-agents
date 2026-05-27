@@ -73,11 +73,13 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   const developerName = opts.developerName ?? 'ABCA';
   const developerUrl = opts.developerUrl ?? 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
   const description = opts.description ?? 'Autonomous Background Coding Agent';
-  // The AWS-hosted callback is surfaced by `aws bedrock-agentcore-control
-  // create-oauth2-credential-provider` once per workspace. If unknown at
-  // template-render time, print a placeholder the operator must replace.
-  const awsCallback = opts.awsCallbackUrl
-    ?? '<paste callbackUrl from `aws bedrock-agentcore-control create-oauth2-credential-provider`>';
+  // Phase 2.0b-O2 (shipped) uses a localhost callback that
+  // `bgagent linear setup` listens on for the one-time redirect. The
+  // `awsCallbackUrl` option is retained for the parked Phase 2.0a flow
+  // and (rare) operators forwarding the callback through a fixed
+  // upstream URL — but the localhost default works for everyone running
+  // setup interactively from their machine.
+  const callbackUrl = opts.awsCallbackUrl ?? 'http://localhost:8080/oauth/callback';
 
   const bar = '═'.repeat(72);
   return [
@@ -93,7 +95,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     `  Description:         ${description}`,
     '',
     '  Callback URLs (one per line, NO line wrapping):',
-    `    ${awsCallback}`,
+    `    ${callbackUrl}`,
     '',
     `  GitHub username:     ${botName}      ← REQUIRED for actor=app`,
     '  Public:              OFF',
@@ -323,6 +325,44 @@ export function makeLinearCommand(): Command {
           description: opts.description,
           awsCallbackUrl: opts.awsCallbackUrl,
         }));
+      }),
+  );
+
+  linear.addCommand(
+    new Command('webhook-info')
+      .description('Print the webhook URL + Linear settings for this stack')
+      .action(() => {
+        // Read-only convenience — surfaces the values an operator needs to
+        // create a webhook subscription in Linear (URL, resource types,
+        // followup command). Eliminates the "find the API URL in CFN
+        // outputs" detour that the setup guide used to embed.
+        const config = loadConfig();
+        if (!config.api_url) {
+          throw new CliError(
+            'No API URL configured. Run `bgagent configure` first to point at a deployed stack.',
+          );
+        }
+        const webhookUrl = `${config.api_url.replace(/\/+$/, '')}/linear/webhook`;
+        const bar = '═'.repeat(72);
+        console.log(bar);
+        console.log('Linear webhook configuration');
+        console.log(bar);
+        console.log();
+        console.log('In Linear → Settings → API → Webhooks → + New webhook, paste:');
+        console.log();
+        console.log(`  URL:             ${webhookUrl}`);
+        console.log('  Resource types:  Issues');
+        console.log('  Team:            (whichever team owns the projects you map)');
+        console.log();
+        console.log('Save, then open the webhook detail page and copy the signing secret');
+        console.log('(starts with `lin_wh_`). Feed it to ABCA via:');
+        console.log();
+        console.log('  bgagent linear update-webhook-secret <slug>');
+        console.log();
+        console.log('Note: webhook subscriptions are workspace-scoped, with a fresh signing');
+        console.log('secret per subscription. Each Linear workspace you onboard needs its');
+        console.log('own webhook configured this way.');
+        console.log(bar);
       }),
   );
 
