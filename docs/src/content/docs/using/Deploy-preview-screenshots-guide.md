@@ -16,7 +16,7 @@ The pipeline doesn't care who built the deploy — it only listens for GitHub `d
 |---|---|---|
 | **Vercel** (managed hosting + GitHub app) | ✅ | The worked example below uses this. Default `environment` is `Preview`. |
 | **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Posts deployment_status for each branch deploy. `environment` is the branch name — set `SCREENSHOT_TARGET_ENVIRONMENT` to your preview branch (or use the same value on every branch via the `BackgroundAgentStack` construct prop). |
-| **Netlify** (managed hosting + GitHub app) | ✅ | `environment` is `Deploy Preview <PR#>`. Single fixed string filter doesn't catch all PRs — followup to support pattern matching. |
+| **Netlify** (managed hosting + GitHub app) | ⚠ | `environment` is `Deploy Preview <PR#>`, which the current single-string `SCREENSHOT_TARGET_ENVIRONMENT` filter doesn't match across all PRs. Workable today only by picking one specific PR's environment string; broader pattern matching isn't shipped. |
 | **GitHub Actions** that calls `POST /repos/.../deployments` (typical for ECS/Fargate, Cloud Run, Fly.io, Railway, Cloudflare Pages, etc.) | ✅ | Your workflow controls the `environment` field; pass whatever you want and set `SCREENSHOT_TARGET_ENVIRONMENT` to match. |
 | **External CI** (CircleCI, GitLab, ArgoCD) that doesn't touch GitHub Deployments | ❌ | Add a final job that calls the GitHub Deployments API after the deploy succeeds — see [GitHub's example](https://docs.github.com/en/rest/deployments/deployments#create-a-deployment). |
 
@@ -99,7 +99,7 @@ Go to **your-project → Settings** in the Vercel dashboard.
 #### Settings → Deployment Protection
 - **Vercel Authentication**: set to **Disabled** (or "Only Production Deployments") for the demo. Otherwise AgentCore Browser will hit a Vercel auth wall and screenshot the login page instead of your app.
 
-> **Production hardening.** When you graduate the demo to a real production setup, switch Vercel Authentication back to **Standard Protection** and configure a [signed bypass token](https://vercel.com/docs/security/deployment-protection/methods-to-bypass-deployment-protection#protection-bypass-for-automation). The screenshot processor will need to inject the bypass token as a query parameter on the preview URL — this is tracked as a followup.
+> **Production hardening.** Real deployments should keep Vercel Authentication on **Standard Protection** and use a [signed bypass token](https://vercel.com/docs/security/deployment-protection/methods-to-bypass-deployment-protection#protection-bypass-for-automation). The screenshot processor would need to inject the bypass token as a query parameter on the preview URL it navigates to — currently not implemented.
 
 > **Using a different provider?** Skip Steps 1–2 and follow your provider's instructions to publish `deployment_status` events to GitHub. For Amplify Hosting, that's automatic when the app is connected via GitHub. For self-hosted CI, add a `gh api repos/.../deployments` step at the end of your deploy job. Then continue with Step 3.
 
@@ -157,7 +157,7 @@ The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (
 |---|---|---|
 | Vercel | `Preview` | leave default |
 | Amplify Hosting | branch name (e.g. `main`, `staging`) | the branch you treat as preview |
-| Netlify | `Deploy Preview <PR#>` | currently not directly matchable — followup #96 covers prefix routing |
+| Netlify | `Deploy Preview <PR#>` | currently not directly matchable across all PRs (single fixed-string filter only) |
 | GitHub Actions custom | whatever your workflow passes | match it exactly |
 
 ## Troubleshooting
@@ -206,11 +206,10 @@ If it 403s, check that the bucket policy includes the OAC service principal (CDK
 
 You forgot Step 2's "Vercel Authentication: Disabled" toggle. Toggle it off, push another commit, and confirm the next screenshot renders the actual app.
 
-## Production hardening (followups)
+## Production hardening considerations
 
-Before using this on a real product:
+Things to think about before using this on a real product:
 
-1. **Re-enable Vercel Standard Protection** (or your provider's equivalent) + signed bypass token; teach the screenshot processor to inject the bypass on preview URLs (followup).
-2. **Scope IAM down from `bedrock-agentcore:*`** to the specific Browser action set (followup, tracked).
-3. **Add CloudFront access logs + WAF** if screenshots ever contain sensitive content.
-4. **Tighten the screenshot retention** below 30 days if your privacy review requires it (constant in `cdk/src/constructs/screenshot-bucket.ts`).
+- **Deploy protection.** This guide turns Vercel Authentication off so the headless browser can render the preview. For real use, you'll want it back on with a signed bypass token (or your provider's equivalent) and the bypass injected onto the preview URL the screenshot processor navigates to.
+- **IAM scope.** The screenshot processor's IAM grants `bedrock-agentcore:*`; tightening to the specific Browser action set is preferable.
+- **Sensitive content.** If your previews include PII or other regulated content, consider CloudFront access logs + a WAF in front of the public CDN, and shorten screenshot retention below the 30-day default (constant in `cdk/src/constructs/screenshot-bucket.ts`).
