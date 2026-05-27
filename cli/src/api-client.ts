@@ -423,9 +423,14 @@ export class ApiClient {
     return res.data;
   }
 
-  /** POST /linear/link — link a Linear account using a verification code. */
-  async linearLink(code: string): Promise<LinearLinkResponse> {
-    const res = await this.request<SuccessResponse<LinearLinkResponse>>('POST', '/linear/link', { code });
+  /** POST /linear/link — link a Linear account using a verification code.
+   *
+   * `dryRun: true` returns the identity attached to the code without
+   * writing the mapping (preview-before-confirm UX). */
+  async linearLink(code: string, opts: { dryRun?: boolean } = {}): Promise<LinearLinkResponse> {
+    const body: Record<string, unknown> = { code };
+    if (opts.dryRun) body.dry_run = true;
+    const res = await this.request<SuccessResponse<LinearLinkResponse>>('POST', '/linear/link', body);
     return res.data;
   }
 }

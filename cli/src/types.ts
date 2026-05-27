@@ -334,11 +334,19 @@ export interface SlackLinkResponse {
   readonly linked_at: string;
 }
 
-/** Linear link response from POST /v1/linear/link. */
+/** Linear link response from POST /v1/linear/link.
+ *
+ * `dry_run: true` returns the identity attached to the code without
+ * writing the mapping. CLI uses it to preview before the user confirms.
+ * `linked_at` is omitted from the dry-run response. */
 export interface LinearLinkResponse {
+  readonly dry_run?: boolean;
   readonly linear_workspace_id: string;
+  readonly linear_workspace_slug?: string;
   readonly linear_user_id: string;
-  readonly linked_at: string;
+  readonly linear_user_name?: string;
+  readonly linear_user_email?: string;
+  readonly linked_at?: string;
 }
 
 /** CLI config stored in ~/.bgagent/config.json. */

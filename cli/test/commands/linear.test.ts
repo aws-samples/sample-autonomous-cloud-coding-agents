@@ -160,16 +160,20 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('REQUIRED for actor=app');
   });
 
-  test('includes the AWS callback URL placeholder when not provided', () => {
+  test('defaults the callback URL to the localhost endpoint that setup listens on', () => {
+    // Phase 2.0b-O2 (shipped) uses an ephemeral localhost server during
+    // `bgagent linear setup`. Printing the right URL by default
+    // eliminates the "and now substitute the placeholder" step the
+    // setup guide used to embed.
     const out = renderLinearAppTemplate();
-    expect(out).toContain('<paste callbackUrl from `aws bedrock-agentcore-control create-oauth2-credential-provider`>');
+    expect(out).toContain('http://localhost:8080/oauth/callback');
   });
 
-  test('substitutes the AWS callback URL when supplied', () => {
+  test('substitutes a different callback URL when supplied (parked AgentCore Identity flow)', () => {
     const url = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/abc-123';
     const out = renderLinearAppTemplate({ awsCallbackUrl: url });
     expect(out).toContain(url);
-    expect(out).not.toContain('<paste callbackUrl');
+    expect(out).not.toContain('http://localhost:8080/oauth/callback');
   });
 
   test('overrides bot name, developer fields, description', () => {
