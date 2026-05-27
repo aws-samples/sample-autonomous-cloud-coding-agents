@@ -74,7 +74,7 @@ export function makeGithubCommand(): Command {
         console.log('receiver can verify the HMAC:');
         console.log();
         if (webhookSecretArn) {
-          console.log(`  bgagent github set-webhook-secret    # interactive prompt`);
+          console.log('  bgagent github set-webhook-secret    # interactive prompt');
           console.log();
           console.log(`  Secret ARN: ${webhookSecretArn}`);
         } else {
