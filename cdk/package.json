@@ -9,14 +9,14 @@
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
     "test": "jest",
-    "eslint": "ESLINT_USE_FLAT_CONFIG=false eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test",
+    "eslint": "eslint --fix src test",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q"
   },
   "dependencies": {
-    "@aws-cdk/aws-bedrock-agentcore-alpha": "2.238.0-alpha.0",
-    "@aws-cdk/aws-bedrock-alpha": "2.238.0-alpha.0",
-    "@aws-cdk/mixins-preview": "2.238.0-alpha.0",
+    "@aws-cdk/aws-bedrock-agentcore-alpha": "2.257.0-alpha.0",
+    "@aws-cdk/aws-bedrock-alpha": "2.257.0-alpha.0",
+    "@aws-cdk/mixins-preview": "2.257.0-alpha.0",
     "@aws-sdk/client-bedrock-agentcore": "^3.1046.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1021.0",
     "@aws-sdk/client-dynamodb": "^3.1021.0",
@@ -29,15 +29,15 @@
     "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@aws/durable-execution-sdk-js": "^1.1.0",
     "@cedar-policy/cedar-wasm": "4.10.0",
-    "aws-cdk-lib": "^2.238.0",
-    "cdk-nag": "^2.37.55",
+    "aws-cdk-lib": "^2.257.0",
+    "cdk-nag": "^2.38.2",
     "constructs": "^10.3.0",
     "pdf-parse": "^1.1.1",
     "js-yaml": "^4.1.1",
     "ulid": "^3.0.2"
   },
   "devDependencies": {
-    "@cdklabs/eslint-plugin": "^1.5.10",
+    "@cdklabs/eslint-plugin": "^2",
     "@stylistic/eslint-plugin": "^2",
     "@types/aws-lambda": "^8.10.161",
     "@types/jest": "^30.0.0",
@@ -48,9 +48,9 @@
     "@typescript-eslint/parser": "^8",
     "aws-cdk": "^2",
     "esbuild": "^0.27.4",
-    "eslint": "^9",
-    "eslint-import-resolver-typescript": "^4.4.4",
-    "eslint-plugin-import": "^2.32.0",
+    "eslint": "^10",
+    "eslint-import-resolver-typescript": "^4",
+    "eslint-plugin-import-x": "^4",
     "eslint-plugin-jest": "^29.15.1",
     "eslint-plugin-jsdoc": "^62.8.1",
     "eslint-plugin-license-header": "^0.9.0",
@@ -60,14 +60,12 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },
-  "resolutions": {
-    "eslint-plugin-import/minimatch": "^3.1.2"
-  },
-  "optionalDependencies": {},
+  "resolutions": {},
   "engines": {
     "node": ">= 20.x <= 24.x"
   },
   "jest": {
+    "cacheDirectory": "<rootDir>/.jest-cache",
     "coverageProvider": "v8",
     "testMatch": [
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
@@ -91,6 +89,9 @@
     ],
     "watchPathIgnorePatterns": [
       "/node_modules/"
+    ],
+    "setupFilesAfterEnv": [
+      "aws-cdk-lib/testhelpers/jest-autoclean"
     ],
     "reporters": [
       "default",

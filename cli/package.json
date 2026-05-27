@@ -5,7 +5,7 @@
   },
   "scripts": {
     "compile": "tsc --build tsconfig.json",
-    "eslint": "eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test build-tools",
+    "eslint": "eslint --fix --no-error-on-unmatched-pattern src test build-tools",
     "test": "jest --passWithNoTests --updateSnapshot",
     "test:watch": "jest --watch",
     "build": "npm run compile && npm run test && npm run eslint",
@@ -17,9 +17,9 @@
     "@types/node": "^25.5.0",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
-    "eslint": "^9",
-    "eslint-import-resolver-typescript": "^4.4.4",
-    "eslint-plugin-import": "^2.32.0",
+    "eslint": "^10",
+    "eslint-import-resolver-typescript": "^4",
+    "eslint-plugin-import-x": "^4",
     "eslint-plugin-jest": "^29.15.1",
     "eslint-plugin-jsdoc": "^62.8.1",
     "eslint-plugin-license-header": "^0.9.0",
@@ -39,9 +39,7 @@
     "@aws-sdk/lib-dynamodb": "3.1024.0",
     "commander": "^14.0.3"
   },
-  "resolutions": {
-    "eslint-plugin-import/minimatch": "^3.1.2"
-  },
+  "resolutions": {},
   "main": "lib/index.js",
   "license": "MIT-0",
   "version": "0.0.0",

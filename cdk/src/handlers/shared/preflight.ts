@@ -351,7 +351,7 @@ export async function runPreflightChecks(
     }
 
     // Run reachability + repo access checks in parallel
-    // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
+
     const results = await Promise.allSettled([
       checkGitHubReachability(token),
       checkRepoAccess(repo, token, taskType),

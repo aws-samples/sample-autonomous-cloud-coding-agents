@@ -113,6 +113,9 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Per-session IAM scoping** | Generate short-lived, scoped credentials per task via `sts:AssumeRole` with session tags (`user_id`, `repo`, `task_id`). DynamoDB leading-key conditions restrict each session to its own partition. Bedrock model access scoped to an explicit ARN allowlist instead of `*`. Eliminates cross-tenant blast radius from a compromised agent session. |
 | **Per-repo GitHub credentials** | GitHub App per org/repo via AgentCore Token Vault. Auto-refresh for long sessions. Sets the pattern for GitLab, Jira, Slack integrations. |
 | **Principal-to-repo authorization** | Map Cognito identities to allowed repository sets. Users can only trigger work on authorized repos. |
+| **Delegation chain propagation** | Embed a cryptographically signed actor chain (`user_id → orchestrator → agent`) in credentials issued to the agent. Downstream services (GitHub commits, API calls) can trace any action back to the originating human principal. Enables per-action accountability, compliance audit, and fine-grained authorization decisions based on the full delegation lineage rather than only the immediate caller. |
+| **Workload-anchored credential binding** | Bind agent credentials to the specific MicroVM execution environment via attestation (e.g., instance identity document or platform-level workload identity). Credentials become non-transferable — unusable if exfiltrated from the VM. Complements per-session IAM scoping (which limits scope) with environment binding (which limits where credentials can be exercised). |
+| **Layered credential derivation** | Extend per-session scoping with a derivation model where each layer in the execution stack receives progressively narrower credentials. The orchestrator holds a task-scoped token; the agent runtime derives a further-restricted token limited to specific tools and repositories; tool invocations receive single-use or time-boxed tokens for each external call. Limits blast radius at every boundary, not just at task creation. |
 
 ### Agent quality
 
@@ -226,6 +229,17 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **CDK constructs library** | Publish reusable constructs to Construct Hub with semver versioning. |
 | **Centralized policy framework** | Unified Cedar-based framework with `PolicyDecisionEvent` audit schema. Three enforcement modes with observe-before-enforce rollout. |
 | **Formal verification** | TLA+ specification of task state machine, concurrency, cancellation races, reconciler interleavings. |
+
+### Agent asset registry
+
+| Capability | Description |
+|------------|-------------|
+| **Central asset registry** | A versioned, platform-managed registry from which agents resolve assets at runtime instead of requiring them to be vendored in source. Assets include skills, plugins, MCP server definitions, capabilities (Change Manifest verification strategies, knowledge tool configurations), custom prompt fragments, and Cedar policy modules. The registry is the single source of truth the Change Manifest's L1 (`tool_needed` validation) and L5 (knowledge resolution) evaluate against — replacing the implicit "known tool registry" currently assumed in the design. Backed by DynamoDB (metadata + version index) with S3 (artifact storage). |
+| **Asset versioning and immutability** | Every asset version is immutable once published. Blueprints pin asset versions explicitly (no floating `latest` in production). Version resolution follows semver constraints. Rollback is a re-pin to a prior version, not mutation. Enables reproducible agent executions and safe rollout of new tool versions without affecting running tasks. |
+| **Asset lifecycle management** | Publish, deprecate, and retire flow for registry assets. Deprecation emits warnings in task telemetry when a pinned asset version is nearing end-of-life. Retirement blocks new task starts that reference the asset. Operator API for bulk migration (re-pin all blueprints from v1 to v2). |
+| **Capability descriptors** | Structured metadata per registry asset declaring what the asset provides (tool surface, permissions required, resource limits, Cedar actions it introduces) and what it requires (runtime dependencies, network egress domains, minimum compute profile). The agent runtime uses descriptors to configure the execution environment dynamically — enabling MCP servers, injecting context, and adjusting sandbox permissions based on resolved capabilities rather than static blueprint lists. |
+| **Blueprint registry references** | Extend the Blueprint construct so `knowledge_tools`, `mcp_servers`, tool profiles, and capability configurations reference registry asset identifiers and version constraints instead of inline definitions. At task start the orchestrator resolves pinned versions from the registry, fetches artifacts, and provisions the agent environment. Decouples asset authoring from infrastructure deployment. |
+| **Registry access control** | Cedar policies govern who can publish, deprecate, or pin assets. Scoped by asset type and namespace (e.g., org-private vs. platform-provided). Read access (resolution at task start) is unrestricted within the deployment; write access requires operator or publisher role. |
 
 ---
 

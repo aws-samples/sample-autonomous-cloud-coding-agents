@@ -465,7 +465,6 @@ async function fetchReviewCommentsGraphQL(
   let cursor: string | null = null;
 
   try {
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const resp = await fetch('https://api.github.com/graphql', {
         method: 'POST',
