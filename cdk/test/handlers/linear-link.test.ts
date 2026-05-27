@@ -84,7 +84,7 @@ describe('linear-link handler', () => {
     ddbSend
       .mockResolvedValueOnce({
         Item: {
-          linear_identity: 'pending#ABC123',
+          linear_identity: 'pending#abc123',
           status: 'pending',
           linear_workspace_id: 'workspace-uuid-1',
           linear_user_id: 'user-uuid-1',
@@ -103,14 +103,16 @@ describe('linear-link handler', () => {
 
     const deleteCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Delete');
     expect(deleteCall).toBeTruthy();
-    expect(deleteCall![0].input.Key.linear_identity).toBe('pending#ABC123');
+    expect(deleteCall![0].input.Key.linear_identity).toBe('pending#abc123');
   });
 
-  test('normalizes the code (uppercase, trimmed)', async () => {
+  test('trims surrounding whitespace from the code without changing case', async () => {
+    // Codes from `bgagent linear invite-user` are case-sensitive — see the
+    // comment in linear-link.ts on `body.code.trim()`. Trim, do not uppercase.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
-          linear_identity: 'pending#ABC123',
+          linear_identity: 'pending#abc123',
           status: 'pending',
           linear_workspace_id: 'w',
           linear_user_id: 'u',
@@ -121,6 +123,6 @@ describe('linear-link handler', () => {
 
     await handler(makeEvent({ code: '  abc123  ' }, 'cognito-user-1'));
     const getCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Get');
-    expect(getCall![0].input.Key.linear_identity).toBe('pending#ABC123');
+    expect(getCall![0].input.Key.linear_identity).toBe('pending#abc123');
   });
 });
