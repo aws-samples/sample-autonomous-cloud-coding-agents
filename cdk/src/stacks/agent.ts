@@ -806,6 +806,9 @@ export class AgentStack extends Stack {
       // the sweep to re-release from).
       userConcurrencyTable: userConcurrencyTable.table,
       maxConcurrentTasksPerUser,
+      // Image attachments extracted from issue descriptions upload here
+      // (otherwise createTaskCore 503s "Attachment storage is not configured").
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // #247 Mode A: the reconciler consumes the TaskTable stream and
