@@ -158,10 +158,55 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.x
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      - name: Cache agent venv
+        id: cache-agent-venv
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: agent/.venv
+          key: agent-venv-${{ runner.os }}-${{ hashFiles('agent/uv.lock') }}
+      - name: Cache Jest transforms
+        id: cache-jest
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: cdk/.jest-cache
+          key: jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-${{ github.sha }}
+          restore-keys: |
+            jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-
+      - name: Cache TypeScript build info
+        id: cache-tsc
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            cdk/tsconfig.tsbuildinfo
+            cli/tsconfig.tsbuildinfo
+          key: tsc-${{ runner.os }}-${{ hashFiles('cdk/src/**', 'cdk/tsconfig.json', 'cdk/tsconfig.dev.json', 'cli/src/**', 'cli/tsconfig.json') }}
+          restore-keys: |
+            tsc-${{ runner.os }}-
       - name: Install dependencies
-        run: mise run install
+        env:
+          CACHE_NODE: ${{ steps.cache-node-modules.outputs.cache-hit }}
+          CACHE_VENV: ${{ steps.cache-agent-venv.outputs.cache-hit }}
+          CACHE_JEST: ${{ steps.cache-jest.outputs.cache-hit }}
+        run: |
+          echo "::group::Cache status"
+          echo "node_modules: ${CACHE_NODE:-MISS}"
+          echo "agent .venv:  ${CACHE_VENV:-MISS}"
+          echo "jest transforms: ${CACHE_JEST:-MISS}"
+          echo "::endgroup::"
+          SECONDS=0
+          mise run install
+          echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
       - name: build
-        run: mise run build
+        run: |
+          SECONDS=0
+          mise run build
+          echo "::notice::Build completed in ${SECONDS}s"
       - name: Upload CDK artifact (${{ matrix.compute_type }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
