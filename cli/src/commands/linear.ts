@@ -595,20 +595,14 @@ export function makeLinearCommand(): Command {
         }));
         console.log('  ✓ Recorded workspace in registry');
 
-        await ddb.send(new PutCommand({
-          TableName: userMappingTable!,
-          Item: {
-            linear_identity: `${identity.organization.id}#${identity.viewer.id}`,
-            platform_user_id: cognitoSub,
-            linear_workspace_id: identity.organization.id,
-            linear_user_id: identity.viewer.id,
-            linked_at: now,
-            status: 'active',
-            link_method: 'auto_setup_oauth',
-          },
-        }));
-        const adminLabel = identity.viewer.name ?? identity.viewer.email ?? identity.viewer.id;
-        console.log(`  ✓ Linked Linear user ${adminLabel} → platform user`);
+        // We deliberately do NOT auto-link a user-mapping row here.
+        // With actor=app, Linear's `viewer` query returns the OAuth
+        // app's bot user (a synthetic `<uuid>@oauthapp.linear.app`
+        // identity), not the human admin who ran the wizard. Writing
+        // that mapping creates the wrong row: the bot never applies
+        // labels, the human applying labels is unmapped, and the
+        // processor drops their tasks with "no linked platform user".
+        // The fix is `bgagent linear link-user <slug>` after setup.
 
         // ─── Step 6: Webhook signing secret (per-workspace + stack-wide) ───
         //
@@ -691,9 +685,12 @@ export function makeLinearCommand(): Command {
         console.log('✅ Setup complete.');
         console.log();
         console.log('Next steps:');
-        console.log('  1. Onboard a Linear project to a GitHub repo:');
+        console.log(`  1. Link your Linear identity in this workspace to your platform user:`);
+        console.log(`       bgagent linear link-user ${slug}`);
+        console.log('     (Required — without this, tasks you trigger from Linear are dropped.)');
+        console.log('  2. Onboard a Linear project to a GitHub repo:');
         console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
-        console.log('  2. Add the `bgagent` label to a Linear issue in a mapped project.');
+        console.log('  3. Add the trigger label to a Linear issue in a mapped project.');
       }),
   );
 
@@ -927,20 +924,10 @@ export function makeLinearCommand(): Command {
         }));
         console.log('  ✓ Recorded workspace in registry');
 
-        await ddb.send(new PutCommand({
-          TableName: userMappingTable!,
-          Item: {
-            linear_identity: `${identity.organization.id}#${identity.viewer.id}`,
-            platform_user_id: cognitoSub,
-            linear_workspace_id: identity.organization.id,
-            linear_user_id: identity.viewer.id,
-            linked_at: now,
-            status: 'active',
-            link_method: 'add_workspace_oauth',
-          },
-        }));
-        const adminLabel = identity.viewer.name ?? identity.viewer.email ?? identity.viewer.id;
-        console.log(`  ✓ Linked Linear user ${adminLabel} → platform user`);
+        // No auto-link — see the same comment in `setup` above. With
+        // actor=app, Linear's `viewer` returns the bot user; auto-
+        // linking that maps the wrong UUID. Operators run
+        // `bgagent linear link-user <slug>` after setup.
 
         // ─── Per-workspace webhook signing secret ──────────────────────
         // Linear webhook subscriptions are workspace-scoped, with a fresh
@@ -979,8 +966,12 @@ export function makeLinearCommand(): Command {
         console.log();
         console.log('✅ Workspace added.');
         console.log();
-        console.log('Next: onboard a project from this workspace:');
-        console.log('  bgagent linear onboard-project <linear-project-id> --repo owner/repo');
+        console.log('Next steps:');
+        console.log(`  1. Link your Linear identity in this workspace to your platform user:`);
+        console.log(`       bgagent linear link-user ${slug}`);
+        console.log('     (Required — without this, tasks you trigger from Linear are dropped.)');
+        console.log('  2. Onboard a Linear project to a GitHub repo:');
+        console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
       }),
   );
 
@@ -1069,6 +1060,149 @@ export function makeLinearCommand(): Command {
         console.log(`✅ Updated webhook signing secret for '${slug}'.`);
         console.log();
         console.log('Next webhook event from this workspace will verify against the new secret.');
+      }),
+  );
+
+  linear.addCommand(
+    new Command('link-user')
+      .description('Map a Linear user UUID in a workspace to an ABCA platform user')
+      .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
+      .option('--linear-user-id <uuid>', 'Linear user UUID to map (else prompted)')
+      .option('--platform-user-id <sub>', 'Cognito sub of the platform user (defaults to you)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (slug: string, opts) => {
+        // Why this command exists:
+        //   bgagent linear setup / add-workspace USED to auto-link the
+        //   wizard runner via Linear's `viewer` query. With actor=app,
+        //   `viewer` returns the OAuth bot user (a synthetic
+        //   `<uuid>@oauthapp.linear.app` identity) — not the human
+        //   admin. The bot never applies labels, so the auto-link
+        //   mapped the wrong UUID and every human-triggered task got
+        //   dropped with "Linear actor has no linked platform user".
+        //
+        // What this does:
+        //   Writes a row into LinearUserMappingTable mapping
+        //   `(workspaceId, linearUserId)` → platformUserId. The
+        //   processor reads this row when an issue is labeled and
+        //   uses it to attribute the resulting task. One row per
+        //   teammate per workspace.
+        if (!SLUG_RE.test(slug)) {
+          throw new CliError(
+            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
+            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+          );
+        }
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+
+        // ─── Resolve table names + caller identity ─────────────────────
+        const [workspaceRegistryTable, userMappingTable] = await Promise.all([
+          getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+          getStackOutput(region, stackName, 'LinearUserMappingTableName'),
+        ]);
+        const missing: string[] = [];
+        if (!workspaceRegistryTable) missing.push('LinearWorkspaceRegistryTableName');
+        if (!userMappingTable) missing.push('LinearUserMappingTableName');
+        if (missing.length > 0) {
+          throw new CliError(
+            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
+            + 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).',
+          );
+        }
+
+        const creds = loadCredentials();
+        if (!creds?.id_token) {
+          throw new CliError('Not authenticated — run `bgagent login` first.');
+        }
+        let callerCognitoSub: string;
+        try {
+          callerCognitoSub = extractCognitoSub();
+        } catch (err) {
+          throw new CliError(
+            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
+            + 'Run `bgagent login` to refresh credentials.',
+          );
+        }
+
+        // ─── Resolve workspace UUID via slug ────────────────────────────
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const scan = await ddb.send(new ScanCommand({
+          TableName: workspaceRegistryTable!,
+          FilterExpression: 'workspace_slug = :slug AND #status = :active',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':slug': slug, ':active': 'active' },
+          Limit: 1,
+        }));
+        const row = scan.Items?.[0];
+        if (!row) {
+          throw new CliError(
+            `Workspace '${slug}' is not in the registry (or status != 'active'). `
+            + `Run \`bgagent linear setup ${slug}\` or \`bgagent linear add-workspace ${slug}\` first.`,
+          );
+        }
+        const workspaceId = row.linear_workspace_id as string;
+
+        console.log(`bgagent linear link-user — workspace '${slug}'`);
+        console.log(`  region:       ${region}`);
+        console.log(`  workspace id: ${workspaceId}`);
+        console.log();
+
+        // ─── Linear user UUID ──────────────────────────────────────────
+        let linearUserId = (opts.linearUserId ?? '').trim();
+        if (!linearUserId) {
+          console.log('  Find your Linear user UUID:');
+          console.log('    • Trigger an issue with the label and grep CloudWatch logs');
+          console.log('      for "no linked platform user" — the warning prints linear_user_id.');
+          console.log('    • Or query Linear: GET https://api.linear.app/graphql with');
+          console.log('      `query { viewer { id } }` while authenticated as that user.');
+          console.log();
+          linearUserId = (await promptLine('  Linear user UUID')).trim();
+        }
+        if (!UUID_RE.test(linearUserId)) {
+          throw new CliError(
+            `Invalid Linear user UUID '${linearUserId}'. Expected the 36-char canonical UUID form, `
+            + 'e.g. \'91999ba0-3b4e-48d3-ad5e-9bc5f9aba200\'.',
+          );
+        }
+
+        // ─── Platform user (Cognito sub) ───────────────────────────────
+        const platformUserId = (opts.platformUserId ?? callerCognitoSub).trim();
+        if (!platformUserId) {
+          throw new CliError('Platform user (Cognito sub) is required.');
+        }
+
+        // ─── Confirm + write ───────────────────────────────────────────
+        const linearIdentity = `${workspaceId}#${linearUserId}`;
+        console.log(`  Will link Linear identity '${linearIdentity}'`);
+        console.log(`  to platform user '${platformUserId}'.`);
+        console.log();
+        const confirm = (await promptLine('  Continue? [y/N]')).trim().toLowerCase();
+        if (confirm !== 'y' && confirm !== 'yes') {
+          console.log('  Aborted.');
+          return;
+        }
+
+        const now = new Date().toISOString();
+        await ddb.send(new PutCommand({
+          TableName: userMappingTable!,
+          Item: {
+            linear_identity: linearIdentity,
+            platform_user_id: platformUserId,
+            linear_workspace_id: workspaceId,
+            linear_user_id: linearUserId,
+            linked_at: now,
+            status: 'active',
+            link_method: 'manual_cli',
+          },
+        }));
+
+        console.log();
+        console.log(`✅ Linked.`);
+        console.log();
+        console.log(`Tasks triggered by Linear user ${linearUserId} in workspace '${slug}'`);
+        console.log('will now be attributed to platform user ' + platformUserId + '.');
       }),
   );
 
