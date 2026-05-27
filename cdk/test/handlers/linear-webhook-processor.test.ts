@@ -497,6 +497,39 @@ describe('linear-webhook-processor handler', () => {
       const [reqBody] = createTaskCoreMock.mock.calls[0];
       expect(reqBody.attachments).toBeUndefined();
     });
+
+    test('skips uploads.linear.app images so the unauthenticated URL resolver does not 401', async () => {
+      // Linear's CDN requires the workspace OAuth token to fetch, which the
+      // orchestrator's URL-resolver does NOT have. The agent picks these up
+      // at runtime via mcp__linear-server__extract_images instead, per the
+      // Linear-channel prompt addendum.
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = [
+        '![paste](https://uploads.linear.app/15d12f61/090e5ce6/938f90d7)',
+        '![public](https://i.imgur.com/abc.png)',
+      ].join('\n');
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      // Only the public image survives the filter.
+      expect(reqBody.attachments).toHaveLength(1);
+      expect(reqBody.attachments[0].url).toBe('https://i.imgur.com/abc.png');
+    });
+
+    test('drops attachments entirely when only uploads.linear.app images are present', async () => {
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = '![only](https://uploads.linear.app/x/y/z)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toBeUndefined();
+    });
   });
 
   // ─── Linear issue context probe (paperclip attachments + project docs) ──────
