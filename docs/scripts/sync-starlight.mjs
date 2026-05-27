@@ -46,7 +46,7 @@ function rewriteDocsLinkTarget(target) {
     SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
     LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
     LINEAR_PAK_MIGRATION_RUNBOOK: '/using/linear-pak-migration-runbook',
-    VERCEL_SETUP_GUIDE: '/using/vercel-setup-guide',
+    DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
   };
@@ -246,10 +246,10 @@ mirrorMarkdownFile(
   path.join('src', 'content', 'docs', 'using', 'Linear-pak-migration-runbook.md'),
 );
 
-// --- Vercel Setup Guide: mirror to using/ ---
+// --- Deploy preview screenshots guide: mirror to using/ ---
 mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'VERCEL_SETUP_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'using', 'Vercel-setup-guide.md'),
+  path.join(docsRoot, 'guides', 'DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md'),
+  path.join('src', 'content', 'docs', 'using', 'Deploy-preview-screenshots-guide.md'),
 );
 
 // --- Cedar Policy Guide: mirror to customizing/ (authoring reference for blueprint authors) ---
