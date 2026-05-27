@@ -1067,21 +1067,64 @@ function promptSecret(label: string): Promise<string> {
  * empty input (Enter without typing). Visible echo — use only for non-secret
  * fields. For secrets, use `promptSecret`.
  *
- * Used by `bgagent linear add-workspace` to show the auto-detected client_id
- * as a default the user can override by typing a new value.
+ * Implemented with the same raw-mode stdin pattern as `promptSecret` (just
+ * echoing the typed character instead of '*') so that chaining a promptLine
+ * call followed by a promptSecret call works — `readline.createInterface`
+ * + `rl.close()` would leave stdin in an EOF state and the next prompt
+ * would reject immediately on its own readline `close` event.
  */
 function promptLine(label: string, defaultValue?: string): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  const display = defaultValue
-    ? `${label} [${defaultValue}]: `
-    : `${label}: `;
   return new Promise((resolve, reject) => {
-    rl.question(display, (line) => {
-      rl.close();
-      const trimmed = line.trim();
-      resolve(trimmed || defaultValue || '');
-    });
-    rl.once('close', () => reject(new Error('No input provided.')));
+    const display = defaultValue ? `${label} [${defaultValue}]: ` : `${label}: `;
+    process.stderr.write(display);
+
+    if (!process.stdin.isTTY) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      rl.once('line', (line) => {
+        rl.close();
+        resolve(line.trim() || defaultValue || '');
+      });
+      rl.once('close', () => reject(new Error('No input provided.')));
+      return;
+    }
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    let value = '';
+
+    const cleanup = () => {
+      process.stdin.removeListener('data', onData);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+    };
+
+    const onData = (chunk: Buffer) => {
+      const str = chunk.toString();
+      for (const char of str) {
+        if (char === '\n' || char === '\r') {
+          cleanup();
+          process.stderr.write('\n');
+          resolve(value.trim() || defaultValue || '');
+          return;
+        } else if (char === '') {
+          cleanup();
+          process.stderr.write('\n');
+          reject(new Error('Cancelled.'));
+          return;
+        } else if (char === '' || char === '\b') {
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stderr.write('\b \b');
+          }
+        } else {
+          value += char;
+          process.stderr.write(char);
+        }
+      }
+    };
+
+    process.stdin.on('data', onData);
   });
 }
 
