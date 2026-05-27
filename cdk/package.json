@@ -65,6 +65,7 @@
     "node": ">= 20.x <= 24.x"
   },
   "jest": {
+    "cacheDirectory": "<rootDir>/.jest-cache",
     "coverageProvider": "v8",
     "testMatch": [
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",

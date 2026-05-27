@@ -97,17 +97,41 @@ function createStack(overrides?: StackOverrides): { stack: Stack; template: Temp
 }
 
 describe('TaskOrchestrator construct', () => {
+  let baseTemplate: Template;
+  let githubTokenTemplate: Template;
+  let repoTableTemplate: Template;
+  let ecsTemplate: Template;
+
+  const ecsOverrides: StackOverrides = {
+    ecsConfig: {
+      clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
+      taskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
+      subnets: 'subnet-aaa,subnet-bbb',
+      securityGroup: 'sg-12345',
+      containerName: 'AgentContainer',
+      taskRoleArn: 'arn:aws:iam::123456789012:role/TaskRole',
+      executionRoleArn: 'arn:aws:iam::123456789012:role/ExecutionRole',
+    },
+  };
+
+  beforeAll(() => {
+    baseTemplate = createStack().template;
+    githubTokenTemplate = createStack({
+      githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
+    }).template;
+    repoTableTemplate = createStack({ includeRepoTable: true }).template;
+    ecsTemplate = createStack(ecsOverrides).template;
+  });
+
   test('creates a Lambda function with NODEJS_24_X runtime', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs24.x',
       Architectures: ['arm64'],
     });
   });
 
   test('Lambda function has correct environment variables', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           TASK_TABLE_NAME: Match.anyValue(),
@@ -133,16 +157,14 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('creates a Lambda alias', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::Lambda::Alias', 1);
-    template.hasResourceProperties('AWS::Lambda::Alias', {
+    baseTemplate.resourceCountIs('AWS::Lambda::Alias', 1);
+    baseTemplate.hasResourceProperties('AWS::Lambda::Alias', {
       Name: 'live',
     });
   });
 
   test('grants AgentCore runtime invocation permissions with wildcard sub-resource', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    baseTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -163,8 +185,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('attaches durable execution managed policy', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::IAM::Role', {
+    baseTemplate.hasResourceProperties('AWS::IAM::Role', {
       ManagedPolicyArns: Match.arrayWith([
         Match.objectLike({
           'Fn::Join': Match.arrayWith([
@@ -178,17 +199,13 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('Lambda function has 60s timeout', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Timeout: 60,
     });
   });
 
   test('includes GITHUB_TOKEN_SECRET_ARN when provided', () => {
-    const { template } = createStack({
-      githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
-    });
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    githubTokenTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           GITHUB_TOKEN_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
@@ -198,10 +215,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('grants Secrets Manager read when githubTokenSecretArn is provided', () => {
-    const { template } = createStack({
-      githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
-    });
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    githubTokenTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -216,17 +230,14 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('does not include GITHUB_TOKEN_SECRET_ARN when not provided', () => {
-    const { template } = createStack();
-    // Verify the env vars do NOT contain GITHUB_TOKEN_SECRET_ARN
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           TASK_TABLE_NAME: Match.anyValue(),
         }),
       },
     });
-    // Check that no Secrets Manager policy exists (only DynamoDB + AgentCore)
-    const policies = template.findResources('AWS::IAM::Policy');
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
     for (const [, policy] of Object.entries(policies)) {
       const statements = (policy as any).Properties.PolicyDocument.Statement;
       for (const stmt of statements) {
@@ -249,8 +260,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('includes REPO_TABLE_NAME when repoTable is provided', () => {
-    const { template } = createStack({ includeRepoTable: true });
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    repoTableTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           REPO_TABLE_NAME: Match.anyValue(),
@@ -260,8 +270,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('does not include REPO_TABLE_NAME when repoTable is not provided', () => {
-    const { template } = createStack();
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
     for (const [, fn] of Object.entries(functions)) {
       const envVars = (fn as any).Properties.Environment?.Variables ?? {};
       expect(envVars).not.toHaveProperty('REPO_TABLE_NAME');
@@ -269,8 +278,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('grants read access on repo table when provided', () => {
-    const { template } = createStack({ includeRepoTable: true });
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    repoTableTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -322,8 +330,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('does not include MEMORY_ID when not provided', () => {
-    const { template } = createStack();
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
     for (const [, fn] of Object.entries(functions)) {
       const envVars = (fn as any).Properties.Environment?.Variables ?? {};
       expect(envVars).not.toHaveProperty('MEMORY_ID');
@@ -351,9 +358,8 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('creates a CloudWatch alarm for orchestrator errors', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
-    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    baseTemplate.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+    baseTemplate.hasResourceProperties('AWS::CloudWatch::Alarm', {
       EvaluationPeriods: 2,
       Threshold: 3,
       TreatMissingData: 'notBreaching',
@@ -361,8 +367,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('configures async invoke with zero retry attempts', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    baseTemplate.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
       MaximumRetryAttempts: 0,
     });
   });
@@ -380,8 +385,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('does not include GUARDRAIL_ID when not provided', () => {
-    const { template } = createStack();
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
     for (const [, fn] of Object.entries(functions)) {
       const envVars = (fn as any).Properties.Environment?.Variables ?? {};
       expect(envVars).not.toHaveProperty('GUARDRAIL_ID');
@@ -411,8 +415,7 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('does not grant bedrock:ApplyGuardrail when guardrailId is not provided', () => {
-    const { template } = createStack();
-    const policies = template.findResources('AWS::IAM::Policy');
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
     for (const [, policy] of Object.entries(policies)) {
       const statements = (policy as any).Properties.PolicyDocument.Statement;
       for (const stmt of statements) {
@@ -438,21 +441,8 @@ describe('TaskOrchestrator construct', () => {
   });
 
   describe('ECS compute strategy', () => {
-    const ecsOverrides = {
-      ecsConfig: {
-        clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
-        taskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
-        subnets: 'subnet-aaa,subnet-bbb',
-        securityGroup: 'sg-12345',
-        containerName: 'AgentContainer',
-        taskRoleArn: 'arn:aws:iam::123456789012:role/TaskRole',
-        executionRoleArn: 'arn:aws:iam::123456789012:role/ExecutionRole',
-      },
-    };
-
     test('includes ECS env vars when ECS props are provided', () => {
-      const { template } = createStack(ecsOverrides);
-      template.hasResourceProperties('AWS::Lambda::Function', {
+      ecsTemplate.hasResourceProperties('AWS::Lambda::Function', {
         Environment: {
           Variables: Match.objectLike({
             ECS_CLUSTER_ARN: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
@@ -466,8 +456,7 @@ describe('TaskOrchestrator construct', () => {
     });
 
     test('does not include ECS env vars when ECS props are omitted', () => {
-      const { template } = createStack();
-      const functions = template.findResources('AWS::Lambda::Function');
+      const functions = baseTemplate.findResources('AWS::Lambda::Function');
       for (const [, fn] of Object.entries(functions)) {
         const envVars = (fn as any).Properties.Environment?.Variables ?? {};
         expect(envVars).not.toHaveProperty('ECS_CLUSTER_ARN');
@@ -476,8 +465,7 @@ describe('TaskOrchestrator construct', () => {
     });
 
     test('grants ECS RunTask/DescribeTasks/StopTask permissions when ECS props are provided', () => {
-      const { template } = createStack(ecsOverrides);
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      ecsTemplate.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -500,8 +488,7 @@ describe('TaskOrchestrator construct', () => {
     });
 
     test('grants iam:PassRole scoped to task/execution role ARNs', () => {
-      const { template } = createStack(ecsOverrides);
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      ecsTemplate.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -523,8 +510,7 @@ describe('TaskOrchestrator construct', () => {
     });
 
     test('does not grant ECS permissions when ECS props are omitted', () => {
-      const { template } = createStack();
-      const policies = template.findResources('AWS::IAM::Policy');
+      const policies = baseTemplate.findResources('AWS::IAM::Policy');
       for (const [, policy] of Object.entries(policies)) {
         const statements = (policy as any).Properties.PolicyDocument.Statement;
         for (const stmt of statements) {
