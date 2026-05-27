@@ -39,6 +39,15 @@ jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
   resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
 }));
 
+const probeLinearIssueContextMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => {
+  const actual = jest.requireActual('../../src/handlers/shared/linear-issue-context-probe');
+  return {
+    ...actual,
+    probeLinearIssueContext: (...args: unknown[]) => probeLinearIssueContextMock(...args),
+  };
+});
+
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
 process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
@@ -77,6 +86,12 @@ describe('linear-webhook-processor handler', () => {
     resolveLinearOauthTokenMock.mockReset();
     // Default: workspace not in registry. Tests that need a token override.
     resolveLinearOauthTokenMock.mockResolvedValue(null);
+    probeLinearIssueContextMock.mockReset();
+    probeLinearIssueContextMock.mockResolvedValue({
+      attachmentTitles: [],
+      projectName: null,
+      projectHasDocuments: false,
+    });
   });
 
   test('skips missing raw_body', async () => {
@@ -482,5 +497,161 @@ describe('linear-webhook-processor handler', () => {
       const [reqBody] = createTaskCoreMock.mock.calls[0];
       expect(reqBody.attachments).toBeUndefined();
     });
+  });
+
+  // ─── Linear issue context probe (paperclip attachments + project docs) ──────
+
+  describe('linear issue context probe', () => {
+    beforeEach(() => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 201,
+        body: JSON.stringify({ data: { task_id: 'T1' } }),
+      });
+      // Resolver must yield an access token for the probe to be called.
+      resolveLinearOauthTokenMock.mockResolvedValue({
+        accessToken: 'lin_oauth_token',
+        scope: 'read,write,issues:create,comments:create',
+        workspaceSlug: 'demo',
+        oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:000:secret:bgagent-linear-oauth-demo-AbCdEf',
+      });
+    });
+
+    test('probes Linear with the resolved access token and the issue id', async () => {
+      await handler(eventWith(issue()));
+      expect(probeLinearIssueContextMock).toHaveBeenCalledTimes(1);
+      const [token, issueId] = probeLinearIssueContextMock.mock.calls[0];
+      expect(token).toBe('lin_oauth_token');
+      expect(issueId).toBe('issue-1');
+    });
+
+    test('prepends a hint listing paperclip attachment titles when present', async () => {
+      probeLinearIssueContextMock.mockResolvedValueOnce({
+        attachmentTitles: ['design-spec.pdf', 'crash-trace.txt'],
+        projectName: 'Onboarding',
+        projectHasDocuments: false,
+      });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).toContain('Linear may have additional context');
+      expect(reqBody.task_description).toContain('design-spec.pdf');
+      expect(reqBody.task_description).toContain('crash-trace.txt');
+      expect(reqBody.task_description).toContain('mcp__linear-server__get_attachment');
+      // The original description must still be present, not replaced.
+      expect(reqBody.task_description).toContain('Users cannot log in.');
+    });
+
+    test('prepends a hint about project documents when the project has wiki docs', async () => {
+      probeLinearIssueContextMock.mockResolvedValueOnce({
+        attachmentTitles: [],
+        projectName: 'Onboarding',
+        projectHasDocuments: true,
+      });
+
+      await handler(eventWith(issue()));
+
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).toContain('project "Onboarding"');
+      expect(reqBody.task_description).toContain('wiki documents');
+      expect(reqBody.task_description).toContain('mcp__linear-server__list_documents');
+    });
+
+    test('omits the hint when probe finds nothing', async () => {
+      // Default mock already returns an empty probe.
+      await handler(eventWith(issue()));
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).not.toContain('Linear may have additional context');
+      // Sanity: original task description still in place.
+      expect(reqBody.task_description).toContain('ABC-42: Fix the login bug');
+    });
+  });
+});
+
+// ─── Direct probe behavior — covers the GraphQL query shape ─────────────────
+
+describe('probeLinearIssueContext', () => {
+  // The mock above only intercepts the version imported by the handler under
+  // test. To verify the actual GraphQL query and field selections we exercise
+  // the real module against a stubbed fetch.
+  const realModule = jest.requireActual('../../src/handlers/shared/linear-issue-context-probe') as {
+    probeLinearIssueContext: (token: string, issueId: string) => Promise<unknown>;
+  };
+
+  let originalFetch: typeof fetch;
+  let fetchMock: jest.Mock;
+
+  beforeEach(() => {
+    originalFetch = global.fetch;
+    fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  test('GraphQL query includes attachments and project.documents fields', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          issue: {
+            attachments: { nodes: [{ id: 'att1', title: 'spec.pdf' }] },
+            project: { id: 'proj1', name: 'P1', documents: { nodes: [{ id: 'doc1' }] } },
+          },
+        },
+      }),
+    });
+
+    const result = await realModule.probeLinearIssueContext('tok', 'issue-uuid-1') as {
+      attachmentTitles: string[];
+      projectName: string | null;
+      projectHasDocuments: boolean;
+    };
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body) as { query: string; variables: { id: string } };
+    expect(body.variables.id).toBe('issue-uuid-1');
+    expect(body.query).toContain('attachments');
+    expect(body.query).toContain('project');
+    expect(body.query).toContain('documents');
+    expect(result).toEqual({
+      attachmentTitles: ['spec.pdf'],
+      projectName: 'P1',
+      projectHasDocuments: true,
+    });
+  });
+
+  test('returns empty probe on graphql errors', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ errors: [{ message: 'boom' }] }),
+    });
+    const result = await realModule.probeLinearIssueContext('tok', 'i') as {
+      attachmentTitles: string[];
+    };
+    expect(result.attachmentTitles).toEqual([]);
+  });
+
+  test('returns empty probe on non-2xx', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) });
+    const result = await realModule.probeLinearIssueContext('tok', 'i') as {
+      projectHasDocuments: boolean;
+    };
+    expect(result.projectHasDocuments).toBe(false);
+  });
+
+  test('returns empty probe on network failure', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('network down'));
+    const result = await realModule.probeLinearIssueContext('tok', 'i') as {
+      attachmentTitles: string[];
+    };
+    expect(result.attachmentTitles).toEqual([]);
   });
 });
