@@ -162,7 +162,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is hardcoded to https://api.linear.app/oauth/token above; no user-controlled input
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             # Body may carry `{"error": "invalid_grant", ...}` even on 400.
