@@ -22,6 +22,7 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { LinearIntegration } from '../../src/constructs/linear-integration';
 
 describe('LinearIntegration construct', () => {
@@ -117,6 +118,69 @@ describe('LinearIntegration construct', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }],
       TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
+    });
+  });
+});
+
+describe('LinearIntegration construct — attachmentsBucket wiring', () => {
+  // Regression-guard: webhook processor needs ATTACHMENTS_BUCKET_NAME and S3
+  // Put/Delete on the bucket so `extractImageUrlAttachments` can reach the
+  // bucket via createTaskCore. Without this, Linear-triggered tasks with
+  // markdown image attachments fail with 503 ("Attachment storage is not
+  // configured.") — the symptom that bit `linear-vercel` 2026-05-27.
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const attachmentsBucket = new s3.Bucket(stack, 'AttachmentsBucket');
+
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      attachmentsBucket,
+    });
+
+    template = Template.fromStack(stack);
+  });
+
+  test('processor env includes ATTACHMENTS_BUCKET_NAME when bucket provided', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ATTACHMENTS_BUCKET_NAME: Match.anyValue(),
+          LINEAR_PROJECT_MAPPING_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('processor role can PutObject and DeleteObject on the attachments bucket', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(['s3:PutObject']),
+            Effect: 'Allow',
+          }),
+          Match.objectLike({
+            Action: 's3:DeleteObject*',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
     });
   });
 });

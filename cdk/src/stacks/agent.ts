@@ -730,6 +730,7 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth

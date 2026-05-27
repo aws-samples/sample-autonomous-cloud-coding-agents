@@ -25,6 +25,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -59,6 +60,14 @@ export interface LinearIntegrationProps {
 
   /** Bedrock Guardrail version for input screening. */
   readonly guardrailVersion?: string;
+
+  /**
+   * S3 bucket for attachment storage. Required to support image attachments
+   * extracted from issue descriptions (markdown `![alt](https://…)` images).
+   * When omitted, Linear-triggered tasks with image attachments fail at
+   * `createTaskCore` with "Attachment storage is not configured."
+   */
+  readonly attachmentsBucket?: s3.IBucket;
 
   /** Task retention in days for TTL computation. */
   readonly taskRetentionDays?: number;
@@ -159,6 +168,9 @@ export class LinearIntegration extends Construct {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+    }
 
     // --- Cognito Authorizer (for /linear/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'LinearCognitoAuthorizer', {
@@ -238,6 +250,15 @@ export class LinearIntegration extends Construct {
           }),
         ],
       }));
+    }
+    // Issue descriptions can carry markdown `![alt](https://…)` images, which
+    // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
+    // URL attachments. `createTaskCore` then uploads the screened bytes to
+    // `ATTACHMENTS_BUCKET_NAME`, mirroring the TaskApi/Slack paths. Without
+    // grantPut + grantDelete here, that upload fails closed with 503.
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantPut(webhookProcessorFn);
+      props.attachmentsBucket.grantDelete(webhookProcessorFn);
     }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---
