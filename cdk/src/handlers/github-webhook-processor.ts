@@ -355,7 +355,7 @@ function renderCommentBody(publicUrl: string, previewUrl: string): string {
     '',
     `[![preview](${publicUrl})](${previewUrl})`,
     '',
-    `_From [${previewUrl}](${previewUrl}) — captured automatically by ABCA after the deploy finished._`,
+    `_From [preview link](${previewUrl}) — captured automatically by ABCA after the deploy finished._`,
   ].join('\n');
 }
 
@@ -371,7 +371,7 @@ function renderLinearCommentBody(publicUrl: string, previewUrl: string): string 
     '',
     `![preview](${publicUrl})`,
     '',
-    `Live preview: [${previewUrl}](${previewUrl})`,
+    `[Preview link](${previewUrl})`,
     '',
     '_Captured automatically by ABCA after the deploy finished._',
   ].join('\n');
