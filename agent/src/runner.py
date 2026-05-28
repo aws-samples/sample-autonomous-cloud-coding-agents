@@ -360,6 +360,9 @@ async def run_agent(
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,
+        # Default 1 MB caps choke on large tool results (full-page HTML reads,
+        # MCP get_issue with long comment threads). Bump to 16 MB.
+        max_buffer_size=16 * 1024 * 1024,
     )
 
     result = AgentResult()
