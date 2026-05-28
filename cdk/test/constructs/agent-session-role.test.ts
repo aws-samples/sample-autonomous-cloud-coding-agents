@@ -157,4 +157,36 @@ describe('AgentSessionRole construct', () => {
     });
     expect(stsStatement).toBeDefined();
   });
+
+  test('addAssumingRole admits a second compute role (ECS task role) to the trust', () => {
+    const app = new App();
+    const stack = new Stack(app, 'MultiPrincipalStack');
+    const agentcoreRole = new iam.Role(stack, 'AgentCoreRole', {
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+    });
+    const ecsTaskRole = new iam.Role(stack, 'EcsTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+    });
+    const table = new dynamodb.Table(stack, 'T', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const sessionRole = new AgentSessionRole(stack, 'SR', {
+      assumingRoles: [agentcoreRole],
+      taskScopedTables: [table],
+      traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
+      attachmentsBucket: new s3.Bucket(stack, 'AB'),
+    });
+    sessionRole.addAssumingRole(ecsTaskRole);
+
+    const trustStatements = Template.fromStack(stack).findResources(
+      'AWS::IAM::Role',
+    );
+    const sr = Object.entries(trustStatements).find(([id]) => id.includes('SR'))![1];
+    // Trust policy now has statements for both AssumeRole and TagSession; the
+    // ECS task role ARN appears as an additional principal.
+    const serialized = JSON.stringify(sr.Properties.AssumeRolePolicyDocument);
+    expect(serialized).toContain('sts:TagSession');
+    expect(serialized).toContain('EcsTaskRole');
+    expect(serialized).toContain('AgentCoreRole');
+  });
 });

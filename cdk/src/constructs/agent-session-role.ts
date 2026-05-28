@@ -197,6 +197,21 @@ export class AgentSessionRole extends Construct {
   }
 
   /**
+   * Admit an additional compute role to the trust policy (e.g. the ECS Fargate
+   * task role when that backend is enabled). Adds `sts:AssumeRole` +
+   * `sts:TagSession` for the role to this SessionRole's trust policy.
+   */
+  public addAssumingRole(computeRole: iam.IRole): void {
+    const principal = new iam.ArnPrincipal(computeRole.roleArn);
+    this.role.assumeRolePolicy?.addStatements(
+      new iam.PolicyStatement({
+        actions: ['sts:AssumeRole', 'sts:TagSession'],
+        principals: [principal],
+      }),
+    );
+  }
+
+  /**
    * Grant a compute role permission to assume this SessionRole and pass
    * session tags. Adds `sts:AssumeRole` + `sts:TagSession` to the grantee's
    * policy (a separate IAM::Policy resource, so no dependency cycle with this

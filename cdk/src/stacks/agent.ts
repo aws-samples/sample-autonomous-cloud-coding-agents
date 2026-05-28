@@ -582,6 +582,11 @@ export class AgentStack extends Stack {
     //   userConcurrencyTable: userConcurrencyTable.table,
     //   githubTokenSecret,
     //   memoryId: agentMemory.memory.memoryId,
+    //   // Per-session IAM scoping (#209): the ECS task role assumes the same
+    //   // SessionRole as the AgentCore runtime for tenant-data access. The
+    //   // construct admits the task role to the trust and injects
+    //   // AGENT_SESSION_ROLE_ARN into the container.
+    //   agentSessionRole,
     // });
 
     // --- Task Orchestrator (durable Lambda function) ---
