@@ -1,0 +1,40 @@
+{
+  "session": {
+    "session_id": "20260526-1924",
+    "invocation_source": "CLI",
+    "start_time": "2026-05-26T19:24:06.745493Z",
+    "end_time": "2026-05-26T19:46:59.106058Z",
+    "duration_seconds": 1372.360565
+  },
+  "directories": {
+    "working_directory": "/Users/alkrok/Projects/sample-autonomous-cloud-coding-agents",
+    "output_directory": "/Users/alkrok/Projects/sample-autonomous-cloud-coding-agents/.threat-composer/20260526-1924"
+  },
+  "system": {
+    "python_version": "3.10.16",
+    "platform": "macOS-26.5-arm64-arm-64bit"
+  },
+  "invocation_arguments": {
+    "directory_path": ".",
+    "verbose": false,
+    "aws_region": "us-east-1",
+    "aws_model_id": "global.anthropic.claude-opus-4-6-v1",
+    "aws_profile": "alkrok-Admin",
+    "skip_validation": false,
+    "enable_telemetry": false
+  },
+  "configuration_sources": {
+    "aws_model_id": "invocation argument",
+    "aws_region": "invocation argument",
+    "aws_profile": "invocation argument",
+    "verbose": "invocation argument",
+    "enable_telemetry": "invocation argument",
+    "execution_timeout": "default",
+    "node_timeout": "default"
+  },
+  "token_usage": {
+    "input_tokens": 1670584,
+    "output_tokens": 53984,
+    "total_tokens": 1724568
+  }
+}

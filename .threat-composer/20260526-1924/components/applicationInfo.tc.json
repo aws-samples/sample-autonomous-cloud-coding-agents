@@ -1,0 +1,127 @@
+{
+  "schema": 1,
+  "applicationInfo": {
+    "name": "ABCA - Autonomous Background Coding Agents on AWS",
+    "description": "### Summary\nABCA is a self-hosted platform on AWS that runs autonomous background coding agents. Users submit coding tasks via CLI, webhooks, or Slack, and agents autonomously clone repos, write code, run tests, and open pull requests in isolated MicroVM environments.\n\n### Key objectives\n- Enable fire-and-forget autonomous coding task execution in the cloud\n- Provide security-by-default with isolated sandboxed compute and least-privilege access\n- Support cross-session learning through tiered memory backed by AgentCore Memory\n- Ensure reliability by driving every task to a terminal state regardless of agent failures\n- Maintain cost efficiency with hybrid deterministic/agentic workflow design\n\n### Use-cases\n- Submit coding tasks that agents complete autonomously and open PRs for review\n- Iterate on PR review feedback automatically via pr_iteration tasks\n- Perform automated PR reviews via pr_review tasks\n- Onboard repositories with per-repo configuration (model, compute, policies)\n- Integrate with Slack and Linear for task submission and notifications\n\n### Features\n- Task orchestration with blueprint-based hybrid workflows (deterministic + agentic steps)\n- Isolated MicroVM compute per task via Amazon Bedrock AgentCore Runtime or ECS\n- Cedar-based policy enforcement for tool-call access control (HITL gates)\n- Input screening via Bedrock Guardrails with fail-closed semantics\n- CLI, REST API, Slack, Linear, and webhook input channels\n- Per-repo memory system with provenance tagging and poisoning defenses\n- DNS Firewall domain allowlisting and VPC-based network isolation"
+  },
+  "architecture": {},
+  "dataflow": {},
+  "assumptions": [
+    {
+      "id": "74ca9ea0-77f7-4d0c-b5a8-74d8d542763c",
+      "numericId": 1,
+      "content": "The analyzed codebase represents the complete application as intended for deployment, with no significant external modules missing.",
+      "tags": ["code-completeness", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The repository contains CDK infrastructure, agent Python code, CLI TypeScript code, and comprehensive documentation. The monorepo structure (cdk, agent, cli, docs workspaces) appears complete."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    },
+    {
+      "id": "f9e7f2c9-4e5e-461f-a744-cb924af3933f",
+      "numericId": 2,
+      "content": "The application is deployed as a single-tenant platform within one AWS account owned by the operator.",
+      "tags": ["deployment-environment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Documentation references self-hosted deployment in customer AWS account. Multi-tenant is mentioned as requiring silo model for AgentCore Memory isolation, suggesting single-tenant is the default."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    },
+    {
+      "id": "57a0d6c3-3e5a-44bd-8935-f6e139d87e3a",
+      "numericId": 3,
+      "content": "The technology stack consists of AWS CDK (TypeScript) for infrastructure, Python for the agent runtime, and TypeScript for the CLI.",
+      "tags": ["technology-stack", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "CDK uses TypeScript with Lambda handlers. Agent uses Python with Claude Agent SDK and FastAPI. CLI is TypeScript. Node >= 20.x. Documentation site uses Astro."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    },
+    {
+      "id": "ba34aa6b-0c2a-4a43-8e9c-9da8e45e64fc",
+      "numericId": 4,
+      "content": "The platform is experimental and not intended for production use without additional hardening.",
+      "tags": ["maturity", "deployment-environment", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "README explicitly states experimental stability badge and disclaimer that it is for experimental and educational purposes only, not intended for direct production use."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    },
+    {
+      "id": "e815f1e1-1cf9-45f5-98d0-1a7f1c01c123",
+      "numericId": 5,
+      "content": "GitHub is the sole supported source code hosting platform for agent interactions (clone, push, PR).",
+      "tags": ["integration", "technology-stack", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "All documentation and code reference GitHub exclusively. DNS Firewall allowlists github.com. PAT-based auth targets GitHub. No GitLab/Bitbucket support observed."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    },
+    {
+      "id": "e6cdf816-56b2-40ca-b863-547737aadbf6",
+      "numericId": 6,
+      "content": "Amazon Bedrock with Claude models is the sole LLM inference provider used by the agent runtime.",
+      "tags": ["technology-stack", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Architecture docs reference Bedrock Runtime VPC endpoints, Bedrock Guardrails, and Claude model variants (Sonnet, Haiku, Opus). No other LLM providers are referenced."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    },
+    {
+      "id": "dd4a0983-4833-43b8-857b-274ccecb1a67",
+      "numericId": 7,
+      "content": "Authentication relies on Amazon Cognito for CLI/API users and HMAC-SHA256 for webhook integrations.",
+      "tags": ["authentication", "security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Security doc confirms Cognito JWT for CLI/REST and HMAC-SHA256 for webhooks. MFA is noted as disabled. No federated identity providers are configured by default."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-app-info-agent"
+        }
+      ]
+    }
+  ],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [],
+  "mitigationLinks": []
+}
