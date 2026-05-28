@@ -36,6 +36,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
     "min": 1,
     "max": 500,
     "default": 50
+  },
+  "approval_timeout_s": {
+    "min": 30,
+    "max": 3600,
+    "default": 300
   }
 }
 ```
@@ -49,6 +54,14 @@ JSON at TypeScript compile time via `resolveJsonModule`.
 - **`approval_gate_cap.default`** — value applied when a blueprint omits
   the field. 50 is the design-decision default (see
   `docs/design/CEDAR_HITL_GATES.md` decision #13).
+- **`approval_timeout_s.min`** — floor for `approval_timeout_s` (§6
+  decision #6). 30 seconds — below this, humans cannot realistically
+  respond to an approval prompt.
+- **`approval_timeout_s.max`** — absolute ceiling for `approval_timeout_s`
+  before the `maxLifetime - 300` clip is applied (§7.3). 3600 seconds
+  (1 hour).
+- **`approval_timeout_s.default`** — value applied when the submit payload
+  omits `approval_timeout_s`. 300 seconds (5 minutes) per §6 decision #6.
 
 ## Adding new constants
 
