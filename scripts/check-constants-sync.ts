@@ -59,6 +59,8 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
   { name: 'DEFAULT_APPROVAL_GATE_CAP', regex: /^\s*DEFAULT_APPROVAL_GATE_CAP\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
   { name: 'APPROVAL_GATE_CAP_MIN', regex: /^\s*APPROVAL_GATE_CAP_MIN\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
   { name: 'APPROVAL_GATE_CAP_MAX', regex: /^\s*APPROVAL_GATE_CAP_MAX\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
+  { name: 'FLOOR_TIMEOUT_S', regex: /^\s*FLOOR_TIMEOUT_S\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
+  { name: 'DEFAULT_TASK_TIMEOUT_S', regex: /^\s*DEFAULT_TASK_TIMEOUT_S\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
 ];
 
 interface Drift {
@@ -83,7 +85,10 @@ function findDriftInPython(filePath: string): Drift[] {
 
 function main(): number {
   // Sanity: confirm the JSON is parseable and shaped as expected.
-  let json: { approval_gate_cap?: { min: number; max: number; default: number } };
+  let json: {
+    approval_gate_cap?: { min: number; max: number; default: number };
+    approval_timeout_s?: { min: number; max: number; default: number };
+  };
   try {
     json = JSON.parse(fs.readFileSync(CONSTANTS_JSON, 'utf-8'));
   } catch (err) {
@@ -94,6 +99,12 @@ function main(): number {
   const agc = json.approval_gate_cap;
   if (!agc || typeof agc.min !== 'number' || typeof agc.max !== 'number' || typeof agc.default !== 'number') {
     console.error(`${CONSTANTS_JSON} is missing approval_gate_cap.{min,max,default}`);
+    return 1;
+  }
+
+  const ats = json.approval_timeout_s;
+  if (!ats || typeof ats.min !== 'number' || typeof ats.max !== 'number' || typeof ats.default !== 'number') {
+    console.error(`${CONSTANTS_JSON} is missing approval_timeout_s.{min,max,default}`);
     return 1;
   }
 

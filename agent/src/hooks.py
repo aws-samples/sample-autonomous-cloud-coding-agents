@@ -30,7 +30,7 @@ import nudge_reader
 import task_state
 from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
-from policy import APPROVAL_RATE_LIMIT, Outcome
+from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
 from progress_writer import _generate_ulid
 from shell import log, log_error_cw
 
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 # Chunk 3 constants (§6.5 pseudocode)
 # ---------------------------------------------------------------------------
 
-FLOOR_30S: int = 30  # §6 decision #6: approval floor on effective timeout
+FLOOR_30S: int = FLOOR_TIMEOUT_S  # §6 decision #6: sourced from contracts/constants.json
 CLEANUP_MARGIN_120S: int = 120  # §6.5 lifetime-margin reserve for cleanup
 # Poll cadence per §3 decision #3 and IMPL-12: 2s for the first 30s, 5s
 # thereafter. Exact counts vary with ``timeout_s``; these pin the

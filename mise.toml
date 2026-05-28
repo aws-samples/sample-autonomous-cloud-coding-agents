@@ -66,6 +66,10 @@ run = "node --experimental-strip-types scripts/check-types-sync.ts"
 description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if agent/src/policy.py declares a literal for a name owned by the JSON contract."
 run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 
+[tasks."sync:abca-commands"]
+description = "Generate commands stubs from .abca/commands for multiple AI assistants"
+run = "node scripts/sync-abca-commands.mjs"
+
 [tasks."security:secrets"]
 description = "Scan for secrets with gitleaks"
 run = "gitleaks detect --source . --no-banner"
@@ -151,16 +155,11 @@ run = [
 ##### BUILD #####
 ##################
 
-# Agent code is packaged by CDK (Docker asset); validate Python before heavy JS/CDK work.
-# Multiple `depends` run in parallel, so agent is a sole prerequisite, then packages run in order.
+# All packages run in parallel via DAG. Each resolves its own internal dependencies.
+# Agent quality runs alongside CDK/CLI/docs — no sequential bottleneck.
 [tasks.build]
-description = "Monorepo build (agent quality, then cdk, cli, docs)"
-depends = ["//agent:quality"]
-run = [
-  "MISE_EXPERIMENTAL=1 mise //cdk:build",
-  "MISE_EXPERIMENTAL=1 mise //cli:build",
-  "MISE_EXPERIMENTAL=1 mise //docs:build",
-]
+description = "Monorepo build (agent, cdk, cli, docs in parallel)"
+depends = ["//agent:quality", "//cdk:build", "//cli:build", "//docs:build", "sync:abca-commands"]
 
 [tasks.default]
 description = "Install + build"

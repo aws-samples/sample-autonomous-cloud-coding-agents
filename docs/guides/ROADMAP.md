@@ -113,6 +113,8 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Per-session IAM scoping** | Generate short-lived, scoped credentials per task via `sts:AssumeRole` with session tags (`user_id`, `repo`, `task_id`). DynamoDB leading-key conditions restrict each session to its own partition. Bedrock model access scoped to an explicit ARN allowlist instead of `*`. Eliminates cross-tenant blast radius from a compromised agent session. |
 | **Per-repo GitHub credentials** | GitHub App per org/repo via AgentCore Token Vault. Auto-refresh for long sessions. Sets the pattern for GitLab, Jira, Slack integrations. |
 | **Principal-to-repo authorization** | Map Cognito identities to allowed repository sets. Users can only trigger work on authorized repos. |
+| **End-to-end task attribution** | Propagate `task_id`, `user_id`, and trace context consistently across orchestrator logs, agent OpenTelemetry, GitHub/API calls, and `TaskEvents` so every downstream action is attributable in incident response (aligns with Zero Trust agent-identity guidance). |
+| **Emergency session containment** | Documented operator runbook and APIs: cancel task, terminate compute session, revoke short-lived credentials (assumed role, GitHub App token). Pairs with **Per-session IAM scoping**, **Per-repo GitHub credentials**, and **Behavioral circuit breaker** automated containment. |
 | **Delegation chain propagation** | Embed a cryptographically signed actor chain (`user_id → orchestrator → agent`) in credentials issued to the agent. Downstream services (GitHub commits, API calls) can trace any action back to the originating human principal. Enables per-action accountability, compliance audit, and fine-grained authorization decisions based on the full delegation lineage rather than only the immediate caller. |
 | **Workload-anchored credential binding** | Bind agent credentials to the specific MicroVM execution environment via attestation (e.g., instance identity document or platform-level workload identity). Credentials become non-transferable — unusable if exfiltrated from the VM. Complements per-session IAM scoping (which limits scope) with environment binding (which limits where credentials can be exercised). |
 | **Layered credential derivation** | Extend per-session scoping with a derivation model where each layer in the execution stack receives progressively narrower credentials. The orchestrator holds a task-scoped token; the agent runtime derives a further-restricted token limited to specific tools and repositories; tool invocations receive single-use or time-boxed tokens for each external call. Limits blast radius at every boundary, not just at task creation. |
@@ -152,8 +154,10 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Behavioral circuit breaker** | Per-session limits on tool-call rate, cumulative cost, consecutive failures, and file churn; pause or terminate when thresholds are exceeded. Configurable per repo via Blueprint (design: `SECURITY.md`, `REPO_ONBOARDING.md`). |
+| **Behavioral circuit breaker** | Per-session limits on tool-call rate, cumulative cost, consecutive failures, and file churn; pause or terminate when thresholds are exceeded. On trip: terminate session, revoke short-lived credentials where applicable, emit a `containment` audit event. Configurable per repo via Blueprint (design: `SECURITY.md`, `REPO_ONBOARDING.md`). Prefer hard containment over friction-only limits (rate/turn caps alone). |
 | **Tool capability tiers** | Opt-in **extended** tool profile per repo: MCP servers, plugins, and additional Gateway-mediated tools beyond the default minimal surface (`COMPUTE.md`). Enforced at Gateway and policy layers. |
+| **MCP supply-chain controls** | For extended-tier repos: pin or self-host MCP servers; keep `.mcp.json` in version control; verify tool descriptors before enablement; no dynamic tool discovery in production blueprints. Mitigates tool poisoning and rug-pull risks (`SECURITY.md`, `COMPUTE.md`). |
+| **Untrusted hydration content boundaries** | Delimit external content in assembled prompts (issue/PR bodies, fetched URLs, review comments) so the model treats it as untrusted context (spotlighting-style framing). Complements Bedrock Guardrails at hydration time (`context-hydration.ts`). |
 
 ### Channels and integrations
 
@@ -204,13 +208,17 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Admission backlog observability** | Metric and alarm when `SUBMITTED` task depth exceeds an operator threshold (capacity and admission health). |
 | **Admission queue with deferred pickup** | When admission is at capacity, persist tasks in a durable queue instead of failing them. Automatically re-attempt admission and continue processing in FIFO order (with optional priority lanes) as concurrency becomes available. Preserve cancel/idempotency semantics and expose queue position/ETA in task status. |
 | **Safe orchestrator deploys** | Pre-deploy checks for active tasks (drain or warn); blue-green or canary Lambda deploy for the durable orchestrator with rollback on error regressions (`OBSERVABILITY.md`). |
+| **Unified cross-plane trace correlation** | Single trace root per task across orchestrator, MicroVM OpenTelemetry, `TaskEvents`, and S3 trace artifacts. Gap-fill beyond existing AgentCore session baggage (`OBSERVABILITY.md`). |
+| **Immutable audit export** | Append-only export of `TaskEvents` and policy decisions to S3 (e.g. Object Lock). Complements **Centralized policy framework** `PolicyDecisionEvent` schema for compliance and tamper-evident investigation. |
+| **Security operations metrics (dwell time and coverage)** | CloudWatch metrics and dashboard panels: time from anomaly (circuit breaker, guardrail spike, policy deny burst) to operator awareness; fraction of security/ops alarms investigated. Targets shortened exploit windows. |
+| **Automated alert first-pass triage** | On selected security/ops alarms, a Lambda produces a structured disposition from logs, traces, and `TaskEvents` before human review. Distinct from **LLM-assisted trace analysis** (post-mortem on failed tasks). |
 
 ### Scale and collaboration
 
 | Capability | Description |
 |------------|-------------|
 | **Multi-user and teams** | Team visibility, shared approval queues, team concurrency/cost budgets, memory isolation. |
-| **Agent swarm** | Planner-worker architecture for complex multi-file tasks. DAG of subtasks, merge orchestrator, one consolidated PR. |
+| **Agent swarm** | Planner-worker architecture for complex multi-file tasks. DAG of subtasks, merge orchestrator, one consolidated PR. Workers receive a strict subset of planner credentials; orchestrator-issued subtask intent; per-worker OpenTelemetry spans under a shared trace root (prevents confused-deputy / unscoped privilege inheritance). |
 | **Cedar-driven HITL approval gates** | Three-outcome model (allow/hard-deny/soft-deny) for tool-call governance with Cedar policy engine. |
 | **Multi-user nudge** | Extend `bgagent nudge` to support multiple users injecting context into the same running task. Per-nudge commit attribution. (Single-user nudge shipped.) |
 | **Scheduled triggers** | Cron-based task creation via EventBridge (dependency updates, nightly flaky test checks). |
@@ -228,6 +236,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **EventBridge / SNS integration** | Publish task lifecycle events to EventBridge or SNS for external consumers beyond the built-in DDB-Stream fanout (which already powers GitHub edit-in-place, Slack, and email dispatchers). |
 | **CDK constructs library** | Publish reusable constructs to Construct Hub with semver versioning. |
 | **Centralized policy framework** | Unified Cedar-based framework with `PolicyDecisionEvent` audit schema. Three enforcement modes with observe-before-enforce rollout. |
+| **Zero Trust control review ("impossible vs tedious")** | Document a standing design test in `SECURITY.md`: prefer controls that remove capability over friction-only mitigations (rate limits, observe-only DNS). Use when prioritizing DNS enforcement, credential scoping, and containment vs. throttling. |
 | **Formal verification** | TLA+ specification of task state machine, concurrency, cancellation races, reconciler interleavings. |
 
 ### Agent asset registry

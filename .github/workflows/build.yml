@@ -23,7 +23,18 @@ jobs:
     permissions:
       actions: write # upload-artifact when self-mutation is detected
       contents: read
-    runs-on: ubuntu-latest
+    # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
+    runs-on: >-
+      ${{
+        vars.DEFAULT_RUNNER_LABEL
+        || (github.event_name == 'pull_request'
+            && contains(github.event.pull_request.labels.*.name, 'self-hosted')
+            && 'self-hosted')
+        || (github.event_name == 'pull_request'
+            && contains(github.event.pull_request.labels.*.name, 'ubuntu-latest-4-cores')
+            && 'ubuntu-latest-4-cores')
+        || 'ubuntu-latest'
+      }}
     strategy:
       matrix:
         compute_type: [agentcore]
@@ -204,9 +215,10 @@ jobs:
           echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
       - name: build
         run: |
+          echo "::notice::Runner: $(nproc) cores, $(free -h | awk '/Mem:/{print $2}') RAM"
           SECONDS=0
           mise run build
-          echo "::notice::Build completed in ${SECONDS}s"
+          echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
       - name: Upload CDK artifact (${{ matrix.compute_type }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
