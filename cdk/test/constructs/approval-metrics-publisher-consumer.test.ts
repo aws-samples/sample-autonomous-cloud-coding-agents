@@ -189,4 +189,19 @@ describe('ApprovalMetricsPublisherConsumer', () => {
     // expect exactly one Table in the synthesized stack.
     template.resourceCountIs('AWS::DynamoDB::Table', 1);
   });
+
+  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (§11.5)', () => {
+    const { template } = createStack();
+
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Namespace: 'AWS/SQS',
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+      Statistic: 'Maximum',
+      Period: 300,
+    });
+  });
 });

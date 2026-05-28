@@ -19,6 +19,7 @@
 
 import * as path from 'path';
 import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -106,6 +107,7 @@ export interface FanOutConsumerProps {
 export class FanOutConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
+  public readonly dlqAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
     super(scope, id);
@@ -184,6 +186,22 @@ export class FanOutConsumer extends Construct {
       onFailure: new SqsDlq(this.dlq),
       reportBatchItemFailures: true,
     }));
+
+    // §11.5: alarm on DLQ depth so poison-pill records don't silently
+    // accumulate without operator visibility.
+    this.dlqAlarm = new cloudwatch.Alarm(this, 'DlqMessageAlarm', {
+      metric: this.dlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmDescription:
+        'FanOutConsumer DLQ has at least one message; investigate poison records. ' +
+        'Runbook: TODO — check CloudWatch Logs for the FanOutFn error that caused the DLQ send.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     NagSuppressions.addResourceSuppressions(this.fn, [
       {
