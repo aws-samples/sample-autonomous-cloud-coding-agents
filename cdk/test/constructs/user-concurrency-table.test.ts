@@ -45,9 +45,11 @@ describe('UserConcurrencyTable', () => {
     });
   });
 
-  test('does not enable point-in-time recovery', () => {
+  test('enables point-in-time recovery by default', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
-      PointInTimeRecoverySpecification: Match.absent(),
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
     });
   });
 
@@ -94,6 +96,19 @@ describe('UserConcurrencyTable with custom props', () => {
     template.hasResource('AWS::DynamoDB::Table', {
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',
+    });
+  });
+
+  test('allows disabling point-in-time recovery', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    new UserConcurrencyTable(stack, 'UserConcurrencyTable', { pointInTimeRecovery: false });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: false,
+      },
     });
   });
 });
