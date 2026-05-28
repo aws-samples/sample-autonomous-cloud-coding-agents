@@ -151,16 +151,11 @@ run = [
 ##### BUILD #####
 ##################
 
-# Agent code is packaged by CDK (Docker asset); validate Python before heavy JS/CDK work.
-# Multiple `depends` run in parallel, so agent is a sole prerequisite, then packages run in order.
+# All packages run in parallel via DAG. Each resolves its own internal dependencies.
+# Agent quality runs alongside CDK/CLI/docs — no sequential bottleneck.
 [tasks.build]
-description = "Monorepo build (agent quality, then cdk, cli, docs)"
-depends = ["//agent:quality"]
-run = [
-  "MISE_EXPERIMENTAL=1 mise //cdk:build",
-  "MISE_EXPERIMENTAL=1 mise //cli:build",
-  "MISE_EXPERIMENTAL=1 mise //docs:build",
-]
+description = "Monorepo build (agent, cdk, cli, docs in parallel)"
+depends = ["//agent:quality", "//cdk:build", "//cli:build", "//docs:build"]
 
 [tasks.default]
 description = "Install + build"
