@@ -75,9 +75,7 @@ if TYPE_CHECKING:
 # Constants (§3, §5.2, §12.9)
 # ---------------------------------------------------------------------------
 
-FLOOR_TIMEOUT_S: int = 30  # §6 decision #6: rejected below this at load
 WARN_TIMEOUT_S: int = 120  # IMPL-25: sub-120s emits WARN on blueprint load
-DEFAULT_TASK_TIMEOUT_S: int = 300  # §6 decision #6 default
 
 
 def _load_shared_constants() -> dict:
@@ -109,6 +107,9 @@ _AGC = _SHARED_CONSTANTS["approval_gate_cap"]
 DEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"])  # decision #13 default
 APPROVAL_GATE_CAP_MIN: int = int(_AGC["min"])
 APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
+_ATS = _SHARED_CONSTANTS["approval_timeout_s"]
+FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this at load
+DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
 CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
 CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
 POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB
