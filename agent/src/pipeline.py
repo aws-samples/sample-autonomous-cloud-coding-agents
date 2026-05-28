@@ -324,6 +324,17 @@ def run_task(
     if cedar_policies:
         config.cedar_policies = cedar_policies
 
+    # Export session-tag values so tenant-data boto3 clients (DDB/S3) assume
+    # the per-task SessionRole with {user_id, repo, task_id} tags. No-op when
+    # AGENT_SESSION_ROLE_ARN is unset (local/dev/tests).
+    from aws_session import configure_session
+
+    configure_session(
+        user_id=config.user_id,
+        repo=config.repo_url,
+        task_id=config.task_id,
+    )
+
     log("TASK", f"Task ID: {config.task_id}")
     log("TASK", f"Repository: {config.repo_url}")
     log("TASK", f"Issue: {config.issue_number or '(none)'}")
