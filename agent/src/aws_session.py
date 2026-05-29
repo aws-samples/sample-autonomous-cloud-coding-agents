@@ -51,14 +51,6 @@ from typing import Any
 # compute environment (AgentCore runtime env / ECS container overrides).
 SESSION_ROLE_ARN_ENV = "AGENT_SESSION_ROLE_ARN"
 
-# Env vars carrying the session-tag values. The agent exports these from its
-# resolved TaskConfig at startup (see ``configure_session``) so that lazily
-# created clients downstream can pick them up without threading config through
-# every call site.
-USER_ID_ENV = "AGENT_SESSION_USER_ID"
-REPO_ENV = "AGENT_SESSION_REPO"
-TASK_ID_ENV = "AGENT_SESSION_TASK_ID"
-
 # Role chaining caps the assumed session at 1 hour. Request the maximum the
 # cap allows; botocore refreshes well before this elapses.
 _CHAINED_SESSION_DURATION_S = 3600
@@ -69,6 +61,12 @@ _MAX_TAG_VALUE_LEN = 256
 _lock = threading.Lock()
 _session: Any = None  # cached boto3.Session (scoped or plain)
 _scoped: bool | None = None  # None until first resolution; True if tag-scoped
+
+# Session-tag values, set once at startup by ``configure_session`` from the
+# resolved TaskConfig. Kept in private module state — NOT os.environ — so the
+# tenant identifiers are not inherited by the untrusted repo subprocesses the
+# agent spawns (build/test/tooling). Read by ``_session_tags`` at assume time.
+_tags: dict[str, str] = {}
 
 
 class SessionScopingError(RuntimeError):
@@ -81,41 +79,40 @@ class SessionScopingError(RuntimeError):
 
 
 def configure_session(user_id: str, repo: str, task_id: str) -> None:
-    """Export session-tag values to the environment for later client creation.
+    """Record session-tag values in private module state for later use.
 
     Called once at agent startup from the resolved ``TaskConfig``. Idempotent;
     safe to call before any tenant-data client is created. Does not itself
     assume the role — assumption is deferred until the first client is built so
-    that a missing SessionRole never delays startup.
+    that a missing SessionRole never delays startup. Values are stored in a
+    module global (not ``os.environ``) so tenant identifiers do not leak into
+    spawned subprocesses.
     """
-    if user_id:
-        os.environ[USER_ID_ENV] = user_id
-    if repo:
-        os.environ[REPO_ENV] = repo
-    if task_id:
-        os.environ[TASK_ID_ENV] = task_id
+    global _tags
+    _tags = {
+        key: value
+        for key, value in (("user_id", user_id), ("repo", repo), ("task_id", task_id))
+        if value
+    }
 
 
 def reset_session_cache() -> None:
-    """Drop the cached session. For tests that toggle env between cases."""
-    global _session, _scoped
+    """Drop the cached session and tags. For tests that toggle config."""
+    global _session, _scoped, _tags
     with _lock:
         _session = None
         _scoped = None
+        _tags = {}
 
 
 def _session_tags() -> list[dict[str, str]]:
-    """Build the AssumeRole ``Tags`` list from the configured env values.
+    """Build the AssumeRole ``Tags`` list from the configured tag values.
 
-    Only non-empty values are included. Values are truncated to the IAM limit
-    so an over-long repo slug can never make ``AssumeRole`` fail closed.
+    Only non-empty values are included (filtered at ``configure_session``).
+    Values are truncated to the IAM limit so an over-long repo slug can never
+    make ``AssumeRole`` fail closed.
     """
-    pairs = (
-        ("user_id", os.environ.get(USER_ID_ENV, "")),
-        ("repo", os.environ.get(REPO_ENV, "")),
-        ("task_id", os.environ.get(TASK_ID_ENV, "")),
-    )
-    return [{"Key": key, "Value": value[:_MAX_TAG_VALUE_LEN]} for key, value in pairs if value]
+    return [{"Key": key, "Value": value[:_MAX_TAG_VALUE_LEN]} for key, value in _tags.items()]
 
 
 def _build_scoped_session(role_arn: str) -> Any:
@@ -132,7 +129,7 @@ def _build_scoped_session(role_arn: str) -> Any:
     from botocore.session import get_session as get_botocore_session
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    task_id = os.environ.get(TASK_ID_ENV, "")
+    task_id = _tags.get("task_id", "")
     # Role session name must be <=64 chars and match [\w+=,.@-]. task_id is a
     # short slug (a ULID, ~26 chars, in the API path; a 12-char hex fallback
     # when the agent generates its own) — well under 64. The ``abca-`` prefix
@@ -204,7 +201,7 @@ def get_session() -> Any:
                     f"scoped session could not be built ({type(exc).__name__}: {exc}). "
                     "Failing closed — refusing to run on unscoped ambient credentials, "
                     "which would disable tenant isolation.",
-                    task_id=os.environ.get(TASK_ID_ENV) or None,
+                    task_id=_tags.get("task_id") or None,
                 )
                 raise SessionScopingError(
                     "per-session IAM scoping requested via "

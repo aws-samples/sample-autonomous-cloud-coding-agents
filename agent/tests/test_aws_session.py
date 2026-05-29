@@ -13,10 +13,7 @@ import pytest
 
 import aws_session
 from aws_session import (
-    REPO_ENV,
     SESSION_ROLE_ARN_ENV,
-    TASK_ID_ENV,
-    USER_ID_ENV,
     configure_session,
     get_session,
     is_scoped,
@@ -26,9 +23,8 @@ from aws_session import (
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
-    """Clear cache + session-tag env between tests."""
-    for var in (SESSION_ROLE_ARN_ENV, USER_ID_ENV, REPO_ENV, TASK_ID_ENV):
-        monkeypatch.delenv(var, raising=False)
+    """Clear cache + session tags between tests."""
+    monkeypatch.delenv(SESSION_ROLE_ARN_ENV, raising=False)
     reset_session_cache()
     yield
     reset_session_cache()
@@ -40,18 +36,24 @@ def _reset(monkeypatch):
 
 
 class TestConfigureSession:
-    def test_exports_nonempty_tag_values(self, monkeypatch):
+    def test_records_nonempty_tag_values_in_private_state(self, monkeypatch):
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
-        assert aws_session.os.environ[USER_ID_ENV] == "u-1"
-        assert aws_session.os.environ[REPO_ENV] == "owner/repo"
-        assert aws_session.os.environ[TASK_ID_ENV] == "t-abc"
+        assert aws_session._tags == {
+            "user_id": "u-1",
+            "repo": "owner/repo",
+            "task_id": "t-abc",
+        }
 
     def test_skips_empty_values(self, monkeypatch):
         configure_session(user_id="", repo="", task_id="t-only")
-        assert USER_ID_ENV not in aws_session.os.environ
-        assert REPO_ENV not in aws_session.os.environ
-        assert aws_session.os.environ[TASK_ID_ENV] == "t-only"
+        assert aws_session._tags == {"task_id": "t-only"}
+
+    def test_does_not_leak_tags_into_os_environ(self, monkeypatch):
+        """Tenant identifiers must not land in os.environ (subprocesses inherit it)."""
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+        assert "AGENT_SESSION_USER_ID" not in aws_session.os.environ
+        assert "u-1" not in aws_session.os.environ.values()
 
 
 # ---------------------------------------------------------------------------
