@@ -152,6 +152,47 @@ run = [
 ]
 
 ##################
+#### WORKTREE ####
+##################
+
+# Issue #197: worktrees branched from origin/main drift silently as other PRs
+# merge. This task fetches origin/main and rebases every clean linked worktree
+# onto it. Dirty worktrees are skipped (no rebase on uncommitted changes); main
+# itself (the primary worktree) is also skipped. Branches that fail to rebase
+# are aborted and reported so the next push surfaces the conflict explicitly
+# rather than silently leaving a half-rebased state.
+[tasks."worktree:sync"]
+description = "Fetch origin/main and rebase every clean linked worktree onto it"
+run = """
+#!/usr/bin/env bash
+set -eu -o pipefail
+git fetch origin main
+status=0
+# tab-delimited "worktree<TAB>branch" pairs, one per linked worktree
+pairs="$(git worktree list --porcelain | awk '
+  /^worktree / { wt = substr($0, 10) }
+  /^branch /   { print wt "\\t" substr($0, 8); wt = "" }
+')"
+while IFS=$'\\t' read -r wt branch; do
+  [ -z "${wt:-}" ] && continue
+  short_branch="${branch#refs/heads/}"
+  # Skip the main branch — `git pull` is the right tool for it, not rebase.
+  case "$short_branch" in main|master) continue ;; esac
+  if [ -n "$(git -C "$wt" status --porcelain)" ]; then
+    echo "SKIP $short_branch ($wt) — dirty working tree"
+    continue
+  fi
+  echo "Rebasing $short_branch ($wt) onto origin/main..."
+  if ! git -C "$wt" rebase origin/main; then
+    echo "FAIL $short_branch — rebase aborted (resolve conflicts manually)"
+    git -C "$wt" rebase --abort || true
+    status=1
+  fi
+done <<< "$pairs"
+exit $status
+"""
+
+##################
 ##### BUILD #####
 ##################
 
