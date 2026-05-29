@@ -43,7 +43,14 @@ const stack = new AgentStack(
 );
 
 const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
-Tags.of(stack).add('compute_type', computeType);
+
+// CfnResolverQueryLoggingConfig treats ALL property changes (including tags) as
+// requiring replacement. Replacement cascades to the per-VPC association, which
+// fails because Route53 Resolver enforces a one-association-per-VPC constraint
+// and CF's Create-before-Delete ordering can't satisfy it.
+const excludeResourceTypes = ['AWS::Route53Resolver::ResolverQueryLoggingConfig'];
+
+Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
 const githubTagKeys = [
   'sha',
@@ -63,7 +70,7 @@ const githubTagKeys = [
 
 for (const key of githubTagKeys) {
   const value = app.node.tryGetContext(`github:${key}`);
-  Tags.of(stack).add(`github:${key}`, value || 'none');
+  Tags.of(stack).add(`github:${key}`, value || 'none', { excludeResourceTypes });
 }
 
 app.synth();
