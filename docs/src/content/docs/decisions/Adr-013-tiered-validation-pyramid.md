@@ -1,5 +1,5 @@
 ---
-title: 013 tiered validation pyramid
+title: Adr 013 tiered validation pyramid
 ---
 
 # ADR-013: Tiered validation pyramid for agentic-first development
