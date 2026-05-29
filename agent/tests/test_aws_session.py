@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -108,15 +109,57 @@ class TestScopedSession:
         assert first is second
         mk_build.assert_called_once()
 
-    def test_build_failure_falls_back_to_plain(self, monkeypatch):
+    def test_concurrent_first_call_builds_once(self, monkeypatch):
+        """Double-checked locking: 20 threads racing the first get_session()
+        must assume the role exactly once and all receive the same session.
+
+        The build sleeps briefly to widen the race window: without the inner
+        ``if _session is not None`` recheck under the lock, threads queued on the
+        lock would each rebuild — this asserts the recheck holds (one build)."""
+        import threading
+        import time
+
         self._arn(monkeypatch)
+        start = threading.Barrier(20)  # release all threads simultaneously
+        results: list[Any] = []
+        lock = threading.Lock()
+
+        def _slow_build(_arn: str) -> Any:
+            time.sleep(0.05)
+            return MagicMock(name="scoped")
+
+        def _worker() -> None:
+            start.wait()
+            session = get_session()
+            with lock:
+                results.append(session)
+
+        with patch("aws_session._build_scoped_session", side_effect=_slow_build) as mk_build:
+            threads = [threading.Thread(target=_worker) for _ in range(20)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        mk_build.assert_called_once()
+        assert len(results) == 20
+        assert all(r is results[0] for r in results)
+
+    def test_build_failure_fails_closed_when_scoping_requested(self, monkeypatch):
+        """When AGENT_SESSION_ROLE_ARN is set, a build failure must FAIL CLOSED
+        (raise) and emit a loud signal — never silently run unscoped."""
+        self._arn(monkeypatch)
+        from aws_session import SessionScopingError
+
+        logged: list[str] = []
         with (
             patch("aws_session._build_scoped_session", side_effect=RuntimeError("boom")),
-            patch("boto3.Session", return_value=MagicMock(name="fallback")),
+            patch("shell.log_error_cw", side_effect=lambda msg, **kw: logged.append(msg)),
+            pytest.raises(SessionScopingError),
         ):
             get_session()
-        # Must NOT crash the agent; degrades to unscoped.
-        assert is_scoped() is False
+        # The downgrade attempt was surfaced loudly before failing.
+        assert any("SESSION_SCOPING_FAILED" in m for m in logged)
 
 
 # ---------------------------------------------------------------------------
@@ -240,3 +283,16 @@ class TestRefreshCallback:
         tags = {t["Key"]: t["Value"] for t in sts_client.assume_role.call_args.kwargs["Tags"]}
         assert tags == {"user_id": "u-1", "task_id": "t-abc"}
         assert "repo" not in tags
+
+
+class TestTagTruncation:
+    def test_overlong_value_truncated_to_256(self, monkeypatch):
+        """An over-long repo slug must be clamped to the IAM 256-char limit so
+        AssumeRole never fails closed on a long value (documented fail-safe)."""
+        from aws_session import _MAX_TAG_VALUE_LEN, _session_tags
+
+        configure_session(user_id="u-1", repo="r" * 300, task_id="t-abc")
+        tags = {t["Key"]: t["Value"] for t in _session_tags()}
+        assert len(tags["repo"]) == _MAX_TAG_VALUE_LEN == 256
+        # Untruncated values are passed through unchanged.
+        assert tags["user_id"] == "u-1"

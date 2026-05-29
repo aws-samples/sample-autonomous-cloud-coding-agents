@@ -26,11 +26,19 @@ Two properties matter for correctness:
    under an AgentCore execution role or an ECS task role — both are valid
    assuming principals in the SessionRole trust policy.
 
-**Fail-safe:** when ``AGENT_SESSION_ROLE_ARN`` is unset (local dev, tests, or
-a deployment that has not yet provisioned the SessionRole), this module
-returns plain boto3 clients/resources backed by the ambient credential chain
-— identical to the pre-feature behavior. Scoping is additive and never blocks
-task execution.
+**Fail-safe vs. fail-closed:**
+
+- When ``AGENT_SESSION_ROLE_ARN`` is **unset** (local dev, tests, or a
+  deployment that has not yet provisioned the SessionRole), this module returns
+  plain boto3 clients/resources backed by the ambient credential chain —
+  identical to the pre-feature behavior. Scoping is opt-in and its absence does
+  not block task execution.
+- When ``AGENT_SESSION_ROLE_ARN`` **is set**, scoping has been *requested*, so a
+  failure to build the scoped session is treated as a hard error: this module
+  raises :class:`SessionScopingError` rather than silently degrading to the
+  ambient (cross-tenant) compute role. For a tenant-isolation control, silently
+  running unscoped is the most dangerous failure mode — the agent keeps working
+  but stops isolating tenants — so we fail **closed** (abort the task) instead.
 """
 
 from __future__ import annotations
@@ -61,6 +69,15 @@ _MAX_TAG_VALUE_LEN = 256
 _lock = threading.Lock()
 _session: Any = None  # cached boto3.Session (scoped or plain)
 _scoped: bool | None = None  # None until first resolution; True if tag-scoped
+
+
+class SessionScopingError(RuntimeError):
+    """Per-session IAM scoping was requested but could not be established.
+
+    Raised when ``AGENT_SESSION_ROLE_ARN`` is set but the scoped session cannot
+    be built. Fails the task closed rather than silently falling back to the
+    ambient (cross-tenant) compute role.
+    """
 
 
 def configure_session(user_id: str, repo: str, task_id: str) -> None:
@@ -117,7 +134,9 @@ def _build_scoped_session(role_arn: str) -> Any:
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     task_id = os.environ.get(TASK_ID_ENV, "")
     # Role session name must be <=64 chars and match [\w+=,.@-]. task_id is a
-    # 12-char hex slug; prefix keeps CloudTrail entries identifiable.
+    # short slug (a ULID, ~26 chars, in the API path; a 12-char hex fallback
+    # when the agent generates its own) — well under 64. The ``abca-`` prefix
+    # keeps CloudTrail entries identifiable. Truncate defensively regardless.
     session_name = f"abca-{task_id}"[:64] or "abca-session"
 
     # A dedicated STS client built from the *ambient* (compute-role) chain.
@@ -170,19 +189,30 @@ def get_session() -> Any:
 
         role_arn = os.environ.get(SESSION_ROLE_ARN_ENV, "").strip()
         if role_arn:
+            # Scoping was requested. Build the scoped session or FAIL CLOSED —
+            # never silently downgrade to the ambient compute role, which can
+            # reach every tenant's data (that is exactly what this control
+            # prevents).
             try:
                 _session = _build_scoped_session(role_arn)
                 _scoped = True
-            except Exception:
-                # Building the session (not yet assuming) should not fail, but
-                # if botocore/boto3 import shape changes, fall back rather than
-                # break task execution. The actual assume_role still runs
-                # lazily and will surface its own errors at call time.
-                _session = boto3.Session(
-                    region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+            except Exception as exc:
+                from shell import log_error_cw
+
+                log_error_cw(
+                    "SESSION_SCOPING_FAILED: AGENT_SESSION_ROLE_ARN is set but the "
+                    f"scoped session could not be built ({type(exc).__name__}: {exc}). "
+                    "Failing closed — refusing to run on unscoped ambient credentials, "
+                    "which would disable tenant isolation.",
+                    task_id=os.environ.get(TASK_ID_ENV) or None,
                 )
-                _scoped = False
+                raise SessionScopingError(
+                    "per-session IAM scoping requested via "
+                    f"{SESSION_ROLE_ARN_ENV} but could not be established"
+                ) from exc
         else:
+            # Scoping not requested (local/dev/tests, or pre-provisioning):
+            # plain ambient session, behaviorally identical to pre-feature code.
             _session = boto3.Session(
                 region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
             )

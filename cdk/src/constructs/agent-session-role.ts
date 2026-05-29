@@ -106,6 +106,14 @@ export class AgentSessionRole extends Construct {
   constructor(scope: Construct, id: string, props: AgentSessionRoleProps) {
     super(scope, id);
 
+    if (props.assumingRoles.length === 0) {
+      // A SessionRole no principal can assume is dead weight and would
+      // synthesize an empty/invalid trust policy. Fail at synth instead.
+      throw new Error(
+        'AgentSessionRole requires at least one assuming role (the compute role[s] that mint scoped credentials)',
+      );
+    }
+
     const principals = props.assumingRoles.map(
       (r) => new iam.ArnPrincipal(r.roleArn),
     );

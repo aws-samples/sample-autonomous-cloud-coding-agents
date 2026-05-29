@@ -260,30 +260,43 @@ describe('EcsAgentCluster construct', () => {
     test('task role gets sts:AssumeRole on the SessionRole, not direct task-table DDB grants', () => {
       const template = createWithSessionRole();
       const policies = template.findResources('AWS::IAM::Policy');
-      // The task role policy should carry an sts:AssumeRole statement.
-      let hasAssume = false;
-      let hasTaskTableDdb = false;
-      for (const policy of Object.values(policies)) {
-        for (const s of policy.Properties.PolicyDocument.Statement) {
+
+      // Identify the task role's own inline policy: it is the one carrying the
+      // sts:AssumeRole grant (only the compute role receives that), as opposed
+      // to the SessionRole's policy (which carries the conditioned DDB
+      // statements). The task-role policy must NOT contain any unconditioned
+      // task-table DDB grant — that access now lives only on the SessionRole.
+      const taskRolePolicies = Object.values(policies).filter((p) =>
+        p.Properties.PolicyDocument.Statement.some((s: { Action: string | string[] }) => {
           const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-          if (actions.includes('sts:AssumeRole')) hasAssume = true;
-          // grantReadWriteData produces dynamodb:GetItem etc. WITHOUT a
-          // leading-key condition; the SessionRole's DDB statements always
-          // carry the condition. A task-role direct grant would be unconditioned.
-          if (
-            actions.includes('dynamodb:GetItem')
-            && !s.Condition
-          ) {
-            // UserConcurrencyTable grant is expected (unconditioned). Only flag
-            // if it references a task-scoped table — heuristic: presence of
-            // BatchWriteItem alongside (task tables granted RW) is not decisive,
-            // so we simply assert assume exists and rely on the explicit
-            // SessionRole conditioned statements tested elsewhere.
-          }
-        }
-      }
-      expect(hasAssume).toBe(true);
-      // Sanity: the conditioned (SessionRole) DDB statements exist.
+          return actions.includes('sts:AssumeRole');
+        }),
+      );
+      expect(taskRolePolicies).toHaveLength(1);
+
+      const taskRoleStatements = taskRolePolicies[0].Properties.PolicyDocument.Statement;
+      // No unconditioned dynamodb item grant on the task role (the only DDB the
+      // task role may touch directly is UserConcurrencyTable — assert that any
+      // DDB statement present is NOT a leading-key-less task-table grant by
+      // checking none grant dynamodb write actions without a condition beyond
+      // the concurrency table). Simplest robust check: the task role carries no
+      // dynamodb:GetItem/Query/BatchWriteItem statement at all for the task
+      // tables — grantReadWriteData on a removed table would have produced one.
+      const ddbItemStatements = taskRoleStatements.filter((s: { Action: string | string[] }) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.some((a: string) =>
+          ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchWriteItem'].includes(a),
+        );
+      });
+      // The only permitted DDB item access on the task role is the
+      // UserConcurrencyTable grant. The two task-scoped tables (TaskTable,
+      // TaskEventsTable) must NOT appear — assert no statement references them.
+      const serialized = JSON.stringify(ddbItemStatements);
+      expect(serialized).not.toContain('TaskTable');
+      expect(serialized).not.toContain('TaskEventsTable');
+
+      // The conditioned (SessionRole) DDB statements still exist — exactly two
+      // task-scoped tables, each leading-key gated.
       let conditioned = 0;
       for (const policy of Object.values(policies)) {
         for (const s of policy.Properties.PolicyDocument.Statement) {
@@ -292,8 +305,7 @@ describe('EcsAgentCluster construct', () => {
           }
         }
       }
-      expect(conditioned).toBe(2); // two task-scoped tables
-      expect(hasTaskTableDdb).toBe(false);
+      expect(conditioned).toBe(2);
     });
   });
 });
