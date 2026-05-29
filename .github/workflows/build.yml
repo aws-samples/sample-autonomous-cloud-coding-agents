@@ -23,18 +23,20 @@ jobs:
     permissions:
       actions: write # upload-artifact when self-mutation is detected
       contents: read
-    # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
-    runs-on: >-
-      ${{
-        vars.DEFAULT_RUNNER_LABEL
-        || (github.event_name == 'pull_request'
-            && contains(github.event.pull_request.labels.*.name, 'self-hosted')
-            && 'self-hosted')
-        || (github.event_name == 'pull_request'
-            && contains(github.event.pull_request.labels.*.name, 'ubuntu-latest-4-cores')
-            && 'ubuntu-latest-4-cores')
-        || 'ubuntu-latest'
-      }}
+    runs-on:
+      - codebuild-github-${{ github.run_id }}-${{ github.run_attempt }}
+    # # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
+    # runs-on: >-
+    #   ${{
+    #     vars.DEFAULT_RUNNER_LABEL
+    #     || (github.event_name == 'pull_request'
+    #         && contains(github.event.pull_request.labels.*.name, 'self-hosted')
+    #         && 'self-hosted')
+    #     || (github.event_name == 'pull_request'
+    #         && contains(github.event.pull_request.labels.*.name, 'ubuntu-latest-4-cores')
+    #         && 'ubuntu-latest-4-cores')
+    #     || 'ubuntu-latest'
+    #   }}
     strategy:
       matrix:
         compute_type: [agentcore]
@@ -50,13 +52,13 @@ jobs:
       # remaining tools that are intentionally skipped here.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
     steps:
-      - name: Free Disk Space
-        shell: bash
-        run: |
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/hostedtoolcache || true
+      # - name: Free Disk Space
+      #   shell: bash
+      #   run: |
+      #     sudo rm -rf \
+      #       /usr/local/lib/android \
+      #       /usr/share/dotnet \
+      #       /opt/hostedtoolcache || true
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
