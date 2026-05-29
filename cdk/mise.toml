@@ -3,6 +3,11 @@ min_version = "2026.2.6"
 [tools]
 node = "22"
 
+# CDK synth and Jest tests write large cdk.out artifacts to TMPDIR.
+# Default /tmp is often tmpfs with limited space; redirect to disk-backed dir.
+[env]
+TMPDIR = "{{config_root}}/.tmp"
+
 [tasks.install]
 description = "Install dependencies from repo root (Yarn workspaces)"
 run = "cd .. && yarn install --check-files"
@@ -18,16 +23,16 @@ run = "yarn eslint"
 [tasks.test]
 description = "Jest tests"
 depends = [":compile"]
-run = "yarn test"
+run = ["mkdir -p .tmp", "yarn test"]
 
 [tasks.synth]
 description = "cdk synth"
-run = "yarn synth"
+run = ["mkdir -p .tmp", "yarn synth"]
 
 [tasks."synth:quiet"]
 description = "cdk synth (quiet)"
 depends = [":compile"]
-run = "yarn synth:quiet"
+run = ["mkdir -p .tmp", "yarn synth:quiet"]
 
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
