@@ -23,7 +23,10 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { EcsAgentCluster } from '../../src/constructs/ecs-agent-cluster';
 
 function createStack(overrides?: { memoryId?: string }): { stack: Stack; template: Template } {
@@ -150,21 +153,25 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
-  test('task role has Bedrock InvokeModel permissions', () => {
-    baseTemplate.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: [
-              'bedrock:InvokeModel',
-              'bedrock:InvokeModelWithResponseStream',
-            ],
-            Effect: 'Allow',
-            Resource: '*',
-          }),
-        ]),
-      },
-    });
+  test('task role Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard)', () => {
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    let bedrockStatement: { Resource: unknown } | undefined;
+    for (const policy of Object.values(policies)) {
+      for (const s of policy.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (actions.includes('bedrock:InvokeModel')) {
+          bedrockStatement = s;
+        }
+      }
+    }
+    expect(bedrockStatement).toBeDefined();
+    // Must NOT be a bare wildcard.
+    expect(bedrockStatement!.Resource).not.toEqual('*');
+    const serialized = JSON.stringify(bedrockStatement!.Resource);
+    expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
+    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
   });
 
   test('container has required environment variables', () => {
@@ -194,6 +201,111 @@ describe('EcsAgentCluster construct', () => {
           ]),
         }),
       ]),
+    });
+  });
+
+  describe('with a SessionRole wired (#209)', () => {
+    function createWithSessionRole(): Template {
+      const app = new App();
+      const stack = new Stack(app, 'EcsSessionStack');
+      const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2 });
+      const agentImageAsset = new ecr_assets.DockerImageAsset(stack, 'AgentImage', {
+        directory: path.join(__dirname, '..', '..', '..', 'agent'),
+      });
+      const mk = (id: string) =>
+        new dynamodb.Table(stack, id, {
+          partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+        });
+      const taskTable = mk('TaskTable');
+      const taskEventsTable = mk('TaskEventsTable');
+      const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      });
+      const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
+      const sessionRole = new AgentSessionRole(stack, 'AgentSessionRole', {
+        assumingRoles: [
+          new iam.Role(stack, 'AgentCoreRole', {
+            assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+          }),
+        ],
+        taskScopedTables: [taskTable, taskEventsTable],
+        traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
+        attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
+      });
+
+      new EcsAgentCluster(stack, 'EcsAgentCluster', {
+        vpc,
+        agentImageAsset,
+        taskTable,
+        taskEventsTable,
+        userConcurrencyTable,
+        githubTokenSecret,
+        agentSessionRole: sessionRole,
+      });
+      return Template.fromStack(stack);
+    }
+
+    test('injects AGENT_SESSION_ROLE_ARN into the container', () => {
+      createWithSessionRole().hasResourceProperties('AWS::ECS::TaskDefinition', {
+        ContainerDefinitions: Match.arrayWith([
+          Match.objectLike({
+            Environment: Match.arrayWith([
+              Match.objectLike({ Name: 'AGENT_SESSION_ROLE_ARN', Value: Match.anyValue() }),
+            ]),
+          }),
+        ]),
+      });
+    });
+
+    test('task role gets sts:AssumeRole on the SessionRole, not direct task-table DDB grants', () => {
+      const template = createWithSessionRole();
+      const policies = template.findResources('AWS::IAM::Policy');
+
+      // Identify the task role's own inline policy: it is the one carrying the
+      // sts:AssumeRole grant (only the compute role receives that), as opposed
+      // to the SessionRole's policy (which carries the conditioned DDB
+      // statements). The task-role policy must NOT contain any unconditioned
+      // task-table DDB grant — that access now lives only on the SessionRole.
+      const taskRolePolicies = Object.values(policies).filter((p) =>
+        p.Properties.PolicyDocument.Statement.some((s: { Action: string | string[] }) => {
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+          return actions.includes('sts:AssumeRole');
+        }),
+      );
+      expect(taskRolePolicies).toHaveLength(1);
+
+      const taskRoleStatements = taskRolePolicies[0].Properties.PolicyDocument.Statement;
+      // No unconditioned dynamodb item grant on the task role (the only DDB the
+      // task role may touch directly is UserConcurrencyTable — assert that any
+      // DDB statement present is NOT a leading-key-less task-table grant by
+      // checking none grant dynamodb write actions without a condition beyond
+      // the concurrency table). Simplest robust check: the task role carries no
+      // dynamodb:GetItem/Query/BatchWriteItem statement at all for the task
+      // tables — grantReadWriteData on a removed table would have produced one.
+      const ddbItemStatements = taskRoleStatements.filter((s: { Action: string | string[] }) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.some((a: string) =>
+          ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchWriteItem'].includes(a),
+        );
+      });
+      // The only permitted DDB item access on the task role is the
+      // UserConcurrencyTable grant. The two task-scoped tables (TaskTable,
+      // TaskEventsTable) must NOT appear — assert no statement references them.
+      const serialized = JSON.stringify(ddbItemStatements);
+      expect(serialized).not.toContain('TaskTable');
+      expect(serialized).not.toContain('TaskEventsTable');
+
+      // The conditioned (SessionRole) DDB statements still exist — exactly two
+      // task-scoped tables, each leading-key gated.
+      let conditioned = 0;
+      for (const policy of Object.values(policies)) {
+        for (const s of policy.Properties.PolicyDocument.Statement) {
+          if (s.Condition?.['ForAllValues:StringEquals']?.['dynamodb:LeadingKeys']) {
+            conditioned += 1;
+          }
+        }
+      }
+      expect(conditioned).toBe(2);
     });
   });
 });

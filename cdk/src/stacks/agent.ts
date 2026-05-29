@@ -32,6 +32,7 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
+import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
@@ -256,6 +257,20 @@ export class AgentStack extends Stack {
       },
     });
 
+    // SessionRole ARN placeholder — the per-task SessionRole (#209) is created
+    // AFTER the Runtime (it lists runtime.role as an assuming principal), but
+    // its ARN must be injected into the runtime's environment so the agent can
+    // assume it. Break the cycle with a Lazy.string, same pattern as above.
+    let sessionRoleArnHolder: string | undefined;
+    const lazySessionRoleArn = Lazy.string({
+      produce: () => {
+        if (!sessionRoleArnHolder) {
+          throw new Error('SessionRole ARN was accessed before AgentSessionRole was created');
+        }
+        return sessionRoleArnHolder;
+      },
+    });
+
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
@@ -297,6 +312,11 @@ export class AgentStack extends Stack {
       // lifecycle configuration below so drift is visible. 8 hours.
       AGENTCORE_MAX_LIFETIME_S: '28800',
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
+      // Per-task SessionRole (#209): the agent assumes this with session tags
+      // {user_id, repo, task_id} and uses the scoped creds for tenant-data
+      // (DDB/S3) access. Resolved lazily — the role lists runtime.role as an
+      // assuming principal, so it is created after the runtime.
+      AGENT_SESSION_ROLE_ARN: lazySessionRoleArn,
       // --trace artifact store (§10.1). The agent writes the JSONL
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
       // terminal state when the submit payload enabled ``trace``.
@@ -360,38 +380,22 @@ export class AgentStack extends Stack {
     ]);
 
     // --- IAM grants ---
-    taskTable.table.grantReadWriteData(runtime);
-    taskEventsTable.table.grantReadWriteData(runtime);
-    taskNudgesTable.table.grantReadWriteData(runtime);
-    // Cedar HITL: the agent writes PENDING rows via TransactWriteItems
-    // (cross-table with TaskTable), reads them with ConsistentRead during
-    // the poll loop, and flips status to TIMED_OUT on deadline. The
-    // grant must be RW because approve/deny Lambdas (Chunk 5) also
-    // need RW; granting twice is idempotent.
-    taskApprovalsTable.table.grantReadWriteData(runtime);
+    // Per-session IAM scoping (#209): tenant-data access (the four
+    // task_id-partitioned tables + the agent's trace/attachment S3 objects)
+    // is NOT granted to the runtime ExecutionRole. Instead the agent assumes a
+    // per-task SessionRole (created below) with session tags
+    // {user_id, repo, task_id}, and that role carries the tenant-data grants
+    // constrained by aws:PrincipalTag conditions. The runtime role keeps only
+    // non-tenant / shared access:
+    //   - UserConcurrencyTable: user-scoped counter (agent path does not write
+    //     it today; left here for the reconciler/orchestrator parity).
+    //   - GitHub PAT secret: read once at startup, before the agent assumes the
+    //     SessionRole.
+    //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
     userConcurrencyTable.table.grantReadWriteData(runtime);
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
-    // Runtime only ever writes trace artifacts (read happens via presigned
-    // URL from the ``get-trace-url`` handler, not the runtime).
-    //
-    // TODO(K2 Stage 2+): tighten to a per-prefix condition so the runtime
-    // cannot write outside its own task's ``traces/<user_id>/`` prefix.
-    // The current grant expands to ``Resource: <bucket>/*`` with no
-    // ``s3:prefix`` / ``aws:PrincipalTag`` condition — per-user isolation
-    // is enforced in *agent code* (object-key construction), which is a
-    // trust boundary, not an enforcement boundary. Options: propagate
-    // ``user_id`` as an IAM session tag on the runtime invocation and
-    // condition the policy on ``aws:PrincipalTag/UserId``; or run the
-    // upload from a short-lived Lambda with a scoped policy instead of
-    // the runtime itself. Deferred because the session-tag plumbing is
-    // orthogonal to landing the feature behavior.
-    traceArtifactsBucket.bucket.grantPut(runtime);
-    // Version-pinned attachment downloads (agent/src/attachments.py uses
-    // GetObject + VersionId). grantRead expands to s3:GetObject* including
-    // GetObjectVersion on the versioned attachments bucket.
-    attachmentsBucket.bucket.grantRead(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -431,6 +435,28 @@ export class AgentStack extends Stack {
     inferenceProfile3.grantInvoke(runtime);
     model2.grantInvoke(runtime);
     inferenceProfile2.grantInvoke(runtime);
+
+    // --- Per-task SessionRole (#209) ---
+    // Holds the tenant-data grants (the four task_id-partitioned tables, plus
+    // per-user-prefixed trace writes and attachment reads), each constrained
+    // by aws:PrincipalTag conditions so a compromised session reaches only its
+    // own task's data. The agent assumes this with refreshable credentials
+    // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
+    // ExecutionRole as the assuming principal; the ECS task role is added in
+    // the ECS block below when that backend is enabled.
+    const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
+      assumingRoles: [runtime.role],
+      taskScopedTables: [
+        taskTable.table,
+        taskEventsTable.table,
+        taskApprovalsTable.table,
+        taskNudgesTable.table,
+      ],
+      traceArtifactsBucket: traceArtifactsBucket.bucket,
+      attachmentsBucket: attachmentsBucket.bucket,
+    });
+    agentSessionRole.grantAssumeToComputeRole(runtime.role);
+    sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
@@ -556,6 +582,11 @@ export class AgentStack extends Stack {
     //   userConcurrencyTable: userConcurrencyTable.table,
     //   githubTokenSecret,
     //   memoryId: agentMemory.memory.memoryId,
+    //   // Per-session IAM scoping (#209): the ECS task role assumes the same
+    //   // SessionRole as the AgentCore runtime for tenant-data access. The
+    //   // construct admits the task role to the trust and injects
+    //   // AGENT_SESSION_ROLE_ARN into the container.
+    //   agentSessionRole,
     // });
 
     // --- Task Orchestrator (durable Lambda function) ---

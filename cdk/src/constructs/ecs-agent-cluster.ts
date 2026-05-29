@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { RemovalPolicy, Stack, ArnFormat } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -27,6 +27,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { AgentSessionRole } from './agent-session-role';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -36,7 +37,30 @@ export interface EcsAgentClusterProps {
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
+
+  /**
+   * Per-task SessionRole (#209). When provided, tenant-data DynamoDB access
+   * (task/events tables) is NOT granted to the Fargate task role; instead the
+   * agent assumes this SessionRole with session tags and the role's
+   * tag-scoped policy governs that access. The task role is admitted to the
+   * SessionRole's trust and `AGENT_SESSION_ROLE_ARN` is injected into the
+   * container. When omitted (e.g. isolated construct tests), the task role
+   * retains the legacy direct grants.
+   */
+  readonly agentSessionRole?: AgentSessionRole;
 }
+
+/**
+ * Bedrock model IDs the agent may invoke (kept in sync with the AgentCore
+ * runtime grants in agent.ts). Used to scope the ECS task role's Bedrock
+ * permissions to explicit foundation-model + inference-profile ARNs instead of
+ * a `Resource: '*'` wildcard.
+ */
+const BEDROCK_MODEL_IDS = [
+  'anthropic.claude-sonnet-4-6',
+  'anthropic.claude-opus-4-20250514-v1:0',
+  'anthropic.claude-haiku-4-5-20251001-v1:0',
+];
 
 export class EcsAgentCluster extends Construct {
   public readonly cluster: ecs.Cluster;
@@ -105,27 +129,64 @@ export class EcsAgentCluster extends Construct {
         LOG_GROUP_NAME: logGroup.logGroupName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
         ...(props.memoryId && { MEMORY_ID: props.memoryId }),
+        // Per-session IAM scoping (#209): when a SessionRole is wired, the
+        // agent assumes it for tenant-data access (see aws_session.py).
+        ...(props.agentSessionRole && {
+          AGENT_SESSION_ROLE_ARN: props.agentSessionRole.role.roleArn,
+        }),
       },
     });
 
     // Task role permissions
     const taskRole = this.taskDefinition.taskRole;
 
-    // DynamoDB read/write on task tables
-    props.taskTable.grantReadWriteData(taskRole);
-    props.taskEventsTable.grantReadWriteData(taskRole);
+    // DynamoDB: when a SessionRole (#209) is wired, tenant-data access lives on
+    // that tag-scoped role and the task role only needs to assume it. Without
+    // one (isolated construct tests / legacy), grant the task role directly.
+    if (props.agentSessionRole) {
+      props.agentSessionRole.addAssumingRole(taskRole);
+      props.agentSessionRole.grantAssumeToComputeRole(taskRole);
+    } else {
+      props.taskTable.grantReadWriteData(taskRole);
+      props.taskEventsTable.grantReadWriteData(taskRole);
+    }
+    // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is
+    // touched by the reconciler/orchestrator path; keep it on the task role.
     props.userConcurrencyTable.grantReadWriteData(taskRole);
 
-    // Secrets Manager read for GitHub token
+    // Secrets Manager read for GitHub token (read once at startup, before the
+    // agent assumes the SessionRole — stays on the task role).
     props.githubTokenSecret.grantRead(taskRole);
 
-    // Bedrock model invocation
+    // Bedrock model invocation — scoped to explicit foundation-model and
+    // cross-region inference-profile ARNs (parity with the AgentCore runtime
+    // grants in agent.ts), replacing the prior Resource: '*' wildcard.
+    const stack = Stack.of(this);
+    const bedrockResources: string[] = [];
+    for (const modelId of BEDROCK_MODEL_IDS) {
+      bedrockResources.push(
+        stack.formatArn({
+          service: 'bedrock',
+          region: '*',
+          account: '',
+          resource: 'foundation-model',
+          resourceName: modelId,
+          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        }),
+        stack.formatArn({
+          service: 'bedrock',
+          resource: 'inference-profile',
+          resourceName: `us.${modelId}`,
+          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        }),
+      );
+    }
     taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'bedrock:InvokeModel',
         'bedrock:InvokeModelWithResponseStream',
       ],
-      resources: ['*'],
+      resources: bedrockResources,
     }));
 
     // CloudWatch Logs write
@@ -138,7 +199,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.taskDefinition, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; Bedrock InvokeModel requires * resource; Secrets Manager wildcards from CDK grantRead; CloudWatch Logs wildcards from CDK grantWrite',
+        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead; CloudWatch Logs wildcards from CDK grantWrite. Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
       },
       {
         id: 'AwsSolutions-ECS2',
