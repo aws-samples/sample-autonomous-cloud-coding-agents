@@ -1,5 +1,5 @@
 ---
-title: 011 conflict resolution
+title: Adr 011 conflict resolution
 ---
 
 # ADR-011: Conflict resolution protocol

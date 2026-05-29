@@ -1,5 +1,5 @@
 ---
-title: 010 error recovery
+title: Adr 010 error recovery
 ---
 
 # ADR-010: Error recovery and rollback protocol

@@ -1,5 +1,5 @@
 ---
-title: 012 operational knowledge stack
+title: Adr 012 operational knowledge stack
 ---
 
 # ADR-012: Operational knowledge as a three-layer stack (Decision → Guide → Skill)
@@ -155,7 +155,7 @@ Organized by persona:
 ```markdown
 # Contributor Workflow
 
-> Operationalizes [ADR-003](/architecture/003-contribution-governance)
+> Operationalizes [ADR-003](/architecture/adr-003-contribution-governance)
 
 ## For Planners
 - Issue quality bar (what makes an issue "ready")
