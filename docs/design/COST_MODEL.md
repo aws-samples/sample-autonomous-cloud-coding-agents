@@ -47,6 +47,22 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 | Custom step Lambdas | $0–0.05 | Only if configured. Per-invocation: ~$0.01 per step. |
 | **Total per task** | **$2–15** | Bedrock tokens dominate (>90% of per-task cost). New interactive features add <$0.01 per task. |
 
+### Optional: deploy-preview screenshots
+
+The screenshot pipeline (see [Deploy preview screenshots guide](../guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md)) is opt-in per repo and deterministic — no LLM, no agent runtime. Only fires when a connected deploy provider posts `deployment_status: success`.
+
+| Component | Estimated cost per screenshot | Notes |
+|---|---|---|
+| AgentCore Browser session | $0.005–0.015 | ~30–60 s of `aws.browser.v1` for navigate + capture. Per-second billing. |
+| Lambda processor | <$0.001 | 512 MB, ~10–20 s wall time per invocation. |
+| S3 PutObject + storage | <$0.001 | One PNG (~200 KB–2 MB), 30-day TTL via lifecycle. |
+| CloudFront request + bytes-out | <$0.001 | First-render fetch from GitHub markdown image proxy + a small number of viewer fetches. |
+| **Total per screenshot** | **~$0.01** | Dominated by AgentCore Browser session time. |
+
+Baseline overhead (CloudFront distribution + S3 bucket idle) is <$1/month and absorbed into the existing infrastructure baseline above. CloudFront has no per-distribution monthly fee; you pay only per-request and per-byte-out.
+
+A high-volume team with ~500 preview deploys per month would add ~$5/month to the per-task variable line, which is rounding error compared to Bedrock token costs.
+
 ### Cost sensitivity analysis
 
 | Factor | Impact on cost | Mitigation |
