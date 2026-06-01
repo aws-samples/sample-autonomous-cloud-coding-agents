@@ -131,9 +131,9 @@ jobs:
         run: |
           sanitize() {
             local result
-            result=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr '/_.' '-' | sed 's/[^a-z0-9-]//g; s/--*/-/g; s/^-//; s/-$//' | cut -c1-60)
+            result=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr '/_.' '-' | sed 's/[^a-z0-9-]//g; s/--*/-/g' | cut -c1-60 | sed 's/^-*//; s/-$//')
             # CloudFormation requires stack names to start with a letter
-            if [[ "$result" =~ ^[0-9] ]]; then
+            if [[ -z "$result" || ! "$result" =~ ^[a-z] ]]; then
               result="s-${result}"
             fi
             echo "$result"
