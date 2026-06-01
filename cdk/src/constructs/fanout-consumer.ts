@@ -107,7 +107,8 @@ export interface FanOutConsumerProps {
 export class FanOutConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
-  public readonly dlqAlarm: cloudwatch.Alarm;
+  /** CloudWatch alarm that fires when the DLQ has at least one poison-pill record. */
+  public readonly dlqAlarm: cloudwatch.IAlarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
     super(scope, id);
@@ -187,7 +188,7 @@ export class FanOutConsumer extends Construct {
       reportBatchItemFailures: true,
     }));
 
-    // §11.5: alarm on DLQ depth so poison-pill records don't silently
+    // #117: alarm on DLQ depth so poison-pill records don't silently
     // accumulate without operator visibility.
     this.dlqAlarm = new cloudwatch.Alarm(this, 'DlqMessageAlarm', {
       metric: this.dlq.metricApproximateNumberOfMessagesVisible({
@@ -199,7 +200,8 @@ export class FanOutConsumer extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       alarmDescription:
         'FanOutConsumer DLQ has at least one message; investigate poison records. ' +
-        'Runbook: TODO — check CloudWatch Logs for the FanOutFn error that caused the DLQ send.',
+        'Check CloudWatch Logs for the FanOutFn error that caused the DLQ send. ' +
+        'See: https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/117',
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 

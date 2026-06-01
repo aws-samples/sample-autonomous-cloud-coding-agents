@@ -85,7 +85,8 @@ export interface ApprovalMetricsPublisherConsumerProps {
 export class ApprovalMetricsPublisherConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
-  public readonly dlqAlarm: cloudwatch.Alarm;
+  /** CloudWatch alarm that fires when the DLQ has at least one poison-pill record. */
+  public readonly dlqAlarm: cloudwatch.IAlarm;
 
   constructor(scope: Construct, id: string, props: ApprovalMetricsPublisherConsumerProps) {
     super(scope, id);
@@ -152,7 +153,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       filters: [agentMilestoneFilter],
     }));
 
-    // §11.5: alarm on DLQ depth so poison-pill records don't silently
+    // #117: alarm on DLQ depth so poison-pill records don't silently
     // accumulate without operator visibility.
     this.dlqAlarm = new cloudwatch.Alarm(this, 'DlqMessageAlarm', {
       metric: this.dlq.metricApproximateNumberOfMessagesVisible({
@@ -164,7 +165,8 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       alarmDescription:
         'ApprovalMetricsPublisher DLQ has at least one message; investigate poison records. ' +
-        'Runbook: TODO — check CloudWatch Logs for the ApprovalMetricsPublisherFn error that caused the DLQ send.',
+        'Check CloudWatch Logs for the ApprovalMetricsPublisherFn error that caused the DLQ send. ' +
+        'See: https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/117',
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 

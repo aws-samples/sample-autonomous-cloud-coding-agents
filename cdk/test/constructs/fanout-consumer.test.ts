@@ -171,7 +171,7 @@ describe('FanOutConsumer', () => {
     }
   });
 
-  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (§11.5)', () => {
+  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (#117)', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     new FanOutConsumer(stack, 'FanOut', {

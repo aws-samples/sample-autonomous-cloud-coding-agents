@@ -190,7 +190,7 @@ describe('ApprovalMetricsPublisherConsumer', () => {
     template.resourceCountIs('AWS::DynamoDB::Table', 1);
   });
 
-  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (§11.5)', () => {
+  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (#117)', () => {
     const { template } = createStack();
 
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
