@@ -60,11 +60,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
     }
 
-    // Codes from `link-user --invite` are case-sensitive (see generateInviteCode
-    // in the CLI; alphabet is mixed-case-friendly but the generator uses lower
-    // only). Don't uppercase — that would break codes generated post-2.0b.
-    // Pre-existing behaviour uppercased; left as-is for compat with any old
-    // uppercase codes still in flight.
+    // Codes from `bgagent linear invite-user` are case-sensitive
+    // (see generateInviteCode in the CLI — `link-<8-char-hex>` shape,
+    // hex is lowercase). Don't uppercase the incoming value — that
+    // would break codes generated post-2.0b.
     const code = body.code.trim();
 
     const pending = await ddb.send(new GetCommand({

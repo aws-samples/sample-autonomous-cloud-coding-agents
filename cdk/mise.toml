@@ -17,6 +17,7 @@ run = "yarn eslint"
 
 [tasks.test]
 description = "Jest tests"
+depends = [":compile"]
 run = "yarn test"
 
 [tasks.synth]
@@ -25,6 +26,7 @@ run = "yarn synth"
 
 [tasks."synth:quiet"]
 description = "cdk synth (quiet)"
+depends = [":compile"]
 run = "yarn synth:quiet"
 
 [tasks.deploy]
@@ -54,5 +56,5 @@ description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at syn
 run = "node -e \"process.exit(0)\""
 
 [tasks.build]
-description = "compile, test, eslint, synth (quiet)"
-depends = [":compile", ":test", ":eslint", ":synth:quiet"]
+description = "compile, test, eslint, synth (quiet) — DAG: compile first, then test+synth+eslint in parallel"
+depends = [":test", ":eslint", ":synth:quiet"]

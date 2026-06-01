@@ -66,9 +66,14 @@ function createStack(overrides?: { memoryId?: string }): { stack: Stack; templat
 }
 
 describe('EcsAgentCluster construct', () => {
+  let baseTemplate: Template;
+
+  beforeAll(() => {
+    baseTemplate = createStack().template;
+  });
+
   test('creates an ECS Cluster with container insights', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::ECS::Cluster', {
+    baseTemplate.hasResourceProperties('AWS::ECS::Cluster', {
       ClusterSettings: Match.arrayWith([
         Match.objectLike({
           Name: 'containerInsights',
@@ -79,8 +84,7 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('creates a Fargate task definition with 2 vCPU and 4 GB', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
       Cpu: '2048',
       Memory: '4096',
       RequiresCompatibilities: ['FARGATE'],
@@ -92,8 +96,7 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('creates a security group with TCP 443 egress only', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::EC2::SecurityGroup', {
+    baseTemplate.hasResourceProperties('AWS::EC2::SecurityGroup', {
       GroupDescription: 'ECS Agent Tasks - egress TCP 443 only',
       SecurityGroupEgress: Match.arrayWith([
         Match.objectLike({
@@ -107,20 +110,17 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('creates a CloudWatch log group with 3-month retention and CDK-generated name', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::Logs::LogGroup', {
+    baseTemplate.hasResourceProperties('AWS::Logs::LogGroup', {
       RetentionInDays: 90,
     });
-    // Verify no hardcoded log group name — CDK auto-generates a unique name
-    const logGroups = template.findResources('AWS::Logs::LogGroup');
+    const logGroups = baseTemplate.findResources('AWS::Logs::LogGroup');
     for (const [, lg] of Object.entries(logGroups)) {
       expect((lg as any).Properties).not.toHaveProperty('LogGroupName');
     }
   });
 
   test('task role has DynamoDB read/write permissions', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    baseTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -136,8 +136,7 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('task role has Secrets Manager read permission', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    baseTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -152,8 +151,7 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('task role has Bedrock InvokeModel permissions', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    baseTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -170,8 +168,7 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('container has required environment variables', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
           Name: 'AgentContainer',

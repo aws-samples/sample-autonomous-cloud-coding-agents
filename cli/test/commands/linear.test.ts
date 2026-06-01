@@ -21,6 +21,8 @@ import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
   findReusableOauthAppCredentials,
+  generateInviteCode,
+  INVITE_CODE_ALPHABET,
   isWebhookSecretConfigured,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
@@ -290,36 +292,83 @@ describe('findReusableOauthAppCredentials', () => {
     });
   });
 
-  test('returns null when the secret is missing client_id/client_secret', async () => {
-    // Phase 2.0a (parked) secrets only stored access_token + refresh_token —
-    // a half-migrated install would hit this path. Returning null forces the
-    // operator to pass --client-id explicitly rather than silently using
-    // empty strings.
-    ddbSend.mockResolvedValueOnce({
-      Items: [{ workspace_slug: 'old', oauth_secret_arn: 'arn:secret:old', status: 'active' }],
-    });
-    smSend.mockResolvedValueOnce({
-      SecretString: JSON.stringify({ access_token: 'a', refresh_token: 'r' }),
-    });
-    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
-    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
-  });
-
-  test('returns null on corrupted SecretString JSON', async () => {
+  test('throws CliError on corrupted SecretString JSON (distinct from "no active workspace")', async () => {
+    // Reviewer flagged: a corrupt secret value used to fall through as
+    // null and surface the same message as "no active workspace, run
+    // setup", nudging the operator toward a duplicate install. The
+    // distinct error tells them which workspace's secret needs repair.
     ddbSend.mockResolvedValueOnce({
       Items: [{ workspace_slug: 's', oauth_secret_arn: 'arn:s', status: 'active' }],
     });
     smSend.mockResolvedValueOnce({ SecretString: '{not valid json' });
     const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
-    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
+    await expect(
+      findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry'),
+    ).rejects.toThrow(/not valid JSON/);
   });
 
-  test('returns null when SecretString is missing', async () => {
+  test('throws CliError when SecretString is missing on a registered workspace', async () => {
+    // Same rationale as above: a registered workspace whose SM secret
+    // has no value is a broken state, not an absence of installs.
     ddbSend.mockResolvedValueOnce({
       Items: [{ workspace_slug: 's', oauth_secret_arn: 'arn:s', status: 'active' }],
     });
     smSend.mockResolvedValueOnce({});
     const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
-    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
+    await expect(
+      findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry'),
+    ).rejects.toThrow(/has no value/);
+  });
+
+  test('throws CliError when stored OAuth bundle is missing client_id/client_secret', async () => {
+    // The third "broken state" branch covered before by null-return.
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 's', oauth_secret_arn: 'arn:s', status: 'active' }],
+    });
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify({ access_token: 'a', refresh_token: 'r' }),
+    });
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    await expect(
+      findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry'),
+    ).rejects.toThrow(/client_id or client_secret/);
+  });
+});
+
+describe('generateInviteCode', () => {
+  // The invite code is the security boundary between admin and teammate
+  // in the link handshake — admin shares it, teammate redeems it. The
+  // properties we care about: prefix, length, ambiguous-glyph
+  // exclusion, and that the consumer-side regex (`linear-link.ts`)
+  // accepts what we produce.
+  test('emits "link-" prefix followed by exactly 8 alphabet characters', () => {
+    const code = generateInviteCode();
+    expect(code).toMatch(/^link-[a-z0-9]{8}$/);
+    expect(code).toHaveLength(13);
+  });
+
+  test('only uses characters from the unambiguous alphabet', () => {
+    // The alphabet excludes 0, O, 1, l, I to make codes safe to
+    // copy-paste across fonts. A regression that pulls a forbidden
+    // character in (e.g. broken Math.random or alphabet typo) would
+    // get caught here statistically over 200 runs.
+    for (let i = 0; i < 200; i++) {
+      const code = generateInviteCode();
+      const chars = code.slice('link-'.length);
+      for (const c of chars) {
+        expect(INVITE_CODE_ALPHABET).toContain(c);
+      }
+    }
+  });
+
+  test('produces distinct codes across many runs (no static seed)', () => {
+    // Not a true uniqueness proof, but a single duplicate in 200 runs
+    // would mean roughly 8-bit-of-entropy generation rather than the
+    // expected ~40-bit (8 chars from a 31-char alphabet).
+    const seen = new Set<string>();
+    for (let i = 0; i < 200; i++) {
+      seen.add(generateInviteCode());
+    }
+    expect(seen.size).toBe(200);
   });
 });

@@ -367,7 +367,11 @@ export class LinearIntegration extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'Wildcard permissions are scoped by DynamoDB index ARN patterns',
+          reason:
+            'Wildcards cover (a) DynamoDB index ARN patterns from CDK grant helpers, '
+            + 'and (b) the Secrets Manager `bgagent-linear-oauth-*` prefix grant — '
+            + 'the per-workspace OAuth secret name is not known at synth time '
+            + '(operators add workspaces by slug at runtime via `bgagent linear add-workspace`).',
         },
       ], true);
     }

@@ -36,6 +36,12 @@ export interface UserConcurrencyTableProps {
    * @default RemovalPolicy.DESTROY
    */
   readonly removalPolicy?: RemovalPolicy;
+
+  /**
+   * Whether to enable point-in-time recovery.
+   * @default true
+   */
+  readonly pointInTimeRecovery?: boolean;
 }
 
 /**
@@ -44,9 +50,6 @@ export interface UserConcurrencyTableProps {
  * Schema: user_id (PK). Each item holds an atomic counter (active_count)
  * representing the number of currently running tasks for the user.
  * The application layer uses conditional updates for increment/decrement.
- *
- * No point-in-time recovery: this is transient counter data that can be
- * reconstructed from the Tasks table by a reconciliation process.
  */
 export class UserConcurrencyTable extends Construct {
   /**
@@ -64,6 +67,9 @@ export class UserConcurrencyTable extends Construct {
         type: dynamodb.AttributeType.STRING,
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
+      },
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
   }
