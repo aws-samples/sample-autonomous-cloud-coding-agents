@@ -11,7 +11,7 @@ What's shipped and what's coming next.
 - [x] **Durable orchestrator** - Lambda Durable Functions with checkpoint/resume; survives transient failures up to 9 hours
 - [x] **Task state machine** - SUBMITTED → HYDRATING → RUNNING → AWAITING_APPROVAL (Cedar HITL) → FINALIZING → COMPLETED / FAILED / CANCELLED / TIMED_OUT
 - [x] **Concurrency control** - Per-user limits (default 3) with atomic admission and automated drift reconciliation
-- [x] **Stranded task reconciler** - Scheduled Lambda detects tasks stuck in non-terminal states and drives them to failure with proper cleanup
+- [x] **Stranded task reconciler** - Scheduled Lambda detects tasks stuck in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` and drives them to failure with proper cleanup
 - [x] **Idempotency** - `Idempotency-Key` header on POST requests (24-hour TTL)
 
 ### Task types
@@ -22,9 +22,9 @@ What's shipped and what's coming next.
 
 ### Onboarding and customization
 
-- [x] **Blueprint construct** - Per-repo CDK configuration (model, turns, budget, prompt overrides, egress, GitHub token)
+- [x] **Blueprint construct** - Per-repo CDK configuration (model, max turns, prompt overrides, egress allowlist, GitHub token, Cedar policies, approval gate cap)
 - [x] **Repo-level project config** - Agent loads `CLAUDE.md`, `.claude/rules/`, `.claude/settings.json`, `.mcp.json`
-- [x] **Per-repo overrides** - Model ID, max turns, max budget, system prompt overrides, poll interval, dedicated token
+- [x] **Per-repo overrides** - Model ID, max turns, max budget (per-task request and/or `RepoTable`; Blueprint CDK default pending), system prompt overrides, poll interval, dedicated token
 
 ### Security
 
@@ -33,9 +33,10 @@ What's shipped and what's coming next.
 - [x] **Input guardrails** - Bedrock Guardrails screen task descriptions and PR/issue content (fail-closed)
 - [x] **Output screening** - Regex-based secret/PII scanner with PostToolUse hook redaction
 - [x] **Content sanitization** - HTML stripping, injection pattern neutralization, control character removal
-- [x] **Cedar policy engine and HITL gates** - Tool-call governance (allow / hard-deny / soft-deny requiring approval) with fail-closed default, per-repo Cedar policies, `AWAITING_APPROVAL` state, `bgagent approve` / `deny` / `pending` / `policies`, and REST approval APIs. See [CEDAR_HITL_GATES.md](../design/CEDAR_HITL_GATES.md)
+- [x] **Cedar policy engine and HITL gates** - Tool-call governance (allow / hard-deny / soft-deny requiring approval) with fail-closed default, per-repo Cedar policies, submit-time `initial_approvals`, `AWAITING_APPROVAL` state, `bgagent approve` / `deny` / `pending` / `policies`, and REST approval APIs. Stranded approvals in `AWAITING_APPROVAL` are cleared by the stranded-task reconciler. See [CEDAR_HITL_GATES.md](../design/CEDAR_HITL_GATES.md)
 - [x] **WAF** - Managed rule groups + rate-based rule (1,000 req/5 min/IP)
 - [x] **Pre-flight checks** - GitHub API reachability, repo access, token permissions (fail-closed)
+- [x] **Per-session IAM scoping** - Agent assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}` and refreshable credentials (1-hour role-chaining cap; tasks up to 8 h). Tenant-data DynamoDB access uses `dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id}`; S3 traces/attachments use a `${aws:PrincipalTag/user_id}` prefix. Bedrock model invocation still uses the compute role (see **Bedrock IAM session-tag attribution** under What's next). See [SECURITY.md](../design/SECURITY.md)
 - [x] **Model invocation logging** - Full prompt/response audit trail (90-day retention)
 
 ### Memory and learning
@@ -116,7 +117,6 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| ~~**Per-session IAM scoping**~~ | **Implemented.** Each task's agent assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags (`user_id`, `repo`, `task_id`) using a refreshable provider (1-hour role-chaining cap; tasks run to 8 h). Tenant-data access is moved off the long-lived compute role: DynamoDB item access on the four `task_id`-partitioned tables is gated by a `dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id}` condition (the enforceable boundary — leading-keys binds to the base-table partition key, not a GSI), and S3 trace/attachment access is scoped to a `${aws:PrincipalTag/user_id}` prefix. Bedrock invocation is ARN-scoped on both the AgentCore runtime and the ECS task role. Backend-agnostic. Eliminates cross-task blast radius from a compromised agent session. See [SECURITY.md](../design/SECURITY.md). |
 | **Per-repo GitHub credentials** | GitHub App per org/repo via AgentCore Token Vault. Auto-refresh for long sessions. Sets the pattern for GitLab, Jira, Slack integrations. |
 | **Principal-to-repo authorization** | Map Cognito identities to allowed repository sets. Users can only trigger work on authorized repos. |
 | **End-to-end task attribution** | Propagate `task_id`, `user_id`, and trace context consistently across orchestrator logs, agent OpenTelemetry, GitHub/API calls, and `TaskEvents` so every downstream action is attributable in incident response (aligns with Zero Trust agent-identity guidance). |
@@ -180,7 +180,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **Additional git providers** | GitLab (and optionally Bitbucket). Same workflow, provider-specific API adapters. |
 | **Slack notification polish** | Rich Block Kit for `agent_milestone` and `approval_requested` (today many map to generic fallback text); in-thread approve/deny buttons wired to HITL APIs. Should render **Smart progress updates** when that ships. |
 | **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. Task detail should show manager-style progress alongside raw events/traces. |
-| **Email notification dispatcher** | SES-based email notifications via the existing fanout pipeline. Stub exists today (logs only). |
+| **Email notification dispatcher** | SES-based email notifications via the existing fanout pipeline. Log-only stub ships today (see unchecked **Email dispatcher** under What's ready). |
 | **Per-user notification preferences** | DynamoDB (or equivalent) store for preferred channels, per-channel config, and event filters (`INPUT_GATEWAY.md`). |
 | **Browser extension channel** | Lightweight extension to open tasks from GitHub issue/PR pages using existing webhook or OAuth-issued JWT; same internal message contract as other channels. |
 
@@ -188,8 +188,8 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Adaptive model router** | Per-turn model selection by complexity. Cheaper models for reads, Opus for complex reasoning. ~30-40% cost reduction. |
-| **Alternative compute** | ECS/Fargate or EKS via ComputeStrategy interface. For workloads exceeding AgentCore's 2 GB image limit or requiring GPU. |
+| **Adaptive model router** | Per-turn model selection by complexity. Cheaper models for reads, Opus for complex reasoning. ~30-40% cost reduction. Related: **Complexity-aware model router** under Cost governance. |
+| **Alternative compute** | ECS/Fargate or EKS via `ComputeStrategy` (`EcsComputeStrategy` exists; Agent stack wiring is commented out). For workloads exceeding AgentCore's 2 GB image limit or requiring GPU. |
 | **Environment pre-warming** | Pre-build container layers per repo. Snapshot-on-schedule (rebuild on push). Cold start from minutes to seconds. |
 | **S3-backed SDK session store (portable transcripts)** | Plumb the Claude Agent SDK `SessionStore` to S3 (dedicated bucket or prefix) with eager flush, IAM-scoped access, conditional part creates, checksums, adaptive retries, and structured logging. Emit metrics or alarms on transcript mirror failures; own graceful shutdown (`disconnect` on SIGTERM/cancel) so in-flight frames can flush. Persist `task_id` ↔ Claude session UUID (from the first `ResultMessage`) for resume on another worker; keep agent `cwd` stable so SDK-derived `project_key` paths stay predictable. Plan compaction when part count threatens resume latency; optional S3 Express One Zone when the fleet is single-AZ. Complements checked **Persistent session storage** (FUSE caches on `/mnt/workspace`) and end-of-task **trace** upload to `traces/...jsonl.gz`. |
 
@@ -210,12 +210,12 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Bedrock IAM session-tag attribution** | Route Bedrock inference through assumed credentials carrying `{user_id, repo, task_id}` session tags (extend the SessionRole / `aws_session.py` pattern from #209/#211). Enables native Cost Explorer and CUR 2.0 chargeback by user and repo. Operator must activate IAM principal cost allocation tags (see [Cost attribution guide](/getting-started/cost-attribution)). |
+| **Bedrock IAM session-tag attribution** | Route Bedrock **InvokeModel** through assumed credentials that carry `{user_id, repo, task_id}` session tags. **Per-session IAM scoping** (#209) already tags the SessionRole for DynamoDB/S3; model calls still use the AgentCore/ECS compute role today. Extend `aws_session.py` (or equivalent) so inference is chargeable in Cost Explorer / CUR 2.0 by principal tag. Operator must activate IAM principal cost allocation tags (see [COST_MODEL.md](../design/COST_MODEL.md#cost-attribution)). |
 | **Bedrock per-request metadata** | Pass `task_id`, `user_id`, and `repo` on each Bedrock call via request metadata / `X-Amzn-Bedrock-Request-Metadata` into model invocation logs. Complements IAM attribution; does not replace in-app `cost_usd`. Requires Claude Code / SDK support for metadata on InvokeModel. |
-| **Cost dashboard and export API** | Log Insights widgets on invocation logs; optional API or export for monthly spend roll-ups by `user_id` / `repo` from the task table. |
+| **Cost dashboard and export API** | Log Insights widgets on invocation logs; optional API or export for monthly spend roll-ups by `user_id` / `repo` from the task table. Operator dashboard today covers task-level cost aggregates, not Bedrock chargeback dimensions. |
 | **Optional tagged application inference profiles** | CDK-managed Bedrock application inference profiles per onboarded repo or environment; set `ANTHROPIC_MODEL` to tagged profile ARN for `resourceTags/*` billing when repo count is bounded. |
-| **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. |
-| **Complexity-aware model router** | Route each request to the most appropriate model based on task complexity (simple reads/edits to cheaper models, deeper reasoning to stronger models) while honoring budget and policy constraints. |
+| **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. Per-task `max_budget_usd` and turn caps ship today. |
+| **Complexity-aware model router** | Route each request to the most appropriate model based on task complexity (simple reads/edits to cheaper models, deeper reasoning to stronger models) while honoring budget and policy constraints. Related: **Adaptive model router** under Compute and performance. |
 
 ### Observability and safe deploy
 
