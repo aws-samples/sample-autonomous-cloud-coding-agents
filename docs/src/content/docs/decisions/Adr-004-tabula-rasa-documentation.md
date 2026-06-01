@@ -1,5 +1,5 @@
 ---
-title: 004 tabula rasa documentation
+title: Adr 004 tabula rasa documentation
 ---
 
 # ADR-004: Tabula rasa documentation standard

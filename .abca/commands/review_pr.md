@@ -20,7 +20,7 @@ the control plane reliable, bounded, and improvable.
 1. Read the PR title and description carefully — does it explain *why*, not just *what*?
 2. Identify and read linked issues with `gh issue view <n>`. Confirm the issue carries the
    `approved` label and that the work matches the stated acceptance criteria (see
-   [ADR-003 contribution governance](../../docs/decisions/003-contribution-governance.md)).
+   [ADR-003 contribution governance](../../docs/decisions/ADR-003-contribution-governance.md)).
 3. Confirm the branch name follows `(feat|fix|chore|docs)/<issue-number>-short-description`.
    A branch without an issue reference is unauthorized work — flag it.
 4. Review the commit history (`gh pr view <n> --json commits` / `git log`) to understand the
