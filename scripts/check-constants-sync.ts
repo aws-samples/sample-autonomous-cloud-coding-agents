@@ -108,6 +108,21 @@ function main(): number {
     return 1;
   }
 
+  // Semantic invariants (belt-and-suspenders — agent also validates at import time)
+  const invariantErrors: string[] = [];
+  if (agc.min <= 0) invariantErrors.push('approval_gate_cap.min must be > 0');
+  if (agc.default < agc.min) invariantErrors.push('approval_gate_cap.default must be >= min');
+  if (agc.max < agc.default) invariantErrors.push('approval_gate_cap.max must be >= default');
+  if (ats.min <= 0) invariantErrors.push('approval_timeout_s.min must be > 0');
+  if (ats.default < ats.min) invariantErrors.push('approval_timeout_s.default must be >= min');
+  if (ats.max < ats.default) invariantErrors.push('approval_timeout_s.max must be >= default');
+
+  if (invariantErrors.length > 0) {
+    console.error(`Semantic invariant violations in ${CONSTANTS_JSON}:\n`);
+    for (const e of invariantErrors) console.error(`  - ${e}`);
+    return 1;
+  }
+
   const drifts = findDriftInPython(POLICY_PY);
 
   if (drifts.length > 0) {
