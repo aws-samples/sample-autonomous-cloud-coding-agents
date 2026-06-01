@@ -44,11 +44,14 @@ const stack = new AgentStack(
 
 const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
 
-// CfnResolverQueryLoggingConfig treats ALL property changes (including tags) as
-// requiring replacement. Replacement cascades to the per-VPC association, which
-// fails because Route53 Resolver enforces a one-association-per-VPC constraint
-// and CF's Create-before-Delete ordering can't satisfy it.
-const excludeResourceTypes = ['AWS::Route53Resolver::ResolverQueryLoggingConfig'];
+// Route53 Resolver resources where tag changes trigger replacement cascades.
+// Config: treats ANY property change (including tags) as requiring replacement.
+// Association: depends on Config's physical ID; if Config is replaced, the
+// Association update fails on the one-association-per-VPC constraint.
+const excludeResourceTypes = [
+  'AWS::Route53Resolver::ResolverQueryLoggingConfig',
+  'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation',
+];
 
 Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
