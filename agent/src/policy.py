@@ -110,6 +110,43 @@ APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
 _ATS = _SHARED_CONSTANTS["approval_timeout_s"]
 FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this at load
 DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
+
+
+def _validate_constants() -> None:
+    """Fail-fast on invariant violations in contracts/constants.json."""
+    if FLOOR_TIMEOUT_S <= 0:
+        raise ValueError(
+            f"contracts/constants.json: approval_timeout_s.min must be > 0, got {FLOOR_TIMEOUT_S}"
+        )
+    if DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
+        raise ValueError(
+            f"contracts/constants.json: approval_timeout_s.default ({DEFAULT_TASK_TIMEOUT_S}) "
+            f"must be >= min ({FLOOR_TIMEOUT_S})"
+        )
+    ats_max = int(_ATS["max"])
+    if ats_max < DEFAULT_TASK_TIMEOUT_S:
+        raise ValueError(
+            f"contracts/constants.json: approval_timeout_s.max ({ats_max}) "
+            f"must be >= default ({DEFAULT_TASK_TIMEOUT_S})"
+        )
+    if APPROVAL_GATE_CAP_MIN <= 0:
+        raise ValueError(
+            f"contracts/constants.json: approval_gate_cap.min must be > 0, "
+            f"got {APPROVAL_GATE_CAP_MIN}"
+        )
+    if DEFAULT_APPROVAL_GATE_CAP < APPROVAL_GATE_CAP_MIN:
+        raise ValueError(
+            f"contracts/constants.json: approval_gate_cap.default ({DEFAULT_APPROVAL_GATE_CAP}) "
+            f"must be >= min ({APPROVAL_GATE_CAP_MIN})"
+        )
+    if APPROVAL_GATE_CAP_MAX < DEFAULT_APPROVAL_GATE_CAP:
+        raise ValueError(
+            f"contracts/constants.json: approval_gate_cap.max ({APPROVAL_GATE_CAP_MAX}) "
+            f"must be >= default ({DEFAULT_APPROVAL_GATE_CAP})"
+        )
+
+
+_validate_constants()
 CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
 CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
 POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB
