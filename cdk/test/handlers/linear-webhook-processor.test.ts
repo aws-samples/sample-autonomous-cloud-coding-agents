@@ -75,8 +75,17 @@ describe('linear-webhook-processor handler', () => {
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
     resolveLinearOauthTokenMock.mockReset();
-    // Default: workspace not in registry. Tests that need a token override.
-    resolveLinearOauthTokenMock.mockResolvedValue(null);
+    // Default: workspace IS resolvable (active registry row + valid
+    // OAuth bundle). The processor early-returns when this resolves to
+    // null — see "Linear workspace not resolvable from registry —
+    // dropping event" in linear-webhook-processor.ts. Tests asserting
+    // that drop-path override per-test with `.mockResolvedValueOnce(null)`.
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'lin_at',
+      scope: 'read write',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+    });
   });
 
   test('skips missing raw_body', async () => {
