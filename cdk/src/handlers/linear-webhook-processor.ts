@@ -248,19 +248,27 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 
   // Phase 2.0b-O2: resolve the workspace's OAuth secret ARN ONCE here
   // and stash it on the task record. The agent runtime reads it directly
-  // (no registry lookup at task-execution time). If the workspace isn't
-  // onboarded the agent's outbound Linear MCP simply skips.
+  // (no registry lookup at task-execution time).
+  //
+  // When the registry table IS configured but resolution returns null —
+  // workspace not in registry, status not active, or token unreadable —
+  // the receiver only let this through because the stack-wide fallback
+  // verified. Creating a task against a workspace ABCA doesn't recognize
+  // is the wrong behaviour: outbound Linear comments would silently
+  // skip, the user mapping lookup would fail, and we'd burn agent
+  // quota for no observable result. Drop the event explicitly here
+  // rather than rely on downstream lookups to incidentally block it.
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
-    if (resolved) {
-      channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
-      channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
-    } else {
-      logger.warn('Linear workspace not in registry — agent will run without Linear MCP', {
+    if (!resolved) {
+      logger.warn('Linear workspace not resolvable from registry — dropping event', {
         linear_workspace_id: workspaceId,
         issue_id: issue.id,
       });
+      return;
     }
+    channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
+    channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
   }
 
   // Extract embedded image URLs from the issue description markdown.

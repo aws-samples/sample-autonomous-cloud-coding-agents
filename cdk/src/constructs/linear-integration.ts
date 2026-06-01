@@ -183,6 +183,12 @@ export class LinearIntegration extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(30),
+      // Default 128 MB OOMs at module init since the attachment-screening
+      // path (#176) bundles pdf-parse + URL-resolver libs alongside the
+      // existing AWS SDK + bedrock-agentcore deps. 512 MB gives ~4× headroom
+      // and lifts CPU enough that p99 startup stays under the API Gateway
+      // 30s deadline on cold starts.
+      memorySize: 512,
       environment: {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
@@ -245,11 +251,32 @@ export class LinearIntegration extends Construct {
         LINEAR_WEBHOOK_SECRET_ARN: this.webhookSecret.secretArn,
         LINEAR_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME: webhookProcessorFn.functionName,
+        // Per-workspace signing-secret lookup — selects the right
+        // workspace's `webhook_signing_secret` from the OAuth secret
+        // bundle so multi-workspace installs verify correctly. Receiver
+        // falls back to LINEAR_WEBHOOK_SECRET_ARN when this lookup
+        // misses (back-compat for single-workspace installs).
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
       bundling: commonBundling,
     });
     this.webhookSecret.grantRead(webhookFn);
     this.webhookDedupTable.grantReadWriteData(webhookFn);
+    this.workspaceRegistryTable.grantReadData(webhookFn);
+    // Read-only on the per-workspace OAuth secret prefix — we extract
+    // `webhook_signing_secret` for verification but never mutate; the
+    // CLI owns the lifecycle of these secrets.
+    webhookFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
     // --- Account linking (Cognito-authenticated) ---
@@ -319,7 +346,11 @@ export class LinearIntegration extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'Wildcard permissions are scoped by DynamoDB index ARN patterns',
+          reason:
+            'Wildcards cover (a) DynamoDB index ARN patterns from CDK grant helpers, '
+            + 'and (b) the Secrets Manager `bgagent-linear-oauth-*` prefix grant — '
+            + 'the per-workspace OAuth secret name is not known at synth time '
+            + '(operators add workspaces by slug at runtime via `bgagent linear add-workspace`).',
         },
       ], true);
     }

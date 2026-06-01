@@ -32,14 +32,19 @@ const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 
 interface LinkRequest {
   readonly code: string;
+  /** Preview-only: return what would be linked without writing. */
+  readonly dry_run?: boolean;
 }
 
 /**
- * POST /v1/linear/link — Complete Linear account linking.
+ * POST /v1/linear/link — Complete Linear account linking, or preview it.
  *
  * Called from the CLI (`bgagent linear link <code>`) with a Cognito JWT.
- * Looks up the pending link record, maps the Linear identity to the
- * authenticated platform user, and cleans up the pending record.
+ * Looks up the pending link record. With `dry_run: true`, returns the
+ * Linear identity attached to the code without writing — the CLI uses
+ * this to render a "you're about to link X (email: Y)" preview before
+ * the teammate confirms. Without `dry_run`, writes the mapping and
+ * deletes the pending record.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
@@ -55,7 +60,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
     }
 
-    const code = body.code.trim().toUpperCase();
+    // Codes from `bgagent linear invite-user` are case-sensitive
+    // (see generateInviteCode in the CLI — `link-<8-char-hex>` shape,
+    // hex is lowercase). Don't uppercase the incoming value — that
+    // would break codes generated post-2.0b.
+    const code = body.code.trim();
 
     const pending = await ddb.send(new GetCommand({
       TableName: USER_MAPPING_TABLE,
@@ -67,7 +76,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const workspaceId = pending.Item.linear_workspace_id as string;
+    const workspaceSlug = (pending.Item.linear_workspace_slug as string | undefined) ?? '';
     const linearUserId = pending.Item.linear_user_id as string;
+    const linearUserName = (pending.Item.linear_user_name as string | undefined) ?? '';
+    const linearUserEmail = (pending.Item.linear_user_email as string | undefined) ?? '';
+
+    // Dry-run preview: return identity without writing.
+    if (body.dry_run === true) {
+      return successResponse(200, {
+        dry_run: true,
+        linear_workspace_id: workspaceId,
+        linear_workspace_slug: workspaceSlug,
+        linear_user_id: linearUserId,
+        linear_user_name: linearUserName,
+        linear_user_email: linearUserEmail,
+      }, requestId);
+    }
+
     const now = new Date().toISOString();
 
     await ddb.send(new PutCommand({
@@ -97,7 +122,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return successResponse(200, {
       message: 'Linear account linked successfully.',
       linear_workspace_id: workspaceId,
+      linear_workspace_slug: workspaceSlug,
       linear_user_id: linearUserId,
+      linear_user_name: linearUserName,
+      linear_user_email: linearUserEmail,
       linked_at: now,
     }, requestId);
   } catch (err) {

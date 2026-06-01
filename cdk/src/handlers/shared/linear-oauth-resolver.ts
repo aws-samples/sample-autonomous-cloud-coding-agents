@@ -59,7 +59,7 @@ const REFRESH_THRESHOLD_SECONDS = 60;
  *  row blocks resolution rather than silently granting access. */
 type RegistryRowStatus = 'active' | 'revoked';
 
-interface RegistryRow {
+export interface RegistryRow {
   readonly linear_workspace_id: string;
   readonly workspace_slug: string;
   readonly oauth_secret_arn: string;
@@ -80,6 +80,17 @@ export interface StoredOauthToken {
   readonly installed_at: string;
   readonly updated_at: string;
   readonly installed_by_platform_user_id: string;
+  /** Per-workspace Linear webhook signing secret (`lin_wh_…`).
+   *
+   *  Linear generates a fresh signing secret per webhook subscription, and
+   *  webhook subscriptions are workspace-scoped — so a single stack-wide
+   *  signing secret can't verify events from multiple workspaces. The
+   *  webhook receiver looks this up by orgId at verify time.
+   *
+   *  Optional for back-compat: tokens written before the per-workspace
+   *  signing flow won't have it, and the receiver falls back to the
+   *  stack-wide `LINEAR_WEBHOOK_SECRET_ARN` for those installs. */
+  readonly webhook_signing_secret?: string;
 }
 
 export interface ResolverOptions {
@@ -198,7 +209,38 @@ export async function resolveLinearOauthToken(
   };
 }
 
-async function getRegistryRow(
+/**
+ * Strict variant of {@link getRegistryRow}: throws on infra error
+ * (DDB throttle, network) instead of returning null. Use this from the
+ * webhook signature-verification path where a `null` return would let
+ * a transient throttle silently downgrade per-workspace verification
+ * to the stack-wide fallback secret.
+ *
+ * The lenient `null`-on-error variant is kept for `resolveLinearOauthToken`,
+ * whose graceful no-op contract is intentional (an MCP token lookup
+ * failing should let the agent run without Linear, not blow up the
+ * task). Mixing the two contracts in one function silently fails open;
+ * splitting them keeps each call site honest.
+ */
+export async function getRegistryRowStrict(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+): Promise<RegistryRow | null> {
+  const cached = registryCache.get(linearWorkspaceId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  // No try/catch — caller (verifyLinearRequestForWorkspace) wants the
+  // error to bubble so the receiver returns 500 and Linear retries,
+  // rather than silently falling back to the stack-wide secret.
+  const result = await ddb.send(new GetCommand({
+    TableName: tableName,
+    Key: { linear_workspace_id: linearWorkspaceId },
+  }));
+  return parseRegistryRow(result.Item, linearWorkspaceId);
+}
+
+export async function getRegistryRow(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   linearWorkspaceId: string,
@@ -227,7 +269,16 @@ async function getRegistryRow(
     return null;
   }
 
-  const item = result.Item as Partial<RegistryRow> | undefined;
+  return parseRegistryRow(result.Item, linearWorkspaceId);
+}
+
+/**
+ * Shared parser for raw DDB items into a {@link RegistryRow}, used by
+ * both {@link getRegistryRow} (lenient) and {@link getRegistryRowStrict}
+ * (throws on infra). Caches on success.
+ */
+function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): RegistryRow | null {
+  const item = rawItem as Partial<RegistryRow> | undefined;
   if (!item || !item.oauth_secret_arn || !item.workspace_slug) return null;
 
   // Fail-closed on the status field: missing or unknown values are
@@ -280,25 +331,14 @@ const STORED_OAUTH_TOKEN_REQUIRED_FIELDS: ReadonlyArray<keyof StoredOauthToken> 
   'installed_by_platform_user_id',
 ];
 
-async function getOauthSecret(
+export async function getOauthSecret(
   sm: SecretsManagerClient,
   secretArn: string,
 ): Promise<StoredOauthToken | null> {
   try {
     const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
     if (!res.SecretString) return null;
-    const parsed = JSON.parse(res.SecretString) as StoredOauthToken;
-    const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
-      (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
-    );
-    if (missing.length > 0) {
-      logger.error('Linear OAuth secret JSON is missing required fields', {
-        secret_arn: secretArn,
-        missing_fields: missing,
-      });
-      return null;
-    }
-    return parsed;
+    return parseOauthSecret(res.SecretString, secretArn);
   } catch (err) {
     logger.error('Failed to fetch Linear OAuth secret', {
       secret_arn: secretArn,
@@ -306,6 +346,50 @@ async function getOauthSecret(
     });
     return null;
   }
+}
+
+/**
+ * Strict variant of {@link getOauthSecret}: throws on Secrets Manager
+ * error (network, IAM) instead of returning null. Use this from the
+ * webhook signature-verification path where a `null` return would let
+ * a transient SM error silently downgrade per-workspace verification
+ * to the stack-wide fallback secret. Only returns null for a row that
+ * exists but has no string value or fails JSON-shape validation.
+ */
+export async function getOauthSecretStrict(
+  sm: SecretsManagerClient,
+  secretArn: string,
+): Promise<StoredOauthToken | null> {
+  // No outer try/catch — caller (verifyLinearRequestForWorkspace) wants
+  // SM errors to bubble so the receiver returns 500 and Linear retries,
+  // rather than silently falling back to the stack-wide secret.
+  const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  if (!res.SecretString) return null;
+  return parseOauthSecret(res.SecretString, secretArn);
+}
+
+function parseOauthSecret(secretString: string, secretArn: string): StoredOauthToken | null {
+  let parsed: StoredOauthToken;
+  try {
+    parsed = JSON.parse(secretString) as StoredOauthToken;
+  } catch (err) {
+    logger.error('Linear OAuth secret value is not valid JSON', {
+      secret_arn: secretArn,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
+    (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
+  );
+  if (missing.length > 0) {
+    logger.error('Linear OAuth secret JSON is missing required fields', {
+      secret_arn: secretArn,
+      missing_fields: missing,
+    });
+    return null;
+  }
+  return parsed;
 }
 
 /**
