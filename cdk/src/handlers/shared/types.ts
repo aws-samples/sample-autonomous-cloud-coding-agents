@@ -1022,15 +1022,18 @@ export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
 /** Maximum per-entry length for an `initial_approvals` scope string. */
 export const INITIAL_APPROVALS_MAX_ENTRY_LENGTH = 128;
 
-/** Floor for `approval_timeout_s` (§6 decision #6). */
-export const APPROVAL_TIMEOUT_S_MIN = 30;
+/** Floor for `approval_timeout_s` (§6 decision #6).
+ *  Sourced from ``contracts/constants.json`` (S9). */
+export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
 
 /** Absolute ceiling for `approval_timeout_s` before the
- *  `maxLifetime - 300` clip is applied (§7.3). */
-export const APPROVAL_TIMEOUT_S_MAX = 3600;
+ *  `maxLifetime - 300` clip is applied (§7.3).
+ *  Sourced from ``contracts/constants.json`` (S9). */
+export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
-/** Default `approval_timeout_s` when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+/** Default `approval_timeout_s` when the submit payload omits it.
+ *  Sourced from ``contracts/constants.json`` (S9). */
+export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap
