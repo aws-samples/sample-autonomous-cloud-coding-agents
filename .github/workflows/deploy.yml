@@ -34,9 +34,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER_FROM_EVENT: ${{ github.event.workflow_run.pull_requests[0].number }}
+          # Single source of truth for this workflow; keep in sync with
+          # build.yml matrix.compute_type and workflow_dispatch.inputs.deploy.options
           ALLOWED_COMPUTE_TYPES: "agentcore"
         run: |
-          ALL_TYPES='["agentcore"]'
+          ALL_TYPES=$(printf '%s\n' $ALLOWED_COMPUTE_TYPES | jq -Rc . | jq -sc .)
 
           validate_compute_type() {
             local type="$1"

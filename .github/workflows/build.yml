@@ -292,6 +292,8 @@ jobs:
           GH_REF_NAME: ${{ github.ref_name }}
           DISPATCH_DEPLOY: ${{ inputs.deploy }}
           COMPUTE_TYPE: ${{ matrix.compute_type }}
+          # Keep in sync with matrix.compute_type above, inputs.deploy.options,
+          # and deploy.yml ALLOWED_COMPUTE_TYPES
           ALLOWED_COMPUTE_TYPES: "agentcore"
         run: |
           validate_compute_type() {
