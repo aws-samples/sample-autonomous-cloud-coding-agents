@@ -280,16 +280,30 @@ export async function findReusableOauthAppCredentials(
   }
   const value = await sm.send(new GetSecretValueCommand({ SecretId: row.oauth_secret_arn as string }));
   if (!value.SecretString) {
-    return null;
+    // Row points at an empty SM secret — broken state, but distinct from
+    // "no active workspace." Surface it so the operator gets a useful
+    // error instead of being told to run `setup` and creating a dup row.
+    throw new CliError(
+      `Workspace '${row.workspace_slug as string}' is registered but its OAuth secret `
+      + `(${row.oauth_secret_arn as string}) has no value. Re-run \`bgagent linear setup\` `
+      + 'for that workspace to repopulate it, or remove the registry row.',
+    );
   }
   let parsed: Partial<StoredLinearOauthToken>;
   try {
     parsed = JSON.parse(value.SecretString) as Partial<StoredLinearOauthToken>;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new CliError(
+      `Workspace '${row.workspace_slug as string}' OAuth secret is not valid JSON: `
+      + `${err instanceof Error ? err.message : String(err)}. Re-run `
+      + '`bgagent linear setup` for that workspace to fix it.',
+    );
   }
   if (!parsed.client_id || !parsed.client_secret) {
-    return null;
+    throw new CliError(
+      `Workspace '${row.workspace_slug as string}' OAuth secret is missing `
+      + 'client_id or client_secret. Re-run `bgagent linear setup` for that workspace.',
+    );
   }
   return {
     clientId: parsed.client_id,
@@ -374,12 +388,17 @@ export function makeLinearCommand(): Command {
       .action(async (code: string, opts) => {
         const client = new ApiClient();
 
-        // Dry-run preview FIRST so the user can confirm what they're
-        // linking before any write hits DDB. This is the safety rail
-        // that lets a teammate abort if the admin picked the wrong row.
-        const preview = await client.linearLink(code, { dryRun: true });
-
+        // In text mode, do a dry-run preview FIRST so the user can
+        // confirm what they're linking before any write hits DDB. The
+        // safety rail that lets a teammate abort if the admin picked
+        // the wrong row.
+        //
+        // In `--output json` mode there's no interactive prompt, so the
+        // dry-run is wasted work — skip it and go straight to the real
+        // link call. The single response object is what callers script
+        // around.
         if (opts.output !== 'json') {
+          const preview = await client.linearLink(code, { dryRun: true });
           const name = preview.linear_user_name || preview.linear_user_id;
           const email = preview.linear_user_email ? ` (${preview.linear_user_email})` : '';
           const wsLabel = preview.linear_workspace_slug || preview.linear_workspace_id;
@@ -625,7 +644,7 @@ export function makeLinearCommand(): Command {
         // that mapping creates the wrong row: the bot never applies
         // labels, the human applying labels is unmapped, and the
         // processor drops their tasks with "no linked platform user".
-        // The fix is `bgagent linear link-user <slug>` after setup.
+        // The admin self-link picker further down replaces that path.
 
         // ─── Step 6: Webhook signing secret (per-workspace + stack-wide) ───
         //
@@ -972,8 +991,8 @@ export function makeLinearCommand(): Command {
 
         // No auto-link — see the same comment in `setup` above. With
         // actor=app, Linear's `viewer` returns the bot user; auto-
-        // linking that maps the wrong UUID. Operators run
-        // `bgagent linear link-user <slug>` after setup.
+        // linking that maps the wrong UUID. The admin self-link picker
+        // further down replaces that path.
 
         // ─── Per-workspace webhook signing secret ──────────────────────
         // Linear webhook subscriptions are workspace-scoped, with a fresh
@@ -1343,13 +1362,27 @@ export function makeLinearCommand(): Command {
         if (opts.slug) {
           slugs = [opts.slug];
         } else {
-          const listed = await sm.send(new ListSecretsCommand({
-            Filters: [{ Key: 'name', Values: [LINEAR_OAUTH_SECRET_PREFIX] }],
-          }));
-          slugs = (listed.SecretList ?? [])
-            .map((s) => s.Name ?? '')
-            .filter((n) => n.startsWith(LINEAR_OAUTH_SECRET_PREFIX))
-            .map((n) => n.slice(LINEAR_OAUTH_SECRET_PREFIX.length));
+          // ListSecretsCommand caps at 100 results per page. Paginate
+          // so a deployment with >100 Linear workspaces (or >100 SM
+          // secrets matching the prefix filter) doesn't silently miss
+          // installs after the first page.
+          const collected: string[] = [];
+          let nextToken: string | undefined;
+          do {
+            const listed = await sm.send(new ListSecretsCommand({
+              Filters: [{ Key: 'name', Values: [LINEAR_OAUTH_SECRET_PREFIX] }],
+              MaxResults: 100,
+              NextToken: nextToken,
+            }));
+            for (const s of listed.SecretList ?? []) {
+              const name = s.Name ?? '';
+              if (name.startsWith(LINEAR_OAUTH_SECRET_PREFIX)) {
+                collected.push(name.slice(LINEAR_OAUTH_SECRET_PREFIX.length));
+              }
+            }
+            nextToken = listed.NextToken;
+          } while (nextToken);
+          slugs = collected;
           if (slugs.length === 0) {
             console.error('No Linear OAuth installs found. Run `bgagent linear setup <slug>` first.');
             process.exit(1);
@@ -1602,9 +1635,10 @@ interface LinearWorkspaceMember {
 }
 
 /**
- * Query the workspace's human members. Used by `bgagent linear link-user`'s
- * picker — surfaces the list of Linear users the OAuth bot can see, so the
- * admin (or self-linker) can pick the right human without typing UUIDs.
+ * Query the workspace's human members. Used by the inline self-link picker
+ * in `setup` / `add-workspace` — surfaces the list of Linear users the
+ * OAuth bot can see, so the admin can pick the right human without typing
+ * UUIDs.
  *
  * Returns null on API failure (logged + caller throws CliError). Filters
  * out the synthetic `@oauthapp.linear.app` bot user happens at the call
@@ -1662,7 +1696,7 @@ async function runSelfLinkPicker(args: {
   if (!members || members.length === 0) {
     console.log(' ✗');
     console.log('  ⚠ Could not list workspace members; skipping self-link.');
-    console.log(`    Run \`bgagent linear link-user-self ${args.slug}\` later, or label an issue and follow the warning.`);
+    console.log(`    Re-run \`bgagent linear ${args.linkMethod === 'add-workspace' ? 'add-workspace' : 'setup'} ${args.slug}\` and answer "y" at the self-link prompt, or label an issue and follow the warning.`);
     return false;
   }
   const humans = members.filter((m) => !(m.email ?? '').endsWith('@oauthapp.linear.app'));
@@ -1713,13 +1747,16 @@ async function runSelfLinkPicker(args: {
  * Alphabet excludes ambiguous glyphs (0/O, 1/l/I) so codes copy-pasted
  * across fonts don't get mistyped.
  */
-function generateInviteCode(): string {
-  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+/** Alphabet used by {@link generateInviteCode}. Exposed so tests can
+ *  assert that generated codes only use these characters. */
+export const INVITE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+export function generateInviteCode(): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   let out = 'link-';
   for (const b of bytes) {
-    out += alphabet[b % alphabet.length];
+    out += INVITE_CODE_ALPHABET[b % INVITE_CODE_ALPHABET.length];
   }
   return out;
 }
