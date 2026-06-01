@@ -275,7 +275,8 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   test('falls back to stack-wide secret when per-workspace bundle has no webhook_signing_secret field', async () => {
     // Migration mid-state: workspace was onboarded under the old flow
     // (no signing secret on its OAuth bundle), but later got registered.
-    // Until the user re-runs setup with --rotate-webhook-secret, the
+    // Until the user runs `bgagent linear update-webhook-secret` to
+    // populate `webhook_signing_secret` on the OAuth bundle, the
     // stack-wide secret remains the source of truth for that workspace.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'active', workspace_slug: 'acme-A' },
@@ -294,11 +295,10 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('rejects when registry status is not active even if per-workspace secret matches', async () => {
-    // Revoked workspaces shouldn't trigger tasks. Setting status to
-    // 'revoked' makes verifyLinearRequestForWorkspace return
-    // 'no-per-workspace-secret', and the stack-wide fallback then has
-    // a fresh shot — but here we never installed a stack-wide secret
-    // matching the workspace's signing secret, so the fallback fails too.
+    // Revoked workspaces shouldn't trigger tasks. The stack-wide
+    // signing secret here does not match the per-workspace secret, so
+    // even without the no-fallback rule the request would fail — this
+    // test only asserts that `revoked` flips to a 401.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'revoked', workspace_slug: 'acme-A' },
     });
@@ -312,6 +312,57 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
     const body = payloadFor(WORKSPACE_A_ID);
     const result = await handler(makeEvent(body, sign(WORKSPACE_A_SECRET, body)));
     expect(result.statusCode).toBe(401);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('revoked workspace rejected even when the stack-wide secret matches the request', async () => {
+    // Critical security test: `setup` mirrors the first workspace's
+    // signing secret into the stack-wide one. If a workspace later gets
+    // revoked, the stack-wide secret still matches its requests. Without
+    // a distinct `revoked` outcome the receiver would silently fall
+    // through to the stack-wide fallback and re-grant access — the bypass
+    // krokoko's PR-200 review-1 flagged. This test pins the no-fallback
+    // rule: a revoked workspace whose orgId is in the registry MUST fail
+    // verification regardless of how the request is signed.
+    configureRegistry({
+      [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'revoked', workspace_slug: 'acme-A' },
+    });
+    configureSecretsManager({
+      [WORKSPACE_A_SECRET_ARN]: makeStoredOauth({
+        workspace_id: WORKSPACE_A_ID,
+        webhook_signing_secret: WORKSPACE_A_SECRET,
+      }),
+      // Stack-wide secret == workspace A's secret (the bypass scenario).
+      [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: WORKSPACE_A_SECRET,
+    });
+    const body = payloadFor(WORKSPACE_A_ID);
+    const result = await handler(makeEvent(body, sign(WORKSPACE_A_SECRET, body)));
+    expect(result.statusCode).toBe(401);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('infra error during per-workspace lookup surfaces as 500 (no silent stack-wide downgrade)', async () => {
+    // A DDB throttle on the registry table (or a Secrets Manager 5xx)
+    // must NOT collapse to the stack-wide fallback path — that would
+    // silently downgrade a per-workspace-secured workspace to stack-
+    // wide verification under load. Strict lookups bubble the error so
+    // the receiver returns 500 and Linear retries (delivery is
+    // best-effort with retries; brief unavailability is preferable to
+    // a security-relevant downgrade).
+    ddbSend.mockImplementation((cmd: { _type?: string }) => {
+      if (cmd._type === 'Get') {
+        const err = new Error('Throttled');
+        (err as Error & { name: string }).name = 'ProvisionedThroughputExceededException';
+        return Promise.reject(err);
+      }
+      return Promise.resolve({});
+    });
+    configureSecretsManager({
+      [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: WORKSPACE_A_SECRET,
+    });
+    const body = payloadFor(WORKSPACE_A_ID);
+    const result = await handler(makeEvent(body, sign(WORKSPACE_A_SECRET, body)));
+    expect(result.statusCode).toBe(500);
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 });
