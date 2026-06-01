@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { getOauthSecret, getRegistryRow } from './linear-oauth-resolver';
+import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
 
 const sm = new SecretsManagerClient({});
@@ -182,9 +182,22 @@ export async function verifyLinearRequest(
  *   doesn't match. Caller MUST reject (do not fall back to stack-wide;
  *   that would let an attacker bypass the per-workspace secret by
  *   tricking us into re-checking against the stack-wide one).
- * - `'no-per-workspace-secret'` — registry miss, secret missing, or
- *   `webhook_signing_secret` field absent in the secret JSON. Caller
- *   should fall back to the stack-wide secret for back-compat.
+ * - `'revoked'` — registry row exists but its status is not `active`.
+ *   Treated like `mismatch` by the receiver: 401, no fallback. Without
+ *   this distinct outcome a revoked workspace would collapse to
+ *   `no-per-workspace-secret` and the stack-wide fallback would
+ *   re-grant access (since `setup` mirrors the first workspace's
+ *   secret into the stack-wide one and revocation never clears it).
+ * - `'no-per-workspace-secret'` — no registry row at all, secret JSON
+ *   has no `webhook_signing_secret` field. Caller should fall back to
+ *   the stack-wide secret for back-compat with single-workspace
+ *   installs predating per-workspace secrets.
+ *
+ * Uses strict lookups (`getRegistryRowStrict`, `getOauthSecretStrict`)
+ * that throw on infra error rather than returning null. A DDB throttle
+ * during a webhook burst must NOT silently downgrade a per-workspace-
+ * secured workspace to stack-wide verification — let the error bubble,
+ * the receiver's outer try/catch returns 500, and Linear retries.
  *
  * @param registryTableName - DynamoDB table for `LinearWorkspaceRegistryTable`.
  * @param linearWorkspaceId - the claimed `organizationId` from the body.
@@ -196,12 +209,15 @@ export async function verifyLinearRequestForWorkspace(
   linearWorkspaceId: string,
   signature: string,
   body: string,
-): Promise<'verified' | 'mismatch' | 'no-per-workspace-secret'> {
-  const row = await getRegistryRow(ddb, registryTableName, linearWorkspaceId);
-  if (!row || row.status !== 'active') {
+): Promise<'verified' | 'mismatch' | 'revoked' | 'no-per-workspace-secret'> {
+  const row = await getRegistryRowStrict(ddb, registryTableName, linearWorkspaceId);
+  if (!row) {
     return 'no-per-workspace-secret';
   }
-  const stored = await getOauthSecret(sm, row.oauth_secret_arn);
+  if (row.status !== 'active') {
+    return 'revoked';
+  }
+  const stored = await getOauthSecretStrict(sm, row.oauth_secret_arn);
   if (!stored || !stored.webhook_signing_secret) {
     return 'no-per-workspace-secret';
   }

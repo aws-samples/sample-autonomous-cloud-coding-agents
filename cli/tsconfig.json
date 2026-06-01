@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "incremental": true,
     "rootDir": "src",
     "outDir": "lib",
     "alwaysStrict": true,
