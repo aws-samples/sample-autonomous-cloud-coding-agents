@@ -49,7 +49,7 @@ What follows from this decision:
 
 ## Numbering
 
-ADRs are numbered sequentially with zero-padded three-digit prefixes: `001-slug.md`, `002-slug.md`, etc. Numbers are never reused.
+ADRs are numbered sequentially with zero-padded three-digit prefixes: `ADR-001-slug.md`, `ADR-002-slug.md`, etc. Numbers are never reused.
 
 ## Lifecycle
 

@@ -450,10 +450,10 @@ def upload_trace_to_s3(
 
     key = f"traces/{user_id}/{task_id}.jsonl.gz"
     try:
-        import boto3
+        from aws_session import tenant_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("s3", region_name=region)
+        client = tenant_client("s3", region_name=region)
         # Intentionally omit ContentEncoding=gzip: Node's fetch (undici) auto-
         # decompresses responses whose metadata declares gzip encoding, which
         # violates the CLI's `-o <file>` "raw gzipped bytes" contract and

@@ -96,7 +96,7 @@ repos:
 
       - id: monorepo-tests-pre-push
         name: package tests (pre-push)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:tests'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export TMPDIR="${HOME}/.cache/cdk-tmp" && mkdir -p "$TMPDIR" && mise run hooks:pre-push:tests'
         language: system
         pass_filenames: false
         stages: [pre-push]
