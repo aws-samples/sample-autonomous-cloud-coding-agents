@@ -52,7 +52,7 @@ jobs:
             local valid_json="[]"
             for type in $(echo "$input_json" | jq -r '.[]'); do
               if validate_compute_type "$type" 2>/dev/null; then
-                valid_json=$(echo "$valid_json" | jq --arg t "$type" '. + [$t]')
+                valid_json=$(echo "$valid_json" | jq -c --arg t "$type" '. + [$t]')
               else
                 echo "::warning::Ignoring invalid compute_type from label: '$type'"
               fi
