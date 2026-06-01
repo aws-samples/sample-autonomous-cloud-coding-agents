@@ -1,5 +1,5 @@
 ---
-title: 003 contribution governance
+title: Adr 003 contribution governance
 ---
 
 # ADR-003: Contribution governance for async agents and humans
