@@ -77,10 +77,7 @@ jobs:
 
               LABELS=$(gh api "repos/$REPO/pulls/$PR_NUMBER_FROM_EVENT" --jq '[.labels[].name]')
 
-              if echo "$LABELS" | jq -e 'index("deploy:*")' > /dev/null 2>&1; then
-                echo "matrix=$ALL_TYPES" >> "$GITHUB_OUTPUT"
-                echo "has_targets=true" >> "$GITHUB_OUTPUT"
-              elif echo "$LABELS" | jq -e '[.[] | select(startswith("deploy:"))] | length > 0' > /dev/null 2>&1; then
+              if echo "$LABELS" | jq -e '[.[] | select(startswith("deploy:"))] | length > 0' > /dev/null 2>&1; then
                 RAW_TYPES=$(echo "$LABELS" | jq -c '[.[] | select(startswith("deploy:")) | ltrimstr("deploy:")]')
                 VALIDATED=$(filter_valid_types "$RAW_TYPES")
                 COUNT=$(echo "$VALIDATED" | jq 'length')
