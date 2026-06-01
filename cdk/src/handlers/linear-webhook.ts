@@ -107,7 +107,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // (c) workspace not in registry, or (d) workspace's stored secret
     // lacks `webhook_signing_secret`. Per-workspace MISMATCH is fatal —
     // do NOT fall back, that would let an attacker bypass per-workspace
-    // signatures by also matching the stack-wide one.
+    // signatures by also matching the stack-wide one. REVOKED is also
+    // fatal: a workspace that has been deactivated must not be able to
+    // ride the stack-wide fallback (which `setup` mirrored from the
+    // first workspace's signing secret) back into a verified state.
     let verified = false;
     if (WORKSPACE_REGISTRY_TABLE && payload.organizationId) {
       const result = await verifyLinearRequestForWorkspace(
@@ -123,16 +126,31 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           linear_workspace_id: payload.organizationId,
         });
         return jsonResponse(401, { error: 'Invalid signature' });
+      } else if (result === 'revoked') {
+        logger.warn('Linear webhook from revoked workspace — rejecting without stack-wide fallback', {
+          linear_workspace_id: payload.organizationId,
+        });
+        return jsonResponse(401, { error: 'Workspace not active' });
       }
       // 'no-per-workspace-secret' falls through to the stack-wide path
       // below — back-compat for installs predating per-workspace secrets.
     }
 
-    if (!verified && !await verifyLinearRequest(WEBHOOK_SECRET_ARN, signature, event.body)) {
-      logger.warn('Invalid Linear webhook signature', {
+    if (!verified) {
+      if (!await verifyLinearRequest(WEBHOOK_SECRET_ARN, signature, event.body)) {
+        logger.warn('Invalid Linear webhook signature', {
+          linear_workspace_id: payload.organizationId,
+        });
+        return jsonResponse(401, { error: 'Invalid signature' });
+      }
+      // Stack-wide fallback succeeded. Log positively so operators
+      // diagnosing a per-workspace verification regression have a
+      // breadcrumb that says "this workspace is verifying via the
+      // back-compat path" rather than its own per-workspace secret.
+      logger.info('Linear webhook verified via stack-wide fallback secret', {
         linear_workspace_id: payload.organizationId,
+        per_workspace_registry_configured: Boolean(WORKSPACE_REGISTRY_TABLE),
       });
-      return jsonResponse(401, { error: 'Invalid signature' });
     }
 
     if (!isWebhookTimestampFresh(payload.webhookTimestamp)) {
