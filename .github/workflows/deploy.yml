@@ -40,6 +40,7 @@ jobs:
         run: |
           ALL_TYPES=$(printf '%s\n' $ALLOWED_COMPUTE_TYPES | jq -Rc . | jq -sc .)
 
+          # return (not exit) — callers handle failure gracefully (skip type or set empty matrix)
           validate_compute_type() {
             local type="$1"
             for allowed in $ALLOWED_COMPUTE_TYPES; do

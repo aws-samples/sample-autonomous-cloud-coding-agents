@@ -296,6 +296,7 @@ jobs:
           # and deploy.yml ALLOWED_COMPUTE_TYPES
           ALLOWED_COMPUTE_TYPES: "agentcore"
         run: |
+          # exit (not return) — no recovery path; invalid dispatch input must abort the step
           validate_compute_type() {
             local type="$1"
             for allowed in $ALLOWED_COMPUTE_TYPES; do
