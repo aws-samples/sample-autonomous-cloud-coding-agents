@@ -1,5 +1,5 @@
 ---
-title: 007 knowledge acquisition
+title: Adr 007 knowledge acquisition
 ---
 
 # ADR-007: Knowledge acquisition through progressive failure

@@ -1,5 +1,5 @@
 ---
-title: 008 definition of done
+title: Adr 008 definition of done
 ---
 
 # ADR-008: Definition of Done (progressive maturity)

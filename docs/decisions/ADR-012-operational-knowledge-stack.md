@@ -151,7 +151,7 @@ Organized by persona:
 ```markdown
 # Contributor Workflow
 
-> Operationalizes [ADR-003](../decisions/003-contribution-governance.md)
+> Operationalizes [ADR-003](../decisions/ADR-003-contribution-governance.md)
 
 ## For Planners
 - Issue quality bar (what makes an issue "ready")
