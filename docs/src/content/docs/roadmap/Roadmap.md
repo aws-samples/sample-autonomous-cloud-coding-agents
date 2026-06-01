@@ -214,6 +214,10 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
+| **Bedrock IAM session-tag attribution** | Route Bedrock inference through assumed credentials carrying `{user_id, repo, task_id}` session tags (extend the SessionRole / `aws_session.py` pattern from #209/#211). Enables native Cost Explorer and CUR 2.0 chargeback by user and repo. Operator must activate IAM principal cost allocation tags (see [Cost attribution guide](/getting-started/cost-attribution)). |
+| **Bedrock per-request metadata** | Pass `task_id`, `user_id`, and `repo` on each Bedrock call via request metadata / `X-Amzn-Bedrock-Request-Metadata` into model invocation logs. Complements IAM attribution; does not replace in-app `cost_usd`. Requires Claude Code / SDK support for metadata on InvokeModel. |
+| **Cost dashboard and export API** | Log Insights widgets on invocation logs; optional API or export for monthly spend roll-ups by `user_id` / `repo` from the task table. |
+| **Optional tagged application inference profiles** | CDK-managed Bedrock application inference profiles per onboarded repo or environment; set `ANTHROPIC_MODEL` to tagged profile ARN for `resourceTags/*` billing when repo count is bounded. |
 | **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. |
 | **Complexity-aware model router** | Route each request to the most appropriate model based on task complexity (simple reads/edits to cheaper models, deeper reasoning to stronger models) while honoring budget and policy constraints. |
 
