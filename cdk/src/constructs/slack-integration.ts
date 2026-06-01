@@ -238,12 +238,17 @@ export class SlackIntegration extends Construct {
     }));
 
     // --- Slash Command Processor (async worker) ---
+    // Memory bumped from default 128 MB → 512 MB after module-init OOM
+    // surfaced in dev. Bundle grew past the 128 MB cap once createTaskCore's
+    // transitive dependency graph (Cedar, attachment-screening) imported
+    // here through the shared task-creation path.
     const commandProcessorFn = new lambda.NodejsFunction(this, 'CommandProcessorFn', {
       entry: path.join(handlersDir, 'slack-command-processor.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(30),
+      memorySize: 512,
       environment: {
         ...createTaskEnv,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
