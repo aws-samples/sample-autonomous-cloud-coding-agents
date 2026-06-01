@@ -75,10 +75,17 @@ function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: St
 }
 
 describe('TaskApi construct', () => {
+  let baseTemplate: Template;
+  let webhookTemplate: Template;
+
+  beforeAll(() => {
+    baseTemplate = createStack().template;
+    webhookTemplate = createStackWithWebhooks().template;
+  });
+
   test('creates a Cognito User Pool', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::Cognito::UserPool', 1);
-    template.hasResourceProperties('AWS::Cognito::UserPool', {
+    baseTemplate.resourceCountIs('AWS::Cognito::UserPool', 1);
+    baseTemplate.hasResourceProperties('AWS::Cognito::UserPool', {
       Policies: {
         PasswordPolicy: {
           MinimumLength: 12,
@@ -92,9 +99,8 @@ describe('TaskApi construct', () => {
   });
 
   test('creates a Cognito User Pool Client with correct auth flows', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::Cognito::UserPoolClient', 1);
-    template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+    baseTemplate.resourceCountIs('AWS::Cognito::UserPoolClient', 1);
+    baseTemplate.hasResourceProperties('AWS::Cognito::UserPoolClient', {
       ExplicitAuthFlows: Match.arrayWith([
         'ALLOW_USER_PASSWORD_AUTH',
         'ALLOW_USER_SRP_AUTH',
@@ -104,29 +110,25 @@ describe('TaskApi construct', () => {
   });
 
   test('creates a REST API with correct stage name', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::ApiGateway::RestApi', 1);
-    template.hasResourceProperties('AWS::ApiGateway::RestApi', {
+    baseTemplate.resourceCountIs('AWS::ApiGateway::RestApi', 1);
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::RestApi', {
       Name: 'TaskApi',
     });
-    template.hasResourceProperties('AWS::ApiGateway::Stage', {
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Stage', {
       StageName: 'v1',
     });
   });
 
   test('creates 5 Lambda functions without webhookTable', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::Lambda::Function', 5);
+    baseTemplate.resourceCountIs('AWS::Lambda::Function', 5);
   });
 
   test('creates 10 Lambda functions with webhookTable', () => {
-    const { template } = createStackWithWebhooks();
-    template.resourceCountIs('AWS::Lambda::Function', 10);
+    webhookTemplate.resourceCountIs('AWS::Lambda::Function', 10);
   });
 
   test('Lambda functions use ARM_64 architecture and Node.js 24', () => {
-    const { template } = createStack();
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
     const fnIds = Object.keys(functions);
 
     expect(fnIds.length).toBe(5);
@@ -137,8 +139,7 @@ describe('TaskApi construct', () => {
   });
 
   test('Lambda functions have correct environment variables', () => {
-    const { template } = createStack();
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
 
     for (const fnId of Object.keys(functions)) {
       const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
@@ -149,43 +150,34 @@ describe('TaskApi construct', () => {
   });
 
   test('creates API resources for /tasks and /tasks/{task_id}', () => {
-    const { template } = createStack();
-
-    // Check for tasks resource
-    template.hasResourceProperties('AWS::ApiGateway::Resource', {
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'tasks',
     });
 
-    // Check for {task_id} resource
-    template.hasResourceProperties('AWS::ApiGateway::Resource', {
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: '{task_id}',
     });
 
-    // Check for events resource
-    template.hasResourceProperties('AWS::ApiGateway::Resource', {
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'events',
     });
   });
 
   test('creates 5 API methods with Cognito authorization (no webhooks)', () => {
-    const { template } = createStack();
-
-    const methods = template.findResources('AWS::ApiGateway::Method');
+    const methods = baseTemplate.findResources('AWS::ApiGateway::Method');
     const nonOptionsMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.HttpMethod !== 'OPTIONS',
     );
     expect(nonOptionsMethods.length).toBe(5);
 
-    // Verify all non-OPTIONS methods use COGNITO authorization
     for (const [_, resource] of nonOptionsMethods) {
       expect((resource as any).Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
     }
   });
 
   test('creates a WAFv2 Web ACL with managed rule groups', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::WAFv2::WebACL', 1);
-    template.hasResourceProperties('AWS::WAFv2::WebACL', {
+    baseTemplate.resourceCountIs('AWS::WAFv2::WebACL', 1);
+    baseTemplate.hasResourceProperties('AWS::WAFv2::WebACL', {
       Scope: 'REGIONAL',
       Rules: Match.arrayWith([
         Match.objectLike({ Name: 'AWSManagedRulesCommonRuleSet' }),
@@ -196,14 +188,12 @@ describe('TaskApi construct', () => {
   });
 
   test('associates WAF with the API Gateway stage', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
+    baseTemplate.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
   });
 
   test('creates a Cognito User Pools authorizer', () => {
-    const { template } = createStack();
-    template.resourceCountIs('AWS::ApiGateway::Authorizer', 1);
-    template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
+    baseTemplate.resourceCountIs('AWS::ApiGateway::Authorizer', 1);
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Authorizer', {
       Type: 'COGNITO_USER_POOLS',
     });
   });
@@ -239,8 +229,7 @@ describe('TaskApi construct', () => {
   });
 
   test('stage has throttle settings', () => {
-    const { template } = createStack();
-    template.hasResourceProperties('AWS::ApiGateway::Stage', {
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Stage', {
       MethodSettings: Match.arrayWith([
         Match.objectLike({
           ThrottlingRateLimit: 60,
@@ -279,22 +268,10 @@ describe('TaskApi construct', () => {
   });
 
   test('createTask Lambda has guardrail env vars when provided', () => {
-    const app = new App();
-    const stack = new Stack(app, 'GuardrailStack');
-    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-    });
-    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
-    });
-    new TaskApi(stack, 'TaskApi', {
-      taskTable,
-      taskEventsTable,
+    const { template } = createStack({
       guardrailId: 'gr-abc123',
       guardrailVersion: '1',
     });
-    const template = Template.fromStack(stack);
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
@@ -310,7 +287,6 @@ describe('TaskApi construct', () => {
       ecsClusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
     });
 
-    // Cancel Lambda should have the ECS_CLUSTER_ARN env var
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
@@ -319,7 +295,6 @@ describe('TaskApi construct', () => {
       },
     });
 
-    // Should have ecs:StopTask permission
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -333,10 +308,7 @@ describe('TaskApi construct', () => {
   });
 
   test('cancelTask Lambda does not get ECS env vars when ecsClusterArn is not set', () => {
-    const { template } = createStack();
-
-    // Find all Lambda functions and verify none have ECS_CLUSTER_ARN
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
     for (const [, fn] of Object.entries(functions)) {
       const vars = (fn as any).Properties?.Environment?.Variables ?? {};
       expect(vars).not.toHaveProperty('ECS_CLUSTER_ARN');
@@ -345,9 +317,13 @@ describe('TaskApi construct', () => {
 });
 
 describe('TaskApi construct with webhooks', () => {
-  test('creates webhook API resources', () => {
-    const { template } = createStackWithWebhooks();
+  let template: Template;
 
+  beforeAll(() => {
+    template = createStackWithWebhooks().template;
+  });
+
+  test('creates webhook API resources', () => {
     template.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'webhooks',
     });
@@ -358,7 +334,6 @@ describe('TaskApi construct with webhooks', () => {
   });
 
   test('creates both Cognito and REQUEST authorizers', () => {
-    const { template } = createStackWithWebhooks();
     template.resourceCountIs('AWS::ApiGateway::Authorizer', 2);
     template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
       Type: 'COGNITO_USER_POOLS',
@@ -369,7 +344,6 @@ describe('TaskApi construct with webhooks', () => {
   });
 
   test('webhook Lambdas have WEBHOOK_TABLE_NAME and WEBHOOK_RETENTION_DAYS env vars', () => {
-    const { template } = createStackWithWebhooks();
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
@@ -381,8 +355,6 @@ describe('TaskApi construct with webhooks', () => {
   });
 
   test('creates 9 non-OPTIONS API methods with webhooks', () => {
-    const { template } = createStackWithWebhooks();
-
     const methods = template.findResources('AWS::ApiGateway::Method');
     const nonOptionsMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.HttpMethod !== 'OPTIONS',
@@ -392,8 +364,6 @@ describe('TaskApi construct with webhooks', () => {
   });
 
   test('webhook task creation uses CUSTOM authorization', () => {
-    const { template } = createStackWithWebhooks();
-
     const methods = template.findResources('AWS::ApiGateway::Method');
     const customAuthMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.AuthorizationType === 'CUSTOM',
@@ -402,7 +372,6 @@ describe('TaskApi construct with webhooks', () => {
   });
 
   test('webhookCreateTask Lambda has Secrets Manager GetSecretValue permission', () => {
-    const { template } = createStackWithWebhooks();
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -416,7 +385,6 @@ describe('TaskApi construct with webhooks', () => {
   });
 
   test('createWebhook Lambda has Secrets Manager CreateSecret and TagResource permissions', () => {
-    const { template } = createStackWithWebhooks();
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -435,7 +403,9 @@ describe('TaskApi construct with webhooks', () => {
 });
 
 describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
-  function createStackWithNudges(overrides?: Partial<TaskApiProps>): Template {
+  let nudgeTemplate: Template;
+
+  beforeAll(() => {
     const app = new App();
     const stack = new Stack(app, 'NudgeStack');
     const taskTable = new dynamodb.Table(stack, 'TaskTable', {
@@ -455,23 +425,12 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
       taskNudgesTable,
       guardrailId: 'gr-abc',
       guardrailVersion: '1',
-      ...overrides,
     });
-    return Template.fromStack(stack);
-  }
+    nudgeTemplate = Template.fromStack(stack);
+  });
 
   test('does NOT create a nudge resource when taskNudgesTable is absent', () => {
-    const app = new App();
-    const stack = new Stack(app, 'NoNudgeStack');
-    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-    });
-    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
-    });
-    new TaskApi(stack, 'TaskApi', { taskTable, taskEventsTable });
-    const template = Template.fromStack(stack);
+    const { template } = createStack();
 
     const resources = template.findResources('AWS::ApiGateway::Resource');
     const nudgeRes = Object.values(resources).filter(
@@ -481,20 +440,17 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   });
 
   test('creates a /nudge resource when taskNudgesTable is provided', () => {
-    const template = createStackWithNudges();
-    template.hasResourceProperties('AWS::ApiGateway::Resource', {
+    nudgeTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'nudge',
     });
   });
 
   test('nudge route uses Cognito authorization on POST', () => {
-    const template = createStackWithNudges();
-    const methods = template.findResources('AWS::ApiGateway::Method');
+    const methods = nudgeTemplate.findResources('AWS::ApiGateway::Method');
     const nudgePost = Object.values(methods).filter(m => {
       const p = (m as { Properties?: { HttpMethod?: string } }).Properties ?? {};
       return p.HttpMethod === 'POST';
     });
-    // At least one POST is for nudge — assert at least one POST uses COGNITO.
     const cognitoPosts = nudgePost.filter(m =>
       (m as { Properties?: { AuthorizationType?: string } }).Properties?.AuthorizationType === 'COGNITO_USER_POOLS',
     );
@@ -502,8 +458,7 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   });
 
   test('nudge Lambda has NUDGES_TABLE_NAME and NUDGE_RATE_LIMIT_PER_MINUTE env vars', () => {
-    const template = createStackWithNudges();
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    nudgeTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           NUDGES_TABLE_NAME: Match.anyValue(),
@@ -514,8 +469,7 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   });
 
   test('nudge Lambda has guardrail env vars when provided', () => {
-    const template = createStackWithNudges();
-    template.hasResourceProperties('AWS::Lambda::Function', {
+    nudgeTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           NUDGES_TABLE_NAME: Match.anyValue(),
@@ -527,8 +481,7 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   });
 
   test('nudge Lambda has bedrock:ApplyGuardrail permission when guardrail configured', () => {
-    const template = createStackWithNudges();
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    nudgeTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
@@ -541,7 +494,28 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   });
 
   test('respects custom nudgeRateLimitPerMinute', () => {
-    const template = createStackWithNudges({ nudgeRateLimitPerMinute: 25 });
+    const app = new App();
+    const stack = new Stack(app, 'CustomNudgeStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskNudgesTable = new dynamodb.Table(stack, 'TaskNudgesTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
+    });
+    new TaskApi(stack, 'TaskApi', {
+      taskTable,
+      taskEventsTable,
+      taskNudgesTable,
+      guardrailId: 'gr-abc',
+      guardrailVersion: '1',
+      nudgeRateLimitPerMinute: 25,
+    });
+    const template = Template.fromStack(stack);
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
@@ -553,7 +527,9 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
 });
 
 describe('TaskApi construct — trace endpoint (design §10.1)', () => {
-  function createStackWithTrace(overrides?: Partial<TaskApiProps>): Template {
+  let traceTemplate: Template;
+
+  beforeAll(() => {
     const app = new App();
     const stack = new Stack(app, 'TraceStack');
     const taskTable = new dynamodb.Table(stack, 'TaskTable', {
@@ -568,23 +544,12 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
       taskTable,
       taskEventsTable,
       traceArtifactsBucket: traceBucket,
-      ...overrides,
     });
-    return Template.fromStack(stack);
-  }
+    traceTemplate = Template.fromStack(stack);
+  });
 
   test('does NOT create a trace resource when traceArtifactsBucket is absent', () => {
-    const app = new App();
-    const stack = new Stack(app, 'NoTraceStack');
-    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-    });
-    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
-    });
-    new TaskApi(stack, 'TaskApi', { taskTable, taskEventsTable });
-    const template = Template.fromStack(stack);
+    const { template } = createStack();
 
     const resources = template.findResources('AWS::ApiGateway::Resource');
     const pathParts = Object.values(resources).map(r => r.Properties.PathPart);
@@ -592,15 +557,11 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
   });
 
   test('creates a GET /tasks/{task_id}/trace resource when traceArtifactsBucket is provided', () => {
-    const template = createStackWithTrace();
-
-    // There should be an API Gateway Resource with PathPart='trace'
-    const resources = template.findResources('AWS::ApiGateway::Resource');
+    const resources = traceTemplate.findResources('AWS::ApiGateway::Resource');
     const tracePath = Object.values(resources).find(r => r.Properties.PathPart === 'trace');
     expect(tracePath).toBeDefined();
 
-    // And a GET method on it
-    template.hasResourceProperties('AWS::ApiGateway::Method', {
+    traceTemplate.hasResourceProperties('AWS::ApiGateway::Method', {
       HttpMethod: 'GET',
       AuthorizationType: 'COGNITO_USER_POOLS',
       ResourceId: Match.anyValue(),
@@ -608,9 +569,7 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
   });
 
   test('creates the GetTraceUrlFn Lambda with TRACE_ARTIFACTS_BUCKET_NAME env var', () => {
-    const template = createStackWithTrace();
-
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = traceTemplate.findResources('AWS::Lambda::Function');
     const traceFns = Object.entries(functions).filter(([id]) =>
       id.startsWith('TaskApiGetTraceUrlFn'),
     );
@@ -619,21 +578,16 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
     const envVars = resource.Properties.Environment?.Variables;
     expect(envVars).toBeDefined();
     expect(envVars.TRACE_ARTIFACTS_BUCKET_NAME).toBeDefined();
-    // TASK_TABLE_NAME must be present too (for the ownership check)
     expect(envVars.TASK_TABLE_NAME).toBeDefined();
   });
 
   test('grants the handler read-only access to the trace bucket (GetObject, not PutObject)', () => {
-    const template = createStackWithTrace();
-
-    // Find the IAM policy attached to the GetTraceUrlFn role
-    const policies = template.findResources('AWS::IAM::Policy');
+    const policies = traceTemplate.findResources('AWS::IAM::Policy');
     const handlerPolicies = Object.entries(policies).filter(([id]) =>
       id.includes('GetTraceUrlFn'),
     );
     expect(handlerPolicies.length).toBeGreaterThan(0);
 
-    // Walk every policy attached to the handler and check S3 actions.
     const allS3Actions: string[] = [];
     for (const [, resource] of handlerPolicies) {
       const statements = resource.Properties.PolicyDocument?.Statement ?? [];
@@ -647,31 +601,18 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
       }
     }
 
-    // Must be able to GetObject (to presign + HeadObject). L3 item 2
-    // tightens this from CDK's ``grantRead`` (which expands to
-    // ``s3:GetObject*`` / ``s3:GetBucket*`` / ``s3:List*``) down to an
-    // explicit ``s3:GetObject`` — AWS grants HeadObject implicitly on
-    // the same permission, so the handler's HEAD-before-presign check
-    // is still authorized.
     expect(allS3Actions).toContain('s3:GetObject');
-    // The wildcarded ``s3:GetObject*`` form must be absent — L3 pinned
-    // the handler to the exact action, not the wildcard.
     expect(allS3Actions).not.toContain('s3:GetObject*');
-    // ``ListBucket`` is unnecessary scope (the handler never lists). A
-    // regression here would reintroduce the ``grantRead`` expansion.
     expect(allS3Actions).not.toContain('s3:ListBucket');
     expect(allS3Actions.some(a => a.startsWith('s3:List'))).toBe(false);
     expect(allS3Actions.some(a => a.startsWith('s3:GetBucket'))).toBe(false);
-    // Must NOT have write permissions (including wildcarded forms).
     expect(allS3Actions.some(a => a.startsWith('s3:PutObject'))).toBe(false);
     expect(allS3Actions.some(a => a.startsWith('s3:DeleteObject'))).toBe(false);
     expect(allS3Actions).not.toContain('s3:*');
   });
 
   test('grants the handler read access to the task table for ownership checks', () => {
-    const template = createStackWithTrace();
-
-    const policies = template.findResources('AWS::IAM::Policy');
+    const policies = traceTemplate.findResources('AWS::IAM::Policy');
     const handlerPolicies = Object.entries(policies).filter(([id]) =>
       id.includes('GetTraceUrlFn'),
     );
@@ -689,36 +630,25 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
       }
     }
     expect(allDdbActions).toContain('dynamodb:GetItem');
-    // Must NOT have write permissions
     expect(allDdbActions).not.toContain('dynamodb:PutItem');
     expect(allDdbActions).not.toContain('dynamodb:UpdateItem');
   });
 
   test('trace endpoint uses Cognito authorization (same as other task endpoints)', () => {
-    const template = createStackWithTrace();
-
-    // The trace resource's method must require Cognito auth.
-    const methods = template.findResources('AWS::ApiGateway::Method');
+    const methods = traceTemplate.findResources('AWS::ApiGateway::Method');
     const traceMethods = Object.values(methods).filter(m =>
       m.Properties.HttpMethod === 'GET',
     );
-    // Gather all Cognito-authorized GET methods; the trace one must be among them.
     const cognitoGetMethods = traceMethods.filter(m => m.Properties.AuthorizationType === 'COGNITO_USER_POOLS');
-    // There should be at least 3 Cognito GET methods: get-task, list-tasks, get-events, get-trace.
-    // But we only test that `get-trace` auth is Cognito (which is implied by the creation test above).
     expect(cognitoGetMethods.length).toBeGreaterThanOrEqual(4);
   });
 
   test('GetTraceUrlFn has adequate timeout and memory for SDK cold-start', () => {
-    const template = createStackWithTrace();
-    // Find the GetTraceUrlFn by looking for the function whose env has TRACE_ARTIFACTS_BUCKET_NAME.
-    const functions = template.findResources('AWS::Lambda::Function');
+    const functions = traceTemplate.findResources('AWS::Lambda::Function');
     const traceFn = Object.values(functions).find(
       f => f.Properties.Environment?.Variables?.TRACE_ARTIFACTS_BUCKET_NAME !== undefined,
     );
     expect(traceFn).toBeDefined();
-    // 15s matches CancelTaskFn precedent for cold-start SDK loads;
-    // 512 MB is headroom above the observed 126 MB cold-start peak.
     expect(traceFn!.Properties.Timeout).toBe(15);
     expect(traceFn!.Properties.MemorySize).toBe(512);
   });

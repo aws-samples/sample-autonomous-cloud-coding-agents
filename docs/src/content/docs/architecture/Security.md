@@ -42,21 +42,32 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 **Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/roadmap/roadmap)).
 
+**Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole` or the ECS Fargate task role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
+
+- **DynamoDB**: item access on the four `task_id`-partitioned tables (task, events, approvals, nudges) is gated by a `dynamodb:LeadingKeys` condition equal to `${aws:PrincipalTag/task_id}`, so a session can read or write only its own task's rows. `Scan` is not granted (it ignores leading-keys). `task_id` is the isolation boundary because it is the base-table partition key — `LeadingKeys` cannot bind to a GSI partition key such as `user_id`.
+- **S3**: trace writes and attachment reads are scoped to the `<prefix>/${aws:PrincipalTag/user_id}/` object prefix.
+
+The compute role retains only non-tenant access (Bedrock model invocation — already ARN-scoped; CloudWatch Logs; the GitHub PAT secret, read once before the SessionRole is assumed; AgentCore Memory) plus `sts:AssumeRole`/`sts:TagSession` on the SessionRole. Because the agent runs under credentials that are themselves an assumed role, its `AssumeRole` is *role chaining* — capped at one hour regardless of the role's max session duration — so the agent uses a **refreshable** credential provider that re-assumes before expiry (tasks can run up to the 8-hour `maxLifetime`). The design is backend-agnostic: the same SessionRole and agent code serve both the AgentCore and ECS backends. A compromised agent session is therefore confined to its own task's data, enforced at the IAM layer rather than by application-code conventions. The policy structure (the `dynamodb:LeadingKeys` condition on `${aws:PrincipalTag/task_id}`, per-user S3 prefixes, and `Scan` exclusion) is asserted by CDK template tests, and the refreshable-credential and session-tag flow by agent unit tests; the matching-tag → allow / mismatched-or-absent-tag → deny behaviour was additionally confirmed once via the IAM policy simulator during development.
+
+> Out of scope for this control and tracked separately on the roadmap: replacing the shared GitHub PAT (GitHub App / Token Vault), binding credentials to the MicroVM via attestation, and scoping AgentCore Memory (namespace isolation by `actorId`/`sessionId` remains its boundary).
+
 ## Input validation and guardrails
 
 Input screening happens at two points in the pipeline, forming a defense-in-depth chain. Content that passes submission screening is screened again during hydration when external data (GitHub issues, PR comments) is added to the prompt.
 
 ### Submission-time screening
 
-- **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 2,000 characters.
-- **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `HIGH` strength screens task descriptions for prompt injection.
+- **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 10,000 characters.
+- **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `MEDIUM` input strength screens task descriptions for prompt injection.
+- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](/architecture/attachments) for the full screening pipeline.
 - **Fail-closed** - If the Bedrock API is unavailable, submissions are rejected (HTTP 503). Unscreened content never reaches the agent.
 
 ### Hydration-time screening
 
 - **PR tasks** (`pr_iteration`, `pr_review`) - The assembled prompt (PR body, review comments, diff, task description) is screened through Bedrock Guardrails before the agent receives it.
 - **`new_task` with issue content** - The assembled prompt (issue body, comments, task description) is screened. When no issue content is present, hydration-time screening is skipped because the task description was already screened at submission.
-- **Fail-closed** - A Bedrock outage during hydration fails the task. A `guardrail_blocked` event is emitted when content is blocked.
+- **URL attachments** - URL attachments are fetched during hydration with full SSRF protection (DNS resolution pinning to prevent rebinding attacks, private IP blocking, redirect validation, timeout enforcement). Fetched content is screened through the same pipeline as inline attachments before being stored in S3.
+- **Fail-closed** - A Bedrock outage during hydration fails the task. A `guardrail_blocked` event is emitted when content is blocked. Attachment resolution errors (fetch failures, screening blocks, integrity failures) also fail the task — attachments are never silently dropped.
 
 ### Tool access control
 
@@ -75,7 +86,7 @@ The blueprint framework ([REPO_ONBOARDING.md](/architecture/repo-onboarding)) al
 
 **Deployment control** - Custom steps are defined in the `Blueprint` CDK construct and deployed via `cdk deploy`. Only principals with CDK deployment permissions can add or modify them. There is no runtime API for custom step CRUD.
 
-The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. Phase 3 (Cedar-driven HITL approval gates — see [`PHASE3_CEDAR_HITL.md`](/architecture/phase3-cedar-hitl)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, Phase 3's §12 trust model must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
+The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. The Cedar-driven HITL approval gates feature (see [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, the §12 trust model in that doc must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
 
 **Input filtering** - The framework strips credential ARNs (`github_token_secret_arn`) and networking configuration (`egress_allowlist`) from the config before passing it to custom Lambda steps. If a custom step needs secrets, it must declare them explicitly and the operator must grant IAM permissions.
 

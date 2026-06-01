@@ -45,6 +45,7 @@ function rewriteDocsLinkTarget(target) {
     CONTRIBUTING: '/developer-guide/contributing',
     SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
     LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
+    CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
   };
 
@@ -237,6 +238,12 @@ mirrorMarkdownFile(
   path.join('src', 'content', 'docs', 'using', 'Linear-setup-guide.md'),
 );
 
+// --- Cedar Policy Guide: mirror to customizing/ (authoring reference for blueprint authors) ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'CEDAR_POLICY_GUIDE.md'),
+  path.join('src', 'content', 'docs', 'customizing', 'Cedar-policies.md'),
+);
+
 // --- Roadmap: mirror to roadmap/ ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'ROADMAP.md'),
@@ -254,6 +261,9 @@ mirrorMarkdownFile(
 // We keep the source directory named "design" because that's what CLAUDE.md and
 // AGENTS.md reference for contributors. The rename happens only at the site level.
 mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs', 'architecture'));
+
+// --- Decision records (ADRs): mirror to decisions/ ---
+mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
 
 // Guardrail: ensure target tree exists when running in a clean checkout.
 fs.mkdirSync(targetRoot, { recursive: true });

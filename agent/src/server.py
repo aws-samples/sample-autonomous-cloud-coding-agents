@@ -29,6 +29,19 @@ from models import TaskResult
 from observability import set_session_id
 from pipeline import run_task
 
+# --- _debug_cw / _warn_cw failure counter -------------------------------
+# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
+# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
+# is invisible except for this metric. Single counter = single alarm
+# surface — the trade-off is that the alarm can't distinguish which writer
+# is broken (see Chunk 7c review notes). Defined BEFORE any function that
+# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
+# import-time safe: a daemon thread spawned from a write-blocking function
+# can never race with module-level globals still being assigned.
+_debug_cw_failures = 0
+_debug_cw_failures_lock = threading.Lock()
+_DEBUG_CW_FAILURE_EMIT_EVERY = 5
+
 
 def _redact_cached_credentials(text: str) -> str:
     """Remove cached env secrets from debug text before stdout / CloudWatch."""
@@ -91,13 +104,71 @@ def _debug_cw_exc(
     _debug_cw(f"{message} [{type(exc).__name__}: {exc}]\n{tb}", task_id=task_id)
 
 
-# --- _debug_cw failure counter -------------------------------------------
-# Counts write failures from the daemon thread. AgentCore doesn't forward
-# container stdout to APPLICATION_LOGS, so a broken _debug_cw is invisible
-# except for this metric.
-_debug_cw_failures = 0
-_debug_cw_failures_lock = threading.Lock()
-_DEBUG_CW_FAILURE_EMIT_EVERY = 5
+def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
+    """Emit a server-level warning to stdout AND CloudWatch.
+
+    Chunk 7c — AgentCore doesn't forward container stdout to
+    APPLICATION_LOGS (see the ``_debug_cw`` comment block above), so
+    warning ``print`` calls about malformed invocation payloads are
+    effectively invisible in production. Route them through the same
+    daemon-thread CloudWatch writer used by ``_debug_cw`` (writing to
+    the ``server_warn/<task_id>`` stream so operators can alarm on
+    warn traffic separately from debug noise).
+
+    The stdout ``print`` is preserved so local ``docker-compose`` runs
+    and the existing ``capsys``-based unit tests still observe the
+    line. CloudWatch delivery is fire-and-forget — failures bump the
+    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
+    so a silently broken writer still surfaces via that single metric.
+    """
+    stamped = f"[server/warn] {msg}"
+    print(stamped, flush=True)
+
+    log_group = os.environ.get("LOG_GROUP_NAME")
+    if not log_group:
+        return
+
+    _t = threading.Thread(
+        target=_warn_cw_write_blocking,
+        args=(log_group, task_id, stamped),
+        name="warn-cw-write",
+        daemon=True,
+    )
+    _t.start()
+
+
+def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
+    """Blocking CloudWatch write for ``_warn_cw`` — only called from a background thread.
+
+    Mirrors ``_debug_cw_write_blocking`` but writes to the
+    ``server_warn/<task_id>`` stream so warn-level traffic is easy to
+    alarm on independently of debug breadcrumbs. Failures bump the
+    shared ``_debug_cw_failures`` counter — a single alarm surface
+    covers both writers.
+    """
+    try:
+        import boto3
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client = boto3.client("logs", region_name=region)
+
+        stream = f"server_warn/{task_id or 'server'}"
+        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream,
+            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
+        )
+    except Exception as _exc:
+        global _debug_cw_failures
+        with _debug_cw_failures_lock:
+            _debug_cw_failures += 1
+        print(
+            f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
 
 
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
@@ -209,6 +280,38 @@ async def lifespan(_application: FastAPI):
 app = FastAPI(title="Background Agent", version="1.0.0", lifespan=lifespan)
 
 
+def _extract_workload_access_token(request: Request) -> str:
+    """Read AgentCore's workload access token off the inbound request.
+
+    AgentCore Runtime delivers the token on `/invocations` requests under
+    one of two header spellings (both observed 2026-05-18 on a single
+    request via diagnostic logging in us-east-1):
+      1. ``WorkloadAccessToken`` — the SDK's documented header in
+         ``bedrock_agentcore.runtime.models::ACCESS_TOKEN_HEADER``.
+      2. ``x-amzn-bedrock-agentcore-runtime-workload-accesstoken`` —
+         undocumented but present on the wire; included for forward
+         compatibility.
+
+    The token must be propagated explicitly into the pipeline thread (see
+    ``_run_task_background``) because Python ``ContextVar`` is per-thread,
+    not per-request — the SDK's bundled ``_build_request_context``
+    middleware sets it in the request handler's async context, but our
+    pipeline runs in a separate ``threading.Thread`` spawned by
+    ``_spawn_background``. The new thread sees a fresh empty ContextVar
+    unless we re-set it on entry.
+
+    See aws/bedrock-agentcore-sdk-python#219 for the upstream tracking
+    issue (per-thread ContextVar) and the workaround pattern in
+    ``awslabs/agentcore-samples`` 07-Outbound_Auth_3LO_ECS_Fargate.
+    """
+    return (
+        request.headers.get("WorkloadAccessToken")
+        or request.headers.get("x-amzn-bedrock-agentcore-runtime-workload-accesstoken")
+        or request.headers.get("x-amzn-bedrock-agentcore-workload-access-token")
+        or ""
+    )
+
+
 class InvocationRequest(BaseModel):
     input: dict[str, Any]
 
@@ -273,13 +376,48 @@ def _run_task_background(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
+    initial_approval_gate_count: int = 0,
+    approval_gate_cap: int | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
+    workload_access_token: str = "",
+    attachments: list[dict] | None = None,
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
+
+    # Re-establish the AgentCore workload-token ContextVar in this thread.
+    # Python ContextVar storage is per-thread, so the request-handler thread's
+    # context (where BedrockAgentCoreApp's _build_request_context would normally
+    # set this) doesn't propagate to here. Without this re-set,
+    # IdentityClient.get_api_key() callers like resolve_linear_api_token()
+    # short-circuit on a None workload token even when the platform delivered
+    # one. See aws/bedrock-agentcore-sdk-python#219 for the upstream design
+    # constraint that motivates this manual propagation.
+    if workload_access_token:
+        # Vestigial path from the parked AgentCore Identity flow. If the
+        # `bedrock-agentcore` SDK is missing or its module structure
+        # changes, fail open: the Linear token resolver falls back to
+        # reading per-workspace Secrets Manager directly, so the agent
+        # can still proceed without this ContextVar set. Catching
+        # (ImportError, AttributeError) here keeps the pipeline alive
+        # instead of bricking the entire task with no diagnostic when
+        # the upstream SDK rearranges modules.
+        try:
+            from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
+
+            BedrockAgentCoreContext.set_workload_access_token(workload_access_token)
+        except (ImportError, AttributeError) as e:
+            _warn_cw(
+                f"bedrock_agentcore workload-token bridge unavailable "
+                f"({type(e).__name__}: {e}); Linear MCP will resolve via "
+                "Secrets Manager fallback",
+                task_id=task_id,
+            )
 
     _debug_cw(
         f"_run_task_background ENTERED task_id={task_id!r} "
@@ -322,10 +460,15 @@ def _run_task_background(
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
+            approval_timeout_s=approval_timeout_s,
+            initial_approvals=initial_approvals,
+            initial_approval_gate_count=initial_approval_gate_count,
+            approval_gate_cap=approval_gate_cap,
             channel_source=channel_source,
             channel_metadata=channel_metadata,
             trace=trace,
             user_id=user_id,
+            attachments=attachments,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -371,8 +514,49 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
+    # Both are forwarded verbatim to the pipeline; the engine
+    # validates shape at construction time and raises on bad input.
+    approval_timeout_s = inp.get("approval_timeout_s")
+    initial_approvals = inp.get("initial_approvals") or []
+    # Chunk 7: TaskTable-persisted ``approval_gate_count`` threaded by
+    # the orchestrator so a container restart (§13.6) resumes the
+    # cumulative gate budget instead of resetting to 0. Non-int payloads
+    # coerce to 0 to keep the invocation path fail-open on a malformed
+    # field; the downstream PolicyEngine rejects negatives loudly.
+    raw_gate_count = inp.get("initial_approval_gate_count", 0)
+    try:
+        initial_approval_gate_count = int(raw_gate_count)
+    except (TypeError, ValueError):
+        _warn_cw(
+            "initial_approval_gate_count payload field is not an int "
+            f"(type={type(raw_gate_count).__name__}, value={raw_gate_count!r}); "
+            f"coerced to 0. task_id={inp.get('task_id', '')!r}",
+            task_id=inp.get("task_id"),
+        )
+        initial_approval_gate_count = 0
+    # Chunk 7b (§4 step 5, decision #13): per-task cap resolved by the
+    # submit path and persisted on the TaskRecord. Threaded so a
+    # blueprint-configured cap (or the default-50 frozen at submit) wins
+    # over the PolicyEngine's compile-time fallback on restarts. A
+    # malformed payload coerces to ``None`` so the engine can still
+    # construct; its own bounds check would reject anything out-of-range.
+    raw_approval_gate_cap = inp.get("approval_gate_cap")
+    approval_gate_cap: int | None = None
+    if raw_approval_gate_cap is not None:
+        try:
+            approval_gate_cap = int(raw_approval_gate_cap)
+        except (TypeError, ValueError):
+            _warn_cw(
+                "approval_gate_cap payload field is not an int "
+                f"(type={type(raw_approval_gate_cap).__name__}, value={raw_approval_gate_cap!r}); "
+                f"falling back to engine default. task_id={inp.get('task_id', '')!r}",
+                task_id=inp.get("task_id"),
+            )
+            approval_gate_cap = None
     channel_source = inp.get("channel_source", "") or ""
     channel_metadata = inp.get("channel_metadata") or {}
+    attachments = inp.get("attachments") or []
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -389,15 +573,33 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     if isinstance(raw_user_id, str):
         user_id = raw_user_id
     else:
-        print(
-            "[server/warn] user_id payload field is not a string "
+        _warn_cw(
+            "user_id payload field is not a string "
             f"(type={type(raw_user_id).__name__}); coerced to empty. "
             f"task_id={inp.get('task_id', '')!r}",
-            flush=True,
+            task_id=inp.get("task_id"),
         )
         user_id = ""
 
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
+
+    # Cedar HITL: stamp TASK_STARTED_AT so the PreToolUse hook's
+    # ``_remaining_maxlifetime_s`` (agent/src/hooks.py §6.5) has the
+    # real per-task clock to compute the maxLifetime ceiling. Without
+    # this the hook's ceiling computation silently falls back to
+    # "unknown, don't clip" (fail-open) and the user may be asked for
+    # approval on a gate whose window will expire before they can
+    # respond.
+    started_at = inp.get("task_started_at", "")
+    if started_at and isinstance(started_at, str):
+        os.environ["TASK_STARTED_AT"] = started_at
+
+    # AgentCore-injected workload access token (see _extract_workload_access_token
+    # for full rationale). Threaded into _run_task_background so the pipeline
+    # thread can call BedrockAgentCoreContext.set_workload_access_token() on entry
+    # — without that the IdentityClient.get_api_key path used by
+    # resolve_linear_api_token() returns None.
+    workload_access_token = _extract_workload_access_token(request)
 
     return {
         "repo_url": repo_url,
@@ -418,10 +620,16 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
+        "approval_timeout_s": approval_timeout_s,
+        "initial_approvals": initial_approvals,
+        "initial_approval_gate_count": initial_approval_gate_count,
+        "approval_gate_cap": approval_gate_cap,
         "channel_source": channel_source,
         "channel_metadata": channel_metadata,
         "trace": trace,
         "user_id": user_id,
+        "workload_access_token": workload_access_token,
+        "attachments": attachments,
     }
 
 

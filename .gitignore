@@ -22,6 +22,8 @@ pids
 coverage
 *.lcov
 .nyc_output
+.jest-cache
+*.tsbuildinfo
 lib-cov
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 /test-reports/
@@ -52,6 +54,7 @@ agent/.venv/
 # ──────────────────────────────────────────────
 cdk.out/
 /cdk/cdk.out*/
+/cdk/cdk-*.out/
 .cdk.staging/
 cdk.context.json
 /assets/
@@ -95,6 +98,7 @@ agent/gitleaks-report.json
 # ──────────────────────────────────────────────
 .mcp.json
 .remember/
+.claude/worktrees/
 
 # ──────────────────────────────────────────────
 # Misc

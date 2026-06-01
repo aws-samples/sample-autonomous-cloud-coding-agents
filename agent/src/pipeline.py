@@ -29,7 +29,7 @@ from post_hooks import (
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
 from runner import run_agent
-from shell import log
+from shell import log, log_error_cw
 from system_prompt import SYSTEM_PROMPT
 from telemetry import (
     _TrajectoryWriter,
@@ -55,6 +55,32 @@ def _chain_prior_agent_error(agent_result: AgentResult | None, exc: BaseExceptio
     if agent_result.status == "error":
         return f"Agent reported status=error; subsequent failure: {tail}"
     return tail
+
+
+def _inject_attachment_context(prompt: str, prepared_attachments: list) -> str:
+    """Append attachment file references to the user prompt.
+
+    Images are referenced by absolute path so the agent can view them
+    with the Read tool (which supports multimodal image reading).
+    File attachments are similarly referenced by path.
+    """
+    lines = ["\n\n---\n\n**Attachments provided with this task:**\n"]
+    for att in prepared_attachments:
+        size_kb = att.size_bytes / 1024
+        if att.type == "image":
+            lines.append(
+                f"- **Image:** `{att.filename}` ({size_kb:.1f} KB, {att.content_type}) "
+                f"— View with: `Read {att.local_path}`"
+            )
+        else:
+            lines.append(
+                f"- **File:** `{att.filename}` ({size_kb:.1f} KB, {att.content_type}) "
+                f"— Read with: `Read {att.local_path}`"
+            )
+    lines.append(
+        "\nUse the Read tool to view these files. Image files will be displayed visually when read."
+    )
+    return prompt + "\n".join(lines)
 
 
 def _maybe_upload_trace(
@@ -244,10 +270,15 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    approval_timeout_s: int | None = None,
+    initial_approvals: list[str] | None = None,
+    initial_approval_gate_count: int = 0,
+    approval_gate_cap: int | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
+    attachments: list[dict] | None = None,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -282,11 +313,32 @@ def run_task(
         channel_metadata=channel_metadata,
         trace=trace,
         user_id=user_id,
+        approval_timeout_s=approval_timeout_s,
+        initial_approvals=initial_approvals,
+        initial_approval_gate_count=initial_approval_gate_count,
+        approval_gate_cap=approval_gate_cap,
+        attachments=attachments,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
     if cedar_policies:
         config.cedar_policies = cedar_policies
+
+    # Export session-tag values so tenant-data boto3 clients (DDB/S3) assume
+    # the per-task SessionRole with {user_id, repo, task_id} tags. No-op when
+    # AGENT_SESSION_ROLE_ARN is unset (local/dev/tests).
+    from aws_session import configure_session, is_scoped
+
+    configure_session(
+        user_id=config.user_id,
+        repo=config.repo_url,
+        task_id=config.task_id,
+    )
+    # Surface the credential-scoping posture once per task so every task's logs
+    # state plainly whether tenant-data isolation was active. is_scoped()
+    # resolves the session; if scoping was requested but unbuildable it raises
+    # SessionScopingError here (fail closed) rather than running unscoped.
+    log("TASK", f"Tenant-data credential scoping: {'SCOPED' if is_scoped() else 'UNSCOPED'}")
 
     log("TASK", f"Task ID: {config.task_id}")
     log("TASK", f"Repository: {config.repo_url}")
@@ -330,6 +382,11 @@ def run_task(
                 )
 
             trajectory.set_truncation_callback(_on_trace_truncated)
+        # Declared up-front so the crash handler at the bottom of this `try`
+        # can reference it via a normal name rather than ``locals().get(...)``
+        # — survives refactors and reads cleanly. Stays None until the Linear
+        # `react_task_started` call assigns the actual reaction id.
+        linear_eyes_reaction_id: str | None = None
         try:
             # Context hydration
             with task_span("task.context_hydration"):
@@ -415,7 +472,7 @@ def run_task(
             # writing .mcp.json so the child SDK process inherits the env var
             # that the MCP server entry references via ${LINEAR_API_TOKEN}.
             if config.channel_source == "linear":
-                resolve_linear_api_token()
+                resolve_linear_api_token(config.channel_metadata)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
@@ -427,6 +484,33 @@ def run_task(
                 config.channel_metadata,
             )
 
+            # Download attachments from S3 (version-pinned, integrity-verified)
+            prepared_attachments: list = []
+            if config.attachments:
+                from attachments import download_attachments
+
+                try:
+                    with task_span("task.attachment_download"):
+                        prepared_attachments = download_attachments(
+                            config.attachments, setup.repo_dir
+                        )
+                    progress.write_agent_milestone(
+                        "attachments_downloaded",
+                        f"count={len(prepared_attachments)}",
+                    )
+                except RuntimeError as e:
+                    log("ERROR", f"Attachment integrity check failed: {e}")
+                    raise RuntimeError(
+                        f"Attachment download/verification failed: {e}. "
+                        "The task cannot proceed without valid attachments."
+                    ) from e
+                except Exception as e:
+                    err_type = type(e).__name__
+                    log("ERROR", f"Attachment download failed: {err_type}: {e}")
+                    raise RuntimeError(
+                        f"Failed to download task attachments from S3: {err_type}: {e}"
+                    ) from e
+
             # Log discovered repo-level project configuration
             # (all files loaded by setting_sources=["project"])
             repo_dir = setup.repo_dir
@@ -435,6 +519,13 @@ def run_task(
                 log("TASK", f"Repo project configuration: {project_config}")
             else:
                 log("TASK", "No repo-level project configuration found")
+
+            # Inject attachment references into the prompt so the agent knows
+            # about available files. Images are read natively by the agent's
+            # Read tool (multimodal support). File attachments are referenced
+            # by path for the agent to read as needed.
+            if prepared_attachments:
+                prompt = _inject_attachment_context(prompt, prepared_attachments)
 
             # Run agent
             disk_before = get_disk_usage(AGENT_WORKSPACE)
@@ -464,7 +555,13 @@ def run_task(
                         )
                     )
                 except Exception as e:
-                    log("ERROR", f"Agent failed: {e}")
+                    # Fatal agent error: mirror to APPLICATION_LOGS so
+                    # TaskDashboard widgets + ``bgagent status`` can see
+                    # the real failure text instead of stopping at
+                    # ``error_classification.UNKNOWN``. Local stdout
+                    # path is preserved for docker-compose / unit-test
+                    # capture.
+                    log_error_cw(f"Agent failed: {e}", task_id=config.task_id or None)
                     agent_span.set_status(StatusCode.ERROR, str(e))
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))
@@ -710,13 +807,14 @@ def run_task(
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
             # No-op for non-Linear tasks; network/GraphQL failures are swallowed.
-            # `linear_eyes_reaction_id` may be unbound if we crashed before the
-            # start-reaction call — guarded with locals() to stay safe.
+            # `linear_eyes_reaction_id` is initialized to None at the top of
+            # this try block, so it's always bound here even if we crashed
+            # before the start-reaction call assigned a real id.
             react_task_finished(
                 config.channel_source,
                 config.channel_metadata,
                 success=False,
-                started_reaction_id=locals().get("linear_eyes_reaction_id"),
+                started_reaction_id=linear_eyes_reaction_id,
             )
             raise
 

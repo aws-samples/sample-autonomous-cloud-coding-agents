@@ -21,7 +21,7 @@ import * as path from 'path';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
-import { Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -30,19 +30,25 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+import { Construct, IConstruct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
+import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
+import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import { Blueprint } from '../constructs/blueprint';
+import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
+// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
-// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { TaskApi } from '../constructs/task-api';
+import { TaskApprovalsTable } from '../constructs/task-approvals-table';
 import { TaskDashboard } from '../constructs/task-dashboard';
 import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
@@ -56,21 +62,59 @@ export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
 
-    const runnerPath = path.join(__dirname, '..', '..', '..', 'agent');
+    // Build context is repo root (not agent/) so the Dockerfile can COPY
+    // sibling trees the agent reads at runtime — currently
+    // ``contracts/constants.json`` (S9 cross-language constants — see
+    // ``contracts/README.md``). Future shared assets (parity fixtures,
+    // schema files) drop into ``contracts/`` without further build-context
+    // changes. Pattern lifted from ``merge/akw-integration``.
+    const repoRoot = path.join(__dirname, '..', '..', '..');
 
-    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(runnerPath);
+    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, {
+      file: 'agent/Dockerfile',
+    });
 
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
+    // Cedar HITL approval-gate state (design §10.1). Agent writes PENDING
+    // rows + GSI query powers `bgagent pending`; Chunk 5 wires the
+    // Approve/Deny Lambdas + fan-out consumer.
+    //
+    // Construct id is ``TaskApprovalsTableV2`` — the original
+    // ``TaskApprovalsTable`` logical id was abandoned mid-development
+    // after the first ship of the ``user_id-status-index`` GSI. Adding
+    // ``matching_rule_ids`` to the projection required a destructive
+    // recreate (DDB rejects in-place ``nonKeyAttributes`` edits), so
+    // the construct id changed to force CloudFormation to create the
+    // new table under a fresh logical resource while tearing down the
+    // old one. Acceptable in dev; in a future prod migration the
+    // dual-index pattern is preferred (see §10.1 of the design doc).
+    const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
 
+    // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
+    // asset is in the synthed template; Chunk 5 handlers (Approve,
+    // Deny, GetPolicies, CreateTask) attach the layer via
+    // ``fn.addLayers(cedarWasmLayer.layer)``.
+    const cedarWasmLayer = new CedarWasmLayer(this, 'CedarWasmLayer');
+
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
     const traceArtifactsBucket = new TraceArtifactsBucket(this, 'TraceArtifactsBucket');
+
+    // Attachment storage — images, files, and URL-fetched content for tasks.
+    const attachmentsBucket = new AttachmentsBucket(this, 'AttachmentsBucket');
+
+    NagSuppressions.addResourceSuppressions(attachmentsBucket.bucket, [
+      {
+        id: 'AwsSolutions-S1',
+        reason: 'Task attachments: writes from create-task and orchestrator Lambdas only; reads by agent via IAM role. 90-day lifecycle; versioning + screening prevent TOCTOU. Access logging not justified for this use case.',
+      },
+    ]);
 
     // Server access logging intentionally disabled. Rationale:
     //  - writes: only the agent runtime IAM role (``grantPut`` below).
@@ -213,11 +257,27 @@ export class AgentStack extends Stack {
       },
     });
 
+    // SessionRole ARN placeholder — the per-task SessionRole (#209) is created
+    // AFTER the Runtime (it lists runtime.role as an assuming principal), but
+    // its ARN must be injected into the runtime's environment so the agent can
+    // assume it. Break the cycle with a Lazy.string, same pattern as above.
+    let sessionRoleArnHolder: string | undefined;
+    const lazySessionRoleArn = Lazy.string({
+      produce: () => {
+        if (!sessionRoleArnHolder) {
+          throw new Error('SessionRole ARN was accessed before AgentSessionRole was created');
+        }
+        return sessionRoleArnHolder;
+      },
+    });
+
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
+      cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
       orchestratorFunctionArn: lazyOrchestratorArn,
@@ -225,6 +285,8 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
       agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
       traceArtifactsBucket: traceArtifactsBucket.bucket,
+      attachmentsBucket: attachmentsBucket.bucket,
+      userConcurrencyTable: userConcurrencyTable.table,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -240,7 +302,21 @@ export class AgentStack extends Stack {
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
+      // Cedar HITL approval gates (§6.5). Agent's task_state primitives
+      // use this to write PENDING rows + transition tasks to
+      // AWAITING_APPROVAL; absent → hook fails closed with
+      // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
+      TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
+      // Hint for the hook's remaining-maxLifetime calculation (§6.5
+      // pseudocode line 793). Kept in sync with the AgentCore
+      // lifecycle configuration below so drift is visible. 8 hours.
+      AGENTCORE_MAX_LIFETIME_S: '28800',
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
+      // Per-task SessionRole (#209): the agent assumes this with session tags
+      // {user_id, repo, task_id} and uses the scoped creds for tenant-data
+      // (DDB/S3) access. Resolved lazily — the role lists runtime.role as an
+      // assuming principal, so it is created after the runtime.
+      AGENT_SESSION_ROLE_ARN: lazySessionRoleArn,
       // --trace artifact store (§10.1). The agent writes the JSONL
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
       // terminal state when the submit payload enabled ``trace``.
@@ -304,28 +380,22 @@ export class AgentStack extends Stack {
     ]);
 
     // --- IAM grants ---
-    taskTable.table.grantReadWriteData(runtime);
-    taskEventsTable.table.grantReadWriteData(runtime);
-    taskNudgesTable.table.grantReadWriteData(runtime);
+    // Per-session IAM scoping (#209): tenant-data access (the four
+    // task_id-partitioned tables + the agent's trace/attachment S3 objects)
+    // is NOT granted to the runtime ExecutionRole. Instead the agent assumes a
+    // per-task SessionRole (created below) with session tags
+    // {user_id, repo, task_id}, and that role carries the tenant-data grants
+    // constrained by aws:PrincipalTag conditions. The runtime role keeps only
+    // non-tenant / shared access:
+    //   - UserConcurrencyTable: user-scoped counter (agent path does not write
+    //     it today; left here for the reconciler/orchestrator parity).
+    //   - GitHub PAT secret: read once at startup, before the agent assumes the
+    //     SessionRole.
+    //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
     userConcurrencyTable.table.grantReadWriteData(runtime);
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
-    // Runtime only ever writes trace artifacts (read happens via presigned
-    // URL from the ``get-trace-url`` handler, not the runtime).
-    //
-    // TODO(K2 Stage 2+): tighten to a per-prefix condition so the runtime
-    // cannot write outside its own task's ``traces/<user_id>/`` prefix.
-    // The current grant expands to ``Resource: <bucket>/*`` with no
-    // ``s3:prefix`` / ``aws:PrincipalTag`` condition — per-user isolation
-    // is enforced in *agent code* (object-key construction), which is a
-    // trust boundary, not an enforcement boundary. Options: propagate
-    // ``user_id`` as an IAM session tag on the runtime invocation and
-    // condition the policy on ``aws:PrincipalTag/UserId``; or run the
-    // upload from a short-lived Lambda with a scoped policy instead of
-    // the runtime itself. Deferred because the session-tag plumbing is
-    // orthogonal to landing the feature behavior.
-    traceArtifactsBucket.bucket.grantPut(runtime);
 
     const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
       supportsAgents: true,
@@ -366,6 +436,28 @@ export class AgentStack extends Stack {
     model2.grantInvoke(runtime);
     inferenceProfile2.grantInvoke(runtime);
 
+    // --- Per-task SessionRole (#209) ---
+    // Holds the tenant-data grants (the four task_id-partitioned tables, plus
+    // per-user-prefixed trace writes and attachment reads), each constrained
+    // by aws:PrincipalTag conditions so a compromised session reaches only its
+    // own task's data. The agent assumes this with refreshable credentials
+    // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
+    // ExecutionRole as the assuming principal; the ECS task role is added in
+    // the ECS block below when that backend is enabled.
+    const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
+      assumingRoles: [runtime.role],
+      taskScopedTables: [
+        taskTable.table,
+        taskEventsTable.table,
+        taskApprovalsTable.table,
+        taskNudgesTable.table,
+      ],
+      traceArtifactsBucket: traceArtifactsBucket.bucket,
+      attachmentsBucket: attachmentsBucket.bucket,
+    });
+    agentSessionRole.grantAssumeToComputeRole(runtime.role);
+    sessionRoleArnHolder = agentSessionRole.role.roleArn;
+
     runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
     // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
@@ -378,6 +470,43 @@ export class AgentStack extends Stack {
         reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
       },
     ], true);
+
+    // Chunk 10 deploy-prep: the Cedar HITL additions (TaskApprovalsTable
+    // grant + extra env vars) pushed the runtime
+    // execution role past CDK's per-inline-policy size limit, causing CDK
+    // to auto-split excess statements into ``OverflowPolicy1`` / etc.
+    // Those overflow policies inherit the same wildcard
+    // ``bedrock:InvokeModel*`` / CloudWatch / cross-region-inference
+    // actions as the base policy but live at paths that any suppression
+    // placed at constructor time does NOT reach (CDK creates the
+    // overflow policies lazily during synth ``prepare()``, after the
+    // construct tree has been frozen). Use an Aspect that visits every
+    // node during synth and matches overflow-policy children of the
+    // runtime ExecutionRole so any present or future overflow is
+    // suppressed automatically without hardcoding
+    // ``OverflowPolicy<N>`` indices.
+    const overflowSuppressionAspect = {
+      visit(node: IConstruct) {
+        const nodePath = node.node.path;
+        if (
+          nodePath.includes('/Runtime/ExecutionRole/OverflowPolicy')
+          && nodePath.endsWith('/Resource')
+        ) {
+          NagSuppressions.addResourceSuppressions(node, [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason:
+                'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
+            },
+          ]);
+        }
+      },
+    };
+    // MUTATING priority: runs before cdk-nag's READONLY aspect so the
+    // suppression is in place when the nag checks visit the overflow
+    // policy. Default priority would race with cdk-nag (registered in
+    // ``main.ts``) and the suppression would arrive too late.
+    Aspects.of(this).add(overflowSuppressionAspect, { priority: AspectPriority.MUTATING });
 
     new CfnOutput(this, 'RuntimeArn', {
       value: runtime.agentRuntimeArn,
@@ -397,6 +526,16 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskNudgesTableName', {
       value: taskNudgesTable.table.tableName,
       description: 'Name of the DynamoDB task nudges table (Phase 2)',
+    });
+
+    new CfnOutput(this, 'TaskApprovalsTableName', {
+      value: taskApprovalsTable.table.tableName,
+      description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
+    });
+
+    new CfnOutput(this, 'CedarWasmLayerArn', {
+      value: cedarWasmLayer.layer.layerVersionArn,
+      description: 'ARN of the Cedar-wasm Lambda layer (consumed by Chunk 5 REST handlers)',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {
@@ -430,7 +569,8 @@ export class AgentStack extends Stack {
     // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
     //
     // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
-    //   directory: runnerPath,
+    //   directory: repoRoot,
+    //   file: 'agent/Dockerfile',
     //   platform: ecr_assets.Platform.LINUX_ARM64,
     // });
     //
@@ -442,6 +582,11 @@ export class AgentStack extends Stack {
     //   userConcurrencyTable: userConcurrencyTable.table,
     //   githubTokenSecret,
     //   memoryId: agentMemory.memory.memoryId,
+    //   // Per-session IAM scoping (#209): the ECS task role assumes the same
+    //   // SessionRole as the AgentCore runtime for tenant-data access. The
+    //   // construct admits the task role to the trust and injects
+    //   // AGENT_SESSION_ROLE_ARN into the container.
+    //   agentSessionRole,
     // });
 
     // --- Task Orchestrator (durable Lambda function) ---
@@ -455,6 +600,7 @@ export class AgentStack extends Stack {
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      attachmentsBucket: attachmentsBucket.bucket,
       // To wire ECS, uncomment the ecsCluster block above and add:
       // ecsConfig: {
       //   clusterArn: ecsCluster.cluster.clusterArn,
@@ -491,16 +637,48 @@ export class AgentStack extends Stack {
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
+    // --- Pending-upload cleanup rule ---
+    // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
+    // 30 minutes (client crash, abandoned session, network failure).
+    // Cleans up orphaned S3 objects under the task's attachment prefix.
+    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      attachmentsBucket: attachmentsBucket.bucket,
+    });
+
     // --- Fan-out plane consumer ---
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
     // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher (Chunk J) edits a single issue comment in place with
-    // If-Match ETag; Slack / Email remain log-only until Phase 2.
+    // dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+    });
+
+    // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
+    // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
+    // Reads agent_milestone records for approval events and emits
+    // CloudWatch EMF for the dashboard widgets below. See the
+    // 2-consumer architectural note in `task-events-table.ts` —
+    // adding a third consumer here requires the Kinesis Data Streams
+    // for DynamoDB migration.
+    new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
+      taskEventsTable: taskEventsTable.table,
     });
 
     // --- Operator dashboard ---
@@ -584,23 +762,61 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
     });
 
-    // Pipe the Linear API token secret into the AgentCore runtime so the
-    // agent's `resolve_linear_api_token()` can populate `LINEAR_API_TOKEN`
-    // for the Linear MCP's `${LINEAR_API_TOKEN}` placeholder.
-    linearIntegration.apiTokenSecret.grantRead(runtime);
-    cfnRuntime.addPropertyOverride(
-      'EnvironmentVariables.LINEAR_API_TOKEN_SECRET_ARN',
-      linearIntegration.apiTokenSecret.secretArn,
+    // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
+    // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
+    // creates `bgagent-linear-oauth-<slug>` secrets at install time;
+    // the secret JSON contains access_token, refresh_token, expires_at,
+    // and the OAuth client_id/client_secret. The orchestrator passes
+    // `linear_oauth_secret_arn` to the agent via task.channel_metadata,
+    // so the agent looks up the exact ARN — no discovery needed.
+    //
+    // Agent has GetSecretValue ONLY — no Put. Review item S1: agent
+    // runtime executes untrusted repo code, so write access to all
+    // workspace tokens is too broad a blast radius (a compromised
+    // agent could overwrite any workspace's token). Lambdas (trusted
+    // code in this stack) handle the in-place refresh path; the agent
+    // proceeds with whatever token Lambdas have most-recently written.
+    // For a 24h Linear access-token TTL, the practical impact is that
+    // a stale token in the cache forces the agent's next call to fail
+    // closed — preferable to a trust gap.
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+
+    // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
+    // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
+    // rejection path can post a Linear comment + ❌. The orchestrator only
+    // resolves a token when `task.channel_source === 'linear'`, but the
+    // IAM grant is unconditional (per-workspace secrets are created lazily
+    // by `bgagent linear setup`).
+    linearIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
+    orchestrator.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
     );
+    orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
 
     new CfnOutput(this, 'LinearWebhookSecretArn', {
       value: linearIntegration.webhookSecret.secretArn,
       description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',
-    });
-
-    new CfnOutput(this, 'LinearApiTokenSecretArn', {
-      value: linearIntegration.apiTokenSecret.secretArn,
-      description: 'Secrets Manager ARN for the Linear personal API token (agent-side MCP) — populate via `bgagent linear setup`',
     });
 
     new CfnOutput(this, 'LinearProjectMappingTableName', {
@@ -611,6 +827,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearUserMappingTableName', {
       value: linearIntegration.userMappingTable.tableName,
       description: 'Name of the DynamoDB Linear user mapping table',
+    });
+
+    new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
+      value: linearIntegration.workspaceRegistryTable.tableName,
+      description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
     });
 
     // --- Bedrock model invocation logging (account-level) ---

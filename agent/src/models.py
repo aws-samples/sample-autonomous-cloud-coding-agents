@@ -61,6 +61,39 @@ ContentTrustLevel = Literal["trusted", "untrusted-external", "memory"]
 # (see cdk/src/handlers/shared/context-hydration.ts).
 SUPPORTED_HYDRATED_CONTEXT_VERSION = 1
 
+# Attachment types — mirrors AttachmentType in cdk/src/handlers/shared/types.ts.
+AttachmentType = Literal["image", "file", "url"]
+
+
+class AttachmentConfig(BaseModel):
+    """Attachment descriptor from the orchestrator — mirrors AgentAttachmentPayload in types.ts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    attachment_id: str
+    type: AttachmentType
+    content_type: str
+    filename: str
+    s3_uri: str
+    s3_version_id: str
+    size_bytes: int
+    source_url: str | None = None
+    token_estimate: int | None = None
+    checksum_sha256: str
+
+    @model_validator(mode="after")
+    def _validate_integrity_fields(self) -> Self:
+        if not self.s3_version_id:
+            raise ValueError("s3_version_id is required for integrity verification")
+        if not self.checksum_sha256:
+            raise ValueError("checksum_sha256 is required for integrity verification")
+        # checksum must be lowercase hex (SHA-256 = 64 hex chars)
+        if len(self.checksum_sha256) != 64 or not all(
+            c in "0123456789abcdef" for c in self.checksum_sha256
+        ):
+            raise ValueError("checksum_sha256 must be a 64-character lowercase hex string")
+        return self
+
 
 class HydratedContext(BaseModel):
     """Orchestrator context JSON — keep in sync with HydratedContext in context-hydration.ts."""
@@ -129,8 +162,30 @@ class TaskConfig(BaseModel):
     trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
+    # Cedar HITL (§7.3, §10.2). Per-task approval defaults threaded
+    # from the orchestrator payload; consumed by PolicyEngine at
+    # construction so the engine seeds ApprovalAllowlist and adopts
+    # the per-task timeout default.
+    approval_timeout_s: int | None = None
+    initial_approvals: list[str] = []
+    # Chunk 7: TaskTable-persisted ``approval_gate_count`` seeded into
+    # the session counter so container restarts (§13.6) resume the
+    # cumulative gate budget without resetting to 0. Threaded from the
+    # orchestrator payload; zero default preserves legacy callers.
+    initial_approval_gate_count: int = 0
+    # Chunk 7b (§4 step 5, decision #13): per-task approval-gate cap
+    # resolved at task submit-time from ``Blueprint.security.approvalGateCap``
+    # (or the platform default of 50). Persisted on the TaskRecord so
+    # it survives container restarts and mid-task blueprint edits do
+    # not shift the cap beneath a running task. ``None`` when the
+    # orchestrator payload did not include the field (legacy tasks);
+    # PolicyEngine falls back to its own default of 50 in that case.
+    approval_gate_cap: int | None = None
     issue: GitHubIssue | None = None
     base_branch: str | None = None
+    # Attachments from the orchestrator payload (Phase 3). Validated as
+    # AttachmentConfig models. Empty list for tasks without attachments.
+    attachments: list[AttachmentConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_trace_requires_user_id(self) -> Self:

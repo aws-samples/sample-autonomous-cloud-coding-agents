@@ -1,0 +1,12 @@
+{
+  "approval_gate_cap": {
+    "min": 1,
+    "max": 500,
+    "default": 50
+  },
+  "approval_timeout_s": {
+    "min": 30,
+    "max": 3600,
+    "default": 300
+  }
+}

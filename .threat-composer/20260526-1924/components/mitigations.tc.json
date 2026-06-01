@@ -1,0 +1,593 @@
+{
+  "schema": 1,
+  "applicationInfo": {},
+  "architecture": {},
+  "dataflow": {},
+  "assumptions": [],
+  "assumptionLinks": [],
+  "threats": [],
+  "mitigations": [
+    {
+      "id": "86c073e9-720d-4af3-b3b8-e589004102f4",
+      "numericId": 1,
+      "content": "Enable MFA on the Cognito User Pool using TOTP software tokens. Configure the Cognito user pool to require MFA for all users (MFA enforcement = REQUIRED). Update the CLI authentication flow to support MFA challenge responses during SRP authentication.",
+      "tags": ["Preventative", "Authentication", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Directly addresses the absence of MFA that enables credential stuffing. Cognito supports TOTP MFA natively. The CLI (TypeScript) needs to handle the SOFTWARE_TOKEN_MFA challenge in the auth flow. This is a low-effort, high-impact change that eliminates the primary authentication weakness."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "c1db91af-2b8b-45bc-9bea-84f88d8460be",
+      "numericId": 2,
+      "content": "Implement adaptive rate limiting on Cognito authentication endpoints using a Lambda pre-authentication trigger that tracks failed attempts per email in DynamoDB with exponential backoff lockout (e.g., 5 failures = 15min lockout, 10 = 1hr).",
+      "tags": ["Preventative", "Authentication", "Rate Limiting", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Supplements MFA by providing defense-in-depth against credential attacks. WAFv2 rate limiting at 1000/5min is too permissive for auth endpoints. A Cognito pre-authentication Lambda trigger can enforce per-user lockouts independent of source IP, defeating distributed attacks."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "82a28084-8d59-4b5a-87df-88c81d35cafb",
+      "numericId": 3,
+      "content": "Implement automatic rotation of webhook secrets in Secrets Manager with a 30-day rotation schedule. Use a Lambda rotation function that updates both Secrets Manager and the WebhookTable with the new secret, supporting a grace period where both old and new secrets are valid during rotation.",
+      "tags": ["Preventative", "Credential Management", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Limits the window of exploitation for compromised webhook secrets. Secrets Manager native rotation with a custom Lambda rotator can handle the dual-secret validation period. Combined with CloudTrail monitoring of GetSecretValue calls, this reduces the risk of long-lived compromised credentials."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "3ebe3140-ca17-4166-bb42-07cdcc88f3f1",
+      "numericId": 4,
+      "content": "Add IP allowlisting for webhook sources by configuring WAFv2 rules that restrict the /v1/webhooks/* path to known source IP ranges (e.g., CI/CD system IPs). Store allowed CIDRs in an IP set that can be updated without redeployment.",
+      "tags": ["Preventative", "Network Security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Even with a compromised HMAC secret, attackers cannot forge requests unless they originate from allowed IP ranges. WAFv2 IP sets support dynamic updates. This is particularly effective for webhook integrations where source IPs are predictable (e.g., GitHub webhook IPs, internal CI systems)."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "c8858580-7af4-48aa-8e18-374aa970ae10",
+      "numericId": 5,
+      "content": "Implement a secondary content screening layer using a dedicated prompt injection classifier model (separate from Bedrock Guardrails) that runs on GitHub issue/PR content before it enters the agent context. Use a fine-tuned classifier that specifically targets code-embedded injection patterns.",
+      "tags": ["Preventative", "Prompt Injection Defense", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Bedrock Guardrails at MEDIUM strength is a single point of failure for prompt injection detection. A secondary classifier provides defense-in-depth. This can be a lightweight model (e.g., Haiku-based) that specifically looks for instruction-like patterns in code comments, issue bodies, and PR descriptions. The two-layer approach catches injections that either system alone would miss."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "15eb3126-c594-437f-bd88-6f89953f2143",
+      "numericId": 6,
+      "content": "Implement output validation on agent-generated code by running a post-generation diff analysis that flags suspicious patterns: new network calls to non-allowlisted domains, environment variable reads of sensitive vars, base64 encoding of secrets, or modifications to files outside the expected scope.",
+      "tags": ["Detective", "Prompt Injection Defense", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Even if prompt injection bypasses input screening, output validation can detect the effects. A PostToolUse hook analyzing git diffs before push can identify: (1) unexpected outbound network calls, (2) access to GITHUB_TOKEN or other env vars in new code, (3) modifications to CI/CD configs or security-sensitive files, (4) obfuscated code patterns. This catches the impact rather than the injection itself."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "1a3f7aaf-197c-47c6-9363-a45b6bf5f405",
+      "numericId": 7,
+      "content": "Replace the shared GitHub PAT with GitHub App installation tokens scoped per-repository. Create a GitHub App, install it on target repos, and generate short-lived installation tokens (1hr expiry) at task hydration time, passing only the repo-specific token to the MicroVM.",
+      "tags": ["Preventative", "Credential Scoping", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "This is the highest-impact mitigation for the blast radius problem. GitHub App installation tokens are scoped to specific repositories and expire in 1 hour. The orchestrator generates a token for only the target repo at hydration time. Even if the MicroVM is fully compromised, the attacker can only access the single target repository. This is already on the roadmap but should be prioritized."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "a2e6938b-6e1f-4ad9-bb9b-af25ecc4f111",
+      "numericId": 8,
+      "content": "As an interim measure before GitHub App migration, create multiple fine-grained PATs each scoped to a single repository or small group of related repos. Map repos to their specific PAT in the RepoTable and inject only the matching token into each MicroVM session.",
+      "tags": ["Preventative", "Credential Scoping", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "GitHub fine-grained PATs (beta) support per-repo scoping. While less elegant than GitHub Apps, this can be implemented quickly by adding a tokenSecretArn field to the RepoTable and modifying the orchestrator to look up the repo-specific secret. Reduces blast radius from all-repos to single-repo immediately."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "8c4ae127-bcbd-4688-8f7d-bfc9c34be0db",
+      "numericId": 9,
+      "content": "Switch DNS Firewall from observation mode to enforcement mode (BLOCK action for non-allowlisted domains). Add explicit allowlist entries for required domains (github.com, registry.npmjs.org, pypi.org, AWS endpoints) and block all others with a fallback BLOCK rule.",
+      "tags": ["Preventative", "Network Security", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "The single most impactful change for preventing data exfiltration. Changing observationMode from true to false in the DnsFirewall construct activates blocking. This prevents compromised agents from contacting attacker-controlled domains. Requires testing to ensure the allowlist is complete (check CloudWatch DNS Firewall ALERT logs for legitimate domains being accessed before switching to BLOCK)."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "1713fa19-f3df-4e21-9509-dda7a84f71dd",
+      "numericId": 10,
+      "content": "Implement VPC Flow Logs analysis with automated alerting for unusual egress patterns from MicroVM subnets. Create CloudWatch metric filters that trigger alarms when: (1) data transfer exceeds baseline per session, (2) connections to IPs not resolving to allowlisted domains, (3) sustained high-bandwidth transfers.",
+      "tags": ["Detective", "Network Monitoring", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Provides visibility into exfiltration attempts even if DNS Firewall is bypassed (e.g., via direct IP connections or DNS-over-HTTPS). VPC Flow Logs capture all network traffic metadata. Baseline normal agent traffic volume (clone, push, npm install) and alert on anomalies. This is the detective control that complements DNS Firewall enforcement."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "15bbd8cc-beaf-4151-af4c-0b826a256295",
+      "numericId": 11,
+      "content": "Strip the GITHUB_TOKEN environment variable from the MicroVM process after the initial git clone and remote configuration is complete. Use a wrapper script that performs git credential setup (git credential store), then unsets the environment variable before launching the agent process.",
+      "tags": ["Preventative", "Credential Protection", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Reduces the window where the PAT is accessible in memory. After git clone and remote setup, the credential is stored in git's credential helper (file-based, accessible only for git operations). The env var is cleared so casual reads of /proc/self/environ or os.environ cannot retrieve it. Does not prevent a determined attacker from reading the credential file but raises the bar significantly."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "fe9b6855-4a91-4a23-b079-ddedf860e0e3",
+      "numericId": 12,
+      "content": "Increase Bedrock Guardrails PROMPT_ATTACK filter to HIGH strength for content sourced from untrusted origins (GitHub issues, PR comments, Linear issues). Maintain MEDIUM for user-submitted task descriptions from authenticated users to reduce false positives on legitimate prompts.",
+      "tags": ["Preventative", "Prompt Injection Defense", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Differentiate screening strength based on trust level of the content source. Authenticated user prompts (DF-01) are semi-trusted and can use MEDIUM. Third-party content fetched from GitHub (DF-13) or Linear (DF-04) is untrusted and should use HIGH. This requires modifying the screenWithGuardrail calls to accept a strength parameter based on content origin."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "6bd63593-5f4e-4374-a74f-b23b3853b08b",
+      "numericId": 13,
+      "content": "Implement memory write validation for AgentCore Memory that requires provenance verification before storing episodes. Each memory write must include: task ID, authenticated user who initiated the task, timestamp, and a content hash. Implement a review queue for memories from tasks that triggered any security alerts.",
+      "tags": ["Preventative", "Memory Integrity", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Addresses memory poisoning by ensuring all stored memories have verifiable provenance. If a task triggered Guardrail alerts (even non-blocking ones), security anomalies, or unusual tool-call patterns, its memory writes should be quarantined for human review rather than immediately available to future sessions. This prevents a single compromised session from persistently affecting future tasks."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "400d26e3-8889-4ae0-8462-adb8c448edfa",
+      "numericId": 14,
+      "content": "Implement memory decay and confidence scoring for AgentCore Memory entries. Memories from tasks with clean execution (no security alerts, successful PR merge) receive high confidence. Memories from flagged tasks receive low confidence. Low-confidence memories are excluded from retrieval after 7 days if not validated.",
+      "tags": ["Corrective", "Memory Integrity", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Limits the persistence of poisoned memories. Even if a malicious memory is stored, its influence is time-bounded and weighted by the trustworthiness of its source task. Combined with provenance tagging, this creates a self-healing memory system where poisoned entries naturally expire unless validated by successful subsequent tasks."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "33f544d0-0bee-4b25-bea3-e8d5834f730e",
+      "numericId": 15,
+      "content": "Disable npm/pip postinstall script execution during dependency installation in the MicroVM. Configure npm with --ignore-scripts flag and pip with --no-build-isolation --no-deps for initial install, then selectively run build steps only for known-safe packages defined in a per-repo allowlist.",
+      "tags": ["Preventative", "Supply Chain", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Directly prevents arbitrary code execution via malicious postinstall hooks. The --ignore-scripts flag for npm and equivalent pip flags prevent lifecycle scripts from running. A per-repo allowlist in the RepoTable can specify packages that legitimately need build scripts (e.g., native addons). This breaks the primary attack vector for malicious repo content executing code during setup_repo."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "f151fe0c-fd1e-4c89-8114-006d90d8ea4b",
+      "numericId": 16,
+      "content": "Implement a pre-clone repository validation step that checks the target repo against a denylist of known-malicious repos and validates that the repo belongs to an organization/owner explicitly registered in the RepoTable. Reject tasks targeting unregistered repositories.",
+      "tags": ["Preventative", "Input Validation", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents attackers from targeting arbitrary repositories not explicitly onboarded. The RepoTable already stores per-repo configuration. Adding a strict validation that the task's target repo must exist in RepoTable with status=active prevents an attacker from pointing the agent at a malicious repo they control. This is a simple check in the admission/hydration phase."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "6f164a0d-cec5-4219-906b-c86353d19aea",
+      "numericId": 17,
+      "content": "Implement lockfile integrity verification during setup_repo. Before running dependency installation, verify that package-lock.json/yarn.lock/poetry.lock exists and matches expected hashes stored in the RepoTable. Alert and fail the task if lockfiles have been tampered with or are missing.",
+      "tags": ["Detective", "Supply Chain", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Lockfiles pin exact dependency versions and prevent dependency confusion attacks. Verifying lockfile integrity before installation ensures the agent installs exactly the dependencies the repo maintainers intended. Combined with --ignore-scripts, this provides defense-in-depth against supply chain attacks during the setup phase."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "0bfa9b9b-f9a2-460a-9dea-bd0fb12752ef",
+      "numericId": 18,
+      "content": "Implement per-session Bedrock inference call budgets enforced via a token counter in the agent runtime. Set a maximum token budget (input + output) per task based on task type (e.g., 500K for new_task, 200K for pr_review). Terminate the session when budget is exceeded.",
+      "tags": ["Preventative", "Resource Control", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Limits the blast radius of a compromised agent making excessive Bedrock calls. The agent runtime tracks cumulative token usage and self-terminates when the budget is exceeded. This is enforced in the agent process itself and backed by CloudWatch metrics for alerting. Prevents a single session from consuming the entire account's Bedrock quota."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "f30d02f6-9750-46ad-b710-398303478932",
+      "numericId": 19,
+      "content": "Implement Secrets Manager access logging and anomaly detection via CloudTrail. Create EventBridge rules that trigger on GetSecretValue API calls for high-value secrets (GitHub PAT, webhook secrets). Alert on access from unexpected IAM principals or at unusual times.",
+      "tags": ["Detective", "Credential Monitoring", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Provides visibility into secret access patterns. Normal access is from specific Lambda execution roles during task processing. Any access from IAM users, roles not in the expected set, or at unusual volumes indicates potential compromise. CloudTrail data events for Secrets Manager combined with EventBridge rules enable near-real-time alerting."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "f1218eaa-a79f-4c27-b21a-9ccfcd4e5d1d",
+      "numericId": 20,
+      "content": "Implement per-user task submission rate limiting at the application layer (beyond WAFv2). Add a sliding window counter in DynamoDB that limits each authenticated user to a configurable maximum tasks per hour (e.g., 10 new_task, 20 pr_iteration). Apply stricter limits to webhook-sourced tasks.",
+      "tags": ["Preventative", "Rate Limiting", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "WAFv2 rate limiting is IP-based and does not prevent authenticated abuse. Application-layer rate limiting per user identity prevents a compromised account or leaked webhook from submitting unlimited tasks. The UserConcurrencyTable already tracks concurrent tasks; extending it with a submission rate counter is straightforward."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "ca208af4-0bb1-4572-af55-7deb0b0c7f55",
+      "numericId": 21,
+      "content": "Scope the MicroVM IAM role's DynamoDB write permissions to the specific task partition key using IAM policy conditions (dynamodb:LeadingKeys). Ensure the agent can only write to its own task record and events, not other tasks' partitions.",
+      "tags": ["Preventative", "Least Privilege", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents a compromised agent from tampering with other tasks' DynamoDB records. Use IAM condition keys: dynamodb:LeadingKeys with the task ID passed as a session tag or environment variable. The orchestrator sets the task ID when creating the session, and the IAM policy restricts writes to that partition key only."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "2142f485-4edd-4efb-adaa-4aa940deb671",
+      "numericId": 22,
+      "content": "Implement Cedar HITL approval request enrichment that includes: full tool call parameters, diff preview of proposed changes, risk score based on operation type, and historical context of what the task has done so far. Present this in a structured format that resists social engineering.",
+      "tags": ["Preventative", "Human Review", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Addresses approval fatigue and social engineering of HITL gates. Rich context in approval requests helps reviewers make informed decisions. A risk score (e.g., HIGH for force-push to main, LOW for creating a feature branch) draws attention to dangerous operations. Structured presentation prevents the agent from framing requests misleadingly."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "50ffc15d-8b30-4fc2-aafe-1130c797ee62",
+      "numericId": 23,
+      "content": "Implement independent agent action logging via CloudWatch Logs from the MicroVM sidecar process (not the agent itself). Capture all system calls, network connections, file modifications, and process executions in a tamper-resistant log stream that the agent process cannot modify.",
+      "tags": ["Detective", "Audit Trail", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Addresses the falsified trace artifact threat. A sidecar process (or kernel-level audit logging) running alongside the agent captures ground-truth actions independent of what the agent reports in its trajectory. Logs are streamed to CloudWatch in real-time, so even if the agent terminates abnormally, the audit trail is preserved. The agent process should not have IAM permissions to modify these log streams."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "e733f6b7-2bc7-45af-8765-27e333e0165d",
+      "numericId": 24,
+      "content": "Implement Slack channel restrictions for the bot integration: limit task submission to specific private channels with controlled membership. Configure the SlackUserMappingTable to require explicit user registration before Slack users can submit tasks.",
+      "tags": ["Preventative", "Access Control", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Reduces the attack surface from compromised Slack accounts. Even if a Slack workspace is compromised, the attacker must be in the specific authorized channel AND have an explicit mapping in SlackUserMappingTable. Unmapped Slack users receive an error when attempting to use /bgagent. This limits blast radius to explicitly authorized users only."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "585ab724-3be4-410c-8f08-3ad93842926c",
+      "numericId": 25,
+      "content": "Implement automatic HITL approval timeout with deny-by-default. If no human responds to a Cedar HITL approval request within a configurable timeout (e.g., 30 minutes), automatically deny the request rather than leaving it pending indefinitely. Add a maximum pending approvals limit per user.",
+      "tags": ["Preventative", "Human Review", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Addresses approval queue flooding. A maximum of N pending approvals per user (e.g., 5) prevents an attacker from generating unlimited approval requests. Combined with deny-by-default timeout, this ensures the approval queue cannot be weaponized for fatigue attacks. Tasks exceeding the pending limit are automatically failed."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "f5b8650b-c5bc-432a-995a-843c06b2aa3f",
+      "numericId": 26,
+      "content": "Sanitize notification content in the fan-out consumer by stripping URLs, code blocks, and markdown formatting from task event data before posting to Slack or GitHub. Only include pre-defined structured fields (task ID, status, repo name, PR number) with links generated server-side from known templates.",
+      "tags": ["Preventative", "Output Sanitization", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents notification-based phishing by ensuring the fan-out consumer only emits controlled content. User-supplied task descriptions and error messages are truncated and sanitized. Links are constructed from known URL templates (e.g., github.com/org/repo/pull/N) rather than passed through from task data. This prevents a compromised task from injecting malicious links into notifications."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    },
+    {
+      "id": "8062b44e-78cb-48df-b95d-17c782e1ee24",
+      "numericId": 27,
+      "content": "Restrict Linear integration task triggers to a configurable set of authorized Linear team members. Validate that the user who applied the trigger label is in an allowlist stored in LinearUserMappingTable before creating the task. Reject label applications from unauthorized users.",
+      "tags": ["Preventative", "Access Control", "AI Generated"],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Prevents any Linear workspace member from triggering tasks. The webhook payload includes the actor who applied the label. Validating this against an explicit allowlist ensures only authorized team members can trigger autonomous coding tasks via Linear, even if other workspace members can edit issues."
+        },
+        {
+          "key": "custom:agent",
+          "value": "threat-composer-defender-agent"
+        }
+      ]
+    }
+  ],
+  "mitigationLinks": [
+    {
+      "mitigationId": "86c073e9-720d-4af3-b3b8-e589004102f4",
+      "linkedId": "db3db729-5fbe-435f-8b74-59c863c6da23"
+    },
+    {
+      "mitigationId": "c1db91af-2b8b-45bc-9bea-84f88d8460be",
+      "linkedId": "db3db729-5fbe-435f-8b74-59c863c6da23"
+    },
+    {
+      "mitigationId": "82a28084-8d59-4b5a-87df-88c81d35cafb",
+      "linkedId": "deceb00c-7311-4cb4-a6ac-7771fe117b2c"
+    },
+    {
+      "mitigationId": "3ebe3140-ca17-4166-bb42-07cdcc88f3f1",
+      "linkedId": "deceb00c-7311-4cb4-a6ac-7771fe117b2c"
+    },
+    {
+      "mitigationId": "c8858580-7af4-48aa-8e18-374aa970ae10",
+      "linkedId": "66b0d8d9-3c92-4090-b015-ae003ae1e438"
+    },
+    {
+      "mitigationId": "15eb3126-c594-437f-bd88-6f89953f2143",
+      "linkedId": "66b0d8d9-3c92-4090-b015-ae003ae1e438"
+    },
+    {
+      "mitigationId": "fe9b6855-4a91-4a23-b079-ddedf860e0e3",
+      "linkedId": "66b0d8d9-3c92-4090-b015-ae003ae1e438"
+    },
+    {
+      "mitigationId": "1a3f7aaf-197c-47c6-9363-a45b6bf5f405",
+      "linkedId": "abe02f3b-ce86-451b-a534-98d5c503dc25"
+    },
+    {
+      "mitigationId": "a2e6938b-6e1f-4ad9-bb9b-af25ecc4f111",
+      "linkedId": "abe02f3b-ce86-451b-a534-98d5c503dc25"
+    },
+    {
+      "mitigationId": "15bbd8cc-beaf-4151-af4c-0b826a256295",
+      "linkedId": "abe02f3b-ce86-451b-a534-98d5c503dc25"
+    },
+    {
+      "mitigationId": "8c4ae127-bcbd-4688-8f7d-bfc9c34be0db",
+      "linkedId": "44e3267d-2cdf-46eb-8323-a032af2a08e4"
+    },
+    {
+      "mitigationId": "1713fa19-f3df-4e21-9509-dda7a84f71dd",
+      "linkedId": "44e3267d-2cdf-46eb-8323-a032af2a08e4"
+    },
+    {
+      "mitigationId": "c8858580-7af4-48aa-8e18-374aa970ae10",
+      "linkedId": "f93e750e-b789-4d07-be98-3bd04e554f5e"
+    },
+    {
+      "mitigationId": "15eb3126-c594-437f-bd88-6f89953f2143",
+      "linkedId": "f93e750e-b789-4d07-be98-3bd04e554f5e"
+    },
+    {
+      "mitigationId": "fe9b6855-4a91-4a23-b079-ddedf860e0e3",
+      "linkedId": "f93e750e-b789-4d07-be98-3bd04e554f5e"
+    },
+    {
+      "mitigationId": "6bd63593-5f4e-4374-a74f-b23b3853b08b",
+      "linkedId": "cebccf55-f43c-439b-ac4a-37fe6c4154f1"
+    },
+    {
+      "mitigationId": "400d26e3-8889-4ae0-8462-adb8c448edfa",
+      "linkedId": "cebccf55-f43c-439b-ac4a-37fe6c4154f1"
+    },
+    {
+      "mitigationId": "33f544d0-0bee-4b25-bea3-e8d5834f730e",
+      "linkedId": "e9697c90-62e0-41d5-9499-f0031c533739"
+    },
+    {
+      "mitigationId": "f151fe0c-fd1e-4c89-8114-006d90d8ea4b",
+      "linkedId": "e9697c90-62e0-41d5-9499-f0031c533739"
+    },
+    {
+      "mitigationId": "6f164a0d-cec5-4219-906b-c86353d19aea",
+      "linkedId": "e9697c90-62e0-41d5-9499-f0031c533739"
+    },
+    {
+      "mitigationId": "33f544d0-0bee-4b25-bea3-e8d5834f730e",
+      "linkedId": "3e6923a3-ab43-4039-ad11-d2103a4000d7"
+    },
+    {
+      "mitigationId": "6f164a0d-cec5-4219-906b-c86353d19aea",
+      "linkedId": "3e6923a3-ab43-4039-ad11-d2103a4000d7"
+    },
+    {
+      "mitigationId": "f30d02f6-9750-46ad-b710-398303478932",
+      "linkedId": "410c9dc1-1ac5-46ab-bf0f-a632260fb189"
+    },
+    {
+      "mitigationId": "f1218eaa-a79f-4c27-b21a-9ccfcd4e5d1d",
+      "linkedId": "4f4fc2f3-7b9e-4916-b866-7deec47d379f"
+    },
+    {
+      "mitigationId": "0bfa9b9b-f9a2-460a-9dea-bd0fb12752ef",
+      "linkedId": "43f9fe2e-0fef-4166-96a8-820a3b90b132"
+    },
+    {
+      "mitigationId": "ca208af4-0bb1-4572-af55-7deb0b0c7f55",
+      "linkedId": "a444628d-b51b-4402-8960-6c31afed4b58"
+    },
+    {
+      "mitigationId": "50ffc15d-8b30-4fc2-aafe-1130c797ee62",
+      "linkedId": "4c32e91c-fd4c-475a-9eb8-86fc9411b9b3"
+    },
+    {
+      "mitigationId": "e733f6b7-2bc7-45af-8765-27e333e0165d",
+      "linkedId": "06996bcb-6cac-4d16-b253-071d41cd81bc"
+    },
+    {
+      "mitigationId": "585ab724-3be4-410c-8f08-3ad93842926c",
+      "linkedId": "1f3ec246-7707-4264-9bda-b1e8a8934ad1"
+    },
+    {
+      "mitigationId": "2142f485-4edd-4efb-adaa-4aa940deb671",
+      "linkedId": "7965b4ec-3907-4df7-986d-5d60e8422272"
+    },
+    {
+      "mitigationId": "2142f485-4edd-4efb-adaa-4aa940deb671",
+      "linkedId": "1f3ec246-7707-4264-9bda-b1e8a8934ad1"
+    },
+    {
+      "mitigationId": "f5b8650b-c5bc-432a-995a-843c06b2aa3f",
+      "linkedId": "e6711220-dced-4353-b739-6757912d5e8f"
+    },
+    {
+      "mitigationId": "f5b8650b-c5bc-432a-995a-843c06b2aa3f",
+      "linkedId": "33f0672c-8eba-4ce9-8305-a2bc5299112c"
+    },
+    {
+      "mitigationId": "8062b44e-78cb-48df-b95d-17c782e1ee24",
+      "linkedId": "ecad4287-e35c-4457-9b48-c82ed5f7c443"
+    },
+    {
+      "mitigationId": "1a3f7aaf-197c-47c6-9363-a45b6bf5f405",
+      "linkedId": "44e3267d-2cdf-46eb-8323-a032af2a08e4"
+    },
+    {
+      "mitigationId": "8c4ae127-bcbd-4688-8f7d-bfc9c34be0db",
+      "linkedId": "e9697c90-62e0-41d5-9499-f0031c533739"
+    },
+    {
+      "mitigationId": "1a3f7aaf-197c-47c6-9363-a45b6bf5f405",
+      "linkedId": "e9697c90-62e0-41d5-9499-f0031c533739"
+    }
+  ]
+}

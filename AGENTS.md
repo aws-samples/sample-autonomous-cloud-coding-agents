@@ -22,6 +22,7 @@ Use this routing before editing so the right package and tests get updated:
 | Agent runtime (clone, tools, prompts, container) | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `policy.py`, `prompts/`, Dockerfile, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
 | Agent progress events (written to `TaskEventsTable` from the MicroVM; read by `bgagent watch`) | `agent/src/progress_writer.py`, `agent/src/pipeline.py` and `agent/src/runner.py` (integration points) | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` for the consumer side |
 | User-facing or design prose | `docs/guides/`, `docs/design/` | Run **`mise //docs:sync`** or **`mise //docs:build`** (do not edit `docs/src/content/docs/` by hand) |
+| Architecture decisions (ADRs) | `docs/decisions/` | Run **`mise //docs:sync`** after adding or editing an ADR |
 | Monorepo tasks, CI glue | Root `mise.toml`, `scripts/`, `.github/workflows/` | — |
 
 ### CDK handler tests (quick map)
@@ -38,6 +39,8 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 
 ### Common mistakes
 
+- **Starting implementation without an approved GitHub issue** — Conversational approval ("yes, do it", "go ahead", "start with X") is NOT governance approval. The correct sequence is: create a GitHub issue with acceptance criteria → get the `approved` label from an admin → self-assign → comment "Starting implementation" → then begin work. Even if the user explicitly directs the work in conversation, create the durable artifact (issue) first. See [ADR-003](./docs/decisions/ADR-003-contribution-governance.md).
+- **Creating branches without an issue reference** — Branch names must follow the pattern `(feat|fix|chore|docs)/<issue-number>-short-description`. A branch without an issue number is unauthorized work. Example: `feat/148-operational-knowledge-stack`.
 - Editing **`docs/src/content/docs/`** instead of **`docs/guides/`** or **`docs/design/`** — content is generated; sync from sources.
 - Adding or editing files in **`docs/design/`** or **`docs/guides/`** without running **`cd docs && node scripts/sync-starlight.mjs`** — CI will reject ("Fail build on mutation") because the Starlight mirror files in `docs/src/content/docs/` are stale. Always commit the regenerated mirrors alongside source changes.
 - Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.
@@ -45,7 +48,9 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 - **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 - **`mise run build`** runs **`//agent:quality`** before CDK — the deployed image bundles **`agent/`**; agent changes belong in that tree.
 - **`prek install`** fails if Git **`core.hooksPath`** is set — another hook manager owns hooks; see [CONTRIBUTING.md](./CONTRIBUTING.md).
-- **Git worktrees** — `node_modules/` and `agent/.venv/` are per-tree (not shared). Run **`mise run install`** in each new worktree before building. All CDK path references (`__dirname`-relative) and mise `config_roots` resolve correctly without extra setup.
+- **Editing on `main` directly** — ALWAYS create a worktree with a feature branch for changes, even trivial ones. Main should stay clean; all work flows through worktree → branch → PR → merge.
+- **Git worktrees** — Always **`git fetch origin main`** before creating a new worktree to ensure you branch from the latest remote state. `node_modules/` and `agent/.venv/` are per-tree (not shared). Run **`mise run install`** in each new worktree before building. All CDK path references (`__dirname`-relative) and mise `config_roots` resolve correctly without extra setup.
+- **Bumping Cedar engines in isolation** — `cedarpy` (Python, `agent/pyproject.toml`) and `@cedar-policy/cedar-wasm` (TypeScript, `cdk/package.json`) are two language bindings over the same Cedar Rust core. They MUST move together; even patch-version drift between bindings can yield divergent `(decision, matching_rule_ids)` on the same `(policy, input)` — invisible to per-side unit tests, caught (only) by `contracts/cedar-parity/` golden fixtures in CI. If you bump one engine you MUST bump the other to a tested-compatible version AND refresh the parity fixtures in the same commit. Both pins are EXACT (no `^`/`~`). See `docs/design/CEDAR_HITL_GATES.md` §15.6 (decision #23) and the parity-contract banner in `mise.toml`. **DO NOT** accept upstream's "Update branch" or auto-merge suggestions on cedarpy without verifying parity with cedar-wasm.
 
 ### Tech stack
 

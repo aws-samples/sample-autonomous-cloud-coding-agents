@@ -69,7 +69,7 @@ describe('loadMemoryContext', () => {
     expect(result!.repo_knowledge[0]).toContain('Jest');
   });
 
-  test('uses repo-based namespaces for queries', async () => {
+  test('uses namespace prefix (hierarchical retrieval) for both queries', async () => {
     const { RetrieveMemoryRecordsCommand } = jest.requireMock('@aws-sdk/client-bedrock-agentcore');
     mockAgentCoreSend
       .mockResolvedValueOnce({ memoryRecordSummaries: [] })
@@ -77,7 +77,7 @@ describe('loadMemoryContext', () => {
 
     await loadMemoryContext('mem-123', 'owner/repo', 'Fix the build');
 
-    // Semantic search uses /{repo}/knowledge/ namespace
+    // Semantic search uses /{repo}/knowledge/ as a namespace prefix.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
         namespace: '/owner/repo/knowledge/',
@@ -86,7 +86,8 @@ describe('loadMemoryContext', () => {
         }),
       }),
     );
-    // Episodic search uses /{repo}/episodes/ namespace prefix
+    // Episodic search uses /{repo}/episodes/ prefix to scoop up records
+    // under all task sessions plus the cross-task reflection records.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
         namespace: '/owner/repo/episodes/',
@@ -203,7 +204,7 @@ describe('loadMemoryContext', () => {
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
         repo: 'owner/repo',
-        namespace: '/owner/repo/knowledge/',
+        namespace_path: '/owner/repo/knowledge/',
         record_type: 'repo_knowledge',
         expected_hash: wrongHash,
         source_type: 'agent_learning',
@@ -235,7 +236,7 @@ describe('loadMemoryContext', () => {
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
         repo: 'owner/repo',
-        namespace: '/owner/repo/episodes/',
+        namespace_path: '/owner/repo/episodes/',
         record_type: 'past_episode',
         expected_hash: wrongHash,
         source_type: 'agent_episode',

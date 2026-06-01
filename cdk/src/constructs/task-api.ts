@@ -23,7 +23,7 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture, type LayerVersion } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -50,6 +50,22 @@ export interface TaskApiProps {
    * `POST /tasks/{task_id}/nudge` endpoint is created.
    */
   readonly taskNudgesTable?: dynamodb.ITable;
+
+  /**
+   * Cedar HITL approvals table. When provided, POST /approve, POST
+   * /deny, and GET /pending endpoints are created. See design §7.1,
+   * §7.2, §7.7.
+   */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
+  /**
+   * Cedar-wasm Lambda layer (CedarWasmLayer.layer). Required by the
+   * handlers that parse blueprint policies (`GetPoliciesFn`,
+   * `CreateTaskFn`). Attached only when all approval-gate plumbing
+   * (TaskApprovalsTable, this layer, blueprint / cedar_policies on
+   * RepoTable) is present.
+   */
+  readonly cedarWasmLayer?: LayerVersion;
 
   /**
    * Per-task per-minute nudge rate limit.
@@ -127,6 +143,18 @@ export interface TaskApiProps {
    * When provided, the cancel Lambda gets `ECS_CLUSTER_ARN` env var and `ecs:StopTask` permission.
    */
   readonly ecsClusterArn?: string;
+
+  /**
+   * S3 bucket for task attachments. When provided, the create-task Lambda
+   * gets PutObject/DeleteObject grants and the bucket name as env var.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
+
+  /**
+   * User concurrency table for admission control during confirm-uploads.
+   * Required when attachmentsBucket is provided.
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
 }
 
 /**
@@ -198,6 +226,7 @@ export class TaskApi extends Construct {
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
       { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
     ]);
 
     // --- REST API ---
@@ -233,30 +262,87 @@ export class TaskApi extends Construct {
       },
       rules: [
         {
-          name: 'AWSManagedRulesCommonRuleSet',
+          // CRS for task paths that accept large bodies (inline base64
+          // attachments up to 3 MB, presigned upload metadata). Excludes
+          // SizeRestrictions_BODY only; all other CRS rules apply. Payload
+          // size is bounded by API GW (10 MB) and validateAttachments().
+          name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
           statement: {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
-              // Inbound webhook payloads from mature SaaS tools (Linear ships
-              // full Issue payloads > 8 KB) trip SizeRestrictions_BODY in this
-              // ruleset. Exempt the Linear webhook path from CRS entirely:
-              // the route is HMAC-verified in the Lambda, parsed as strict
-              // JSON, never interpolated into SQL/HTML, and rate-limited by
-              // the priority-3 rule below. CRS still applies to every other
-              // route (user API, Slack, etc.).
+              excludedRules: [{ name: 'SizeRestrictions_BODY' }],
               scopeDownStatement: {
-                notStatement: {
-                  statement: {
-                    byteMatchStatement: {
-                      fieldToMatch: { uriPath: {} },
-                      positionalConstraint: 'EXACTLY',
-                      searchString: '/v1/linear/webhook',
-                      textTransformations: [{ priority: 0, type: 'NONE' }],
+                orStatement: {
+                  statements: [
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'STARTS_WITH',
+                        searchString: '/v1/tasks',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
                     },
-                  },
+                    {
+                      // Linear webhook payloads > 8 KB (HMAC-verified in Lambda,
+                      // rate-limited by priority-4 rule below).
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/linear/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'CommonRuleSetTaskPaths',
+            sampledRequestsEnabled: true,
+          },
+        },
+        {
+          // Full CRS (including SizeRestrictions_BODY) for all other paths.
+          name: 'AWSManagedRulesCommonRuleSet',
+          priority: 2,
+          overrideAction: { none: {} },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: 'AWS',
+              name: 'AWSManagedRulesCommonRuleSet',
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'STARTS_WITH',
+                            searchString: '/v1/tasks',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/linear/webhook',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                  ],
                 },
               },
             },
@@ -269,7 +355,7 @@ export class TaskApi extends Construct {
         },
         {
           name: 'AWSManagedRulesKnownBadInputsRuleSet',
-          priority: 2,
+          priority: 3,
           overrideAction: { none: {} },
           statement: {
             managedRuleGroupStatement: {
@@ -285,7 +371,7 @@ export class TaskApi extends Construct {
         },
         {
           name: 'RateLimitRule',
-          priority: 3,
+          priority: 4,
           action: { block: {} },
           statement: {
             rateBasedStatement: {
@@ -351,6 +437,12 @@ export class TaskApi extends Construct {
       ],
     };
 
+    // pdf-parse is used for PDF attachment screening (text extraction).
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
+
     // --- Lambda handlers ---
     const createTaskEnv: Record<string, string> = { ...commonEnv };
     if (props.repoTable) {
@@ -363,6 +455,9 @@ export class TaskApi extends Construct {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+    }
 
     const createTaskFn = new lambda.NodejsFunction(this, 'CreateTaskFn', {
       entry: path.join(handlersDir, 'create-task.ts'),
@@ -370,7 +465,9 @@ export class TaskApi extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
-      bundling: commonBundling,
+      bundling: attachmentScreeningBundling,
+      memorySize: 512,
+      timeout: Duration.seconds(15),
     });
 
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
@@ -483,8 +580,68 @@ export class TaskApi extends Construct {
       }));
     }
 
+    // Grant create-task Lambda put/delete on attachments bucket for inline upload + cleanup
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantPut(createTaskFn);
+      props.attachmentsBucket.grantDelete(createTaskFn);
+    }
+
+    // --- Confirm-uploads Lambda (presigned upload flow) ---
+    let confirmUploadsFn: lambda.NodejsFunction | undefined;
+    if (props.attachmentsBucket && props.userConcurrencyTable) {
+      const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
+      confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+      confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      if (props.orchestratorFunctionArn) {
+        confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
+      }
+      if (props.guardrailId && props.guardrailVersion) {
+        confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
+        confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+      }
+
+      confirmUploadsFn = new lambda.NodejsFunction(this, 'ConfirmUploadsFn', {
+        entry: path.join(handlersDir, 'confirm-uploads.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: confirmUploadsEnv,
+        bundling: attachmentScreeningBundling,
+        memorySize: 1024,
+        timeout: Duration.seconds(180),
+      });
+
+      // Grants: DDB read-write, S3 read-write-delete, orchestrator invoke, guardrail
+      props.taskTable.grantReadWriteData(confirmUploadsFn);
+      props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
+      props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
+      props.attachmentsBucket.grantDelete(confirmUploadsFn);
+      props.userConcurrencyTable.grantReadWriteData(confirmUploadsFn);
+
+      if (props.orchestratorFunctionArn) {
+        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [props.orchestratorFunctionArn],
+        }));
+      }
+
+      if (props.guardrailId) {
+        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['bedrock:ApplyGuardrail'],
+          resources: [
+            Stack.of(this).formatArn({
+              service: 'bedrock',
+              resource: 'guardrail',
+              resourceName: props.guardrailId,
+            }),
+          ],
+        }));
+      }
+    }
+
     // Collect all Lambda functions for cdk-nag suppressions
     const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn];
+    if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
@@ -497,6 +654,12 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // --- Confirm-uploads endpoint: POST /tasks/{task_id}/confirm-uploads ---
+    if (confirmUploadsFn) {
+      const confirmUploads = taskById.addResource('confirm-uploads');
+      confirmUploads.addMethod('POST', new apigw.LambdaIntegration(confirmUploadsFn), cognitoAuthOptions);
+    }
 
     // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
     if (props.traceArtifactsBucket) {
@@ -593,6 +756,149 @@ export class TaskApi extends Construct {
       allFunctions.push(nudgeTaskFn);
     }
 
+    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.6, §7.7) ---
+    // Activated only when the approvals table is provided. The layer
+    // attachment on GetPoliciesFn is conditional on the cedar-wasm
+    // layer being supplied — without it the handler cannot parse
+    // policies and the route is skipped.
+    if (props.taskApprovalsTable) {
+      const approvalEnv: Record<string, string> = {
+        ...commonEnv,
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      };
+
+      // ApproveTaskFn — POST /tasks/{task_id}/approve
+      const approveTaskFn = new lambda.NodejsFunction(this, 'ApproveTaskFn', {
+        entry: path.join(handlersDir, 'approve-task.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: approvalEnv,
+        bundling: commonBundling,
+        timeout: Duration.seconds(15),
+        memorySize: 256,
+      });
+      props.taskTable.grantReadWriteData(approveTaskFn);
+      props.taskApprovalsTable.grantReadWriteData(approveTaskFn);
+      props.taskEventsTable.grantReadWriteData(approveTaskFn);
+
+      // DenyTaskFn — POST /tasks/{task_id}/deny
+      const denyTaskFn = new lambda.NodejsFunction(this, 'DenyTaskFn', {
+        entry: path.join(handlersDir, 'deny-task.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: approvalEnv,
+        bundling: commonBundling,
+        timeout: Duration.seconds(15),
+        memorySize: 256,
+      });
+      props.taskTable.grantReadWriteData(denyTaskFn);
+      props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
+      props.taskEventsTable.grantReadWriteData(denyTaskFn);
+
+      // GetPendingFn — GET /pending
+      const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
+        entry: path.join(handlersDir, 'get-pending.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: approvalEnv,
+        bundling: commonBundling,
+        timeout: Duration.seconds(10),
+        memorySize: 256,
+      });
+      // Least-privilege: GetPendingFn only reads (Query on
+      // user_id-status-index for the user's pending rows) and writes
+      // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row
+      // (UpdateItem with TTL). Full grantReadWriteData would also
+      // grant PutItem, BatchWrite, and DeleteItem on every approval
+      // record — orders of magnitude broader than needed (PR review
+      // S6). Pinned to the table ARN + its GSI, not the wildcard
+      // "/*" suffix that grantReadWriteData uses.
+      getPendingFn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Query'],
+        resources: [
+          props.taskApprovalsTable.tableArn,
+          `${props.taskApprovalsTable.tableArn}/index/*`,
+        ],
+      }));
+      getPendingFn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:UpdateItem'],
+        resources: [props.taskApprovalsTable.tableArn],
+      }));
+
+      // --- Routes ---
+      const approveTask = taskById.addResource('approve');
+      approveTask.addMethod(
+        'POST',
+        new apigw.LambdaIntegration(approveTaskFn),
+        cognitoAuthOptions,
+      );
+      const denyTask = taskById.addResource('deny');
+      denyTask.addMethod(
+        'POST',
+        new apigw.LambdaIntegration(denyTaskFn),
+        cognitoAuthOptions,
+      );
+      const pending = this.api.root.addResource('pending');
+      pending.addMethod(
+        'GET',
+        new apigw.LambdaIntegration(getPendingFn),
+        cognitoAuthOptions,
+      );
+
+      allFunctions.push(approveTaskFn, denyTaskFn, getPendingFn);
+
+      // GetPoliciesFn — GET /repos/{repo_id}/policies. Requires the
+      // cedar-wasm layer to parse blueprint policy text.
+      if (props.cedarWasmLayer && props.repoTable) {
+        const getPoliciesEnv: Record<string, string> = {
+          ...approvalEnv,
+          REPO_TABLE_NAME: props.repoTable.tableName,
+        };
+        const getPoliciesFn = new lambda.NodejsFunction(this, 'GetPoliciesFn', {
+          entry: path.join(handlersDir, 'get-policies.ts'),
+          handler: 'handler',
+          runtime: Runtime.NODEJS_24_X,
+          architecture: Architecture.ARM_64,
+          environment: getPoliciesEnv,
+          bundling: {
+            ...commonBundling,
+            // Keep cedar-wasm in the layer, not the function bundle.
+            // esbuild externalizes the import at build time; the layer
+            // provides it at runtime.
+            externalModules: [
+              ...(commonBundling.externalModules ?? []),
+              '@cedar-policy/cedar-wasm',
+              '@cedar-policy/cedar-wasm/nodejs',
+            ],
+          },
+          layers: [props.cedarWasmLayer],
+          // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
+          // the wasm binary is ~4 MB which pushes init time.
+          memorySize: 512,
+          timeout: Duration.seconds(15),
+        });
+        props.taskApprovalsTable.grantReadData(getPoliciesFn);
+        props.repoTable.grantReadData(getPoliciesFn);
+        // Allow the rate-limit Update path on TaskApprovalsTable.
+        props.taskApprovalsTable.grantWriteData(getPoliciesFn);
+
+        const repos = this.api.root.addResource('repos');
+        const repoById = repos.addResource('{repo_id}');
+        const policies = repoById.addResource('policies');
+        policies.addMethod(
+          'GET',
+          new apigw.LambdaIntegration(getPoliciesFn),
+          cognitoAuthOptions,
+        );
+        allFunctions.push(getPoliciesFn);
+      }
+    }
+
     // --- Webhook endpoints (only when webhookTable is provided) ---
     if (props.webhookTable) {
       const webhookEnv: Record<string, string> = {
@@ -645,7 +951,9 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: createTaskEnv,
-        bundling: commonBundling,
+        bundling: attachmentScreeningBundling,
+        memorySize: 1024,
+        timeout: Duration.seconds(15),
       });
 
       // --- IAM grants for webhook Lambdas ---

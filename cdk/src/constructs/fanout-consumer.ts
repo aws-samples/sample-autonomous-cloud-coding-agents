@@ -18,11 +18,13 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sm from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
@@ -61,6 +63,18 @@ export interface FanOutConsumerProps {
    * omitted and the repo has no override, the dispatcher skips.
    */
   readonly githubTokenSecret?: sm.ISecret;
+
+  /**
+   * Secrets Manager ARN-prefix pattern for per-workspace Slack bot
+   * tokens. Required ONLY when the platform deploys SlackIntegration —
+   * the Slack dispatcher reads bot tokens at this scope. Matches the
+   * other "guarded by prop" grants (taskTable, repoTable,
+   * githubTokenSecret): a deployment without Slack onboarding gets no
+   * dangling IAM permission to ``bgagent/slack/*``. Typically passed
+   * as ``Stack.of(this).formatArn({ ..., resourceName:
+   * 'bgagent/slack/*' })``. Found in PR #79 review (#2 CRITICAL).
+   */
+  readonly slackSecretArnPattern?: string;
 
   /**
    * Maximum batch size delivered to the Lambda per invocation.
@@ -105,6 +119,16 @@ export class FanOutConsumer extends Construct {
       enforceSSL: true,
     });
 
+    // Explicit log group: without this Lambda auto-creates the group
+    // at first invocation with no retention cap. Declaring it here
+    // locks retention, makes the IAM grant graph discoverable by
+    // cdk-nag, and matches the pattern used in
+    // ``ApprovalMetricsPublisherConsumer`` and ``ecs-agent-cluster``.
+    const logGroup = new logs.LogGroup(this, 'FanOutFnLogs', {
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     this.fn = new lambda.NodejsFunction(this, 'FanOutFn', {
       entry: path.join(handlersDir, 'fanout-task-events.ts'),
       handler: 'handler',
@@ -112,6 +136,7 @@ export class FanOutConsumer extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(1),
       memorySize: 256,
+      logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],
       },
@@ -132,6 +157,20 @@ export class FanOutConsumer extends Construct {
     if (props.githubTokenSecret) {
       props.githubTokenSecret.grantRead(this.fn);
       this.fn.addEnvironment('GITHUB_TOKEN_SECRET_ARN', props.githubTokenSecret.secretArn);
+    }
+
+    // Slack dispatcher reads per-workspace bot tokens from Secrets
+    // Manager (``bgagent/slack/<team_id>``). Scope the grant to the
+    // caller-provided prefix so the fan-out Lambda cannot read
+    // unrelated platform secrets — matches the policy the old
+    // standalone ``SlackNotifyFn`` held before issue #64. Guarded on
+    // ``slackSecretArnPattern`` so deployments without Slack
+    // onboarding don't get a dangling IAM grant (PR #79 review #2).
+    if (props.slackSecretArnPattern) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [props.slackSecretArnPattern],
+      }));
     }
 
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {

@@ -13,7 +13,7 @@ Permission requirements vary by task type:
 - `new_task` and `pr_iteration` require Contents (read/write) and Pull requests (read/write).
 - `pr_review` only needs Triage or higher since it does not push branches.
 
-Classic PATs with `repo` scope also work. See `agent/README.md` for edge cases.
+Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](/architecture/readme#github-pat--minimal-permissions) for when to use which token type.
 
 ### Quick setup (single repo)
 
@@ -47,6 +47,12 @@ Redeploy after changing Blueprints: `mise run //cdk:deploy`.
 ### Customizing the agent image
 
 The default image (`agent/Dockerfile`) includes Python, Node 20, `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
+
+### Writing Cedar policies for the repo
+
+A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
+
+See the [Cedar policy guide](/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
 
 ### Other options
 

@@ -14,6 +14,23 @@ There are five ways to interact with the platform. You can use them independentl
 
 For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `pr_review` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
+## Roles
+
+ABCA is a **shared-stack-per-organization** platform — one CDK deployment, used by everyone on the team. Like a self-hosted GitLab or Linear instance: one company → one stack → many users. You generally do **not** run your own deployment to use someone else's; you join theirs as a Cognito user.
+
+There are four lifecycle roles. They are often the same person early on, but the operations they perform are distinct:
+
+| Role | What they do | Frequency |
+|------|--------------|-----------|
+| **Stack admin** | `cdk deploy` the stack; rotates platform-level secrets; runs `bgagent admin invite-user` to onboard teammates | Once + occasional |
+| **Linear / Slack workspace admin** | Runs `bgagent linear setup` (or `bgagent slack setup`) once per workspace to install the OAuth app | One-time per workspace |
+| **Repo onboarder** | Runs `bgagent linear onboard-project` (or registers a Blueprint via CDK) to wire a repo into the platform | As needed; any authenticated user |
+| **Teammate** | Runs `bgagent configure` once + `bgagent submit` / Linear-label / Slack mention from then on | Daily user |
+
+If you're a teammate joining an existing deployment, jump to [Joining an existing deployment](#joining-an-existing-deployment) below.
+
+If you're standing up a new deployment from scratch, see the [Developer guide](./DEVELOPER_GUIDE.md) first, then come back here for the [admin onboarding flow](#get-stack-outputs).
+
 ## Prerequisites
 
 - The CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
@@ -64,6 +81,49 @@ flowchart TB
 3. **Verify signature** - The handler fetches the webhook's shared secret from AWS Secrets Manager, computes `HMAC-SHA256(secret, raw_request_body)`, and compares it to the provided signature using constant-time comparison (`crypto.timingSafeEqual`). Mismatches are rejected with `403`.
 4. **Extract identity** - The `user_id` is the Cognito user who originally created the webhook integration. Tasks created via webhook are owned by that user.
 
+### Joining an existing deployment
+
+If your team already has ABCA deployed and someone (the "stack admin") has invited you, this is your path. You will **not** run `cdk deploy`, will **not** run `bgagent linear setup`, and will not need AWS credentials. You're a tenant on a shared deployment.
+
+Three steps:
+
+1. **Get a config bundle from your admin.** They run `bgagent admin invite-user your-email@example.com` and send you the output via Slack / 1Password / email. The output looks like:
+
+   ```
+   ✓ Created Cognito user your-email@example.com
+   ✓ Set permanent password (no first-login change required)
+
+   Share with the new teammate:
+   ────────────────────────────────────────────────────────────────
+     email:    your-email@example.com
+     password: K9$mPq2nL!vXf3Hb
+     bundle:   eyJhcGlfdXJsIjoiaHR0cHM6Ly9hYmMxMjM…
+   ────────────────────────────────────────────────────────────────
+   ```
+
+   The `bundle` is a base64 blob carrying the four config fields (API URL, region, user pool ID, app client ID) so you don't have to type them as separate flags.
+
+2. **Configure your CLI from the bundle:**
+
+   ```bash
+   bgagent configure --from-bundle <paste the base64 string>
+   ```
+
+3. **Log in with the temp password:**
+
+   ```bash
+   bgagent login --username your-email@example.com
+   # paste the temp password
+   ```
+
+   The CLI caches your tokens in `~/.bgagent/credentials.json` and auto-refreshes them.
+
+You're in. `bgagent submit`, `bgagent list`, `bgagent status` work against the shared stack. Tasks you submit are attributed to your Cognito user; concurrency caps and budgets are scoped to you.
+
+**You do not run** `bgagent linear setup` or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#step-6-link-your-linear-account).
+
+If something looks broken (commands fail with `Not configured` or `401 Unauthorized`), re-paste the bundle and re-run `bgagent login`. The bundle holds no secrets — your password (separate) is the credential.
+
 ### Get stack outputs
 
 After deployment, retrieve the API URL and Cognito identifiers. Set `REGION` to the AWS region where you deployed the stack (for example `us-east-1`). Use the same value for all `aws` and `bgagent configure` commands below  - a mismatch often surfaces as a confusing Cognito “app client does not exist” error.
@@ -82,14 +142,35 @@ APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-
   --query 'Stacks[0].Outputs[?OutputKey==`AppClientId`].OutputValue' --output text)
 ```
 
-### Create a user (admin)
+### Invite a teammate (admin)
+
+```bash
+bgagent admin invite-user teammate@example.com
+```
+
+This wraps Cognito `admin-create-user` + `admin-set-user-password` with the right defaults (email-verified, password set as permanent so the teammate doesn't hit a password-change flow on first login, suppress-email so SES isn't required) and prints a shareable config bundle plus an auto-generated strong temp password. Send the bundle + password to the teammate; they paste them into `bgagent configure --from-bundle <bundle>` + `bgagent login --username <email>` and they're in.
+
+The CLI command requires the running shell to have AWS credentials with `cognito-idp:AdminCreateUser` and `cognito-idp:AdminSetUserPassword` on the configured user pool — i.e. you're acting as the stack admin, not as a Cognito-authenticated end-user.
+
+**Pool constraints** (enforced server-side; the CLI handles them, but useful to know if you ever need to bypass it with raw AWS CLI):
+
+- **Username MUST be an email address.** The pool is configured with email as the sign-in alias.
+- **Password policy**: minimum 12 characters, with at least one uppercase, lowercase, digit, and symbol.
+- **`email_verified=true` attribute is required**, otherwise the account stays in `FORCE_CHANGE_PASSWORD` state and `initiate-auth` fails with `User is not confirmed`.
+- **`--message-action SUPPRESS`** stops Cognito from trying to email the temp password — required unless you've set up SES verified identities.
+
+#### Raw AWS CLI fallback
+
+If you can't run `bgagent admin invite-user` (e.g., you're scripting this from CI without the CLI installed), the underlying calls are:
 
 ```bash
 aws cognito-idp admin-create-user \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --username user@example.com \
-  --temporary-password 'TempPass123!@'
+  --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
+  --temporary-password 'TempPass123!@' \
+  --message-action SUPPRESS
 
 aws cognito-idp admin-set-user-password \
   --region "$REGION" \
@@ -99,7 +180,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-Password requirements: minimum 12 characters, uppercase, lowercase, digits, and symbols.
+The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so the teammate does not have to go through a password change flow on first login. After running these, hand the teammate the four config fields manually (or build the bundle: `echo '{"api_url":"…","region":"…","user_pool_id":"…","client_id":"…"}' | base64`).
 
 ### Obtain a JWT token
 
@@ -393,6 +474,15 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 # Review a PR with a specific focus area
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
+# Submit with attachments (local files)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
+  --attachment screenshot.png \
+  --attachment error.log
+
+# Submit with a URL attachment
+node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+  --attachment https://figma.com/file/abc123/export.png
+
 # Submit and wait for completion
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
@@ -421,14 +511,70 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
+| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
+| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
 At least one of `--issue`, `--task`, `--pr`, or `--review-pr` is required. The `--pr` and `--review-pr` flags are mutually exclusive.
+
+### Attachments
+
+Attachments let you provide non-text context to the agent — screenshots of bugs, design mockups, CSV data, log files, or URLs to external resources. Every attachment passes through security screening before reaching the agent.
+
+**Supported file types:**
+
+| Category | Types | Extensions |
+|---|---|---|
+| Images | PNG, JPEG | `.png`, `.jpg` |
+| Text files | Plain text, CSV, Markdown, JSON, PDF, Log | `.txt`, `.csv`, `.md`, `.json`, `.pdf`, `.log` |
+
+**Limits:**
+
+| Limit | Value |
+|---|---|
+| Max attachments per task | 10 |
+| Max size per attachment | 10 MB |
+| Max total size per task | 50 MB |
+| URL attachments | HTTPS only |
+
+**Usage:**
+
+```bash
+# Local file (auto-detects MIME type from content)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
+  --attachment screenshot.png
+
+# Multiple attachments
+node lib/bin/bgagent.js submit --repo owner/repo --task "Analyze these logs" \
+  --attachment error.log \
+  --attachment metrics.csv
+
+# URL attachment (fetched during task hydration)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+  --attachment https://example.com/mockup.png
+```
+
+The CLI automatically routes attachments through the optimal upload path:
+
+- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body).
+- **Files > 500 KB** use presigned upload (uploaded directly to S3, then confirmed).
+- **URLs** are validated at submission and fetched during context hydration with SSRF protection.
+
+**Security screening:**
+
+All attachments are screened before reaching the agent:
+
+- **Images**: Magic bytes validation, dimension checks (max 8000px per side), Bedrock Guardrail content screening (prompt attack detection). Only PNG and JPEG are accepted.
+- **Text files**: Magic bytes validation, Bedrock Guardrail text content screening. PDFs have text extracted (max 50 pages) before screening.
+- **URLs**: HTTPS-only enforcement, DNS resolution pinning (prevents DNS rebinding/SSRF), private IP blocking, redirect validation, size and timeout limits.
+
+If any attachment fails screening, the entire task is rejected with a clear error identifying the problematic file. Re-submit without the flagged attachment.
 
 ### Checking task status
 
@@ -543,6 +689,112 @@ node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
 ```bash
 node lib/bin/bgagent.js cancel <TASK_ID>
 ```
+
+## Approval gates (Cedar HITL)
+
+The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.
+
+The mechanism is Cedar HITL gates — "Human-In-The-Loop." It is the same policy language you can already author at the blueprint level, with one added annotation (`@tier("soft")`) that flips a rule from hard-deny to require-approval.
+
+For the full design and guarantees (atomicity, fail-closed posture, timeout semantics, late-approval handling), see [Cedar HITL gates design doc](../design/CEDAR_HITL_GATES.md). For writing policies, see the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md).
+
+### When a gate fires
+
+When a rule marked `@tier("soft")` matches a tool call:
+
+1. The agent stops before invoking the tool.
+2. A row is atomically written to the approvals table and the task status flips to `AWAITING_APPROVAL`.
+3. A progress event (`approval_requested`) is emitted so `bgagent watch` shows the gate in real time.
+4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per-rule and per-task).
+5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
+
+A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.
+
+### Listing pending approvals
+
+```bash
+node lib/bin/bgagent.js pending
+```
+
+Lists every approval across your tasks that is currently awaiting your decision. The default text output gives you the `request_id`, tool, severity, the reason the rule matched, the tool-input preview, the expiry time, and ready-to-run `approve` / `deny` command lines. Pipe through `--output json` for scripting.
+
+```text
+1 pending approval(s):
+
+  task_id:    01KN37PZ77P1W19D71DTZ15X6X
+  request_id: 01R...
+  tool:       Bash    severity: high
+  reason:     Bash command matches force-push pattern
+  rules:      force_push_any
+  preview:    git push --force origin feature/xyz
+  created:    2026-05-13T12:04:12Z
+  expires:    2026-05-13T12:09:12Z (timeout_s=300)
+  approve:    bgagent approve 01KN37PZ77P1W19D71DTZ15X6X 01R...
+  deny:       bgagent deny 01KN37PZ77P1W19D71DTZ15X6X 01R... --reason "..."
+```
+
+### Approving a gate
+
+```bash
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID>
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope tool_type:Bash
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope rule:force_push_any
+node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope all_session --yes
+```
+
+The `--scope` flag controls how long the approval carries forward within the running task:
+
+| Scope | Effect |
+|---|---|
+| `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
+| `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
+| `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). |
+| `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
+| `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
+| `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
+| `all_session` | Nuclear option — approves every subsequent gate in the task. Requires `--yes`. |
+
+Approvals only affect the current task; they do not persist across tasks.
+
+### Denying a gate
+
+```bash
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID>
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason "run the migration dry-run first"
+node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
+```
+
+The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
+
+### Discovering repo policies
+
+Before submitting a task you can list the rules that apply to the target repository:
+
+```bash
+node lib/bin/bgagent.js policies list --repo owner/repo
+node lib/bin/bgagent.js policies list --repo owner/repo --tier soft
+node lib/bin/bgagent.js policies show --repo owner/repo --rule force_push_any
+```
+
+`policies list` prints both tiers: **hard-deny** rules are absolute (even `--pre-approve` cannot bypass them), **soft-deny** rules are the approvable ones. `policies show` prints the full detail for a specific rule (severity, timeout, category, summary).
+
+### Pre-approving scopes at submit time
+
+If you trust a task to make a certain class of changes without interactive confirmation, pre-approve them up front:
+
+```bash
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
+  --pre-approve tool_type:Bash \
+  --pre-approve write_path:tests/**
+
+# Per-task timeout override (platform default is 300s)
+node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
+```
+
+`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+
+`--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
 
 ## Webhook integration
 
@@ -667,10 +919,12 @@ When you create a task, the platform orchestrates it through these states:
 flowchart LR
     S[SUBMITTED] --> H[HYDRATING]
     H --> R[RUNNING]
+    R <--> A[AWAITING_APPROVAL]
     R --> C[COMPLETED]
     R --> F[FAILED]
     R --> X[CANCELLED]
     R --> T[TIMED_OUT]
+    A --> X
     H --> F
     H --> X
     S --> F
@@ -684,12 +938,13 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 | `SUBMITTED` | Task accepted; orchestrator invoked asynchronously |
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
+| `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
 | `FAILED` | Something went wrong - pre-flight check failed, concurrency limit reached, guardrail blocked the content, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~9 hours) |
 
-Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`.
+Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`. `AWAITING_APPROVAL` is not terminal — a decision (or an approval-timeout) always flips it back to `RUNNING` or onto a terminal state.
 
 Task records in terminal states are automatically deleted after 90 days (configurable via `taskRetentionDays`).
 
@@ -713,6 +968,7 @@ Available events:
 - **Orchestration** - `admission_rejected`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
+- **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
 - **Output** - `pr_created`, `pr_updated`
 
 **Error classifiers** on terminal failure events provide a specific reason:

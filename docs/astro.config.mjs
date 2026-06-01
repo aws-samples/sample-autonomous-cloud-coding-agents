@@ -67,6 +67,7 @@ export default defineConfig({
             { slug: 'customizing/repository-onboarding' },
             { slug: 'customizing/per-repo-overrides' },
             { label: 'Prompt Engineering', slug: 'customizing/prompt-engineering' },
+            { label: 'Cedar Policies', slug: 'customizing/cedar-policies' },
           ],
         },
         {
@@ -96,6 +97,11 @@ export default defineConfig({
             { slug: 'architecture/evaluation' },
             { slug: 'architecture/repo-onboarding' },
           ],
+        },
+        {
+          label: 'Decisions',
+          collapsed: true,
+          autogenerate: { directory: 'decisions' },
         },
         {
           label: 'Roadmap',

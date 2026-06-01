@@ -1,5 +1,12 @@
 # Root mise config: monorepo task discovery + shared tools.
 # See https://mise.jdx.dev/tasks/monorepo.html
+#
+# Cedar engine parity contract (see docs/design/CEDAR_HITL_GATES.md §15.6,
+# decision #23): both engines are pinned EXACTLY (no ^/~) and must move
+# together. Golden-file parity fixtures under contracts/cedar-parity/ fail
+# CI if the engines diverge on any (policy, input) pair.
+#   - agent:   cedarpy==4.8.0                 (agent/pyproject.toml)
+#   - cdk:     @cedar-policy/cedar-wasm@4.10.0 (cdk/package.json)
 min_version = "2026.2.6"
 
 experimental_monorepo_root = true
@@ -50,6 +57,18 @@ run = [
 ##################
 #### SECURITY ####
 ##################
+
+[tasks."check:types-sync"]
+description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
+run = "node --experimental-strip-types scripts/check-types-sync.ts"
+
+[tasks."check:constants-sync"]
+description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if agent/src/policy.py declares a literal for a name owned by the JSON contract."
+run = "node --experimental-strip-types scripts/check-constants-sync.ts"
+
+[tasks."sync:abca-commands"]
+description = "Generate commands stubs from .abca/commands for multiple AI assistants"
+run = "node scripts/sync-abca-commands.mjs"
 
 [tasks."security:secrets"]
 description = "Scan for secrets with gitleaks"
@@ -136,17 +155,11 @@ run = [
 ##### BUILD #####
 ##################
 
-# Agent code is packaged by CDK (Docker asset); validate Python before heavy JS/CDK work.
-# Multiple `depends` run in parallel, so agent is a sole prerequisite, then packages run in order.
+# All packages run in parallel via DAG. Each resolves its own internal dependencies.
+# Agent quality runs alongside CDK/CLI/docs — no sequential bottleneck.
 [tasks.build]
-description = "Monorepo build (agent quality, then cdk, cli, docs)"
-depends = ["//agent:quality"]
-run = [
-  "MISE_EXPERIMENTAL=1 mise //cdk:build",
-  "MISE_EXPERIMENTAL=1 mise //cli:build",
-  "MISE_EXPERIMENTAL=1 mise //docs:build",
-  "MISE_EXPERIMENTAL=1 mise //docs:sync",
-]
+description = "Monorepo build (agent, cdk, cli, docs in parallel)"
+depends = ["//agent:quality", "//cdk:build", "//cli:build", "//docs:build", "sync:abca-commands"]
 
 [tasks.default]
 description = "Install + build"
