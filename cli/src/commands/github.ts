@@ -29,7 +29,7 @@ import { CliError } from '../errors';
 
 export function makeGithubCommand(): Command {
   const github = new Command('github')
-    .description('Manage GitHub integration (deployment-status webhook for Vercel preview screenshots)');
+    .description('Manage GitHub integration (deployment-status webhook for preview-deploy screenshots)');
 
   github.addCommand(
     new Command('webhook-info')
@@ -59,7 +59,7 @@ export function makeGithubCommand(): Command {
 
         const bar = '═'.repeat(72);
         console.log(bar);
-        console.log('GitHub webhook configuration (Vercel preview screenshot pipeline)');
+        console.log('GitHub webhook configuration (preview-deploy screenshot pipeline)');
         console.log(bar);
         console.log();
         console.log('In GitHub, on the repo whose previews should generate screenshots:');
@@ -81,8 +81,9 @@ export function makeGithubCommand(): Command {
           console.log('  (Stack output GitHubWebhookSecretArn not found — check `aws cloudformation describe-stacks`.)');
         }
         console.log();
-        console.log('Note: Vercel posts deployment_status events via the GitHub Deployments API,');
-        console.log('so this single webhook covers all Vercel-connected previews on the repo.');
+        console.log('Note: deploy providers (Vercel, Amplify Hosting, Netlify, GitHub Actions');
+        console.log('custom CD, etc.) post deployment_status events via the GitHub Deployments');
+        console.log('API, so this single webhook covers every preview your provider builds.');
         console.log(bar);
       }),
   );
@@ -150,9 +151,9 @@ export function makeGithubCommand(): Command {
         console.log();
         console.log('✅ Stored webhook signing secret.');
         console.log();
-        console.log('Test by triggering a Vercel preview deploy on the configured repo. The');
-        console.log('receiver Lambda log group should show a successful HMAC verification on');
-        console.log('the next deployment_status event.');
+        console.log('Test by triggering a preview deploy on the configured repo (push to a');
+        console.log('PR-attached branch). The receiver Lambda log group should show a successful');
+        console.log('HMAC verification on the next deployment_status event.');
       }),
   );
 
