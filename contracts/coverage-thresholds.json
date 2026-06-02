@@ -1,0 +1,27 @@
+{
+  "$comment": "Measured coverage floors (2026-06-02). Ratchet up when coverage improves; do not lower without maintainer approval. Synced into cdk/cli package.json (jest) and agent/pyproject.toml (pytest-cov); enforced by scripts/check-coverage-thresholds-sync.ts.",
+  "jest": {
+    "cdk": {
+      "global": {
+        "branches": 82,
+        "functions": 94,
+        "lines": 91,
+        "statements": 91
+      }
+    },
+    "cli": {
+      "global": {
+        "branches": 84,
+        "functions": 78,
+        "lines": 68,
+        "statements": 68
+      }
+    }
+  },
+  "pytest": {
+    "agent": {
+      "fail_under": 72,
+      "branch": true
+    }
+  }
+}
