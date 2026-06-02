@@ -17,7 +17,7 @@ These costs are incurred regardless of task volume:
 | NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/architecture/compute)). |
 | VPC Interface Endpoints (7×, 2 AZs) | ~$102/month | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
-| DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 6 tables (Tasks, Events, Nudges, UserConcurrency, Webhooks, Repo). No cost when idle. |
+| DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 7 core tables (Tasks, Events, Nudges, Approvals, UserConcurrency, Webhooks, Repo). Integration tables add more when enabled (Slack: installation, user-mapping; Linear: project-mapping, user-mapping, workspace-registry, webhook-dedup). No cost when idle. |
 | S3 Trace Artifacts bucket (idle) | ~$0/month | 7-day lifecycle auto-expires objects; no cost when no traces are stored. |
 | EventBridge reconciler rule | <$0.01/month | Invokes Lambda every 5 min (288/day). Rule itself is free; Lambda invocation is the cost (see below). |
 | Stranded task reconciler Lambda (idle) | <$0.01/month | 288 invocations/day × 256 MB × ~100 ms avg (early exit when no stranded tasks). ~$0.005/month total (requests + duration). |
@@ -27,7 +27,7 @@ These costs are incurred regardless of task volume:
 
 ### Scale-to-zero characteristics
 
-Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 6 tables), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 7 core tables plus integration tables when Slack/Linear are enabled), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 

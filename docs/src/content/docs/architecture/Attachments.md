@@ -655,18 +655,20 @@ const payload = {
 - Pydantic `extra="forbid"` rejection — `HydratedContext` uses `extra="forbid"` (models.py line 68), so adding a field there without updating the agent would crash it. The `TaskConfig` model (models.py line 94) uses only `validate_assignment=True` without `extra="forbid"`, so Pydantic v2's default behaviour (`extra="ignore"`) silently discards unrecognized top-level fields on old agents.
 - Conflating raw inputs (attachments) with assembled prompt context (issue body, PR comments, memory).
 
-### Agent capability check
+### Agent capability check (FUTURE — not yet implemented)
 
-While old agents silently ignore the `attachments` top-level field (due to Pydantic `extra="ignore"` default), this produces a bad user experience: the user's attachments have no effect, with no error or warning. To prevent this during incremental rollout:
+> **Status: deferred design item.** The capability/version gate described below is **not** implemented today. There is no `ATTACHMENT_UNSUPPORTED_AGENT` error code in `cdk/src/handlers/shared/response.ts`, no `agent_capabilities` field, and no version check across `cdk/src/handlers/`. This section captures a proposed mechanism for a future incremental-rollout window; it does not describe current shipped behavior.
 
-**The orchestrator checks the agent's deployment version before including attachments in the payload.** The mechanism:
+While old agents silently ignore the `attachments` top-level field (due to Pydantic `extra="ignore"` default), this produces a bad user experience: the user's attachments have no effect, with no error or warning. To prevent this during incremental rollout, the following mechanism is **proposed** (not yet built):
+
+**The orchestrator would check the agent's deployment version before including attachments in the payload.** The proposed mechanism:
 
 1. The agent container image is tagged with a version identifier (already tracked via `prompt_version` in the payload).
 2. The orchestrator checks the `prompt_version` (or a new `agent_capabilities` field in the blueprint config) to determine attachment support.
 3. If the agent does not support attachments AND the task has attachments, the orchestrator fails the task with: `"Agent runtime version does not support attachments. A deployment is required to enable this feature for repository {repo}."`.
 4. If the task has no attachments, the orchestrator proceeds normally regardless of agent version.
 
-This ensures users never silently lose their attachments during the rollout window.
+This would ensure users never silently lose their attachments during the rollout window. Until it is implemented, old agents fall back to the `extra="ignore"` behavior described above.
 
 ### No HydratedContext version bump needed
 
@@ -845,15 +847,16 @@ class AttachmentConfig(BaseModel):
     checksum_sha256: str                     # Required — lowercase hex-encoded SHA-256 (64 chars, e.g., "a1b2c3...")
 
     @model_validator(mode="after")
-    def _validate_invariants(self) -> Self:
-        if self.type == "image" and self.token_estimate is None:
-            raise ValueError("Image attachments must have token_estimate")
-        # checksum_sha256 must be lowercase hex, exactly 64 characters
-        import re
-        if not re.fullmatch(r"[0-9a-f]{64}", self.checksum_sha256):
-            raise ValueError(
-                f"checksum_sha256 must be 64 lowercase hex characters, got: {self.checksum_sha256!r}"
-            )
+    def _validate_integrity_fields(self) -> Self:
+        if not self.s3_version_id:
+            raise ValueError("s3_version_id is required for integrity verification")
+        if not self.checksum_sha256:
+            raise ValueError("checksum_sha256 is required for integrity verification")
+        # checksum must be lowercase hex (SHA-256 = 64 hex chars)
+        if len(self.checksum_sha256) != 64 or not all(
+            c in "0123456789abcdef" for c in self.checksum_sha256
+        ):
+            raise ValueError("checksum_sha256 must be a 64-character lowercase hex string")
         return self
 
 
@@ -1294,7 +1297,7 @@ The task record is preserved with status `CANCELLED` — `bgagent status <task_i
 The existing codebase increments user concurrency at task creation time (in `create-task-core.ts`), since tasks currently always start in `SUBMITTED`. With `PENDING_UPLOADS`, this must change:
 
 - **Create-task handler (PENDING_UPLOADS path):** Skip concurrency increment. No agent resources are allocated; the task may never be confirmed.
-- **Confirm-uploads handler (PENDING_UPLOADS → SUBMITTED):** Increment user concurrency. If the concurrency limit is reached at this point, the confirm-uploads call fails with `CONCURRENCY_LIMIT_EXCEEDED` (same as if the user tried to create a new task). The task remains in `PENDING_UPLOADS` and the user must wait for a slot or cancel another running task.
+- **Confirm-uploads handler (PENDING_UPLOADS → SUBMITTED):** Increment user concurrency. If the concurrency limit is reached at this point, the confirm-uploads call fails with `429 RATE_LIMIT_EXCEEDED` (the user concurrency gate on the confirm-uploads path; there is no separate `CONCURRENCY_LIMIT_EXCEEDED` code). The task remains in `PENDING_UPLOADS` and the user must wait for a slot or cancel another running task.
 - **Auto-cancel Lambda (PENDING_UPLOADS → CANCELLED):** No concurrency decrement needed (was never incremented).
 
 This ensures `PENDING_UPLOADS` tasks never count against the user's concurrency limit, while still enforcing the limit at the point where agent resources would actually be allocated.
@@ -1456,26 +1459,36 @@ The CLI `types.ts` must be updated to match the server types. The CDK `CreateTas
 
 ## Error codes
 
-New error codes for attachment-related failures:
+Error codes for attachment-related failures. The following are the codes
+**currently defined** in `cdk/src/handlers/shared/response.ts` (`ErrorCode`):
 
 | Code | Status | Description |
 |---|---|---|
 | `ATTACHMENT_BLOCKED` | 400 | Attachment content blocked by security screening |
 | `ATTACHMENT_TOO_LARGE` | 400 | Individual attachment exceeds 10 MB size limit |
 | `ATTACHMENT_INLINE_TOO_LARGE` | 400 | Inline attachment exceeds 500 KB limit (use presigned upload) |
-| `ATTACHMENTS_INLINE_TOTAL_TOO_LARGE` | 400 | Total inline attachment size exceeds 3 MB limit |
 | `ATTACHMENTS_TOTAL_TOO_LARGE` | 400 | Total attachment size exceeds 50 MB limit |
 | `ATTACHMENT_INVALID_TYPE` | 400 | MIME type not in allowlist |
 | `ATTACHMENT_INVALID_CONTENT` | 400 | Content does not match declared MIME type (magic bytes mismatch) or image dimensions exceed limits |
 | `ATTACHMENT_INVALID_FILENAME` | 400 | Filename contains invalid characters or path traversal |
 | `ATTACHMENT_SIZE_MISMATCH` | 400 | Uploaded file size does not match declared `expected_size_bytes` (> 10% deviation) |
+| `ATTACHMENT_UPLOAD_MISSING` | 400 | A declared presigned upload was never completed |
+| `ATTACHMENT_SCREENING_UNAVAILABLE` | 503 | Screening service unavailable after retries (fail-closed) |
+| `SCREENING_DEADLINE_EXCEEDED` | 503 | Confirm-uploads hit the internal deadline before all attachments were screened |
+| `UPLOADS_NOT_PENDING` | 409 | Task is not in the PENDING_UPLOADS state expected by confirm-uploads |
+
+**Proposed / future codes (NOT yet defined in `response.ts`).** These appear in
+the surrounding design discussion but are not implemented. Do not treat them as
+part of the current API contract:
+
+| Code | Status | Description |
+|---|---|---|
+| `ATTACHMENTS_INLINE_TOTAL_TOO_LARGE` | 400 | Total inline attachment size exceeds 3 MB limit |
 | `ATTACHMENT_FETCH_FAILED` | 422 | URL attachment could not be fetched (timeout, DNS, SSRF blocked) |
 | `ATTACHMENT_BUDGET_EXCEEDED` | 422 | Image attachments exceed token budget (insufficient room for text context) |
 | `ATTACHMENT_DOWNLOAD_FAILED` | 500 | Agent could not download attachment from S3 |
 | `ATTACHMENT_INTEGRITY_FAILED` | 500 | Attachment checksum mismatch after download |
-| `ATTACHMENT_UNSUPPORTED_AGENT` | 422 | Agent runtime version does not support attachments |
-| `ATTACHMENT_SCREENING_UNAVAILABLE` | 503 | Screening service unavailable after retries (fail-closed) |
-| `UPLOADS_NOT_CONFIRMED` | 409 | Task is in PENDING_UPLOADS but confirm-uploads not yet called |
+| `ATTACHMENT_UNSUPPORTED_AGENT` | 422 | Agent runtime version does not support attachments (see "Agent capability check (FUTURE)") |
 | `UPLOADS_EXPIRED` | 410 | Upload window expired (> 30 minutes); re-submit the task |
 
 ## Observability

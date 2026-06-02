@@ -25,7 +25,7 @@ ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is presen
 
 | Component | Billing Model | Idle Cost |
 |-----------|--------------|-----------|
-| DynamoDB (6 tables) | PAY_PER_REQUEST | $0 |
+| DynamoDB (7 core tables; integrations add more) | PAY_PER_REQUEST | $0 |
 | Lambda (all functions) | Per invocation | $0 |
 | API Gateway REST | Per request | $0 |
 | ECS Fargate tasks (when enabled) | Per running task | $0 (cluster is free) |
@@ -84,7 +84,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](../design/
 
 | Service | Used By | Scales to Zero |
 |---------|---------|---------------|
-| DynamoDB (6 tables, PAY_PER_REQUEST) | Task state, events, nudges, concurrency, webhooks, repo config | Yes |
+| DynamoDB (7 core tables, PAY_PER_REQUEST) | Task state, events, nudges, concurrency, webhooks, repo config, approvals. Enabling the Slack integration adds 2 tables (installation, user-mapping) and Linear adds 4 (project-mapping, user-mapping, workspace-registry, webhook-dedup) | Yes |
 | DynamoDB Streams | TaskEventsTable → FanOut Consumer Lambda | Yes |
 | S3 | CDK asset bucket, ECR image layers, FUSE session storage, trace artifacts (7-day lifecycle) | Minimal |
 | SQS (DLQ) | FanOut Consumer dead-letter queue | Yes |

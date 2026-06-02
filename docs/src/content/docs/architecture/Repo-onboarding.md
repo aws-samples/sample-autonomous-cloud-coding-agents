@@ -132,11 +132,13 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 
 Blueprints customize the orchestrator pipeline through three progressively powerful layers. See [ORCHESTRATOR.md](/architecture/orchestrator) for how the framework enforces invariants regardless of customization.
 
+> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — see the "Blueprint custom steps and step sequences" item in [ROADMAP.md](/roadmap/roadmap). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
+
 ### Layer 1: Parameterized strategies
 
-Select and configure built-in step implementations without writing code. Set `compute.type`, `agent.modelId`, `agent.maxTurns`, and other Blueprint props.
+Select and configure built-in step implementations without writing code. Set `compute.type`, `agent.modelId`, `agent.maxTurns`, and other Blueprint props. (The only pipeline-stage override available today is `pipeline.pollIntervalMs`.)
 
-### Layer 2: Lambda-backed custom steps
+### Layer 2: Lambda-backed custom steps (planned)
 
 Inject custom logic at `pre-agent` or `post-agent` phases:
 
@@ -151,7 +153,7 @@ interface CustomStepConfig {
 }
 ```
 
-### Layer 3: Custom step sequences
+### Layer 3: Custom step sequences (planned)
 
 Override the default step order entirely:
 
@@ -164,7 +166,7 @@ interface StepRef {
 
 ### Step sequence validation
 
-When a `stepSequence` is provided, the framework validates it at CDK synth time and at runtime. Invalid sequences cause `INVALID_STEP_SEQUENCE`.
+When a `stepSequence` is provided, the framework will validate it at CDK synth time and at runtime, raising `INVALID_STEP_SEQUENCE` on misconfiguration. (Planned — see the status note above; not enforced in code today.)
 
 **Required steps:**
 

@@ -60,6 +60,24 @@ interface ExportSummary {
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const CDK_TYPES_FILE = path.join(REPO_ROOT, 'cdk/src/handlers/shared/types.ts');
 const CLI_TYPES_FILE = path.join(REPO_ROOT, 'cli/src/types.ts');
+const CONSTANTS_JSON_FILE = path.join(REPO_ROOT, 'contracts/constants.json');
+
+/**
+ * ``contracts/constants.json`` is the single source of truth for the
+ * shared numeric bounds (``check-constants-sync.ts`` enforces that
+ * Python and the JSON agree). The CDK imports these directly
+ * (``import sharedConstants from '.../constants.json'``) because its
+ * handlers are esbuild-bundled at deploy; the CLI is a plain
+ * ``tsc --build`` published package whose ``rootDir`` can't reach the
+ * file, so it mirrors the same numbers as literals. To compare the two
+ * fairly we resolve any ``<alias>.a.b`` reference to a value loaded from
+ * the JSON, so ``sharedConstants.approval_timeout_s.min`` and ``30``
+ * normalize to the same shape — while a genuine literal drift (``60``)
+ * still trips the diff.
+ */
+const SHARED_CONSTANTS: Record<string, unknown> = JSON.parse(
+  fs.readFileSync(CONSTANTS_JSON_FILE, 'utf-8'),
+);
 
 /**
  * Names that are intentionally CDK-only — handler-internal shapes
@@ -146,6 +164,13 @@ function parseFile(filePath: string): Map<string, ExportSummary> {
   const sourceFile = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
   const exports = new Map<string, ExportSummary>();
 
+  // Local names bound to a default-import of contracts/constants.json
+  // (e.g. ``import sharedConstants from '.../constants.json'``). Used to
+  // resolve ``sharedConstants.approval_timeout_s.min`` to its JSON value
+  // when summarizing literal constants, so a JSON-sourced reference and a
+  // mirrored literal compare equal.
+  const constantsAliases = collectConstantsAliases(sourceFile);
+
   for (const node of sourceFile.statements) {
     // Re-export declarations (``export type { Foo } from './bar'`` or
     // ``export type { Foo };`` after an import) are top-level
@@ -169,7 +194,7 @@ function parseFile(filePath: string): Map<string, ExportSummary> {
       // Constants like `export const APPROVAL_TIMEOUT_S_MIN = 30`.
       for (const decl of node.declarationList.declarations) {
         if (ts.isIdentifier(decl.name)) {
-          exports.set(decl.name.text, summarizeLiteralConst(decl));
+          exports.set(decl.name.text, summarizeLiteralConst(decl, constantsAliases));
         }
       }
     } else if (ts.isFunctionDeclaration(node) && node.name) {
@@ -215,10 +240,71 @@ function summarizeTypeAlias(node: ts.TypeAliasDeclaration): ExportSummary {
   return { kind: 'type-alias', shape: sorted };
 }
 
-function summarizeLiteralConst(decl: ts.VariableDeclaration): ExportSummary {
+/**
+ * Collect local identifiers bound to a default-import of
+ * ``contracts/constants.json`` so property accesses through them can be
+ * resolved to concrete JSON values. Matches the import by specifier
+ * basename (``constants.json``) regardless of the relative path depth,
+ * which differs between the CDK (``../../../../``) and any future CLI use.
+ */
+function collectConstantsAliases(sourceFile: ts.SourceFile): Set<string> {
+  const aliases = new Set<string>();
+  for (const node of sourceFile.statements) {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      path.basename(node.moduleSpecifier.text) === 'constants.json' &&
+      node.importClause?.name
+    ) {
+      aliases.add(node.importClause.name.text);
+    }
+  }
+  return aliases;
+}
+
+/**
+ * Resolve a ``<alias>.a.b`` property-access chain rooted at a
+ * constants.json default-import to its JSON value, returning the value's
+ * textual form (e.g. ``30``). Returns ``undefined`` for any expression
+ * that isn't such a chain or doesn't resolve to a primitive in the JSON.
+ */
+function resolveConstantsReference(
+  expr: ts.Expression,
+  aliases: Set<string>,
+): string | undefined {
+  if (aliases.size === 0 || !ts.isPropertyAccessExpression(expr)) return undefined;
+  const segments: string[] = [];
+  let cursor: ts.Expression = expr;
+  while (ts.isPropertyAccessExpression(cursor)) {
+    segments.unshift(cursor.name.text);
+    cursor = cursor.expression;
+  }
+  if (!ts.isIdentifier(cursor) || !aliases.has(cursor.text)) return undefined;
+  let value: unknown = SHARED_CONSTANTS;
+  for (const seg of segments) {
+    if (value == null || typeof value !== 'object') return undefined;
+    value = (value as Record<string, unknown>)[seg];
+  }
+  if (value == null || typeof value === 'object') return undefined;
+  return String(value);
+}
+
+function summarizeLiteralConst(
+  decl: ts.VariableDeclaration,
+  constantsAliases: Set<string>,
+): ExportSummary {
   // Capture the textual initializer so a value drift (e.g.
-  // APPROVAL_TIMEOUT_S_MIN = 30 vs 60) gets flagged. Whitespace
-  // normalized to keep formatting churn out of the diff.
+  // APPROVAL_TIMEOUT_S_MIN = 30 vs 60) gets flagged. A reference into
+  // contracts/constants.json (e.g. ``sharedConstants.approval_timeout_s.min``)
+  // is first resolved to its JSON value so it compares equal to the
+  // mirrored literal on the other side. Whitespace normalized to keep
+  // formatting churn out of the diff.
+  if (decl.initializer) {
+    const resolved = resolveConstantsReference(decl.initializer, constantsAliases);
+    if (resolved !== undefined) {
+      return { kind: 'literal-const', shape: resolved };
+    }
+  }
   const init = decl.initializer ? decl.initializer.getText().replace(/\s+/g, ' ').trim() : '';
   return { kind: 'literal-const', shape: init };
 }
