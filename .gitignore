@@ -20,6 +20,7 @@ pids
 # Coverage & test reports
 # ──────────────────────────────────────────────
 coverage
+agent/.coverage
 *.lcov
 .nyc_output
 .jest-cache
