@@ -96,19 +96,35 @@ Apply the trigger label to a Linear issue in the onboarded project. The agent sh
 
 ## Inviting teammates
 
-The setup walkthrough auto-links **the person running the wizard**. To onboard additional teammates so they can trigger tasks from Linear:
+The setup walkthrough offers an inline self-link picker that lets the **person running the wizard** map their own Linear identity to their Cognito sub. To onboard additional teammates so they can trigger tasks from Linear from their own ABCA accounts, run:
+
+### Admin: generate the invite
 
 ```bash
 bgagent linear invite-user <slug>
 ```
 
-The admin picks the teammate from a Linear member picker. The CLI generates a one-time code (24h TTL) and prints a command to send to the teammate (Slack/email/etc). The teammate runs:
+The CLI shows a picker of human Linear members in the workspace. After you pick the teammate, it generates a one-time code (24h TTL) and prints a CLI command to send them via Slack/email/etc.
 
-```bash
-bgagent linear link <code>
-```
+### Teammate: redeem the invite
 
-The CLI shows them the Linear identity name+email and asks for confirmation **before** writing the mapping row. If the admin picked the wrong member, the teammate sees the mismatch and aborts.
+The teammate needs their own ABCA account first (Cognito user + configured CLI). If they don't have one yet:
+
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](./USER_GUIDE.md#joining-an-existing-deployment) for the full Cognito-side flow).
+2. **Teammate** pastes the bundle + password from the admin into:
+
+   ```bash
+   bgagent configure --from-bundle <bundle>
+   bgagent login --username teammate@example.com
+   ```
+
+3. **Teammate** redeems the Linear invite code:
+
+   ```bash
+   bgagent linear link <code>
+   ```
+
+   The CLI shows them the Linear identity name+email and asks for confirmation **before** writing the mapping row. If the admin picked the wrong member, the teammate sees the mismatch and aborts. After confirmation, the binding is recorded — the teammate can now apply the trigger label to a Linear issue and it'll fire as a task under their ABCA account (their concurrency, their cost attribution, their notifications).
 
 ### Why this two-step handshake
 
