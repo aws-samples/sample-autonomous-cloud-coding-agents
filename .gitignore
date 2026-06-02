@@ -22,6 +22,9 @@ pids
 coverage
 agent/.coverage
 *.lcov
+# Codecov uploader binary + signature files downloaded by codecov-action at CI time
+codecov
+codecov.*
 .nyc_output
 .jest-cache
 *.tsbuildinfo
