@@ -279,6 +279,13 @@ jobs:
           SECONDS=0
           mise run build
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@3f20e214133d0983f9a10f3d63b0faf9241a3daa # v6.0.0
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: cdk/coverage/lcov.info,cli/coverage/lcov.info,agent/coverage/lcov.info
+          fail_ci_if_error: false
       - name: Upload CDK artifact (${{ matrix.compute_type }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

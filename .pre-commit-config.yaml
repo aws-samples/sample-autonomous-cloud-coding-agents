@@ -87,6 +87,14 @@ repos:
         files: ^(contracts/constants\.json$|agent/src/policy\.py$|cdk/src/handlers/shared/types\.ts$|cdk/src/constructs/blueprint\.ts$|scripts/check-constants-sync\.ts$)
         stages: [pre-commit]
 
+      - id: coverage-thresholds-sync
+        name: coverage threshold drift (contracts/coverage-thresholds.json)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:coverage-thresholds-sync'
+        language: system
+        pass_filenames: false
+        files: ^(contracts/coverage-thresholds\.json$|cdk/package\.json$|cli/package\.json$|agent/(pyproject\.toml|mise\.toml)$|scripts/check-coverage-thresholds-sync\.ts$)
+        stages: [pre-commit]
+
       - id: monorepo-security-pre-push
         name: security scans (pre-push)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:security'
