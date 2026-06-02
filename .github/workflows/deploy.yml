@@ -1,0 +1,262 @@
+name: deploy
+on:
+  # zizmor: ignore[dangerous-triggers] — intentional; workflow_run is required
+  # for OIDC id-token on PR builds. Mitigations: env-var-only untrusted input,
+  # least-privilege permissions per job, deploy environment approval gate.
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+permissions: {}
+jobs:
+  resolve-targets:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+      has_targets: ${{ steps.targets.outputs.has_targets }}
+      run_id: ${{ github.event.workflow_run.id }}
+    steps:
+      - name: Download deploy intent
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: deploy-intent
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Resolve deploy targets
+        id: targets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER_FROM_EVENT: ${{ github.event.workflow_run.pull_requests[0].number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Single source of truth for this workflow; keep in sync with
+          # build.yml matrix.compute_type and workflow_dispatch.inputs.deploy.options
+          ALLOWED_COMPUTE_TYPES: "agentcore"
+        run: |
+          ALL_TYPES=$(printf '%s\n' $ALLOWED_COMPUTE_TYPES | jq -Rc . | jq -sc .)
+
+          resolve_pr_number() {
+            if [[ -n "$PR_NUMBER_FROM_EVENT" ]]; then
+              echo "$PR_NUMBER_FROM_EVENT"
+              return
+            fi
+            gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true
+          }
+          PR_NUMBER=$(resolve_pr_number)
+
+          # return (not exit) — callers handle failure gracefully (skip type or set empty matrix)
+          validate_compute_type() {
+            local type="$1"
+            for allowed in $ALLOWED_COMPUTE_TYPES; do
+              [[ "$type" == "$allowed" ]] && return 0
+            done
+            echo "::error::Invalid compute_type: '$type'. Allowed: $ALLOWED_COMPUTE_TYPES"
+            return 1
+          }
+
+          filter_valid_types() {
+            local input_json="$1"
+            local valid_json="[]"
+            for type in $(echo "$input_json" | jq -r '.[]'); do
+              if validate_compute_type "$type" 2>/dev/null; then
+                valid_json=$(echo "$valid_json" | jq -c --arg t "$type" '. + [$t]')
+              else
+                echo "::warning::Ignoring invalid compute_type from label: '$type'"
+              fi
+            done
+            echo "$valid_json"
+          }
+
+          INTENT=$(jq -r '.deploy' deploy-intent.json)
+          echo "Deploy intent from build: $INTENT"
+
+          case "$INTENT" in
+            -)
+              echo "matrix=[]" >> "$GITHUB_OUTPUT"
+              echo "has_targets=false" >> "$GITHUB_OUTPUT"
+              ;;
+            labels)
+              if [[ -z "$PR_NUMBER" ]]; then
+                echo "::warning::Could not resolve PR number from event or head_sha"
+                echo "matrix=[]" >> "$GITHUB_OUTPUT"
+                echo "has_targets=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              LABELS=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.labels[].name]')
+
+              if echo "$LABELS" | jq -e '[.[] | select(startswith("deploy:"))] | length > 0' > /dev/null 2>&1; then
+                RAW_TYPES=$(echo "$LABELS" | jq -c '[.[] | select(startswith("deploy:")) | ltrimstr("deploy:")]')
+                VALIDATED=$(filter_valid_types "$RAW_TYPES")
+                COUNT=$(echo "$VALIDATED" | jq 'length')
+                if [[ "$COUNT" -gt 0 ]]; then
+                  echo "matrix=$VALIDATED" >> "$GITHUB_OUTPUT"
+                  echo "has_targets=true" >> "$GITHUB_OUTPUT"
+                else
+                  echo "::warning::All deploy:<type> labels were invalid"
+                  echo "matrix=[]" >> "$GITHUB_OUTPUT"
+                  echo "has_targets=false" >> "$GITHUB_OUTPUT"
+                fi
+              elif echo "$LABELS" | jq -e 'index("deploy")' > /dev/null 2>&1; then
+                echo "matrix=$ALL_TYPES" >> "$GITHUB_OUTPUT"
+                echo "has_targets=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "matrix=[]" >> "$GITHUB_OUTPUT"
+                echo "has_targets=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              if ! validate_compute_type "$INTENT"; then
+                echo "matrix=[]" >> "$GITHUB_OUTPUT"
+                echo "has_targets=false" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+              echo "matrix=[\"$INTENT\"]" >> "$GITHUB_OUTPUT"
+              echo "has_targets=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+  # Surfaces CloudFormation changes in the step summary BEFORE the deploy
+  # approval gate. Uses a read-only IAM role (no deploy/mutate permissions).
+  # Configure the 'diff' environment with no required reviewers so it auto-runs;
+  # gate it later if read-access to stack templates needs approval.
+  diff:
+    needs: resolve-targets
+    if: needs.resolve-targets.outputs.has_targets == 'true'
+    runs-on: ubuntu-latest
+    environment: diff
+    strategy:
+      matrix:
+        compute_type: ${{ fromJson(needs.resolve-targets.outputs.matrix) }}
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download CDK artifact (${{ matrix.compute_type }})
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cdk-${{ matrix.compute_type }}-out
+          path: cdk/
+          run-id: ${{ needs.resolve-targets.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: CDK Diff (full)
+        env:
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+        run: |
+          # --method=template: read-only comparison against deployed template;
+          # no change-set creation, no S3 asset publishing, no deploy role needed.
+          npx cdk diff --app cdk/cdk.out --all --method=template --no-color 2>&1 | tee cdk-diff-full.txt || true
+
+      - name: CDK Diff (security only)
+        env:
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+        run: |
+          echo "## Security Changes (\`$COMPUTE_TYPE\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          npx cdk diff --app cdk/cdk.out --all --method=template --security-only --no-color 2>&1 | tee cdk-diff-security.txt
+          if [ -s cdk-diff-security.txt ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat cdk-diff-security.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No security-relevant changes detected." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload diff artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cdk-diff-${{ matrix.compute_type }}
+          path: |
+            cdk-diff-full.txt
+            cdk-diff-security.txt
+
+  deploy:
+    needs: [resolve-targets, diff]
+    if: needs.resolve-targets.outputs.has_targets == 'true'
+    runs-on: ubuntu-latest
+    environment: deploy
+    concurrency:
+      group: deploy-${{ matrix.compute_type }}
+      cancel-in-progress: false
+    strategy:
+      matrix:
+        compute_type: ${{ fromJson(needs.resolve-targets.outputs.matrix) }}
+      max-parallel: 3
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download CDK artifact (${{ matrix.compute_type }})
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cdk-${{ matrix.compute_type }}-out
+          path: cdk/
+          run-id: ${{ needs.resolve-targets.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install mise
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Deploy
+        env:
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+        # --require-approval never: CDK hard-fails in non-TTY CI without this
+        # (throws "terminal (TTY) is not attached"). The approval mechanism is the
+        # GitHub 'deploy' environment gate above — a human must approve before this
+        # job starts. The 'diff' job surfaces all CloudFormation and security changes
+        # in the step summary (visible before approval), and the full diff is
+        # downloadable as an artifact. Defense in depth:
+        #   1. diff environment (read-only role) → surfaces changes pre-approval
+        #   2. deploy environment (required reviewers) → human gate
+        #   3. fork guard (line 14) → blocks untrusted repositories
+        #   4. OIDC federation → no stored credentials, request-scoped tokens
+        run: npx cdk deploy --app cdk/cdk.out --all --require-approval never

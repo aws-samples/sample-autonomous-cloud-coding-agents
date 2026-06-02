@@ -127,6 +127,46 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/architect
 
 ## Reference
 
+## CI/CD pipeline (`deploy.yml`)
+
+The repository includes a two-stage CI/CD pipeline:
+
+### Stage 1: Build (`build.yml`)
+
+Triggers on every PR and push to main. Runs `mise run build` (compile, test, lint, synth) and uploads the synthesized `cdk.out/` as a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
+
+### Stage 2: Deploy (`deploy.yml`)
+
+Triggers via `workflow_run` when `build.yml` completes successfully. The pipeline:
+
+1. **Skips fork PRs** — `head_repository.full_name == github.repository` prevents forks from entering the deploy flow. This is a security measure: an untrusted fork could modify `build.yml` to produce a deploy-intent artifact, which would otherwise prompt maintainers for approval unnecessarily.
+2. **Downloads `deploy-intent.json`** from the triggering build run.
+3. **Resolves targets** — Determines which compute types to deploy:
+   - `intent: "-"` → no-op (most PRs)
+   - `intent: "labels"` → reads PR labels against an allowlist
+   - `intent: "<type>"` → deploys the specified type (e.g., `agentcore`)
+4. **Requires approval** — The `deploy` job uses a GitHub Environment with required reviewers. Approvals are logged and the self-review rule prevents unilateral deploys.
+5. **Deploys via OIDC** — Assumes an IAM role via GitHub OIDC federation (no long-lived credentials). The role is scoped to the `cdk deploy` action with least-privilege policies per [DEPLOYMENT_ROLES.md](/architecture/deployment-roles).
+
+### Security controls
+
+| Control | Purpose |
+|---------|---------|
+| Fork exclusion (`head_repository` check) | Prevents fork PRs from triggering deploy approval prompts |
+| Environment approval | Human gate before any deploy reaches AWS |
+| OIDC federation | No stored AWS credentials; tokens are request-scoped |
+| Compute type allowlist | Only pre-approved types can be deployed |
+| Non-cancellable concurrency | Deploy can't be interrupted mid-flight |
+
+### For administrators
+
+- **Enable deploys**: Set the `deploy` Environment in repo settings with required reviewers.
+- **Configure OIDC**: Set `AWS_ROLE_TO_ASSUME` secret and `AWS_REGION` variable.
+- **Allowlist compute types**: Edit `ALLOWED_COMPUTE_TYPES` in `deploy.yml`.
+- **Deploy via PR label**: Add the `deploy:<type>` label to a PR (e.g., `deploy:agentcore`).
+
+## Related docs
+
 - [Quick start](/getting-started/quick-start) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](/developer-guide/introduction) -- Local development, testing, repository onboarding.
 - [User guide](/using/overview) -- API reference, CLI usage, task management.

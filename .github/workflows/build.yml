@@ -1,7 +1,15 @@
 name: build
 on:
   pull_request: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy after build (- = no deploy)"
+        type: choice
+        default: "-"
+        options:
+          - "-"
+          - agentcore
 permissions:
   actions: none
   attestations: none
@@ -112,9 +120,59 @@ jobs:
               echo "pr-number=" >> "$GITHUB_OUTPUT"
               ;;
           esac
+      - name: Resolve stack name
+        id: naming
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+          GH_SHA: ${{ github.sha }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          PR_NUMBER: ${{ steps.tags.outputs.pr-number }}
+        run: |
+          sanitize() {
+            local result
+            result=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr '/_.' '-' | sed 's/[^a-z0-9-]//g; s/--*/-/g' | cut -c1-60 | sed 's/^-*//; s/-$//')
+            # CloudFormation requires stack names to start with a letter
+            if [[ -z "$result" || ! "$result" =~ ^[a-z] ]]; then
+              result="s-${result}"
+            fi
+            echo "$result"
+          }
+
+          case "$EVENT_NAME" in
+            push)
+              REF=$(sanitize "$GH_REF_NAME")
+              STACK_NAME="${REF}-${COMPUTE_TYPE}"
+              ;;
+            pull_request|pull_request_target)
+              if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+                echo "::error::Invalid PR number: '$PR_NUMBER'"
+                exit 1
+              fi
+              STACK_NAME="pr${PR_NUMBER}-${COMPUTE_TYPE}"
+              ;;
+            merge_group)
+              if [[ -n "$PR_NUMBER" && "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+                STACK_NAME="mg${PR_NUMBER}-${COMPUTE_TYPE}"
+              else
+                STACK_NAME="${COMPUTE_TYPE}-${GH_SHA:0:7}"
+              fi
+              ;;
+            workflow_dispatch)
+              REF=$(sanitize "$GH_REF_NAME")
+              STACK_NAME="${REF}-${COMPUTE_TYPE}"
+              ;;
+            *)
+              STACK_NAME="${COMPUTE_TYPE}-${GH_SHA:0:7}"
+              ;;
+          esac
+
+          echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
+          echo "Stack name: $STACK_NAME"
       - name: Generate CDK context
         env:
           COMPUTE_TYPE: ${{ matrix.compute_type }}
+          STACK_NAME: ${{ steps.naming.outputs.stack_name }}
           TAG_SHA: ${{ steps.tags.outputs.sha }}
           TAG_REF: ${{ steps.tags.outputs.ref }}
           TAG_REF_TYPE: ${{ steps.tags.outputs.ref-type }}
@@ -130,7 +188,7 @@ jobs:
         run: |
           jq -n \
             --arg compute_type "$COMPUTE_TYPE" \
-            --arg stackName "backgroundagent-dev" \
+            --arg stackName "$STACK_NAME" \
             --arg sha "$TAG_SHA" \
             --arg ref "$TAG_REF" \
             --arg ref_type "$TAG_REF_TYPE" \
@@ -228,6 +286,54 @@ jobs:
           path: |
             cdk/cdk.out/
             cdk/cdk.context.json
+      - name: Write deploy intent
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          DISPATCH_DEPLOY: ${{ inputs.deploy }}
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+          # Keep in sync with matrix.compute_type above, inputs.deploy.options,
+          # and deploy.yml ALLOWED_COMPUTE_TYPES
+          ALLOWED_COMPUTE_TYPES: "agentcore"
+        run: |
+          # exit (not return) — no recovery path; invalid dispatch input must abort the step
+          validate_compute_type() {
+            local type="$1"
+            for allowed in $ALLOWED_COMPUTE_TYPES; do
+              [[ "$type" == "$allowed" ]] && return 0
+            done
+            echo "::error::Invalid compute_type: '$type'. Allowed: $ALLOWED_COMPUTE_TYPES"
+            exit 1
+          }
+
+          case "$EVENT_NAME" in
+            push)
+              if [[ "$GH_REF_NAME" == "main" ]]; then
+                INTENT="$COMPUTE_TYPE"
+              else
+                INTENT="-"
+              fi
+              ;;
+            workflow_dispatch)
+              if [[ "$DISPATCH_DEPLOY" != "-" ]]; then
+                validate_compute_type "$DISPATCH_DEPLOY"
+              fi
+              INTENT="$DISPATCH_DEPLOY"
+              ;;
+            pull_request|pull_request_target)
+              INTENT="labels"
+              ;;
+            *)
+              INTENT="-"
+              ;;
+          esac
+          jq -n --arg deploy "$INTENT" '{"deploy":$deploy}' > deploy-intent.json
+          echo "Deploy intent: $INTENT"
+      - name: Upload deploy intent
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-intent
+          path: deploy-intent.json
       - name: Find mutations
         id: self_mutation
         run: |-
