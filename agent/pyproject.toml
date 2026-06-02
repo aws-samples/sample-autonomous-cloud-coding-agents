@@ -53,6 +53,7 @@ dev = [
     "ty",
     "pytest",
     "pygments==2.20.0",
+    "pytest-cov==7.1.0",
 ]
 
 [tool.ruff]
@@ -86,6 +87,17 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 72
+precision = 2
+show_missing = true
+skip_covered = true
 
 [tool.ty.environment]
 python-version = "3.13"
