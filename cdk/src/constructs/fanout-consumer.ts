@@ -77,6 +77,23 @@ export interface FanOutConsumerProps {
   readonly slackSecretArnPattern?: string;
 
   /**
+   * LinearWorkspaceRegistryTable — the Linear dispatcher reads this to
+   * resolve per-workspace OAuth tokens at comment-post time. Optional:
+   * when omitted, the dispatcher logs and skips so a deployment without
+   * Linear onboarding doesn't accumulate dangling IAM grants.
+   */
+  readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
+
+  /**
+   * Secrets Manager ARN-prefix pattern for per-workspace Linear OAuth
+   * bundles. Mirrors ``slackSecretArnPattern`` shape — typically
+   * ``bgagent-linear-oauth-*``. Required when ``linearWorkspaceRegistryTable``
+   * is set; without it the dispatcher would resolve the registry row but
+   * fail at the SM GetSecretValue call.
+   */
+  readonly linearOauthSecretArnPattern?: string;
+
+  /**
    * Maximum batch size delivered to the Lambda per invocation.
    *
    * @default 100 (DynamoDB Stream default)
@@ -170,6 +187,30 @@ export class FanOutConsumer extends Construct {
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
         resources: [props.slackSecretArnPattern],
+      }));
+    }
+
+    // Linear dispatcher plumbing. Same guarded shape as Slack/GitHub:
+    // a deployment without Linear onboarding gets no IAM grants and
+    // the dispatcher logs-and-skips on missing env. The registry table
+    // tells us per-workspace OAuth-secret ARN; the secret holds the
+    // access token that ``postIssueComment`` uses to drive
+    // ``commentCreate`` GraphQL.
+    if (props.linearWorkspaceRegistryTable) {
+      props.linearWorkspaceRegistryTable.grantReadData(this.fn);
+      this.fn.addEnvironment(
+        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+        props.linearWorkspaceRegistryTable.tableName,
+      );
+    }
+    if (props.linearOauthSecretArnPattern) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        // GetSecretValue + PutSecretValue: the resolver may rotate the
+        // OAuth token (writes the refreshed bundle back to SM) — same
+        // grants the LinearIntegration's webhook-processor Lambda holds
+        // for the same reason.
+        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+        resources: [props.linearOauthSecretArnPattern],
       }));
     }
 

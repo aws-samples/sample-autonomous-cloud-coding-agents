@@ -93,8 +93,23 @@ jest.mock('../../src/handlers/slack-notify', () => {
   };
 });
 
+// Linear dispatcher posts via the existing `postIssueComment` helper
+// in `linear-feedback.ts` (#239). Mock it here so dispatcher tests
+// observe the call shape without exercising the real OAuth-resolver
+// + GraphQL path. Default ``true`` so a test that forgets to script
+// the mock still drives the happy path.
+const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue(true);
+jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIssueComment: (
+    ctx: { linearWorkspaceId: string; registryTableName: string },
+    issueId: string,
+    body: string,
+  ) => mockPostIssueComment(ctx, issueId, body),
+}));
+
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:0:secret:platform';
+process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
 import {
   CHANNEL_DEFAULTS,
@@ -358,23 +373,32 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     timestamp: '2026-04-22T04:00:00Z',
   });
 
-  test('task_completed routes to all three channels', async () => {
+  test('task_completed routes to all four channels (slack, github, linear, email)', async () => {
+    // Linear joined the dispatcher list in #239: terminal-events fan
+    // out to a deterministic platform-side comment for Linear-origin
+    // tasks. The dispatcher itself short-circuits on
+    // ``channel_source !== 'linear'`` so non-Linear tasks see no
+    // observable effect, but the routing layer still counts it as
+    // dispatched (the same way Slack's channel_source gate doesn't
+    // remove it from the dispatched list for non-Slack tasks).
     const outcome = await routeEvent(mk('task_completed'));
-    expect([...outcome.dispatched].sort()).toEqual(['email', 'github', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['email', 'github', 'linear', 'slack']);
     expect(outcome.infraRejections).toEqual([]);
   });
 
-  test('task_cancelled skips Email per §6.2 (only Slack + GitHub)', async () => {
+  test('task_cancelled skips Email per §6.2 (Slack + GitHub + Linear)', async () => {
     // Regression guard against accidentally folding cancelled+stranded
     // into Email via a shared TERMINAL spread — design says Email is
     // minimal (task_completed, task_failed, approval_required only).
+    // Linear joined the terminal-event default in #239 alongside the
+    // existing Slack + GitHub.
     const outcome = await routeEvent(mk('task_cancelled'));
-    expect([...outcome.dispatched].sort()).toEqual(['github', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'linear', 'slack']);
   });
 
   test('task_stranded skips Email per §6.2', async () => {
     const outcome = await routeEvent(mk('task_stranded'));
-    expect([...outcome.dispatched].sort()).toEqual(['github', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'linear', 'slack']);
   });
 
   test('agent_error routes only to Slack', async () => {
@@ -399,7 +423,7 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
   test('per-task override silences one channel without affecting others', async () => {
     const overrides: TaskNotificationsConfig = { slack: { enabled: false } };
     const outcome = await routeEvent(mk('task_completed'), overrides);
-    expect([...outcome.dispatched].sort()).toEqual(['email', 'github']);
+    expect([...outcome.dispatched].sort()).toEqual(['email', 'github', 'linear']);
     expect(outcome.dispatched).not.toContain('slack');
   });
 });
@@ -447,8 +471,12 @@ describe('fanout-task-events: channel isolation', () => {
       expect(mockDispatchSlackEvent).toHaveBeenCalledTimes(1);
 
       // (2) Telemetry truthfulness: Slack must NOT be in ``dispatched``
-      // because its dispatcher rejected. Email + GitHub are.
-      expect([...outcome.dispatched].sort()).toEqual(['email', 'github']);
+      // because its dispatcher rejected. Email + GitHub + Linear are.
+      // Linear joined the terminal-event dispatcher list in #239; for
+      // non-Linear tasks (this test omits channel_source — dispatcher
+      // short-circuits early but still resolves cleanly so it counts
+      // as dispatched).
+      expect([...outcome.dispatched].sort()).toEqual(['email', 'github', 'linear']);
       expect(outcome.dispatched).not.toContain('slack');
 
       // (3) Slack landed in ``infraRejections`` so the handler will
@@ -591,13 +619,29 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   beforeEach(() => {
     // Per-test-suite reset. After ``mockReset`` we re-establish a
     // permissive default so a test that forgets to script GetCommand
-    // doesn't crash with a TypeError.
-    mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
+    // doesn't crash with a TypeError. Uses an implementation that
+    // dispatches by command type so the GitHub + Linear dispatchers
+    // can both call ``send`` (Get from each dispatcher, Update from
+    // GitHub) without the test having to script every call sequence.
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Update') return Promise.resolve({});
+      // Default Get → no Item (test overrides with ``mockResolvedValueOnce``
+      // BEFORE invoking the handler). Pre-existing tests pass ``Item: TASK_RECORD_BASE``
+      // via ``mockResolvedValueOnce`` chains; that takes precedence over this
+      // impl thanks to mockResolvedValueOnce's stacking semantics.
+      return Promise.resolve({ Item: undefined });
+    });
     mockUpsertTaskComment.mockReset();
     mockRenderCommentBody.mockReset().mockReturnValue('rendered body');
     mockLoadRepoConfig.mockReset().mockResolvedValue(null);
     mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
     mockClearTokenCache.mockReset();
+    // Linear dispatcher's postIssueComment runs in parallel with the
+    // GitHub dispatcher under the new fan-out wiring (#239). Stub it as
+    // a no-op for these GitHub-focused tests so a non-Linear-channel
+    // task short-circuits inside the dispatcher (channel_source ===
+    // 'api' / 'github'). Pre-existing tests don't assert on it.
+    mockPostIssueComment.mockReset().mockResolvedValue(true);
   });
 
   test('first terminal event POSTs a new comment and persists the comment_id to TaskTable', async () => {
@@ -626,8 +670,15 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // that GitHub rejects with HTTP 400. The field must no longer be
     // passed on.
     expect(upsertArg).not.toHaveProperty('existingEtag');
-    // UpdateCommand fired with the new id (no etag persistence).
-    const update = mockDdbSend.mock.calls[1][0] as {
+    // UpdateCommand fired with the new id (no etag persistence). Find it
+    // by command type rather than index — Linear's dispatcher ALSO
+    // calls GetCommand against the same shared mock (#239), so the
+    // call sequence is no longer a deterministic [Get, Update].
+    const updateCall = mockDdbSend.mock.calls.find(
+      ([cmd]) => (cmd as { _type?: string })._type === 'Update',
+    );
+    expect(updateCall).toBeDefined();
+    const update = updateCall![0] as {
       input: {
         ExpressionAttributeValues: Record<string, unknown>;
         UpdateExpression: string;
@@ -643,9 +694,15 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test('subsequent event passes the persisted comment_id so the helper PATCHes', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...TASK_RECORD_BASE, github_comment_id: 555 } });
-    // No UpdateCommand on a PATCH — nothing new to persist.
+    // Both dispatchers (GitHub + Linear) call GetCommand against the
+    // shared mock; provide the task record for both calls. PATCH path:
+    // no UpdateCommand on a PATCH because there's no new state.
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') {
+        return Promise.resolve({ Item: { ...TASK_RECORD_BASE, github_comment_id: 555 } });
+      }
+      return Promise.resolve({});
+    });
     mockUpsertTaskComment.mockResolvedValueOnce({
       commentId: 555,
       created: false,
@@ -656,22 +713,37 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
 
     const upsertArg = mockUpsertTaskComment.mock.calls[0][0];
     expect(upsertArg.existingCommentId).toBe(555);
-    // No second DDB call (no UpdateCommand) — the PATCH path skips
-    // ``saveCommentState`` since there's no new state.
-    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    // No UpdateCommand fired — the PATCH path skips ``saveCommentState``
+    // since there's no new state. Linear's dispatcher only does a Get
+    // (then short-circuits on channel_source !== 'linear' for this 'api'
+    // task), so the only sends are: GitHub-Get, Linear-Get. No Update.
+    const updateCalls = mockDdbSend.mock.calls.filter(
+      ([cmd]) => (cmd as { _type?: string })._type === 'Update',
+    );
+    expect(updateCalls).toHaveLength(0);
   });
 
   test('task with no issue_number and no pr_number skips the GitHub dispatcher', async () => {
-    mockDdbSend.mockResolvedValueOnce({
-      Item: { ...TASK_RECORD_BASE, pr_number: undefined, issue_number: undefined },
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') {
+        return Promise.resolve({
+          Item: { ...TASK_RECORD_BASE, pr_number: undefined, issue_number: undefined },
+        });
+      }
+      return Promise.resolve({});
     });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await handler(event);
 
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
-    // No UpdateItem either — nothing to persist.
-    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    // No UpdateCommand fired — nothing to persist. Both dispatchers
+    // ran their Get (Linear short-circuits on channel_source) but no
+    // writes happened.
+    const updateCalls = mockDdbSend.mock.calls.filter(
+      ([cmd]) => (cmd as { _type?: string })._type === 'Update',
+    );
+    expect(updateCalls).toHaveLength(0);
   });
 
   test('missing task record (TTL race) → skip without throwing', async () => {
@@ -741,11 +813,14 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // the UpdateItem must require ``github_comment_id = :prev`` so
     // we cannot silently overwrite a sibling fanout invocation that
     // already re-posted (or that beat us to writing a fresh id).
-    mockDdbSend
-      .mockResolvedValueOnce({
-        Item: { ...TASK_RECORD_BASE, github_comment_id: 555 },
-      })
-      .mockResolvedValueOnce({}); // UpdateCommand for the re-POST
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') {
+        return Promise.resolve({
+          Item: { ...TASK_RECORD_BASE, github_comment_id: 555 },
+        });
+      }
+      return Promise.resolve({});
+    });
     mockUpsertTaskComment.mockResolvedValueOnce({
       commentId: 999, // new id from the fallback POST
       created: true,
@@ -754,7 +829,13 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
     await handler(event);
 
-    const update = mockDdbSend.mock.calls[1][0] as {
+    // Find the UpdateCommand by command type (Linear dispatcher's
+    // GetCommand sits between GitHub's Get and Update post-#239).
+    const updateCall = mockDdbSend.mock.calls.find(
+      ([cmd]) => (cmd as { _type?: string })._type === 'Update',
+    );
+    expect(updateCall).toBeDefined();
+    const update = updateCall![0] as {
       input: {
         ExpressionAttributeValues: Record<string, unknown>;
         UpdateExpression: string;
@@ -907,11 +988,19 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // Benign: the task was TTL-evicted between the Get and the
     // Update. Subsequent events for this task will also skip, so
     // no duplicate-comment risk. Must NOT alarm operators.
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
-      .mockRejectedValueOnce(
-        Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }),
-      );
+    //
+    // Linear dispatcher also calls Get against the same mock (#239);
+    // dispatch on command type so its Get returns the same Item but
+    // the GitHub UpdateCommand specifically rejects.
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: TASK_RECORD_BASE });
+      if (cmd?._type === 'Update') {
+        return Promise.reject(
+          Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }),
+        );
+      }
+      return Promise.resolve({});
+    });
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
@@ -931,11 +1020,18 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       'error',
     ).mockImplementation(errorSpy);
 
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: TASK_RECORD_BASE })
-      .mockRejectedValueOnce(
-        Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }),
-      );
+    // Linear dispatcher also calls Get; dispatch by command type so
+    // it gets the Item (then short-circuits on channel_source !==
+    // 'linear') while GitHub's Update specifically throttles.
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: TASK_RECORD_BASE });
+      if (cmd?._type === 'Update') {
+        return Promise.reject(
+          Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }),
+        );
+      }
+      return Promise.resolve({});
+    });
     mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
@@ -1212,6 +1308,169 @@ describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
     };
     // Must still be caught — record advances, no batchItemFailures.
     await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Linear dispatcher (#239)
+// ---------------------------------------------------------------------------
+
+describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
+  const TASK_RECORD_LINEAR = {
+    task_id: 't-lin',
+    user_id: 'u-1',
+    status: 'COMPLETED',
+    repo: 'owner/repo',
+    branch_name: 'bgagent/t-lin/fix',
+    channel_source: 'linear',
+    channel_metadata: {
+      linear_issue_id: 'issue-uuid-42',
+      linear_workspace_id: 'org-uuid-acme',
+    },
+    status_created_at: 'COMPLETED#2026-04-30T12:00:00Z',
+    created_at: '2026-04-30T11:50:00Z',
+    updated_at: '2026-04-30T12:00:00Z',
+    cost_usd: 0.55,
+    turns_attempted: 27,
+    max_turns: 100,
+    duration_s: 221,
+    pr_url: 'https://github.com/owner/repo/pull/13',
+  };
+
+  beforeEach(() => {
+    mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
+    mockPostIssueComment.mockReset().mockResolvedValue(true);
+    // Slack/GitHub mocks aren't asserted here but leaving them
+    // un-reset would let prior-test rejections bleed in.
+    mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
+    // GitHub dispatcher resolves cleanly so it doesn't reject the
+    // batch — its dispatcher will skip on "no comment target" since
+    // the Linear test record has no pr_number/issue_number, but the
+    // upsertTaskComment mock is harmless either way.
+    mockUpsertTaskComment.mockReset().mockResolvedValue({ commentId: 1, created: false });
+    mockRenderCommentBody.mockReset().mockReturnValue('rendered body');
+    mockLoadRepoConfig.mockReset().mockResolvedValue(null);
+    mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
+  });
+
+  // Helper: configure the shared DDB mock so EVERY GetCommand returns
+  // the supplied Item. Both GitHub and Linear dispatchers call Get
+  // against the shared mock; they need the same record back.
+  const mockGet = (item: unknown) => {
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: item });
+      return Promise.resolve({});
+    });
+  };
+
+  test('task_completed posts ✅ comment with cost / turns / duration on linked Linear issue', async () => {
+    mockGet(TASK_RECORD_LINEAR);
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    const [ctx, issueId, body] = mockPostIssueComment.mock.calls[0];
+    expect(ctx).toEqual({
+      linearWorkspaceId: 'org-uuid-acme',
+      registryTableName: 'LinearWorkspaceRegistry',
+    });
+    expect(issueId).toBe('issue-uuid-42');
+    expect(body).toContain('✅');
+    expect(body).toContain('Task completed');
+    expect(body).toContain('$0.55');
+    expect(body).toContain('27 / 100');
+    expect(body).toContain('3m 41s');
+    expect(body).toContain('https://github.com/owner/repo/pull/13');
+    expect(body).toContain('t-lin');
+  });
+
+  test('task_failed without PR renders ❌ frame', async () => {
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      pr_url: undefined,
+      error_message: 'Generic crash',
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_failed', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    const [, , body] = mockPostIssueComment.mock.calls[0];
+    expect(body).toContain('❌');
+    expect(body).not.toContain('Shipped a PR');
+  });
+
+  test('error_max_turns + pr_url renders ⚠️ "shipped a PR but stopped early" frame (ABCA-91 case)', async () => {
+    // The motivating real-world case from #239: ABCA-91 hit max_turns
+    // on turn 101 but successfully opened PR #35 before the cap fired.
+    // The Linear comment should frame this as ⚠️ shipped-but-stopped,
+    // not ❌ failed — the work landed and the requester needs to see
+    // the PR link.
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      // Terminal event-type stays 'task_failed' for max-turns; the
+      // classifier reads the error_message text to derive the title.
+      error_message: 'Task did not succeed: agent_status="error_max_turns"',
+      turns_attempted: 101,
+      cost_usd: 3.44,
+      duration_s: 1272,
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_failed', 't-lin')] };
+    await handler(event);
+
+    const [, , body] = mockPostIssueComment.mock.calls[0];
+    expect(body).toContain('⚠️');
+    expect(body).toContain('Shipped a PR but stopped early');
+    expect(body).toContain('https://github.com/owner/repo/pull/13');
+    expect(body).toContain('$3.44');
+    expect(body).toContain('101 / 100');
+    expect(body).toContain('21m 12s');
+  });
+
+  test('non-Linear task short-circuits — postIssueComment never called', async () => {
+    // The dispatcher gates on ``channel_source === 'linear'``. Slack
+    // and GitHub origin tasks (which still fan out to Linear's
+    // dispatcher because terminal-events are subscribed for all
+    // channels) must not cause a Linear API call.
+    mockGet({ ...TASK_RECORD_LINEAR, channel_source: 'github' });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('Linear-origin task missing channel_metadata.linear_issue_id — skip with warning', async () => {
+    // Defensive: a properly-admitted Linear task should always have
+    // these fields, but if it doesn't we'd rather log + skip than
+    // throw or post a comment to the wrong issue.
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      channel_metadata: { linear_workspace_id: 'org-uuid-acme' }, // no issue id
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('postIssueComment returning false (Linear API down) does not reject the dispatcher', async () => {
+    // postIssueComment is best-effort — a Linear outage returns false
+    // rather than throwing. The dispatcher logs the failure but
+    // resolves cleanly so the routing layer doesn't flag the record
+    // for retry (retrying won't fix Linear's API).
+    mockGet(TASK_RECORD_LINEAR);
+    mockPostIssueComment.mockReset().mockResolvedValue(false);
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    const result = await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    // Critical: resolve, don't reject. No batchItemFailures.
+    expect(result).toEqual({ batchItemFailures: [] });
   });
 });
 
