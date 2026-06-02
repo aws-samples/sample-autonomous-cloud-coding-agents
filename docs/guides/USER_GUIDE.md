@@ -70,7 +70,7 @@ flowchart TB
 
 1. **Authenticate** - The user sends username and password to Amazon Cognito via the CLI (`bgagent login`) or the AWS SDK (`initiate-auth`).
 2. **Receive token** - Cognito validates credentials and returns a JWT ID token. The CLI caches it locally (`~/.bgagent/credentials.json`) and auto-refreshes on expiry.
-3. **Call the API** - Every request includes the token in the `Authorization: Bearer <token>` header.
+3. **Call the API** - Every request includes the raw ID token (no `Bearer` prefix) in the `Authorization: <token>` header.
 4. **Validate** - API Gateway's Cognito authorizer verifies the JWT signature, expiration, and audience. Invalid tokens are rejected with `401`.
 5. **Extract identity** - The Lambda handler reads the `sub` claim from the validated JWT and uses it as `user_id` for task ownership and audit.
 
@@ -362,7 +362,7 @@ curl -X POST "$API_URL/tasks" \
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
-**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 GUARDRAIL_BLOCKED` error  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR tasks (`pr_iteration`, `pr_review`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
+**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR tasks (`pr_iteration`, `pr_review`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
 
 **Idempotency:** Include an `Idempotency-Key` header (alphanumeric, dashes, underscores, max 128 chars) to prevent duplicate task creation on retries:
 
@@ -935,14 +935,16 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 
 | Status | Meaning |
 |---|---|
+| `PENDING_UPLOADS` | Initial state while presigned attachment uploads are pending confirmation |
 | `SUBMITTED` | Task accepted; orchestrator invoked asynchronously |
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
 | `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
+| `FINALIZING` | Agent session ended; task is wrapping up (post-session hooks / PR finalization) before reaching a terminal state |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
 | `FAILED` | Something went wrong - pre-flight check failed, concurrency limit reached, guardrail blocked the content, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
-| `TIMED_OUT` | Task exceeded the maximum allowed duration (~9 hours) |
+| `TIMED_OUT` | Task exceeded the maximum allowed duration (~8 hours, the AgentCore max session duration; the orchestrator safety-net timer is slightly longer) |
 
 Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`. `AWAITING_APPROVAL` is not terminal — a decision (or an approval-timeout) always flips it back to `RUNNING` or onto a terminal state.
 

@@ -32,7 +32,7 @@ flowchart TB
 
 1. **Authenticate** - The user sends username and password to Amazon Cognito via the CLI (`bgagent login`) or the AWS SDK (`initiate-auth`).
 2. **Receive token** - Cognito validates credentials and returns a JWT ID token. The CLI caches it locally (`~/.bgagent/credentials.json`) and auto-refreshes on expiry.
-3. **Call the API** - Every request includes the token in the `Authorization: Bearer <token>` header.
+3. **Call the API** - Every request includes the raw ID token (no `Bearer` prefix) in the `Authorization: <token>` header.
 4. **Validate** - API Gateway's Cognito authorizer verifies the JWT signature, expiration, and audience. Invalid tokens are rejected with `401`.
 5. **Extract identity** - The Lambda handler reads the `sub` claim from the validated JWT and uses it as `user_id` for task ownership and audit.
 

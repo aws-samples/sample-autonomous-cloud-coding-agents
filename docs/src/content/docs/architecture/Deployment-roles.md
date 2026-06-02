@@ -6,7 +6,7 @@ title: Deployment roles
 
 This document defines least-privilege IAM policies for the CloudFormation execution role used during `cdk deploy`. The default CDK bootstrap grants `AdministratorAccess` to this role; the policies below scope it to only what ABCA needs.
 
-> **Origin**: These IAM policies were derived from a thorough review of the repository's CDK constructs, stacks, and handler code, then **validated against a live deployment** in `us-east-1` (create, update, task execution, and destroy). CloudTrail analysis identified 36 additional actions beyond the initial code review, and 7 deployment iterations refined the policies to their current form. The policies are split into three managed policies to stay under the IAM 6,144-character limit.
+> **Origin**: These IAM policies were derived from a thorough review of the repository's CDK constructs, stacks, and handler code, then **validated against a live deployment** in `us-east-1` (create, update, task execution, and destroy). CloudTrail analysis identified 36 additional actions beyond the initial code review, and 7 deployment iterations refined the policies to their current form. The policies are split into five managed policies — three always-applied (Infrastructure, Application, Observability) plus two compute-variant policies (Compute-AgentCore, Compute-ECS) — to stay under the IAM 6,144-character limit and to support per-compute-backend bootstrap selection. The policy sources live in `cdk/src/bootstrap/policies/*.ts` and are compiled to `cdk/bootstrap/policies/*.json`.
 
 ## How CDK deployment roles work
 
@@ -21,25 +21,28 @@ The policy below is a **CloudFormation Execution Role** replacement. The other t
 
 ## Using these policies
 
-The policies are split into three IAM managed policies (each under the 6,144-character limit):
+The policies are split into five IAM managed policies (each under the 6,144-character limit):
 
-| Policy Name | Scope |
-|-------------|-------|
-| `IaCRole-ABCA-Infrastructure` | CloudFormation, IAM, VPC networking, Route 53 Resolver DNS Firewall |
-| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, Secrets Manager |
-| `IaCRole-ABCA-Observability` | Bedrock AgentCore, Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS |
+| Policy Name | Scope | When applied |
+|-------------|-------|--------------|
+| `IaCRole-ABCA-Infrastructure` | CloudFormation, IAM, VPC networking, Route 53 Resolver DNS Firewall | Always |
+| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, Secrets Manager | Always |
+| `IaCRole-ABCA-Observability` | Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS | Always |
+| `IaCRole-ABCA-Compute-Agentcore` | Bedrock AgentCore (`bedrock-agentcore:*`) | Always (default compute backend) |
+| `IaCRole-ABCA-Compute-ECS` | ECS cluster + task-definition operations | Only when `ecs` is in `ComputeTypes` |
 
 > **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
 
+These policies are not created or attached manually. The repository generates them — and a custom bootstrap template that wires all five into the CloudFormation execution role — from the TypeScript sources, then bootstraps with that template:
+
 ```bash
-# Create all three policies in your account, then re-bootstrap:
-cdk bootstrap aws://ACCOUNT_ID/REGION \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT_ID:policy/IaCRole-ABCA-Infrastructure" \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT_ID:policy/IaCRole-ABCA-Application" \
-  --cloudformation-execution-policies "arn:aws:iam::ACCOUNT_ID:policy/IaCRole-ABCA-Observability"
+# Regenerate artifacts (policies JSON + template YAML) and bootstrap.
+# Default ComputeTypes is "agentcore"; pass ECS via context to also include Compute-ECS:
+MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
+MISE_EXPERIMENTAL=1 mise //cdk:bootstrap -- --context ComputeTypes=agentcore,ecs
 ```
 
-The `--cloudformation-execution-policies` flag can be repeated to attach multiple policies to the CloudFormation execution role.
+Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines five inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` policy is conditional on the `ComputeTypes` parameter including `ecs`. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
 
 ## Trust policy
 
@@ -74,7 +77,7 @@ The `--cloudformation-execution-policies` flag can be repeated to attach multipl
 
 For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
 
-> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into three policies to stay under this limit. Use all three when re-bootstrapping (see [Using these policies](#using-these-policies)).
+> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into five policies to stay under this limit (three always-applied, plus two compute-variant policies). They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
 
 ### IaCRole-ABCA-Infrastructure
 
@@ -438,20 +441,12 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
 
 ### IaCRole-ABCA-Observability
 
-Bedrock AgentCore, Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), KMS, ECR, SSM, and STS.
+Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), KMS, ECR, SSM, and STS. (Bedrock AgentCore lives in the separate `IaCRole-ABCA-Compute-Agentcore` policy below.)
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
-    {
-      "Sid": "BedrockAgentCore",
-      "Effect": "Allow",
-      "Action": [
-        "bedrock-agentcore:*"
-      ],
-      "Resource": "*"
-    },
     {
       "Sid": "BedrockGuardrailsAndLogging",
       "Effect": "Allow",
@@ -612,31 +607,56 @@ Bedrock AgentCore, Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray,
 }
 ```
 
-### When ECS compute is enabled
+### IaCRole-ABCA-Compute-Agentcore
 
-If you uncomment the ECS blocks in `cdk/src/stacks/agent.ts` to enable the Fargate compute backend, add the following statement to the `IaCRole-ABCA-Application` policy (the combined policy remains under the 6,144-character IAM limit):
+Bedrock AgentCore runtime/memory operations. This policy is always applied (AgentCore is the default compute backend) and is kept separate from Observability so each compute variant can be bootstrapped independently.
 
 ```json
 {
-  "Sid": "ECS",
-  "Effect": "Allow",
-  "Action": [
-    "ecs:CreateCluster",
-    "ecs:DeleteCluster",
-    "ecs:DescribeClusters",
-    "ecs:UpdateCluster",
-    "ecs:UpdateClusterSettings",
-    "ecs:PutClusterCapacityProviders",
-    "ecs:RegisterTaskDefinition",
-    "ecs:DeregisterTaskDefinition",
-    "ecs:DescribeTaskDefinition",
-    "ecs:ListTaskDefinitions",
-    "ecs:TagResource",
-    "ecs:UntagResource",
-    "ecs:ListTagsForResource",
-    "ecs:PutAccountSetting"
-  ],
-  "Resource": "*"
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockAgentCore",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### IaCRole-ABCA-Compute-ECS
+
+When the ECS Fargate compute backend is enabled (bootstrap with `--context ComputeTypes=agentcore,ecs`), the generated template conditionally attaches this policy to the CloudFormation execution role. It is a standalone managed policy, not an addition to `IaCRole-ABCA-Application`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECS",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:DeleteCluster",
+        "ecs:DescribeClusters",
+        "ecs:UpdateCluster",
+        "ecs:UpdateClusterSettings",
+        "ecs:PutClusterCapacityProviders",
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:ListTaskDefinitions",
+        "ecs:TagResource",
+        "ecs:UntagResource",
+        "ecs:ListTagsForResource",
+        "ecs:PutAccountSetting"
+      ],
+      "Resource": "*"
+    }
+  ]
 }
 ```
 
