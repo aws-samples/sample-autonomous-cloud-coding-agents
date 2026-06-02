@@ -45,6 +45,7 @@ function rewriteDocsLinkTarget(target) {
     CONTRIBUTING: '/developer-guide/contributing',
     SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
     LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
+    LINEAR_PAK_MIGRATION_RUNBOOK: '/using/linear-pak-migration-runbook',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
   };
@@ -236,6 +237,12 @@ mirrorMarkdownFile(
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'LINEAR_SETUP_GUIDE.md'),
   path.join('src', 'content', 'docs', 'using', 'Linear-setup-guide.md'),
+);
+
+// --- Linear PAK migration runbook: mirror to using/ ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'LINEAR_PAK_MIGRATION_RUNBOOK.md'),
+  path.join('src', 'content', 'docs', 'using', 'Linear-pak-migration-runbook.md'),
 );
 
 // --- Cedar Policy Guide: mirror to customizing/ (authoring reference for blueprint authors) ---
