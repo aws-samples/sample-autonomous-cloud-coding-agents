@@ -78,6 +78,24 @@ Then apply principal-architect judgment over the diff:
 - **Routing** — Changes should land in the right package per the AGENTS.md routing table
   (agent runtime in `agent/`, API/Lambdas in `cdk/`, CLI in `cli/`).
 
+**Human review heuristics (non-automatable)** — After automated agents, apply these four
+dimensions. They are where agent output often looks plausible but isn't. Flag blocking issues when
+a dimension is clearly violated:
+
+- **Proportionality** — Does complexity match the problem? (new abstraction/factory/"engine"
+  for a one-off → AI002/AI003; files >800 lines — is size essential or accreted?)
+- **Coherence** — Does it belong here? Same concept = same term across the repo? Parallel
+  structure with real substance, not copy-paste boilerplate (AI006)?
+- **Clarity** — Do names communicate intent? Does error handling surface failures or hide
+  them behind plausible defaults (AI004)? Magic values that should live in
+  `contracts/constants.json` (AI007)?
+- **Appropriateness** — Maintainable by this team? Integration code verified against *real*
+  API behavior, not only self-written mocks (AI001)? Tests assert what code *should* do,
+  not merely what it *does* (AI005)?
+
+Include a **Human heuristics** subsection in Stage 5 output: one bullet per dimension
+(pass or concern with `file:line` when applicable).
+
 ### Stage 4: Documentation — Did We Update It Where Needed?
 
 Documentation drift is a blocking concern on this repo. Check:
@@ -112,5 +130,7 @@ Summarize as a principal architect would in a PR review. Structure the output:
 7. **Review agents run** — List each plugin/agent you invoked (Stage 3) and, for any in-scope
    agent you omitted, the one-line reason. This section is required — its absence means the
    mandatory plugin step was skipped.
+8. **Human heuristics** — Proportionality, Coherence, Clarity, Appropriateness (pass or concern
+   per dimension; cite `file:line` when not pass).
 
 Be specific and actionable. Prefer concrete diffs over vague advice.
