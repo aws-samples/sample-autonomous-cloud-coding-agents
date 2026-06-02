@@ -219,6 +219,7 @@ export interface TaskNotificationsConfig {
   readonly slack?: ChannelConfig;
   readonly email?: ChannelConfig;
   readonly github?: ChannelConfig;
+  readonly linear?: ChannelConfig;
 }
 
 /**

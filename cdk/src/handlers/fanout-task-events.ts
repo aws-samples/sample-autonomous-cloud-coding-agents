@@ -46,7 +46,9 @@ import type {
   DynamoDBStreamEvent,
 } from 'aws-lambda';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
+import { classifyError } from './shared/error-classifier';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
+import { postIssueComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -105,7 +107,7 @@ const APPROVAL_NOTIFICATION_EVENTS = [
  *   - Per-user rate limit of 10 approval-related messages per minute
  *     is enforced in the dispatcher, not in this filter.
  */
-export type NotificationChannel = 'slack' | 'email' | 'github';
+export type NotificationChannel = 'slack' | 'email' | 'github' | 'linear';
 
 export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> = {
   // Slack is the "on-call" channel per §6.2 — all terminal outcomes
@@ -154,6 +156,21 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   github: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
     'pr_created',
+  ]),
+  // Linear posts a single deterministic final-status comment on
+  // terminal events. The agent's three-comment prompt contract (start /
+  // PR-opened / completion) covers in-flight progress; this dispatcher
+  // only fires once the task reaches a terminal state, with cost /
+  // turns / duration / pr_url metrics the requester wouldn't otherwise
+  // see. Crucially, this fires even when the agent crashes (e.g.
+  // error_max_turns, OOM) before reaching its own step-3 completion
+  // comment — the GH issue #239 motivating example.
+  //
+  // Linear's `save_comment` doesn't support edit, so this is post-once
+  // (no live updates a la GitHub edit-in-place). Approvals / milestones
+  // are excluded for the same reason — N comments rather than 1.
+  linear: new Set<string>([
+    ...TERMINAL_EVENT_TYPES,
   ]),
 };
 
@@ -753,6 +770,184 @@ async function dispatchToEmail(event: FanOutEvent): Promise<void> {
   });
 }
 
+/**
+ * Render the Linear final-status comment body. Inputs are already
+ * coerced to native types by the caller; this function only formats.
+ *
+ * The framing flips between three outcomes based on `(eventType, prUrl)`:
+ *
+ *   1. ``task_completed``        → ✅ "Task completed"
+ *   2. ``error_max_turns``  + PR → ⚠️ "Shipped a PR but hit max-turns cap" — the
+ *                                  motivating GH #239 case (ABCA-91 turn 101)
+ *   3. all other terminal subtypes → ❌ "Task failed" + classifier title if known
+ *
+ * Cost / turns / duration appear as a subtitle line. Missing values
+ * (e.g. failure before the agent emitted any tokens) render as `—`.
+ */
+export function renderLinearFinalStatusComment(args: {
+  eventType: string;
+  prUrl: string | null;
+  costUsd: number | null;
+  turns: number | null;
+  maxTurns: number | null;
+  durationS: number | null;
+  taskId: string;
+  errorTitle: string | null;
+}): string {
+  const isCompleted = args.eventType === 'task_completed';
+  const shippedDespiteFailure = !isCompleted && args.prUrl != null;
+
+  let header: string;
+  if (isCompleted) {
+    header = '✅ **Task completed**';
+  } else if (shippedDespiteFailure) {
+    header = '⚠️ **Shipped a PR but stopped early** — review and decide if more work is needed';
+  } else {
+    const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
+    header = `❌ **Task ${args.eventType.replace(/^task_/, '')}${reason}**`;
+  }
+
+  const costStr = args.costUsd != null ? `$${args.costUsd.toFixed(2)}` : '—';
+  const turnsStr = args.turns != null
+    ? `${args.turns}${args.maxTurns != null ? ` / ${args.maxTurns}` : ''}`
+    : '—';
+  const durationStr = args.durationS != null
+    ? formatDuration(args.durationS)
+    : '—';
+
+  const lines: string[] = [
+    header,
+    '',
+    `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}`,
+  ];
+  if (args.prUrl) {
+    lines.push('', `PR: ${args.prUrl}`);
+  }
+  lines.push('', `_task ${args.taskId}_`);
+  return lines.join('\n');
+}
+
+function formatDuration(seconds: number): string {
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
+}
+
+/**
+ * Linear dispatcher — posts a deterministic final-status comment when a
+ * Linear-origin task reaches a terminal event. Mirrors Slack's structural
+ * shape (channel_source gate, best-effort, single error-isolation point):
+ *
+ *   1. Load TaskRecord. Skip if missing (TTL eviction race).
+ *   2. Gate on ``channel_source === 'linear'`` so non-Linear tasks
+ *      short-circuit after one DDB Get.
+ *   3. Read ``linear_issue_id`` + ``linear_workspace_id`` from
+ *      ``channel_metadata``. Skip if either is missing — defensive,
+ *      shouldn't happen for properly-admitted Linear tasks.
+ *   4. Render the comment + post via the existing ``postIssueComment``
+ *      helper, which itself swallows network/auth errors and returns
+ *      false rather than throwing.
+ *
+ * Failure handling: ``postIssueComment`` is best-effort — a Linear API
+ * outage logs and returns false rather than throwing. We reflect that
+ * outcome in the dispatcher log but never reject the dispatcher
+ * promise: a failed Linear comment shouldn't trigger ``routeEvent``'s
+ * batch-retry path because retrying won't fix Linear's API.
+ */
+async function dispatchToLinear(event: FanOutEvent): Promise<void> {
+  const registryTableName = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (!registryTableName) {
+    logger.info('[fanout/linear] LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set — skipping', {
+      event: 'fanout.linear.missing_env',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
+  const task = await loadTaskForComment(event.task_id);
+  if (!task) {
+    logger.warn('[fanout/linear] task not found — skipping comment', {
+      event: 'fanout.linear.task_missing',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
+  // channel_source gate — short-circuit non-Linear tasks. Same shape
+  // Slack uses to keep the GitHub edit-in-place comment from racing
+  // against the platform-side Linear comment when channel_source is
+  // 'github'/'slack'/'api'.
+  if (task.channel_source !== 'linear') {
+    return;
+  }
+
+  const issueId = task.channel_metadata?.linear_issue_id;
+  const workspaceId = task.channel_metadata?.linear_workspace_id;
+  if (!issueId || !workspaceId) {
+    logger.warn('[fanout/linear] task missing linear_issue_id or linear_workspace_id — skipping', {
+      event: 'fanout.linear.metadata_missing',
+      task_id: event.task_id,
+      has_issue_id: Boolean(issueId),
+      has_workspace_id: Boolean(workspaceId),
+    });
+    return;
+  }
+
+  // Derive an error title from `error_message` via the shared classifier.
+  // Same data the API surfaces as `error_classification.title` —
+  // "Hit max-turns cap", "Insufficient GitHub permissions", etc.
+  // Returns null for tasks that completed successfully or whose error
+  // message doesn't match any known pattern; the renderer falls back
+  // to a generic frame in that case.
+  const classification = classifyError(task.error_message);
+
+  const body = renderLinearFinalStatusComment({
+    eventType: event.event_type,
+    prUrl: task.pr_url ?? null,
+    // DDB returns numeric attributes as strings at the Document-client
+    // boundary; coerce so toFixed/comparisons work. Same pattern the
+    // GitHub dispatcher uses.
+    costUsd: coerceNumericOrNull(
+      task.cost_usd,
+      { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    turns: coerceNumericOrNull(
+      task.turns_attempted,
+      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    maxTurns: coerceNumericOrNull(
+      task.max_turns,
+      { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    durationS: coerceNumericOrNull(
+      task.duration_s,
+      { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    taskId: task.task_id,
+    errorTitle: classification?.title ?? null,
+  });
+
+  const ok = await postIssueComment(
+    { linearWorkspaceId: workspaceId, registryTableName },
+    issueId,
+    body,
+  );
+
+  logger.info('[fanout/linear] comment dispatched', {
+    event: ok ? 'fanout.linear.dispatched' : 'fanout.linear.post_failed',
+    task_id: task.task_id,
+    issue_id: issueId,
+    event_type: event.event_type,
+    posted: ok,
+  });
+}
+
 /** Exposed for testing: the per-channel dispatcher callable by the
  *  handler. Each key's absence from the routing map disables its
  *  dispatcher; the signature is uniform so adding a channel is one
@@ -760,6 +955,7 @@ async function dispatchToEmail(event: FanOutEvent): Promise<void> {
 const DISPATCHERS: Record<NotificationChannel, (ev: FanOutEvent) => Promise<void>> = {
   slack: dispatchToSlack,
   github: dispatchToGitHubComment,
+  linear: dispatchToLinear,
   email: dispatchToEmail,
 };
 
