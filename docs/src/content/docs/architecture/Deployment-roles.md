@@ -441,12 +441,22 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
 
 ### IaCRole-ABCA-Observability
 
-Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), KMS, ECR, SSM, and STS. (Bedrock AgentCore lives in the separate `IaCRole-ABCA-Compute-Agentcore` policy below.)
+Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), KMS, ECR, SSM, and STS.
+
+> The golden baseline below keeps the `BedrockAgentCore` statement (`bedrock-agentcore:*`) as the first entry of this block, since it is the canonical action list parsed by `cdk/test/bootstrap/golden-baseline.test.ts`. At **deploy** time those actions are emitted as the standalone `IaCRole-ABCA-Compute-Agentcore` managed policy (see the next subsection), not as part of the runtime Observability policy — the test extracts the statement from here and validates it against the separate `computeAgentcorePolicy()`.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
+    {
+      "Sid": "BedrockAgentCore",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:*"
+      ],
+      "Resource": "*"
+    },
     {
       "Sid": "BedrockGuardrailsAndLogging",
       "Effect": "Allow",
@@ -609,23 +619,7 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
 
 ### IaCRole-ABCA-Compute-Agentcore
 
-Bedrock AgentCore runtime/memory operations. This policy is always applied (AgentCore is the default compute backend) and is kept separate from Observability so each compute variant can be bootstrapped independently.
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "BedrockAgentCore",
-      "Effect": "Allow",
-      "Action": [
-        "bedrock-agentcore:*"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
+Bedrock AgentCore runtime/memory operations — a single statement granting `bedrock-agentcore:*` on `*` (the `BedrockAgentCore` statement shown in the Observability block above). This policy is always applied (AgentCore is the default compute backend) and is emitted as its own managed policy (`computeAgentcorePolicy()`, compiled to `cdk/bootstrap/policies/compute-agentcore.json`) so each compute variant can be bootstrapped independently. No separate JSON baseline is repeated here: the golden-file test reads the action list from the Observability block and validates it against this policy.
 
 ### IaCRole-ABCA-Compute-ECS
 
@@ -633,30 +627,25 @@ When the ECS Fargate compute backend is enabled (bootstrap with `--context Compu
 
 ```json
 {
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ECS",
-      "Effect": "Allow",
-      "Action": [
-        "ecs:CreateCluster",
-        "ecs:DeleteCluster",
-        "ecs:DescribeClusters",
-        "ecs:UpdateCluster",
-        "ecs:UpdateClusterSettings",
-        "ecs:PutClusterCapacityProviders",
-        "ecs:RegisterTaskDefinition",
-        "ecs:DeregisterTaskDefinition",
-        "ecs:DescribeTaskDefinition",
-        "ecs:ListTaskDefinitions",
-        "ecs:TagResource",
-        "ecs:UntagResource",
-        "ecs:ListTagsForResource",
-        "ecs:PutAccountSetting"
-      ],
-      "Resource": "*"
-    }
-  ]
+  "Sid": "ECS",
+  "Effect": "Allow",
+  "Action": [
+    "ecs:CreateCluster",
+    "ecs:DeleteCluster",
+    "ecs:DescribeClusters",
+    "ecs:UpdateCluster",
+    "ecs:UpdateClusterSettings",
+    "ecs:PutClusterCapacityProviders",
+    "ecs:RegisterTaskDefinition",
+    "ecs:DeregisterTaskDefinition",
+    "ecs:DescribeTaskDefinition",
+    "ecs:ListTaskDefinitions",
+    "ecs:TagResource",
+    "ecs:UntagResource",
+    "ecs:ListTagsForResource",
+    "ecs:PutAccountSetting"
+  ],
+  "Resource": "*"
 }
 ```
 
