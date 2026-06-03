@@ -6,6 +6,7 @@
 
 # CDK output (recursive include if not excluded)
 cdk/cdk.out/
+cdk/cdk.out.*/
 cdk/lib/
 cdk/node_modules/
 
