@@ -18,7 +18,8 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Stack } from 'aws-cdk-lib';
@@ -213,21 +214,24 @@ describe('Synth coverage', () => {
   });
 
   it('all ecs resource types have map entries', () => {
-    const ecsOutDir = join(__dirname, '..', '..', 'cdk.out.ecs');
-    const ecsTemplatePath = join(ecsOutDir, 'backgroundagent-dev.template.json');
-    // Try to synth with ecs config — skip if unavailable (no AWS creds, etc.)
-    if (!existsSync(ecsTemplatePath)) {
-      try {
-        execFileSync('npx', ['cdk', 'synth', '-q', '-c', 'compute_type=ecs', '-o', ecsOutDir], {
-          cwd: join(__dirname, '..', '..'),
-          stdio: 'pipe',
-          timeout: 120000,
-        });
-      } catch {
-        return; // synth unavailable — skip gracefully
-      }
+    // Use a temp dir outside the repo tree to avoid racing with parallel
+    // tests that fingerprint repoRoot (e.g. github-tags.test.ts via
+    // AgentRuntimeArtifact.fromAsset). A synth.lock inside the repo tree
+    // causes ENOENT when another worker stats it mid-lifecycle.
+    const ecsOutDir = mkdtempSync(join(tmpdir(), 'cdk-ecs-synth-'));
+    try {
+      execFileSync('npx', ['cdk', 'synth', '-q', '-c', 'compute_type=ecs', '-o', ecsOutDir], {
+        cwd: join(__dirname, '..', '..'),
+        stdio: 'pipe',
+        timeout: 120000,
+      });
+    } catch {
+      rmSync(ecsOutDir, { recursive: true, force: true });
+      return; // synth unavailable — skip gracefully
     }
+    const ecsTemplatePath = join(ecsOutDir, 'backgroundagent-dev.template.json');
     const types = getResourceTypes(ecsTemplatePath);
+    rmSync(ecsOutDir, { recursive: true, force: true });
     if (types.length === 0) return;
     const unmapped = types.filter(t => !SKIP_TYPES.has(t) && !RESOURCE_ACTION_MAP[t]);
     expect(unmapped).toEqual([]);
