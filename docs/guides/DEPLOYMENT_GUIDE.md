@@ -163,7 +163,7 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Related docs
 
-- [Quick start](./QUICK_START.md) -- Zero-to-first-PR in 6 steps.
+- [Quick start](./QUICK_START.md) -- Zero-to-first-PR in 7 steps.
 - [Developer guide](./DEVELOPER_GUIDE.md) -- Local development, testing, repository onboarding.
 - [User guide](./USER_GUIDE.md) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md) -- Least-privilege IAM policies for CloudFormation execution.
