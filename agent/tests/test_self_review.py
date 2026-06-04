@@ -1,9 +1,17 @@
 """Unit tests for self_review.py — self-review orchestration module."""
 
+import os
 from unittest.mock import MagicMock, patch
 
 from models import AgentResult, RepoSetup, TaskConfig
-from self_review import _MAX_DIFF_CHARS, _get_diff, _truncate_diff, run_self_review
+from self_review import (
+    _MAX_DIFF_CHARS,
+    _SUMMARY_FILENAME,
+    _get_diff,
+    _truncate_diff,
+    read_self_review_summary,
+    run_self_review,
+)
 
 
 def _make_config(**overrides) -> TaskConfig:
@@ -314,3 +322,163 @@ class TestHappyPath:
         result = run_self_review(config, setup, agent_result, trajectory, progress)
         assert result is not None
         assert result.status == "success"
+
+
+class TestReadSelfReviewSummary:
+    """Tests for read_self_review_summary — reads and cleans up the summary file."""
+
+    def test_returns_content_when_file_exists(self, tmp_path):
+        summary_content = (
+            "### Self-Review Summary\n\n"
+            "**Findings:** 2\n"
+            "**Fixes applied:** 1\n\n"
+            "#### Issues found\n\n"
+            "- Security: hardcoded token — fixed\n"
+            "- Style: inconsistent naming — not fixed (cosmetic)\n"
+        )
+        (tmp_path / _SUMMARY_FILENAME).write_text(summary_content)
+
+        result = read_self_review_summary(str(tmp_path))
+
+        assert result == summary_content.strip()
+
+    def test_returns_none_when_file_missing(self, tmp_path):
+        result = read_self_review_summary(str(tmp_path))
+        assert result is None
+
+    def test_deletes_file_after_reading(self, tmp_path):
+        (tmp_path / _SUMMARY_FILENAME).write_text("No issues found — code looks good.")
+
+        read_self_review_summary(str(tmp_path))
+
+        assert not (tmp_path / _SUMMARY_FILENAME).exists()
+
+    def test_returns_none_for_empty_file(self, tmp_path):
+        (tmp_path / _SUMMARY_FILENAME).write_text("   \n\n  ")
+
+        result = read_self_review_summary(str(tmp_path))
+
+        assert result is None
+
+    def test_returns_none_for_whitespace_only(self, tmp_path):
+        (tmp_path / _SUMMARY_FILENAME).write_text("\t\n ")
+
+        result = read_self_review_summary(str(tmp_path))
+
+        assert result is None
+
+    @patch("self_review.subprocess.run")
+    def test_runs_git_rm_cached_for_cleanup(self, mock_run, tmp_path):
+        (tmp_path / _SUMMARY_FILENAME).write_text("Some findings")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        read_self_review_summary(str(tmp_path))
+
+        mock_run.assert_called_once_with(
+            ["git", "rm", "--cached", "--ignore-unmatch", "-f", _SUMMARY_FILENAME],
+            cwd=str(tmp_path),
+            capture_output=True,
+            timeout=30,
+        )
+
+    @patch("self_review.subprocess.run", side_effect=OSError("git not found"))
+    def test_git_rm_failure_does_not_block(self, mock_run, tmp_path):
+        (tmp_path / _SUMMARY_FILENAME).write_text("Findings here")
+
+        # Should not raise even if git rm fails
+        result = read_self_review_summary(str(tmp_path))
+
+        assert result == "Findings here"
+
+
+class TestPostSelfReviewComment:
+    """Tests for post_hooks.post_self_review_comment."""
+
+    def test_posts_comment_on_success(self, tmp_path):
+        from post_hooks import post_self_review_comment
+
+        (tmp_path / _SUMMARY_FILENAME).write_text("**Findings:** 1\n**Fixes applied:** 1")
+
+        config = MagicMock()
+        config.repo_url = "owner/repo"
+        pr_url = "https://github.com/owner/repo/pull/42"
+
+        with patch("post_hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = post_self_review_comment(str(tmp_path), pr_url, config)
+
+        assert result is True
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0:3] == ["gh", "pr", "comment"]
+        assert "42" in call_args
+        assert "owner/repo" in call_args
+
+    def test_returns_false_when_no_summary(self, tmp_path):
+        from post_hooks import post_self_review_comment
+
+        config = MagicMock()
+        config.repo_url = "owner/repo"
+        pr_url = "https://github.com/owner/repo/pull/42"
+
+        result = post_self_review_comment(str(tmp_path), pr_url, config)
+        assert result is False
+
+    def test_returns_false_on_invalid_pr_url(self, tmp_path):
+        from post_hooks import post_self_review_comment
+
+        (tmp_path / _SUMMARY_FILENAME).write_text("Some findings")
+
+        config = MagicMock()
+        config.repo_url = "owner/repo"
+        pr_url = "https://github.com/owner/repo/issues/42"
+
+        result = post_self_review_comment(str(tmp_path), pr_url, config)
+        assert result is False
+
+    def test_returns_false_on_gh_failure(self, tmp_path):
+        from post_hooks import post_self_review_comment
+
+        (tmp_path / _SUMMARY_FILENAME).write_text("**Findings:** 1")
+
+        config = MagicMock()
+        config.repo_url = "owner/repo"
+        pr_url = "https://github.com/owner/repo/pull/99"
+
+        with patch("post_hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not found")
+            result = post_self_review_comment(str(tmp_path), pr_url, config)
+
+        assert result is False
+
+    def test_fail_open_on_exception(self, tmp_path):
+        from post_hooks import post_self_review_comment
+
+        (tmp_path / _SUMMARY_FILENAME).write_text("**Findings:** 1")
+
+        config = MagicMock()
+        config.repo_url = "owner/repo"
+        pr_url = "https://github.com/owner/repo/pull/5"
+
+        with patch("post_hooks.subprocess.run", side_effect=OSError("network error")):
+            result = post_self_review_comment(str(tmp_path), pr_url, config)
+
+        assert result is False
+
+    def test_comment_body_includes_header(self, tmp_path):
+        from post_hooks import post_self_review_comment
+
+        (tmp_path / _SUMMARY_FILENAME).write_text("**Findings:** 0\nNo issues.")
+
+        config = MagicMock()
+        config.repo_url = "owner/repo"
+        pr_url = "https://github.com/owner/repo/pull/7"
+
+        with patch("post_hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            post_self_review_comment(str(tmp_path), pr_url, config)
+
+        call_args = mock_run.call_args[0][0]
+        body_idx = call_args.index("--body") + 1
+        body = call_args[body_idx]
+        assert "Self-Review Summary" in body
+        assert "**Findings:** 0" in body

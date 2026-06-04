@@ -31,6 +31,7 @@ from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
     ensure_pr,
+    post_self_review_comment,
     verify_build,
     verify_lint,
 )
@@ -1048,6 +1049,10 @@ def run_task(
                 post_span.set_attribute("pr.url", pr_url or "")
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
+
+            # Post self-review summary as PR comment (if self-review ran and produced findings)
+            if pr_url and review_result is not None:
+                post_self_review_comment(setup.repo_dir, pr_url, config)
 
             # Memory write — capture task episode and repo learnings
             memory_written = False

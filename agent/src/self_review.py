@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -196,3 +198,42 @@ def run_self_review(
         f"status={review_result.status} turns={review_result.turns}",
     )
     return review_result
+
+
+_SUMMARY_FILENAME = ".self-review-summary.md"
+
+
+def read_self_review_summary(repo_dir: str) -> str | None:
+    """Read and delete the self-review summary file.
+
+    The self-review agent writes `.self-review-summary.md` in the repo root.
+    This function reads the content, removes the file (so it never appears in
+    the PR), and returns the content. Returns None if the file doesn't exist.
+    """
+    summary_path = os.path.join(repo_dir, _SUMMARY_FILENAME)
+    if not os.path.isfile(summary_path):
+        return None
+
+    try:
+        with open(summary_path) as f:
+            content = f.read()
+    except OSError as e:
+        log("WARN", f"self_review: failed to read summary file: {type(e).__name__}: {e}")
+        return None
+
+    # Remove the file so it doesn't end up in the PR
+    try:
+        os.remove(summary_path)
+    except OSError as e:
+        log("WARN", f"self_review: failed to delete summary file: {type(e).__name__}: {e}")
+
+    # If the file was staged by the agent, unstage it
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        subprocess.run(
+            ["git", "rm", "--cached", "--ignore-unmatch", "-f", _SUMMARY_FILENAME],
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=30,
+        )
+
+    return content.strip() if content.strip() else None

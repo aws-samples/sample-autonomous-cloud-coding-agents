@@ -37,4 +37,25 @@ making changes.
 concrete bug or security issue.
 - Keep fixes minimal and focused. Each fix should be a separate commit with a \
 clear message.
+
+## Summary output
+
+After completing your review (whether you made fixes or not), write a file \
+`.self-review-summary.md` in the repository root with your findings in this format:
+
+```markdown
+### Self-Review Summary
+
+**Findings:** <number of issues found>
+**Fixes applied:** <number of fixes committed>
+
+#### Issues found
+
+- <category>: <brief description of issue> — <fixed | not fixed (reason)>
+```
+
+If no issues were found, write the file with: "No issues found — code looks good."
+
+This file is a pipeline artifact and will be deleted automatically — it will NOT \
+appear in the pull request.
 """

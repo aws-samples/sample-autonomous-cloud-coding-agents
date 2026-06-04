@@ -392,6 +392,68 @@ def ensure_pr(
         return None
 
 
+def post_self_review_comment(repo_dir: str, pr_url: str, config: TaskConfig) -> bool:
+    """Post the self-review summary as a PR comment.
+
+    Reads the summary file written by the self-review agent, formats it as a
+    comment, and posts it via `gh pr comment`. Fail-open: exceptions are logged
+    but never propagated.
+
+    Returns True if a comment was posted, False otherwise.
+    """
+    from self_review import read_self_review_summary
+
+    try:
+        summary = read_self_review_summary(repo_dir)
+    except Exception as e:
+        log("WARN", f"post_self_review_comment: failed to read summary: {type(e).__name__}: {e}")
+        return False
+
+    if not summary:
+        log("POST", "post_self_review_comment: no summary file found — skipping")
+        return False
+
+    # Extract PR number from URL (e.g. https://github.com/owner/repo/pull/123)
+    match = re.search(r"/pull/(\d+)", pr_url)
+    if not match:
+        log("WARN", f"post_self_review_comment: could not extract PR number from {pr_url}")
+        return False
+    pr_number = match.group(1)
+
+    comment_body = f"## \U0001f50d Self-Review Summary\n\n{summary}"
+
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "comment",
+                pr_number,
+                "--repo",
+                config.repo_url,
+                "--body",
+                comment_body,
+            ],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            log("POST", f"Self-review summary posted as comment on PR #{pr_number}")
+            return True
+        stderr = result.stderr.strip()[:200] if result.stderr else ""
+        log(
+            "WARN",
+            f"post_self_review_comment: gh pr comment failed "
+            f"(rc={result.returncode}): {stderr}",
+        )
+        return False
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log("WARN", f"post_self_review_comment: {type(e).__name__}: {e}")
+        return False
+
+
 def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str | None:
     """Extract the "## Agent notes" section from the PR body.
 
