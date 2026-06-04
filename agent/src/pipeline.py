@@ -36,6 +36,7 @@ from post_hooks import (
 )
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
+from self_review import run_self_review
 from shell import log, log_error_cw
 from system_prompt import SYSTEM_PROMPT
 from telemetry import (
@@ -589,6 +590,8 @@ def run_task(
     trace: bool = False,
     user_id: str = "",
     attachments: list[dict] | None = None,
+    self_review_enabled: bool = False,
+    self_review_max_turns: int = 5,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -628,6 +631,8 @@ def run_task(
         initial_approval_gate_count=initial_approval_gate_count,
         approval_gate_cap=approval_gate_cap,
         attachments=attachments,
+        self_review_enabled=self_review_enabled,
+        self_review_max_turns=self_review_max_turns,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
@@ -1005,6 +1010,22 @@ def run_task(
                     "strategy to 'create' so the agent's work is not stranded",
                 )
                 ensure_pr_strategy = "create"
+
+            # Self-review phase: LLM critiques its own diff before PR creation.
+            # Runs between cancel-check and post-hooks. Fail-open: errors here
+            # never block PR creation.
+            with task_span("task.self_review"):
+                review_result = run_self_review(
+                    config, setup, agent_result, trajectory, progress
+                )
+                if review_result is not None:
+                    # Accumulate turns and cost from the review phase
+                    agent_result.turns += review_result.turns
+                    agent_result.num_turns += review_result.num_turns or review_result.turns
+                    if review_result.cost_usd is not None:
+                        agent_result.cost_usd = (
+                            (agent_result.cost_usd or 0.0) + review_result.cost_usd
+                        )
 
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:

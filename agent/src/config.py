@@ -471,6 +471,8 @@ def build_config(
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
     attachments: list[dict] | None = None,
+    self_review_enabled: bool = False,
+    self_review_max_turns: int = 5,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
@@ -583,6 +585,8 @@ def build_config(
         initial_approval_gate_count=initial_approval_gate_count,
         approval_gate_cap=approval_gate_cap,
         attachments=validated_attachments,
+        self_review_enabled=self_review_enabled,
+        self_review_max_turns=self_review_max_turns,
     )
 
 
@@ -607,6 +611,9 @@ def get_config() -> TaskConfig:
             # an unreachable ``traces//`` key.
             trace=os.environ.get("TRACE", "").lower() in ("1", "true", "yes"),
             user_id=os.environ.get("USER_ID", ""),
+            self_review_enabled=os.environ.get("SELF_REVIEW_ENABLED", "").lower()
+            in ("1", "true", "yes"),
+            self_review_max_turns=int(os.environ.get("SELF_REVIEW_MAX_TURNS", "5")),
         )
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)

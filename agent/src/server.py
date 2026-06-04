@@ -405,6 +405,8 @@ def _run_task_background(
     user_id: str = "",
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
+    self_review_enabled: bool = False,
+    self_review_max_turns: int = 5,
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -488,6 +490,8 @@ def _run_task_background(
             trace=trace,
             user_id=user_id,
             attachments=attachments,
+            self_review_enabled=self_review_enabled,
+            self_review_max_turns=self_review_max_turns,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -576,6 +580,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     channel_source = inp.get("channel_source", "") or ""
     channel_metadata = inp.get("channel_metadata") or {}
     attachments = inp.get("attachments") or []
+    # Self-review (opt-in): LLM critiques its own diff before PR creation.
+    self_review_enabled = inp.get("self_review_enabled") is True
+    self_review_max_turns = int(inp.get("self_review_max_turns", 5))
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -649,6 +656,8 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "user_id": user_id,
         "workload_access_token": workload_access_token,
         "attachments": attachments,
+        "self_review_enabled": self_review_enabled,
+        "self_review_max_turns": self_review_max_turns,
     }
 
 
