@@ -836,11 +836,12 @@ export class AgentStack extends Stack {
     });
 
     // --- GitHub deployment-status → screenshot pipeline ---
-    // Listens for Vercel-style preview deploys, screenshots the
-    // `deployment.environment_url` via AgentCore Browser, posts the
-    // image into a fresh PR comment. Default-on: any repo whose
-    // GitHub webhook is configured will get screenshotted on
-    // successful preview deploys; no opt-in flag.
+    // Listens for GitHub deployment_status events from any provider
+    // (Vercel, Amplify Hosting, Netlify, GitHub Actions custom CD),
+    // screenshots the `deployment.environment_url` via AgentCore
+    // Browser, posts the image into a fresh PR comment. Default-on:
+    // any repo whose GitHub webhook is configured will get
+    // screenshotted on successful preview deploys; no opt-in flag.
     const githubScreenshot = new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
       api: taskApi.api,
       githubTokenSecret,
@@ -864,7 +865,7 @@ export class AgentStack extends Stack {
 
     new CfnOutput(this, 'ScreenshotBucketName', {
       value: githubScreenshot.screenshotBucket.bucket.bucketName,
-      description: 'Private S3 bucket hosting Vercel-preview screenshots (served via CloudFront)',
+      description: 'Private S3 bucket hosting preview-deploy screenshots (served via CloudFront)',
     });
 
     new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
