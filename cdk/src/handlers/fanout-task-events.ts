@@ -776,10 +776,16 @@ async function dispatchToEmail(event: FanOutEvent): Promise<void> {
  *
  * The framing flips between three outcomes based on `(eventType, prUrl)`:
  *
- *   1. ``task_completed``        → ✅ "Task completed"
- *   2. ``error_max_turns``  + PR → ⚠️ "Shipped a PR but hit max-turns cap" — the
- *                                  motivating GH #239 case (ABCA-91 turn 101)
- *   3. all other terminal subtypes → ❌ "Task failed" + classifier title if known
+ *   1. ``task_completed``                        → ✅ "Task completed"
+ *   2. any non-completed terminal event WITH PR  → ⚠️ "Shipped a PR but stopped early"
+ *      (the motivating ABCA-91 case is max-turns-with-PR, but the same
+ *      framing applies to any terminal failure — budget cap, agent
+ *      crash, etc. — that managed to ship a PR before stopping)
+ *   3. any non-completed terminal event NO PR    → ❌ "Task <subtype>" + classifier title
+ *
+ * The ⚠️ frame appends the classifier title when one is available so the
+ * requester sees both outcomes (the PR shipped, AND the reason it
+ * stopped — "Hit max-turns cap" for ABCA-91).
  *
  * Cost / turns / duration appear as a subtitle line. Missing values
  * (e.g. failure before the agent emitted any tokens) render as `—`.
@@ -801,7 +807,11 @@ export function renderLinearFinalStatusComment(args: {
   if (isCompleted) {
     header = '✅ **Task completed**';
   } else if (shippedDespiteFailure) {
-    header = '⚠️ **Shipped a PR but stopped early** — review and decide if more work is needed';
+    // Append the classifier title (when known) so the requester sees
+    // *why* the agent stopped, not just that it shipped a PR. For
+    // ABCA-91 this renders "...stopped early — Hit max-turns cap".
+    const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
+    header = `⚠️ **Shipped a PR but stopped early${reason}** — review and decide if more work is needed`;
   } else {
     const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
     header = `❌ **Task ${args.eventType.replace(/^task_/, '')}${reason}**`;
@@ -859,8 +869,15 @@ function formatDuration(seconds: number): string {
 async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   const registryTableName = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
   if (!registryTableName) {
-    logger.info('[fanout/linear] LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set — skipping', {
+    // WARN with error_id so this is alarmable. The Linear comment is
+    // the *only* completion signal for the agent-crash case (#239), so a
+    // misconfigured env var would silently drop every Linear-origin
+    // task's metrics — exactly the gap this dispatcher was built to
+    // close. The GitHub dispatcher uses the same WARN+error_id pattern
+    // for its missing-env path.
+    logger.warn('[fanout/linear] LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set — skipping', {
       event: 'fanout.linear.missing_env',
+      error_id: 'FANOUT_LINEAR_MISSING_ENV',
       task_id: event.task_id,
     });
     return;
@@ -898,9 +915,12 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   // Derive an error title from `error_message` via the shared classifier.
   // Same data the API surfaces as `error_classification.title` —
   // "Hit max-turns cap", "Insufficient GitHub permissions", etc.
-  // Returns null for tasks that completed successfully or whose error
-  // message doesn't match any known pattern; the renderer falls back
-  // to a generic frame in that case.
+  //
+  // Returns null only when error_message is empty/undefined (the
+  // task_completed case). For any non-empty error_message that doesn't
+  // match a known pattern, returns the UNKNOWN_CLASSIFICATION fallback
+  // ("Unexpected error") — so a generic failure still gets a structured
+  // title rather than nothing. See error-classifier.ts.
   const classification = classifyError(task.error_message);
 
   const body = renderLinearFinalStatusComment({
@@ -939,13 +959,29 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     body,
   );
 
-  logger.info('[fanout/linear] comment dispatched', {
-    event: ok ? 'fanout.linear.dispatched' : 'fanout.linear.post_failed',
-    task_id: task.task_id,
-    issue_id: issueId,
-    event_type: event.event_type,
-    posted: ok,
-  });
+  // Split the success / failure path so post-failure can be alarmed
+  // distinctly. The underlying linear-feedback.ts path already WARNs
+  // on the specific failure reason (auth, network, etc.); this
+  // backstop ensures a steady drip of post-failures shows up in the
+  // dispatcher's own log channel for cross-channel alarms.
+  if (ok) {
+    logger.info('[fanout/linear] comment dispatched', {
+      event: 'fanout.linear.dispatched',
+      task_id: task.task_id,
+      issue_id: issueId,
+      event_type: event.event_type,
+      posted: true,
+    });
+  } else {
+    logger.warn('[fanout/linear] postIssueComment returned false — Linear API path failed', {
+      event: 'fanout.linear.post_failed',
+      error_id: 'FANOUT_LINEAR_POST_FAILED',
+      task_id: task.task_id,
+      issue_id: issueId,
+      event_type: event.event_type,
+      posted: false,
+    });
+  }
 }
 
 /** Exposed for testing: the per-channel dispatcher callable by the
@@ -1010,8 +1046,9 @@ export async function routeEvent(
     attempted.push(ch);
     tasks.push(DISPATCHERS[ch](ev));
   }
-  // Parallelism is bounded by the dispatcher list (at most 3 channels),
-  // not by program input, so the unbounded-parallelism lint does not apply.
+  // Parallelism is bounded by the dispatcher list (4 channels:
+  // slack/github/linear/email), not by program input, so the
+  // unbounded-parallelism lint does not apply.
 
   const results = await Promise.allSettled(tasks);
 
