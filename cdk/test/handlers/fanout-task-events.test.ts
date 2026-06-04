@@ -114,6 +114,7 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 import {
   CHANNEL_DEFAULTS,
   parseStreamRecord,
+  renderLinearFinalStatusComment,
   resolveChannelFilter,
   routeEvent,
   shouldFanOut,
@@ -1471,6 +1472,203 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
     // Critical: resolve, don't reject. No batchItemFailures.
     expect(result).toEqual({ batchItemFailures: [] });
+  });
+
+  test('LINEAR_WORKSPACE_REGISTRY_TABLE_NAME unset → dispatcher logs WARN and skips', async () => {
+    // The deploy-misconfig safety valve: if a stack is built without the
+    // Linear integration but somehow ends up with the dispatcher in the
+    // map, the missing env var must short-circuit cleanly. WARN +
+    // error_id so the operator sees an alarmable signal — the Linear
+    // comment is the *only* completion signal for the agent-crash case
+    // (#239), so silent drops are exactly what this dispatcher exists
+    // to prevent.
+    const original = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+    delete process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      mockGet(TASK_RECORD_LINEAR);
+
+      const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+      const result = await handler(event);
+
+      expect(mockPostIssueComment).not.toHaveBeenCalled();
+      expect(result).toEqual({ batchItemFailures: [] });
+      const missingEnvWarn = warnSpy.mock.calls
+        .map(c => c[1] as Record<string, unknown> | undefined)
+        .find(meta => meta?.event === 'fanout.linear.missing_env');
+      expect(missingEnvWarn).toBeDefined();
+      expect(missingEnvWarn?.error_id).toBe('FANOUT_LINEAR_MISSING_ENV');
+    } finally {
+      warnSpy.mockRestore();
+      if (original !== undefined) process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = original;
+    }
+  });
+
+  test('error_max_turns WITHOUT pr_url renders ❌ frame, not ⚠️ (the no-PR boundary)', async () => {
+    // The flip the other direction: without a PR, even a max-turns
+    // failure is a plain ❌. Pins the (eventType, prUrl) discriminator —
+    // the requester only sees ⚠️ when the agent shipped something.
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      pr_url: undefined,
+      error_message: 'Task did not succeed: agent_status="error_max_turns"',
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_failed', 't-lin')] };
+    await handler(event);
+
+    const [, , body] = mockPostIssueComment.mock.calls[0];
+    expect(body).toContain('❌');
+    expect(body).not.toContain('⚠️');
+    expect(body).not.toContain('Shipped a PR');
+    // Classifier title still appears on the ❌ frame. The actual title
+    // for max-turns errors is "Exceeded max turns" (see error-classifier.ts).
+    expect(body).toContain('Exceeded max turns');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderLinearFinalStatusComment — table-driven tests for the formatter
+// ---------------------------------------------------------------------------
+
+describe('renderLinearFinalStatusComment', () => {
+  // The dispatcher tests above exercise the renderer indirectly through
+  // the full handler stack. These tests call the exported renderer
+  // directly to cover edge cases the integration fixtures don't:
+  // null-metric fallbacks, formatDuration boundaries (`<60s`,
+  // exact-minute), and the title-on-⚠️ rendering for the ABCA-91 case.
+
+  test('all metrics null → renders em-dash placeholders', () => {
+    // The crash-before-metrics case: the agent died so early that no
+    // turns were attempted, no cost was tagged, and duration was zero.
+    // Better to show `—` than `0` or `null`.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_failed',
+      prUrl: null,
+      costUsd: null,
+      turns: null,
+      maxTurns: null,
+      durationS: null,
+      taskId: 't-empty',
+      errorTitle: null,
+    });
+    expect(body).toContain('cost: — • turns: — • duration: —');
+  });
+
+  test('turns present but maxTurns null → renders just turns without slash', () => {
+    // A max-turns-cap config that never materialised on the task
+    // (older record, schema gap). Don't render `27 / null`.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_completed',
+      prUrl: null,
+      costUsd: 0.5,
+      turns: 27,
+      maxTurns: null,
+      durationS: 60,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('turns: 27 ');
+    expect(body).not.toContain('27 /');
+  });
+
+  test('formatDuration: under 60s → seconds only', () => {
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_completed',
+      prUrl: null,
+      costUsd: 0.01,
+      turns: 1,
+      maxTurns: 100,
+      durationS: 42,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('duration: 42s');
+  });
+
+  test('formatDuration: exact minute → `Nm` without zero seconds', () => {
+    // ``180 → 3m`` not ``3m 0s``. Cosmetic but the regex anchored.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_completed',
+      prUrl: null,
+      costUsd: 0.01,
+      turns: 1,
+      maxTurns: 100,
+      durationS: 180,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('duration: 3m');
+    expect(body).not.toContain('3m 0s');
+  });
+
+  test('formatDuration: minutes + seconds → `Nm Ss`', () => {
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_completed',
+      prUrl: null,
+      costUsd: 0.01,
+      turns: 1,
+      maxTurns: 100,
+      durationS: 221,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('duration: 3m 41s');
+  });
+
+  test('⚠️ frame renders the classifier title (ABCA-91 contextual reason)', () => {
+    // Krokoko's review item #4: the most useful context for the ⚠️
+    // case is *why* the agent stopped early. Render the classifier
+    // title alongside "Shipped a PR but stopped early" so the
+    // requester sees both outcomes.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_failed',
+      prUrl: 'https://github.com/owner/repo/pull/35',
+      costUsd: 3.44,
+      turns: 101,
+      maxTurns: 100,
+      durationS: 1272,
+      taskId: 't-abca-91',
+      errorTitle: 'Hit max-turns cap',
+    });
+    expect(body).toContain('⚠️');
+    expect(body).toContain('Shipped a PR but stopped early');
+    expect(body).toContain('Hit max-turns cap');
+  });
+
+  test('❌ frame includes classifier title when known', () => {
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_failed',
+      prUrl: null,
+      costUsd: 0.05,
+      turns: 3,
+      maxTurns: 100,
+      durationS: 30,
+      taskId: 't',
+      errorTitle: 'Insufficient GitHub permissions',
+    });
+    expect(body).toContain('❌');
+    expect(body).toContain('Insufficient GitHub permissions');
+  });
+
+  test('❌ frame renders without colon when errorTitle is null (clean fallback)', () => {
+    // Distinct from the "Unexpected error" case — this is what happens
+    // when the classifier returns null (empty error_message). Header
+    // should not render a stranded ": " trailing the subtype.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_cancelled',
+      prUrl: null,
+      costUsd: null,
+      turns: null,
+      maxTurns: null,
+      durationS: null,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('❌');
+    expect(body).toContain('cancelled');
+    expect(body).not.toMatch(/cancelled:\s/);
   });
 });
 
