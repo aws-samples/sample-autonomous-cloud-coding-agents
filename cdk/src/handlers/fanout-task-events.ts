@@ -830,7 +830,14 @@ export function renderLinearFinalStatusComment(args: {
     '',
     `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}`,
   ];
-  if (args.prUrl) {
+  // Render the PR URL only on the ⚠️ "shipped a PR but stopped early"
+  // path — that's the case where the agent's own step-2 "PR opened"
+  // comment is *not* guaranteed to have fired (the agent may have
+  // crashed between opening the PR and posting the comment, e.g.
+  // ABCA-91 hitting max-turns on turn 101). On the ✅ success path the
+  // agent's step-2 comment reliably carries the PR link, so duplicating
+  // it here is just noise.
+  if (args.prUrl && shippedDespiteFailure) {
     lines.push('', `PR: ${args.prUrl}`);
   }
   lines.push('', `_task ${args.taskId}_`);
