@@ -181,13 +181,24 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 **Resolution — choose one:**
 
-#### Option A: Manual disassociation via AWS Console (recommended)
+#### Option A: AWS CLI disassociation (recommended)
 
-1. Open the [Route 53 Resolver console](https://console.aws.amazon.com/route53resolver/home#/query-logging)
-2. Select the query logging configuration named `agent-dns-query-log`
-3. Under **Associated VPCs**, disassociate the VPC
-4. Delete the query logging configuration
-5. Run `mise //cdk:deploy` (or `cdk deploy`) — CloudFormation will recreate both resources without tags
+Fastest, scriptable, no console access required. Replace `<vpc-id>` with the agent VPC ID and `<region>` with your stack's region.
+
+1. List the association for your VPC to get the `ResolverQueryLogConfigId`:
+   ```bash
+   aws route53resolver list-resolver-query-log-config-associations \
+     --region <region> \
+     --query "ResolverQueryLogConfigAssociations[?ResourceId=='<vpc-id>']"
+   ```
+2. Disassociate using the `Id` from step 1:
+   ```bash
+   aws route53resolver disassociate-resolver-query-log-config \
+     --resolver-query-log-config-id <rqlc-id> \
+     --resource-id <vpc-id> \
+     --region <region>
+   ```
+3. Run `mise //cdk:deploy` — CloudFormation recreates both the config and association without the orphan tags. The pre-existing `ResolverQueryLoggingConfig` is replaced as part of the same update, so an explicit `delete-resolver-query-log-config` is not required.
 
 #### Option B: Two-phase deploy (comment-out / re-add)
 
@@ -203,7 +214,17 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 3. Uncomment the `DnsFirewall` block
 4. Deploy again: `mise //cdk:deploy` — resources are recreated cleanly without tags
 
-Option B is more disruptive (two deploys, brief DNS logging gap) but requires no console access.
+Option B is more disruptive (two deploys, brief DNS logging gap) but requires no AWS API access beyond `cdk deploy`.
+
+#### Option C: Manual disassociation via AWS Console
+
+For users without AWS CLI access.
+
+1. Open the [Route 53 Resolver console](https://console.aws.amazon.com/route53resolver/home#/query-logging)
+2. Select the query logging configuration named `agent-dns-query-log`
+3. Under **Associated VPCs**, disassociate the VPC
+4. Delete the query logging configuration
+5. Run `mise //cdk:deploy` (or `cdk deploy`) — CloudFormation will recreate both resources without tags
 
 ## Related docs
 
