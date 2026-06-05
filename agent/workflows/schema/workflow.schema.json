@@ -269,7 +269,10 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "read_only": { "const": true } } },
+      "if": {
+        "required": ["read_only"],
+        "properties": { "read_only": { "const": true } }
+      },
       "then": {
         "properties": {
           "agent_config": {
@@ -283,7 +286,10 @@
       }
     },
     {
-      "if": { "properties": { "requires_repo": { "const": false } } },
+      "if": {
+        "required": ["requires_repo"],
+        "properties": { "requires_repo": { "const": false } }
+      },
       "then": {
         "properties": {
           "steps": {
