@@ -20,7 +20,11 @@ pids
 # Coverage & test reports
 # ──────────────────────────────────────────────
 coverage
+agent/.coverage
 *.lcov
+# Codecov uploader binary + signature files downloaded by codecov-action at CI time
+codecov
+codecov.*
 .nyc_output
 .jest-cache
 *.tsbuildinfo
@@ -58,6 +62,11 @@ cdk.out/
 .cdk.staging/
 cdk.context.json
 /assets/
+
+# ──────────────────────────────────────────────
+# CI artifacts (generated during build)
+# ──────────────────────────────────────────────
+deploy-intent.json
 
 # ──────────────────────────────────────────────
 # Build outputs (compiled TS → JS)

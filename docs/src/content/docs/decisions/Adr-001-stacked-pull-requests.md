@@ -1,5 +1,5 @@
 ---
-title: 001 stacked pull requests
+title: Adr 001 stacked pull requests
 ---
 
 # ADR-001: Stacked pull requests for multi-PR features

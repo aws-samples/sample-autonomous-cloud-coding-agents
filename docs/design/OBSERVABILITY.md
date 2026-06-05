@@ -61,7 +61,7 @@ The platform tracks four categories of signals, each serving different consumers
 
 Every task emits structured events at each state transition, stored in the TaskEvents table:
 
-- State transitions: `task_created`, `admission_passed`, `admission_rejected`, `hydration_started`, `hydration_complete`, `session_started`, `session_ended`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
+- State transitions: `task_created`, `admission_rejected`, `uploads_confirmed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
 - Blueprint custom step events: `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`
 - Guardrail events: `guardrail_blocked` (content blocked during hydration)
 
@@ -105,7 +105,7 @@ Emitted as custom CloudWatch metrics and used in dashboards and alarms.
 
 ## Dashboard
 
-A CloudWatch dashboard (`BackgroundAgent-Tasks`) is deployed via the `TaskDashboard` CDK construct. It provides Logs Insights widgets for:
+A CloudWatch dashboard (`BackgroundAgent-Tasks-${stackName}`, i.e. the base name suffixed with the stack name) is deployed via the `TaskDashboard` CDK construct. It provides Logs Insights widgets for:
 
 - Task success rate and count by status
 - Cost per task and turns per task
@@ -145,7 +145,7 @@ Agent sessions run for up to 8 hours. CDK deployments replace Lambda functions, 
 
 - **Drain before deploy** - Pre-deploy check for active tasks. Warn or block if tasks are running.
 - **Durable execution resilience** - Lambda Durable Functions checkpoints are stored externally. A replaced Lambda can resume from its last checkpoint.
-- **Consistency recovery** - If a deploy interrupts a running orchestrator, the counter drift reconciliation Lambda (every 5 minutes) corrects the concurrency counter. The stuck task alarm fires and triggers manual finalization.
+- **Consistency recovery** - If a deploy interrupts a running orchestrator, the `ConcurrencyReconciler` Lambda (every 15 minutes) corrects the concurrency counter. (This is distinct from the stranded-task reconciler, a separate Lambda that runs every 5 minutes to fail tasks whose pipeline never started.) The stuck task alarm fires and triggers manual finalization.
 - **Blue-green deployment** - CI/CD pipeline uses blue-green for the orchestrator Lambda, with automatic rollback if error rates increase.
 
 ## Account prerequisites

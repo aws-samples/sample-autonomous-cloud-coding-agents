@@ -11,11 +11,11 @@ What's shipped and what's coming next.
 ### Core platform
 
 - [x] **Autonomous agent execution** - Isolated MicroVM (AgentCore Runtime) per task with shell, filesystem, and git access
-- [x] **CLI and REST API** - Submit, list, get, cancel, nudge, watch, trace, webhook management; view audit events; Cognito auth with token caching
+- [x] **CLI and REST API** - Submit, list, get, cancel, nudge, watch, trace, status, webhook management; Cedar HITL (`approve`, `deny`, `pending`, `policies`); Slack and Linear workspace setup; view audit events; Cognito auth with token caching
 - [x] **Durable orchestrator** - Lambda Durable Functions with checkpoint/resume; survives transient failures up to 9 hours
-- [x] **Task state machine** - SUBMITTED → HYDRATING → RUNNING → COMPLETED / FAILED / CANCELLED / TIMED_OUT
+- [x] **Task state machine** - SUBMITTED → HYDRATING → RUNNING → AWAITING_APPROVAL (Cedar HITL) → FINALIZING → COMPLETED / FAILED / CANCELLED / TIMED_OUT
 - [x] **Concurrency control** - Per-user limits (default 3) with atomic admission and automated drift reconciliation
-- [x] **Stranded task reconciler** - Scheduled Lambda detects tasks stuck in non-terminal states and drives them to failure with proper cleanup
+- [x] **Stranded task reconciler** - Scheduled Lambda detects tasks stuck in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` and drives them to failure with proper cleanup
 - [x] **Idempotency** - `Idempotency-Key` header on POST requests (24-hour TTL)
 
 ### Task types
@@ -26,9 +26,9 @@ What's shipped and what's coming next.
 
 ### Onboarding and customization
 
-- [x] **Blueprint construct** - Per-repo CDK configuration (model, turns, budget, prompt overrides, egress, GitHub token)
+- [x] **Blueprint construct** - Per-repo CDK configuration (model, max turns, prompt overrides, egress allowlist, GitHub token, Cedar policies, approval gate cap)
 - [x] **Repo-level project config** - Agent loads `CLAUDE.md`, `.claude/rules/`, `.claude/settings.json`, `.mcp.json`
-- [x] **Per-repo overrides** - Model ID, max turns, max budget, system prompt overrides, poll interval, dedicated token
+- [x] **Per-repo overrides** - Model ID, max turns, max budget (per-task request and/or `RepoTable`; Blueprint CDK default pending), system prompt overrides, poll interval, dedicated token
 
 ### Security
 
@@ -37,9 +37,10 @@ What's shipped and what's coming next.
 - [x] **Input guardrails** - Bedrock Guardrails screen task descriptions and PR/issue content (fail-closed)
 - [x] **Output screening** - Regex-based secret/PII scanner with PostToolUse hook redaction
 - [x] **Content sanitization** - HTML stripping, injection pattern neutralization, control character removal
-- [x] **Cedar policy engine** - Tool-call governance with fail-closed default and per-repo custom policies
+- [x] **Cedar policy engine and HITL gates** - Tool-call governance (allow / hard-deny / soft-deny requiring approval) with fail-closed default, per-repo Cedar policies, submit-time `initial_approvals`, `AWAITING_APPROVAL` state, `bgagent approve` / `deny` / `pending` / `policies`, and REST approval APIs. Stranded approvals in `AWAITING_APPROVAL` are cleared by the stranded-task reconciler. See [CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates)
 - [x] **WAF** - Managed rule groups + rate-based rule (1,000 req/5 min/IP)
 - [x] **Pre-flight checks** - GitHub API reachability, repo access, token permissions (fail-closed)
+- [x] **Per-session IAM scoping** - Agent assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}` and refreshable credentials (1-hour role-chaining cap; tasks up to 8 h). Tenant-data DynamoDB access uses `dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id}`; S3 traces/attachments use a `${aws:PrincipalTag/user_id}` prefix. Bedrock model invocation still uses the compute role (see **Bedrock IAM session-tag attribution** under What's next). See [SECURITY.md](/architecture/security)
 - [x] **Model invocation logging** - Full prompt/response audit trail (90-day retention)
 
 ### Memory and learning
@@ -52,6 +53,7 @@ What's shipped and what's coming next.
 
 - [x] **Rich prompt assembly** - Task description + GitHub issue/PR content + memory context (~100K token budget)
 - [x] **Token budget management** - Oldest comments trimmed first; title/body always preserved
+- [x] **Task attachments (multimodal)** - `attachments` on create-task: inline base64 (≤ 500 KB), presigned upload (up to 10 MB), and URL fetch with SSRF protection. Images (PNG, JPEG) and text files (TXT, CSV, MD, JSON, PDF, LOG) pass through Guardrail screening, magic-bytes validation, and re-encoding. CLI `--attachment`, Slack file uploads, and Linear image extraction share the same schema. See [ATTACHMENTS.md](/architecture/attachments)
 
 ### Webhooks
 
@@ -69,7 +71,7 @@ What's shipped and what's coming next.
 - [x] **Real-time watch** - `bgagent watch` streams progress events with adaptive polling (500 ms active; 1/2/5 s idle backoff), cold-start retry, clean exit on terminal state
 - [x] **Mid-run steering (nudge)** - `bgagent nudge` sends guidance to a running agent; combined-turn acknowledgement (agent emits `nudge_acknowledged` before incorporating)
 - [x] **Execution tracing** - `--trace` on submit raises preview cap to 4 KB and uploads full gzipped NDJSON trajectory to S3; `bgagent trace download` retrieves it
-- [x] **Deterministic status snapshot** - `bgagent status` derives all fields from task record + recent events with no LLM in the loop
+- [x] **Deterministic status snapshot** - `bgagent status` shows operational fields (turn, last milestone, current tool/turn, cost) from the task record + recent events with no LLM in the loop—suited to ops/debug, not a narrative manager-style report (see **Smart progress updates** under What's next)
 - [x] **Debug output** - `--verbose` flag emits full HTTP request/response on stderr for any CLI command
 
 ### Notification plane
@@ -78,8 +80,13 @@ What's shipped and what's coming next.
 - [x] **GitHub edit-in-place** - Single status comment per task on the target PR, edited in place as progress events fire (phase, milestone, cost, link)
 - [x] **Routable agent milestones** - Named checkpoints (`pr_created`, `nudge_acknowledged`) unwrapped against allowlist for channel filter matching
 - [x] **Deploy-preview screenshots** - Listens for GitHub `deployment_status: success` events from any provider (Vercel, Amplify Hosting, Netlify, GitHub Actions); captures the preview URL via AgentCore Browser; posts a markdown image comment on the open PR (and on the linked Linear issue if Linear is configured). Lambda-only, deterministic, ~10–15 s post-deploy. See [Deploy preview screenshots guide](/using/deploy-preview-screenshots-guide).
-- [ ] **Slack dispatcher** - Log-only stub; pending full Slack Block Kit integration
+- [x] **Slack notification dispatcher** - FanOut Block Kit messages for Slack-origin tasks (lifecycle events, threaded replies, terminal dedup, in-thread cancel). Generic fallback text for unmapped event types (e.g. some milestones); richer milestone and approval-gate rendering is follow-up work
 - [ ] **Email dispatcher** - Log-only stub; pending SES integration
+
+### Channels
+
+- [x] **Slack integration** - @mention task submission, `bgagent slack link` / `setup`, file attachments on submit, threaded progress notifications. See [SLACK_SETUP_GUIDE.md](/using/slack-setup-guide)
+- [x] **Linear integration** - Label-triggered tasks, `bgagent linear setup` / `link`, progress comments on issues. See [LINEAR_SETUP_GUIDE.md](/using/linear-setup-guide)
 
 ### Observability
 
@@ -115,7 +122,6 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Per-session IAM scoping** | Generate short-lived, scoped credentials per task via `sts:AssumeRole` with session tags (`user_id`, `repo`, `task_id`). DynamoDB leading-key conditions restrict each session to its own partition. Bedrock model access scoped to an explicit ARN allowlist instead of `*`. Eliminates cross-tenant blast radius from a compromised agent session. |
 | **Per-repo GitHub credentials** | GitHub App per org/repo via AgentCore Token Vault. Auto-refresh for long sessions. Sets the pattern for GitLab, Jira, Slack integrations. |
 | **Principal-to-repo authorization** | Map Cognito identities to allowed repository sets. Users can only trigger work on authorized repos. |
 | **End-to-end task attribution** | Propagate `task_id`, `user_id`, and trace context consistently across orchestrator logs, agent OpenTelemetry, GitHub/API calls, and `TaskEvents` so every downstream action is attributable in incident response (aligns with Zero Trust agent-identity guidance). |
@@ -164,16 +170,22 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | **MCP supply-chain controls** | For extended-tier repos: pin or self-host MCP servers; keep `.mcp.json` in version control; verify tool descriptors before enablement; no dynamic tool discovery in production blueprints. Mitigates tool poisoning and rug-pull risks (`SECURITY.md`, `COMPUTE.md`). |
 | **Untrusted hydration content boundaries** | Delimit external content in assembled prompts (issue/PR bodies, fetched URLs, review comments) so the model treats it as untrusted context (spotlighting-style framing). Complements Bedrock Guardrails at hydration time (`context-hydration.ts`). |
 
+### Interactive task UX
+
+| Capability | Description |
+|------------|-------------|
+| **Smart progress updates (manager-style status)** | Extend check-in beyond the shipped deterministic snapshot: human-readable progress that answers what the agent completed, what it plans next, and which decisions or blockers matter—surfaced via `bgagent status`, notification channels (GitHub/Slack/email), and the future control panel. Prefer structured agent-emitted progress events in `TaskEventsTable` (e.g. done / next / decisions / blockers) so all readers stay consistent and auditable; complement with Phase 2 **`bgagent ask`** for on-demand Q&A and an optional read-path **LLM-synthesized summary** over events (no agent turn) where cost/latency trade-offs are acceptable. Distinct from raw `watch`/`events` streams and from post-mortem **LLM-assisted trace analysis**. Design context: [INTERACTIVE_AGENTS.md](/architecture/interactive-agents). |
+| **`bgagent ask` (Phase 2)** | Mid-run questions to the agent (`POST /tasks/{id}/asks`); answers durable as `status_response` events with CLI block-and-poll. Enables interactive summaries (e.g. "what changed so far?") without a separate status API. Ships as part of the interactive check-in layer in [INTERACTIVE_AGENTS.md](/architecture/interactive-agents) Phase 2. |
+| **LLM-synthesized status summary (optional)** | Optional `bgagent status` mode where a Lambda narrates recent `TaskEvents` without waking the agent—deferred in design due to cost and hallucination risk; pursue behind a flag only if agent-authored progress reports are insufficient. Complements, does not replace, **Smart progress updates**. |
+
 ### Channels and integrations
 
 | Capability | Description |
 |------------|-------------|
-| ~~**Task attachments (multimodal)**~~ | **Implemented.** End-to-end support for the `attachments` array: inline base64 (≤ 500 KB), presigned upload (up to 10 MB), and URL fetch with SSRF protection. Images (PNG, JPEG, GIF, WebP) and text files (TXT, CSV, MD, JSON, PDF, LOG) pass through Bedrock Guardrail screening, magic bytes validation, EXIF stripping, and re-encoding. CLI `--attachment` flag, Slack file uploads, and Linear image extraction all feed the same schema. See [ATTACHMENTS.md](/architecture/attachments). |
 | **Additional git providers** | GitLab (and optionally Bitbucket). Same workflow, provider-specific API adapters. |
-| **Slack integration** | Submit tasks, check status, receive notifications from Slack. Block Kit rendering. |
-| **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. |
-| **Slack notification dispatcher** | Full Slack Block Kit rendering for the existing DDB-Stream fanout pipeline. Stub exists today (logs only). |
-| **Email notification dispatcher** | SES-based email notifications via the existing fanout pipeline. Stub exists today (logs only). |
+| **Slack notification polish** | Rich Block Kit for `agent_milestone` and `approval_requested` (today many map to generic fallback text); in-thread approve/deny buttons wired to HITL APIs. Should render **Smart progress updates** when that ships. |
+| **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. Task detail should show manager-style progress alongside raw events/traces. |
+| **Email notification dispatcher** | SES-based email notifications via the existing fanout pipeline. Log-only stub ships today (see unchecked **Email dispatcher** under What's ready). |
 | **Per-user notification preferences** | DynamoDB (or equivalent) store for preferred channels, per-channel config, and event filters (`INPUT_GATEWAY.md`). |
 | **Browser extension channel** | Lightweight extension to open tasks from GitHub issue/PR pages using existing webhook or OAuth-issued JWT; same internal message contract as other channels. |
 
@@ -181,8 +193,8 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Adaptive model router** | Per-turn model selection by complexity. Cheaper models for reads, Opus for complex reasoning. ~30-40% cost reduction. |
-| **Alternative compute** | ECS/Fargate or EKS via ComputeStrategy interface. For workloads exceeding AgentCore's 2 GB image limit or requiring GPU. |
+| **Adaptive model router** | Per-turn model selection by complexity. Cheaper models for reads, Opus for complex reasoning. ~30-40% cost reduction. Related: **Complexity-aware model router** under Cost governance. |
+| **Alternative compute** | ECS/Fargate or EKS via `ComputeStrategy` (`EcsComputeStrategy` exists; Agent stack wiring is commented out). For workloads exceeding AgentCore's 2 GB image limit or requiring GPU. |
 | **Environment pre-warming** | Pre-build container layers per repo. Snapshot-on-schedule (rebuild on push). Cold start from minutes to seconds. |
 | **S3-backed SDK session store (portable transcripts)** | Plumb the Claude Agent SDK `SessionStore` to S3 (dedicated bucket or prefix) with eager flush, IAM-scoped access, conditional part creates, checksums, adaptive retries, and structured logging. Emit metrics or alarms on transcript mirror failures; own graceful shutdown (`disconnect` on SIGTERM/cancel) so in-flight frames can flush. Persist `task_id` ↔ Claude session UUID (from the first `ResultMessage`) for resume on another worker; keep agent `cwd` stable so SDK-derived `project_key` paths stay predictable. Plan compaction when part count threatens resume latency; optional S3 Express One Zone when the fleet is single-AZ. Complements checked **Persistent session storage** (FUSE caches on `/mnt/workspace`) and end-of-task **trace** upload to `traces/...jsonl.gz`. |
 
@@ -203,8 +215,12 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
-| **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. |
-| **Complexity-aware model router** | Route each request to the most appropriate model based on task complexity (simple reads/edits to cheaper models, deeper reasoning to stronger models) while honoring budget and policy constraints. |
+| **Bedrock IAM session-tag attribution** | Route Bedrock **InvokeModel** through assumed credentials that carry `{user_id, repo, task_id}` session tags. **Per-session IAM scoping** (#209) already tags the SessionRole for DynamoDB/S3; model calls still use the AgentCore/ECS compute role today. Extend `aws_session.py` (or equivalent) so inference is chargeable in Cost Explorer / CUR 2.0 by principal tag. Operator must activate IAM principal cost allocation tags (see [COST_MODEL.md](/architecture/cost-model#cost-attribution)). |
+| **Bedrock per-request metadata** | Pass `task_id`, `user_id`, and `repo` on each Bedrock call via request metadata / `X-Amzn-Bedrock-Request-Metadata` into model invocation logs. Complements IAM attribution; does not replace in-app `cost_usd`. Requires Claude Code / SDK support for metadata on InvokeModel. |
+| **Cost dashboard and export API** | Log Insights widgets on invocation logs; optional API or export for monthly spend roll-ups by `user_id` / `repo` from the task table. Operator dashboard today covers task-level cost aggregates, not Bedrock chargeback dimensions. |
+| **Optional tagged application inference profiles** | CDK-managed Bedrock application inference profiles per onboarded repo or environment; set `ANTHROPIC_MODEL` to tagged profile ARN for `resourceTags/*` billing when repo count is bounded. |
+| **Org and team budgets** | Per-user and per-team monthly token or USD budgets with alerting (e.g. 80%) and optional hard stop at 100%. Per-task `max_budget_usd` and turn caps ship today. |
+| **Complexity-aware model router** | Route each request to the most appropriate model based on task complexity (simple reads/edits to cheaper models, deeper reasoning to stronger models) while honoring budget and policy constraints. Related: **Adaptive model router** under Compute and performance. |
 
 ### Observability and safe deploy
 
@@ -224,7 +240,6 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 |------------|-------------|
 | **Multi-user and teams** | Team visibility, shared approval queues, team concurrency/cost budgets, memory isolation. |
 | **Agent swarm** | Planner-worker architecture for complex multi-file tasks. DAG of subtasks, merge orchestrator, one consolidated PR. Workers receive a strict subset of planner credentials; orchestrator-issued subtask intent; per-worker OpenTelemetry spans under a shared trace root (prevents confused-deputy / unscoped privilege inheritance). |
-| **Cedar-driven HITL approval gates** | Three-outcome model (allow/hard-deny/soft-deny) for tool-call governance with Cedar policy engine. |
 | **Multi-user nudge** | Extend `bgagent nudge` to support multiple users injecting context into the same running task. Per-nudge commit attribution. (Single-user nudge shipped.) |
 | **Scheduled triggers** | Cron-based task creation via EventBridge (dependency updates, nightly flaky test checks). |
 
@@ -257,4 +272,4 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 ---
 
-Design docs to keep in sync: [ARCHITECTURE.md](/architecture/architecture), [ORCHESTRATOR.md](/architecture/orchestrator), [API_CONTRACT.md](/architecture/api-contract), [INPUT_GATEWAY.md](/architecture/input-gateway), [REPO_ONBOARDING.md](/architecture/repo-onboarding), [MEMORY.md](/architecture/memory), [OBSERVABILITY.md](/architecture/observability), [COMPUTE.md](/architecture/compute), [SECURITY.md](/architecture/security), [EVALUATION.md](/architecture/evaluation).
+Design docs to keep in sync: [ARCHITECTURE.md](/architecture/architecture), [ORCHESTRATOR.md](/architecture/orchestrator), [API_CONTRACT.md](/architecture/api-contract), [ATTACHMENTS.md](/architecture/attachments), [CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates), [INPUT_GATEWAY.md](/architecture/input-gateway), [INTERACTIVE_AGENTS.md](/architecture/interactive-agents), [REPO_ONBOARDING.md](/architecture/repo-onboarding), [MEMORY.md](/architecture/memory), [OBSERVABILITY.md](/architecture/observability), [COMPUTE.md](/architecture/compute), [SECURITY.md](/architecture/security), [EVALUATION.md](/architecture/evaluation).

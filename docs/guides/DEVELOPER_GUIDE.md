@@ -68,13 +68,30 @@ new Blueprint(this, ‘MyServiceBlueprint’, {
 });
 ```
 
-Each Blueprint supports per-repo overrides: `runtimeArn`, `modelId`, `maxTurns`, `systemPromptOverrides`, `githubTokenSecretArn`, and `pollIntervalMs`. If you use a custom `runtimeArn` or secret, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model.
+Each Blueprint supports per-repo overrides grouped into nested props (`BlueprintProps` in `cdk/src/constructs/blueprint.ts`):
+
+```typescript
+new Blueprint(this, 'MyServiceBlueprint', {
+  repo: 'acme/my-service',
+  repoTable: repoTable.table,
+  compute: { runtimeArn: '...' },                    // override the default runtime ARN
+  agent: {
+    modelId: 'us.anthropic.claude-sonnet-4-6',       // foundation model override
+    maxTurns: 150,                                    // default turn limit for this repo
+    systemPromptOverrides: 'Extra instructions...',   // appended to the platform prompt
+  },
+  credentials: { githubTokenSecretArn: '...' },       // per-repo GitHub token secret
+  pipeline: { pollIntervalMs: 5000 },                 // poll interval awaiting completion
+});
+```
+
+If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model.
 
 Redeploy after changing Blueprints: `mise run //cdk:deploy`.
 
 ### Customizing the agent image
 
-The default image (`agent/Dockerfile`) includes Python, Node 20, `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
+The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
 
 ### Writing Cedar policies for the repo
 
@@ -259,10 +276,16 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `UserPoolId` / `AppClientId` | Cognito identifiers |
 | `TaskTableName` | DynamoDB table for task state |
 | `TaskEventsTableName` | DynamoDB table for audit events |
+| `TaskNudgesTableName` | DynamoDB table for task nudges |
+| `TaskApprovalsTableName` | DynamoDB table for Cedar HITL approval gates |
 | `UserConcurrencyTableName` | DynamoDB table for per-user concurrency |
 | `WebhookTableName` | DynamoDB table for webhook integrations |
 | `RepoTableName` | DynamoDB table for per-repo Blueprint config |
+| `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
+| `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
+
+When the Slack or Linear integrations are enabled, the stack emits additional outputs (e.g. `Slack*` and `Linear*` secret ARNs and integration table names).
 
 Use the same AWS Region as your deployment. If `--region` is omitted, the CLI uses your default from `aws configure`.
 

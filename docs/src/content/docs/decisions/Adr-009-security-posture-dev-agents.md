@@ -1,5 +1,5 @@
 ---
-title: 009 security posture dev agents
+title: Adr 009 security posture dev agents
 ---
 
 # ADR-009: Security posture and blast radius for development-time agents

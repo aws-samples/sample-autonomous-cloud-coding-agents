@@ -48,7 +48,7 @@ The most significant constraint. The image must fit the agent code, runtimes, an
 |-------|---------------|
 | Base OS (slim Linux) | ~50-100 MB |
 | Python 3.x + pip | ~100-150 MB |
-| Node.js 20.x + npm | ~100-150 MB |
+| Node.js 24.x + npm | ~100-150 MB |
 | Git + CLI tools | ~50-80 MB |
 | Agent code + SDK | ~100-200 MB |
 | **Available for repo deps** | **~1.3-1.6 GB** |
@@ -73,7 +73,7 @@ The platform works around this by splitting storage:
 | Limit | Value | Notes |
 |-------|-------|-------|
 | Max session duration | 8 hours | Hard limit enforced by AgentCore |
-| Idle timeout | 15 minutes | Agent must report `HealthyBusy` via `/ping` to stay alive |
+| Idle timeout | 8 hours (configured) | Overridden from the default via `idleRuntimeSessionTimeout: Duration.hours(8)` so sessions blocked on long approval waits or heavy builds are not evicted while idle. Agent reports `HealthyBusy` via `/ping` to stay alive |
 
 See [ORCHESTRATOR.md](/architecture/orchestrator) for how the orchestrator handles these timeouts.
 
@@ -202,5 +202,5 @@ Single NAT Gateway (~$32/month) provides internet egress for GitHub and package 
 | Interface endpoints (7x, 2 AZs) | ~$102 |
 | Flow logs (CloudWatch) | ~$3 |
 | DNS Firewall + query logs | ~$2-4 |
-| WAFv2 (3 rules) | ~$6 |
+| WAFv2 (4 rules) | ~$6 |
 | **Total** | **~$145-150** |

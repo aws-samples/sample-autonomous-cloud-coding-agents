@@ -59,6 +59,14 @@
       "text"
     ],
     "coverageDirectory": "coverage",
+    "coverageThreshold": {
+      "global": {
+        "branches": 84,
+        "functions": 78,
+        "lines": 68,
+        "statements": 68
+      }
+    },
     "coveragePathIgnorePatterns": [
       "/node_modules/"
     ],

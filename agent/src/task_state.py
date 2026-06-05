@@ -53,10 +53,10 @@ def _get_table():
     if not table_name:
         return None
 
-    import boto3
+    from aws_session import tenant_resource
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    dynamodb = boto3.resource("dynamodb", region_name=region)
+    dynamodb = tenant_resource("dynamodb", region_name=region)
     _table = dynamodb.Table(table_name)
     return _table
 
@@ -543,10 +543,10 @@ def _get_ddb_client(*, client=None):
     """
     if client is not None:
         return client
-    import boto3
+    from aws_session import tenant_client
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    return boto3.client("dynamodb", region_name=region)
+    return tenant_client("dynamodb", region_name=region)
 
 
 def _require_tables() -> tuple[str, str]:

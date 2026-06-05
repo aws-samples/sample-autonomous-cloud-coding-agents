@@ -41,8 +41,8 @@ description = "Type check with ty"
 run = "uv run ty check"
 
 [tasks.test]
-description = "Run tests with pytest"
-run = "uv run pytest"
+description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"
+run = "uv run pytest --cov=src --cov-branch --cov-fail-under=72 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
 
 # SECURITY
 

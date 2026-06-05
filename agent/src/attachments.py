@@ -53,12 +53,12 @@ def download_attachments(
     if not attachments:
         return []
 
-    import boto3
+    from aws_session import tenant_client
 
     attachments_dir = Path(workspace) / ATTACHMENTS_DIR
     attachments_dir.mkdir(parents=True, exist_ok=True)
 
-    s3_client = boto3.client("s3")
+    s3_client = tenant_client("s3")
     prepared: list[PreparedAttachment] = []
 
     try:

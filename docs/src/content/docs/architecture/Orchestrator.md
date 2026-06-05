@@ -50,7 +50,7 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 
 ## Task state machine
 
-Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the eight states are terminal, meaning the task is done and no further transitions occur.
+Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the ten states are terminal, meaning the task is done and no further transitions occur.
 
 ### States
 
@@ -115,7 +115,7 @@ stateDiagram-v2
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
 | `RUNNING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during execution |
 | `RUNNING` | `FINALIZING` | Session ends | Response received or session terminated |
-| `RUNNING` | `TIMED_OUT` | Max duration exceeded | Wall-clock timer (default 8h, matching AgentCore max) |
+| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore terminates the session at its 8h cap; the orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h, after which a still-`RUNNING` task is driven to `TIMED_OUT` |
 | `RUNNING` | `FAILED` | Session crash | Heartbeat lost (see Liveness monitoring) |
 | `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received; agent resumes |
 | `AWAITING_APPROVAL` | `CANCELLED` | User cancels | Explicit cancel while awaiting approval |
@@ -143,7 +143,7 @@ Multiple timeout mechanisms work together to prevent runaway tasks. Time-based l
 
 | Type | Default | Effect |
 |---|---|---|
-| Max session duration | 8 hours | AgentCore terminates session. Task transitions to `TIMED_OUT`. |
+| Max session duration | 8 hours | AgentCore terminates the session at its 8h cap. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
 | Idle timeout | 15 minutes | AgentCore terminates if agent is idle. See Liveness monitoring. |
 | Max turns | 100 (range 1-500) | Agent stops after N model invocations. Configurable per task or per repo. |
 | Max cost budget | $0.01-$100 | Agent stops when budget is reached. Per-task or per-repo via Blueprint. |
@@ -155,12 +155,14 @@ Every task follows a blueprint: a sequence of deterministic steps wrapping one a
 
 ```mermaid
 flowchart LR
-    A[Admission] --> B[Hydration]
-    B --> C[Pre-flight]
+    A[Admission] --> B[Pre-flight]
+    B --> C[Hydration]
     C --> D[Start session]
     D --> E[Await completion]
     E --> F[Finalize]
 ```
+
+The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-execution steps in order: `admission-control` → `pre-flight` → `hydrate-context` → `start-session` → `await-agent-completion` → `finalize`. Pre-flight runs **before** hydration so that GitHub-permission and reachability failures are caught before any prompt assembly or Bedrock screening work.
 
 ### Step 1: Admission control
 
@@ -172,11 +174,15 @@ Validates the task before any compute is consumed. Checks run in order:
 4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Exceeded tasks are rejected, not queued.
 5. **Idempotency** - If the request includes an idempotency key and a task with that key exists, return the existing task.
 
-On acceptance, the concurrency slot is acquired and the task transitions to `HYDRATING`.
+On acceptance, the concurrency slot is acquired and the orchestrator proceeds to pre-flight.
 
-### Step 2: Context hydration
+### Step 2: Pre-flight checks
 
-Assembles the agent's user prompt. The implementation lives in `context-hydration.ts`. What it does, by task type:
+Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before AgentCore runtime is consumed.
+
+### Step 3: Context hydration
+
+Assembles the agent's user prompt and transitions the task to `HYDRATING`. The implementation lives in `context-hydration.ts`. What it does, by task type:
 
 **`new_task`:** Fetches the GitHub issue (title, body, comments) if `issue_number` is set, loads memory from past tasks, and combines everything with the user's task description.
 
@@ -184,15 +190,13 @@ Assembles the agent's user prompt. The implementation lives in `context-hydratio
 
 Regardless of task type, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
 
-A **pre-flight** sub-step verifies the GitHub token has sufficient permissions for the task type, catches inaccessible PRs, and confirms GitHub API reachability. This fails fast with clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before compute is consumed.
-
-### Step 3: Session start
+### Step 4: Session start
 
 The orchestrator calls `invoke_agent_runtime` with the hydrated payload. The agent receives it, starts the coding task in a background thread (via `add_async_task`), and returns an acknowledgment immediately. The orchestrator records the `(task_id, session_id)` mapping and transitions to `RUNNING`.
 
 The session ID is pre-generated and reused on retry, making session start idempotent after a crash.
 
-### Step 4: Await completion
+### Step 5: Await completion
 
 The orchestrator polls for completion using `waitForCondition` from the Durable Execution SDK. At configurable intervals (default 30s), it re-invokes on the same session (sticky routing). The agent responds with its current status:
 
@@ -202,7 +206,7 @@ The orchestrator polls for completion using `waitForCondition` from the Durable 
 
 If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization using GitHub-based result inference as fallback.
 
-### Step 5: Finalization
+### Step 6: Finalization
 
 After the session ends, the orchestrator determines the outcome from multiple signals.
 

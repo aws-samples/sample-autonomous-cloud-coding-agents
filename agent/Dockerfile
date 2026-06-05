@@ -1,5 +1,5 @@
 ARG TARGETPLATFORM=linux/arm64
-ARG GH_VERSION=2.92.0
+ARG GH_VERSION=2.93.0
 
 FROM --platform=$TARGETPLATFORM jdxcode/mise:latest AS mise
 
