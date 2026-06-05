@@ -36,6 +36,11 @@ dependencies = [
     "cedarpy==4.8.0", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.10.0
 ]
 
+[tool.uv]
+constraint-dependencies = [
+    "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
+]
+
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
 skips = [
