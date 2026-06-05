@@ -36,6 +36,11 @@ dependencies = [
     "cedarpy==4.8.0", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.10.0
 ]
 
+[tool.uv]
+constraint-dependencies = [
+    "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
+]
+
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
 skips = [
@@ -53,6 +58,7 @@ dev = [
     "ty",
     "pytest",
     "pygments==2.20.0",
+    "pytest-cov==7.1.0",
 ]
 
 [tool.ruff]
@@ -86,6 +92,17 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 72
+precision = 2
+show_missing = true
+skip_covered = true
 
 [tool.ty.environment]
 python-version = "3.13"

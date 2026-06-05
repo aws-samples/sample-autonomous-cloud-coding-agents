@@ -97,6 +97,7 @@ jobs:
 
           gh issue create \
             --title "Security suite failed (${GITHUB_REF_NAME} @ ${short})" \
+            --label bug \
             --body-file "${body_file}"
 
       - name: Fail job if security suite failed

@@ -16,7 +16,7 @@
 
 Run these BEFORE deploying 2.0b so the maintenance window is short:
 
-1. **List in-flight tasks**: `bgagent list --status RUNNING --status PENDING`. The migration won't corrupt them, but their final Linear comment may fail because the OAuth token isn't authorized at agent-run time.
+1. **List in-flight tasks**: `bgagent list --status RUNNING,HYDRATING,SUBMITTED`. The migration won't corrupt them, but their final Linear comment may fail because the OAuth token isn't authorized at agent-run time.
 2. **Pick one workspace to migrate first** (lowest-traffic if multi-workspace).
 3. **Note the workspace's `urlKey`** — the `<slug>` in `linear.app/<slug>/...`. You need it for `bgagent linear setup <slug>`.
 4. **Confirm CLI admin access**: AWS principal needs `secretsmanager:CreateSecret` on `bgagent-linear-oauth-*` AND `dynamodb:PutItem` on `LinearWorkspaceRegistryTable`. Without these, `setup` aborts mid-way (OAuth dance succeeds, secret write fails — Linear OAuth app gets stuck with no usable token).

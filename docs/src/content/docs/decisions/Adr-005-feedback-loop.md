@@ -1,5 +1,5 @@
 ---
-title: 005 feedback loop
+title: Adr 005 feedback loop
 ---
 
 # ADR-005: Feedback loop — PR reviews propagate to issues and ADRs
