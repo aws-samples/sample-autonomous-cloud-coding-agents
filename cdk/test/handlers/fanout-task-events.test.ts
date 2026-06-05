@@ -1382,7 +1382,14 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(body).toContain('$0.55');
     expect(body).toContain('27 / 100');
     expect(body).toContain('3m 41s');
-    expect(body).toContain('https://github.com/owner/repo/pull/13');
+    // PR URL is intentionally NOT rendered on the ✅ success path —
+    // the agent's step-2 "PR opened" comment already carries it, so
+    // duplicating it here just stacks two near-identical links on the
+    // Linear issue. (Smoke-test feedback after the first dev deploy.)
+    // The ⚠️ "shipped a PR but stopped early" path DOES render it,
+    // because the agent may have crashed before its step-2 comment
+    // fired — see the ABCA-91 case test below.
+    expect(body).not.toContain('https://github.com/owner/repo/pull/13');
     expect(body).toContain('t-lin');
   });
 
