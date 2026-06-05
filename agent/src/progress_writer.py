@@ -374,10 +374,10 @@ class _ProgressWriter:
             self._disabled = True
             return
 
-        import boto3
+        from aws_session import tenant_resource
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        dynamodb = boto3.resource("dynamodb", region_name=region)
+        dynamodb = tenant_resource("dynamodb", region_name=region)
         self._table = dynamodb.Table(self._table_name)
 
     # -- core write ------------------------------------------------------------

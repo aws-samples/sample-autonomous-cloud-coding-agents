@@ -1,7 +1,3 @@
----
-title: 013 tiered validation pyramid
----
-
 # ADR-013: Tiered validation pyramid for agentic-first development
 
 **Status:** proposed
@@ -35,7 +31,7 @@ The root cause: there is no **Tier 2** — a local, fast, high-fidelity validati
 | Tier | Time | What it catches | Gap |
 |------|------|-----------------|-----|
 | Pre-commit (Tier 0) | < 5s | Formatting, secrets, trailing whitespace | None — works well |
-| mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Partial — available but not gated on push |
+| mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Wired as a pre-push gate (prek `pre-push` hooks run tests + security); the `mise run build` superset is available on demand |
 | Remote CI (Tier 3) | 5–20 min | Full matrix, security, E2E, deploy | Authoritative but slow |
 | **Local integration (Tier 2)** | — | **Does not exist** | Integration-level validation without remote round-trip |
 
@@ -96,9 +92,9 @@ Status: **Implemented** (prek hooks)
 - Type sync drift (CDK ↔ CLI types in sync)
 - Constants drift (cross-language contract check)
 
-Status: **Partially implemented** — available as `mise run build` but not enforced as a push gate. Agents can invoke this but often skip it.
+Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
 
-Requirement: Make `mise run build` (or a subset) the pre-push gate. Consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s).
+Remaining refinement: consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
 
 **Tier 2 — Local sandbox (1–5 min, on-demand before PR)**
 
@@ -166,7 +162,7 @@ The gap analysis dictates priority:
 
 | Priority | Investment | Impact |
 |----------|-----------|--------|
-| P0 | Enforce Tier 1 as pre-push gate | Eliminates "pushed without building" class of CI failures |
+| P0 | ~~Enforce Tier 1 as pre-push gate~~ **(largely done)** — test + security push gate is wired (prek `pre-push` hooks); remaining work is folding synth/docs-sync/drift into the gate | Eliminates "pushed without building" class of CI failures |
 | P1 | `mise run test:integration` (Tier 2a — LocalStack) | Eliminates 60%+ of CI-only failures (AWS API contract mismatches) |
 | P2 | Agent smoke test (Tier 2b) | Catches agent runtime regressions before PR |
 | P3 | Ephemeral stack deploy (Tier 2c) | Catches IAM/wiring issues that only surface in real deployment |
@@ -211,7 +207,7 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - ADR-002 — bootstrap policies (Tier 2c validates IAM preflight locally)
 - ADR-008 — definition of done (tier requirements per DoD level)
 - ADR-012 (prerequisite) — operational knowledge stack; this ADR depends on 012's skill model for agent interaction with validation tiers
-- Current hooks: `.pre-commit-config.yaml` (Tier 0 implementation)
+- Current hooks: `.pre-commit-config.yaml` — the config file keeps the `pre-commit` name, but the runner is **prek** (pinned in `mise.toml` `[tools]`; `prek install --prepare-hooks` wires both `pre-commit` and `pre-push` stages). Implements Tier 0 (`pre-commit` stage) and the Tier 1 push gate (`pre-push` stage).
 - Current build: `mise.toml` root + package-level configs (Tier 1 implementation)
 - LocalStack: https://localstack.cloud (candidate for Tier 2a)
 - Firecracker MicroVMs: https://firecracker-microvm.github.io (candidate for Tier 2d)

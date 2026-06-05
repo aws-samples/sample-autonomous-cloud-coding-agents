@@ -76,10 +76,10 @@ def _get_table() -> Any | None:
         return None
 
     try:
-        import boto3
+        from aws_session import tenant_resource
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        dynamodb = boto3.resource("dynamodb", region_name=region)
+        dynamodb = tenant_resource("dynamodb", region_name=region)
         _TABLE_CACHE = dynamodb.Table(table_name)
         return _TABLE_CACHE
     except Exception as exc:
