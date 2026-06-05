@@ -11,7 +11,6 @@
 #   --dry-run           Show what would be deleted without acting
 #   --max-age-hours N   Delete stacks older than N hours (default: 4)
 #   --prefix PREFIX     Only target stacks matching this prefix (default: all ABCA stacks)
-#   --force-eni         Force-detach ENIs even if stack deletion hasn't started yet
 #
 # Safety:
 #   - Never touches stacks with termination protection enabled
@@ -23,7 +22,6 @@ set -euo pipefail
 MAX_AGE_HOURS=${MAX_AGE_HOURS:-4}
 DRY_RUN=false
 PREFIX=""
-FORCE_ENI=false
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 while [[ $# -gt 0 ]]; do
@@ -31,15 +29,33 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=true; shift ;;
     --max-age-hours) MAX_AGE_HOURS="$2"; shift 2 ;;
     --prefix) PREFIX="$2"; shift 2 ;;
-    --force-eni) FORCE_ENI=true; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
+# Validate numeric input — guards the age arithmetic against injection/garbage.
+if ! [[ "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
+  echo "Error: --max-age-hours must be a non-negative integer (got: '$MAX_AGE_HOURS')" >&2
+  exit 1
+fi
+
 MAX_AGE_SECONDS=$((MAX_AGE_HOURS * 3600))
 NOW=$(date +%s)
 
+# Surface the blast radius before touching anything. Confirms the operator is
+# pointed at the account/identity they think they are (defense in depth).
+CALLER_IDENTITY=$(aws sts get-caller-identity \
+  --region "$REGION" \
+  --query '[Account,Arn]' --output text 2>/dev/null) || {
+  echo "Error: unable to resolve AWS identity (sts:GetCallerIdentity failed). Check credentials." >&2
+  exit 1
+}
+ACCOUNT_ID=$(echo "$CALLER_IDENTITY" | cut -f1)
+CALLER_ARN=$(echo "$CALLER_IDENTITY" | cut -f2)
+
 echo "=== Ephemeral Stack Cleanup ==="
+echo "  Account:       $ACCOUNT_ID"
+echo "  Identity:      $CALLER_ARN"
 echo "  Region:        $REGION"
 echo "  Max age:       ${MAX_AGE_HOURS}h"
 echo "  Dry run:       $DRY_RUN"
@@ -62,6 +78,7 @@ fi
 
 DELETED=0
 SKIPPED=0
+FAILED=0
 
 while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
   # Apply prefix filter
@@ -99,8 +116,15 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
     continue
   fi
 
-  # Check age
-  CREATED_EPOCH=$(date -d "$CREATION_TIME" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${CREATION_TIME%%.*}" +%s 2>/dev/null || echo 0)
+  # Check age. Parse the CreationTime to epoch seconds (GNU date, then BSD date).
+  # FAIL CLOSED: if both parsers fail we cannot trust the age, so SKIP rather than
+  # risk deleting a stack we can't prove is old enough.
+  CREATED_EPOCH=$(date -d "$CREATION_TIME" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${CREATION_TIME%%.*}" +%s 2>/dev/null || echo "")
+  if ! [[ "$CREATED_EPOCH" =~ ^[0-9]+$ ]]; then
+    echo "  SKIP (unparseable creation time '$CREATION_TIME'): $STACK_NAME"
+    ((SKIPPED++)) || true
+    continue
+  fi
   AGE_SECONDS=$((NOW - CREATED_EPOCH))
 
   if [[ $AGE_SECONDS -lt $MAX_AGE_SECONDS ]]; then
@@ -129,7 +153,8 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
 
   if [[ -n "$SG_IDS" && "$SG_IDS" != "None" ]]; then
     for SG_ID in $SG_IDS; do
-      # Find ENIs attached to this security group
+      # Find ENIs attached to this security group.
+      # shellcheck disable=SC2016  # backticks are JMESPath literal syntax for --query, must NOT expand
       ENIS=$(aws ec2 describe-network-interfaces \
         --region "$REGION" \
         --filters "Name=group-id,Values=$SG_ID" \
@@ -172,12 +197,18 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
   fi
 
   # --- Delete the stack ---
+  # Only count a deletion we actually initiated. Tolerate a single failure
+  # (e.g. AccessDenied, transient throttling) without aborting the whole run —
+  # set -e would otherwise kill the loop mid-pass and orphan later stacks.
   echo "    Deleting stack $STACK_NAME..."
-  aws cloudformation delete-stack \
+  if aws cloudformation delete-stack \
     --region "$REGION" \
-    --stack-name "$STACK_NAME" 2>/dev/null
-
-  ((DELETED++)) || true
+    --stack-name "$STACK_NAME" 2>/dev/null; then
+    ((DELETED++)) || true
+  else
+    echo "    ERROR: delete-stack failed for $STACK_NAME (continuing)" >&2
+    ((FAILED++)) || true
+  fi
 
 done <<< "$STACKS"
 
@@ -185,6 +216,7 @@ echo ""
 echo "=== Summary ==="
 echo "  Deleted: $DELETED"
 echo "  Skipped: $SKIPPED"
+echo "  Failed:  $FAILED"
 
 if [[ "$DELETED" -gt 0 && "$DRY_RUN" == "false" ]]; then
   echo ""
