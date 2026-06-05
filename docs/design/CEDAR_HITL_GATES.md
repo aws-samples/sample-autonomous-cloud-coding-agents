@@ -1,11 +1,11 @@
 # Cedar HITL Approval Gates
 
-> **Status:** Detailed design, pre-implementation.
+> **Status:** Core implemented; this document remains the authoritative design reference.
 > **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (pointing here), §7 (state machine).
 > **Visual:** [`../diagrams/phase3-cedar-hitl.drawio`](../diagrams/phase3-cedar-hitl.drawio) (12 pages; supplemented by inline Mermaid diagrams below).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
-> **Implementation:** not started.
+> **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
 
 ---
 
@@ -666,7 +666,7 @@ def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
 
 The recent-decision cache is a simple `dict[(tool_name, input_sha), (decision, reason, inserted_at)]` with a 60-second sliding window. Entries are added by the PreToolUse hook whenever an approval resolves to DENIED or TIMED_OUT — not on APPROVED (we don't want to accidentally auto-deny a tool call the user just approved). Cache is in-process, **lost on container restart** — a re-gating of the same recently-denied action is possible if the container restarts mid-task. See §12.8 and finding #3 scenario below.
 
-**Scenario (finding #3):** A developer submits `--task "clean up /tmp"` and the agent runs `Bash: rm -rf /tmp/build-cache-*`. The soft-deny rule `rm_rf_path` fires; the user clicks deny with reason "use the cache-clean target in the Makefile instead". The agent's recent-decision cache now holds `(Bash, sha256("rm -rf /tmp/build-cache-*"))` for 60 seconds. The agent tries the same command on its next turn (cached → auto-deny, no new approval request — this is the point). Now imagine a container restart at this moment (AWS spot interruption, OOM-kill, manual redeploy). The new container's `PolicyEngine` has an empty cache. The agent tries the same command again. The soft-deny fires again. The user gets the same prompt they denied 30 seconds ago. This is annoying but bounded: the persistent per-task `approvalGateCap` (decision #13, default 50) means even with worst-case restart + retry amplification, the user sees at most `approvalGateCap` prompts before the task is force-failed. We accept this as a threat-model caveat rather than persisting the cache to DDB because (a) container restarts are rare, (b) DDB persistence would add latency to every denied call's write path, and (c) the persistent gate cap provides the terminal safety regardless of cache state. An operator monitoring the `approval_cap_exceeded` dashboard widget will see anomalous retry patterns if they become systemic. A persistent decision cache is noted in §17 as future work, gated on actual restart telemetry justifying the complexity.
+**Scenario (finding #3):** A developer submits `--task "ship the hotfix to main"` and the agent runs `Bash: git push --force origin main`. The soft-deny rule `force_push_main` fires; the user clicks deny with reason "open a PR instead of force-pushing main". The agent's recent-decision cache now holds `(Bash, sha256("git push --force origin main"))` for 60 seconds. The agent tries the same command on its next turn (cached → auto-deny, no new approval request — this is the point). Now imagine a container restart at this moment (AWS spot interruption, OOM-kill, manual redeploy). The new container's `PolicyEngine` has an empty cache. The agent tries the same command again. The soft-deny fires again. The user gets the same prompt they denied 30 seconds ago. This is annoying but bounded: the persistent per-task `approvalGateCap` (decision #13, default 50) means even with worst-case restart + retry amplification, the user sees at most `approvalGateCap` prompts before the task is force-failed. We accept this as a threat-model caveat rather than persisting the cache to DDB because (a) container restarts are rare, (b) DDB persistence would add latency to every denied call's write path, and (c) the persistent gate cap provides the terminal safety regardless of cache state. An operator monitoring the `approval_cap_exceeded` dashboard widget will see anomalous retry patterns if they become systemic. A persistent decision cache is noted in §17 as future work, gated on actual restart telemetry justifying the complexity.
 
 ### 6.3 Annotation merging
 
@@ -1920,22 +1920,22 @@ $ bgagent run --repo my-org/my-app \
     --approval-timeout 600
 ```
 
-Agent tries `Bash: rm -rf src/dashboard/v1`. Soft-deny rule `rm_rf_path` hits. `approval_requested` → user:
+Agent finishes the rewrite, then tries to publish it by rewriting history on the default branch: `Bash: git push --force origin main`. Soft-deny rule `force_push_main` hits. `approval_requested` → user:
 
 ```bash
 $ bgagent deny 01KPW... 01KPR... \
-    --reason "move it to src/dashboard/v1.deprecated instead of deleting; we may need to reference it in migrations"
+    --reason "don't force-push main; open a PR and keep src/dashboard/v1 around (move it to src/dashboard/v1.deprecated) — we may need it for migrations"
 ```
 
 `DenyTaskFn` sanitizes (no secrets in this reason, passes through unchanged), writes to DDB. Agent's poll reads DENIED.
 
-Hook executes: atomic resume to RUNNING → queue denial injection via `between_turns_hooks` → return to SDK with `permissionDecisionReason = "move it to src/dashboard/v1.deprecated..."` (truncated, guaranteed surface).
+Hook executes: atomic resume to RUNNING → queue denial injection via `between_turns_hooks` → return to SDK with `permissionDecisionReason = "don't force-push main; open a PR..."` (truncated, guaranteed surface).
 
 Next Stop seam fires. The between-turns injector emits (best-effort; pre-empted if cancel hook short-circuits first):
 
 ```xml
 <user_denial request_id="01KPR..." timestamp="2026-04-23T14:30:08Z">
-move it to src/dashboard/v1.deprecated instead of deleting; we may need to reference it in migrations
+don't force-push main; open a PR and keep src/dashboard/v1 around (move it to src/dashboard/v1.deprecated) — we may need it for migrations
 </user_denial>
 ```
 
@@ -1944,6 +1944,8 @@ Agent reads the denial on its next turn, adapts:
 ```
 [14:30:12]  ▶ Bash: git mv src/dashboard/v1 src/dashboard/v1.deprecated
 [14:30:13]  ◀ Bash: (success)
+[14:30:15]  ▶ Bash: git push origin feat/dashboard-v2   (opens a PR instead of force-pushing main)
+[14:30:17]  ◀ Bash: (success)
 ```
 
 Task proceeds. If the user had concurrently cancelled, the `permissionDecisionReason` surface still carries the reason — the agent sees enough context to not blindly retry; the richer XML injection is best-effort.
@@ -2061,6 +2063,8 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 
 ## 15. Implementation plan
 
+> **Status note (post-implementation):** The v1 core described below is **shipped on `main`** — the 3-outcome engine, hard/soft default policy sets, the approval/deny/pending/policies Lambdas and their API routes, and the cross-engine parity contract all exist and are tested. The task list and scenarios in this section are retained as the historical design-and-build record; treat them as descriptive of what was built rather than as outstanding work. Items still explicitly deferred are tracked in §15.1 ("Future work — polish") and §17 (e.g. CLI inline streaming prompt, `approve --defer` / allowlist revocation, CloudWatch alarm plumbing, persistent recent-decision cache, persistent per-minute rate limit).
+
 ### 15.1 Milestone structure
 
 **v1 — core feature (3-4 weeks of work):**
@@ -2087,7 +2091,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 | # | Package | File | Change |
 |---|---|---|---|
 | 1 | agent | Spike | Validate cedarpy.policies_to_json_str() returns annotations. Confirm `diagnostics.reasons` shape for multi-match. If API diverges, update §6 before proceeding. |
-| 2 | mise + agent + cdk | `mise.toml`, `agent/pyproject.toml`, `cdk/package.json` | Pin `cedarpy==<version>` (agent) and `@cedar-policy/cedar-wasm==4.10.0` (cdk). Both pinned exactly, not `^` or `~` — decision #23 / finding #1. |
+| 2 | mise + agent + cdk | `mise.toml`, `agent/pyproject.toml`, `cdk/package.json` | Pin `cedarpy==4.8.0` (agent) and `@cedar-policy/cedar-wasm==4.10.0` (cdk). The two bindings are intentionally on different version lines — verified compatible via the parity fixtures, not required to be equal. Both pinned exactly, not `^` or `~` — decision #23 / finding #1. |
 | 3 | agent + cdk | `contracts/cedar-parity/*.json` (shared fixture dir; follows precedent set by `contracts/memory-hash-vectors.json`) | Golden-file parity fixtures: `(policy_set, input) → {decision, matching_rule_ids}`. Agent side loads via `cedarpy`; Lambda side via `cedar-wasm`. Divergence fails CI. |
 | 4 | agent | `src/policy.py` | Extend `PolicyDecision` (outcome/timeout_s/severity/matching_rule_ids/allowed-property). Split `_DEFAULT_POLICIES` into hard + soft. Add annotation parsing. Implement `ApprovalAllowlist` + `RecentDecisionCache` (50-entry LRU cap, independent of `approvalGateCap`). Load-time validation (rule_id uniqueness, tier mismatch, annotation floor, 64 KB cap, disable-list hard-deny rejection, `approvalGateCap` bounds check `1 ≤ N ≤ 500`). `PolicyEngine.__init__` accepts `approval_gate_cap` sourced from blueprint (default 50). |
 | 5 | agent | `policies/hard_deny.cedar` (new) | Migrate current hard-deny rules + add DROP TABLE. Annotations. |
@@ -2228,10 +2232,10 @@ Rollout steps:
 
 ### 15.6 Shared Cedar parsing — cross-engine parity contract
 
-The agent runtime uses Python [`cedarpy`](https://pypi.org/project/cedarpy/); the Lambda side (`CreateTaskFn`, `ApproveTaskFn`, `DenyTaskFn`, `GetPoliciesFn`) uses [`@cedar-policy/cedar-wasm@4.10.0`](https://www.npmjs.com/package/@cedar-policy/cedar-wasm) — AWS's official WASM-compiled Cedar engine. Same Rust core, two bindings. Because these engines evolve independently, we ship a **parity contract** (decision #23, finding #1) to catch drift before deploy.
+The agent runtime uses Python [`cedarpy@4.8.0`](https://pypi.org/project/cedarpy/); the Lambda side (`CreateTaskFn`, `ApproveTaskFn`, `DenyTaskFn`, `GetPoliciesFn`) uses [`@cedar-policy/cedar-wasm@4.10.0`](https://www.npmjs.com/package/@cedar-policy/cedar-wasm) — AWS's official WASM-compiled Cedar engine. Same Rust core, two bindings. Because these engines evolve independently, we ship a **parity contract** (decision #23, finding #1) to catch drift before deploy.
 
-**Version pinning.** Both engines are pinned exactly (not `^` or `~`) in the monorepo's canonical manifest files:
-- `agent/pyproject.toml`: `cedarpy==<version>`
+**Version pinning.** Both engines are pinned exactly (not `^` or `~`) in the monorepo's canonical manifest files. The two bindings are deliberately on **different version lines** — they are NOT required to be equal. `cedarpy` and `cedar-wasm` follow independent release cadences over the shared Cedar Rust core, and the currently-shipped pins (`cedarpy==4.8.0` ↔ `@cedar-policy/cedar-wasm==4.10.0`) are an intentional, tested-compatible skew: the parity fixtures in `contracts/cedar-parity/` are what certify that this specific pair produces identical `(decision, matching_rule_ids)` on every fixture. The rule is "move together and re-verify parity when you bump either side," not "keep the version strings equal."
+- `agent/pyproject.toml`: `cedarpy==4.8.0`
 - `cdk/package.json`: `"@cedar-policy/cedar-wasm": "4.10.0"`
 - `mise.toml` documents the pinned versions in a comment for operator visibility
 
@@ -2280,7 +2284,7 @@ flowchart LR
 
 When policy authors upgrade either engine, the parity fixture must be re-generated (a small helper script dumps decisions from both engines; the human confirms the change is intentional).
 
-**Scenario (finding #1):** A platform engineer runs `mise run deps:update` which bumps cedarpy from 4.10.1 to 4.11.0. They notice cedar-wasm is still 4.10.0 but assume it's fine because both say "4.x". Between these versions, cedarpy added support for a new `context has` operator that cedar-wasm doesn't yet have. A new blueprint soft-deny rule uses `context has "approved_context"`. On deploy:
+**Scenario (finding #1, illustrative):** This example uses hypothetical versions (e.g. cedarpy `4.10.1` → `4.11.0`) to show the *class* of bug the parity contract catches; it does not describe the real shipped pins (which are the intentional `cedarpy==4.8.0` ↔ `cedar-wasm==4.10.0` skew documented above). The point is that closeness of version strings — even within the same minor line — is no guarantee of behavioral parity, which is exactly why the golden fixtures, not the version numbers, are the source of truth. A platform engineer runs `mise run deps:update` which bumps cedarpy from 4.10.1 to 4.11.0. They notice cedar-wasm is still 4.10.0 but assume it's fine because both say "4.x". Between these versions, cedarpy added support for a new `context has` operator that cedar-wasm doesn't yet have. A new blueprint soft-deny rule uses `context has "approved_context"`. On deploy:
 - Agent-side `PolicyEngine.__init__` parses the rule successfully; engine loads normally.
 - `CreateTaskFn` on the Lambda side calls cedar-wasm `policyToJson()` — it throws: `ParseError: unknown operator 'has' at line 3`.
 - User submits a task against that repo. `CreateTaskFn` crashes mid-validation. Error message: "500 Internal Server Error" (because the Lambda didn't handle the upstream parse error gracefully).

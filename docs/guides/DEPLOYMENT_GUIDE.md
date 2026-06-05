@@ -25,7 +25,7 @@ ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is presen
 
 | Component | Billing Model | Idle Cost |
 |-----------|--------------|-----------|
-| DynamoDB (6 tables) | PAY_PER_REQUEST | $0 |
+| DynamoDB (7 core tables; integrations add more) | PAY_PER_REQUEST | $0 |
 | Lambda (all functions) | Per invocation | $0 |
 | API Gateway REST | Per request | $0 |
 | ECS Fargate tasks (when enabled) | Per running task | $0 (cluster is free) |
@@ -84,7 +84,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](../design/
 
 | Service | Used By | Scales to Zero |
 |---------|---------|---------------|
-| DynamoDB (6 tables, PAY_PER_REQUEST) | Task state, events, nudges, concurrency, webhooks, repo config | Yes |
+| DynamoDB (7 core tables, PAY_PER_REQUEST) | Task state, events, nudges, concurrency, webhooks, repo config, approvals. Enabling the Slack integration adds 2 tables (installation, user-mapping) and Linear adds 4 (project-mapping, user-mapping, workspace-registry, webhook-dedup) | Yes |
 | DynamoDB Streams | TaskEventsTable → FanOut Consumer Lambda | Yes |
 | S3 | CDK asset bucket, ECR image layers, FUSE session storage, trace artifacts (7-day lifecycle) | Minimal |
 | SQS (DLQ) | FanOut Consumer dead-letter queue | Yes |
@@ -122,6 +122,46 @@ For the full cost model including per-task costs, see [COST_MODEL.md](../design/
 | IAM | Roles and policies for all components | N/A |
 
 ## Reference
+
+## CI/CD pipeline (`deploy.yml`)
+
+The repository includes a two-stage CI/CD pipeline:
+
+### Stage 1: Build (`build.yml`)
+
+Triggers on every PR and push to main. Runs `mise run build` (compile, test, lint, synth) and uploads the synthesized `cdk.out/` as a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
+
+### Stage 2: Deploy (`deploy.yml`)
+
+Triggers via `workflow_run` when `build.yml` completes successfully. The pipeline:
+
+1. **Skips fork PRs** — `head_repository.full_name == github.repository` prevents forks from entering the deploy flow. This is a security measure: an untrusted fork could modify `build.yml` to produce a deploy-intent artifact, which would otherwise prompt maintainers for approval unnecessarily.
+2. **Downloads `deploy-intent.json`** from the triggering build run.
+3. **Resolves targets** — Determines which compute types to deploy:
+   - `intent: "-"` → no-op (most PRs)
+   - `intent: "labels"` → reads PR labels against an allowlist
+   - `intent: "<type>"` → deploys the specified type (e.g., `agentcore`)
+4. **Requires approval** — The `deploy` job uses a GitHub Environment with required reviewers. Approvals are logged and the self-review rule prevents unilateral deploys.
+5. **Deploys via OIDC** — Assumes an IAM role via GitHub OIDC federation (no long-lived credentials). The role is scoped to the `cdk deploy` action with least-privilege policies per [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md).
+
+### Security controls
+
+| Control | Purpose |
+|---------|---------|
+| Fork exclusion (`head_repository` check) | Prevents fork PRs from triggering deploy approval prompts |
+| Environment approval | Human gate before any deploy reaches AWS |
+| OIDC federation | No stored AWS credentials; tokens are request-scoped |
+| Compute type allowlist | Only pre-approved types can be deployed |
+| Non-cancellable concurrency | Deploy can't be interrupted mid-flight |
+
+### For administrators
+
+- **Enable deploys**: Set the `deploy` Environment in repo settings with required reviewers.
+- **Configure OIDC**: Set `AWS_ROLE_TO_ASSUME` secret and `AWS_REGION` variable.
+- **Allowlist compute types**: Edit `ALLOWED_COMPUTE_TYPES` in `deploy.yml`.
+- **Deploy via PR label**: Add the `deploy:<type>` label to a PR (e.g., `deploy:agentcore`).
+
+## Related docs
 
 - [Quick start](./QUICK_START.md) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](./DEVELOPER_GUIDE.md) -- Local development, testing, repository onboarding.
