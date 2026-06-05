@@ -193,7 +193,12 @@ promotion_gate: { requires: [eval:web-research-quality] }   # min-sources / cita
 status: production
 ```
 
-This second example is the acceptance-criterion proof that a task can run end-to-end with no `repo`: `attachments` + `task_description` are sufficient, no `clone_repo`/`ensure_pr` steps run, and the terminal outcome is an uploaded artifact rather than a PR.
+This second example is the **target shape** for repo-less execution — the acceptance criterion it will *eventually* prove is that a task runs end-to-end with no `repo`: `attachments` + `task_description` are sufficient, no `clone_repo`/`ensure_pr` steps run, and the terminal outcome is an uploaded artifact rather than a PR. It is **not yet runnable**, and the schema's `requires_repo:false` promise is a Phase-0 forward-declaration, not a working path. Two platform assumptions must become *decisions* (not open questions) before this workflow can execute — both **blocking Phase 3**:
+
+- **Memory actorId** is `repo` today ([Open questions](#open-questions) #1); a repo-less task has no actor namespace and fails without a fallback.
+- **Artifact delivery** has no defined bucket / key scheme / IAM grant / size limit / `TaskDetail` surfacing ([Open questions](#open-questions) #2).
+
+Because resolving either may add a field (e.g. an `actor_namespace` selector, or a `deliver_artifact` target contract), **these two questions must be settled — as recorded decisions, ideally a short ADR addendum — before the Phase-0 schema is treated as frozen.** Until then, `web_research` is a design fixture used to validate the *schema's* expressiveness, not an executable acceptance test.
 
 ## The agent-side step runner
 
@@ -287,6 +292,8 @@ Today read-only is enforced by Cedar hard-deny rules keyed on the literal `Agent
 
 - **Defense in depth.** `read_only: true` makes the runner drop `Write`/`Edit` from `allowed_tools` *and* select the read-only Cedar principal — closing today's gap where read-only was enforced only by Cedar string-match, not by the tool list.
 - **Principal scheme migration (security-relevant — must be precise, not hand-waved).** The Cedar principal must encode **`workflow id + read_only`**, not be a recycled per-task-type string. If `read_only` simply mapped to one shared `read_only` principal, the existing literal-`"pr_review"` hard-deny rules would silently stop matching any *new* read-only workflow. The migration therefore: (a) introduces a principal derived from the resolved workflow (e.g. `Agent::Workflow::"coding/pr-review-v1"` plus a `read_only` context attribute); (b) **rewrites the two `pr_review_*` hard-deny rules to forbid `Write`/`Edit` whenever `context.read_only == true`**, so read-only enforcement attaches to the *property*, not the literal task type — making it apply uniformly to every read-only workflow. This is a deliberate, recorded behavior change, gated by the existing Cedar parity fixtures.
+
+  This is the one migration step where an error *silently weakens* enforcement (the rule stops matching) rather than failing loudly, so it ships as **its own isolated PR (Phase 2a)** — the policy rewrite and its regenerated `contracts/cedar-parity/` fixtures reviewed alone, with no workflow migrations riding along to dilute the diff — and it lands *ahead* of the `pr_iteration`/`pr_review` workflow migrations (Phase 2b) that depend on the new principal. See [Phasing](#phasing).
 
 **Policy floor (no privilege escalation by config).** `agent_config` and its `cedar_policy_modules` are author-supplied, so the schema/validator must enforce a floor rather than trusting the file:
 
@@ -412,6 +419,16 @@ Enforced at author time (CDK synth / CI lint over `agent/workflows/**`) and at r
 
 > The `id`/`version` consistency (`-vN` ↔ semver major) in rule 1 and the cross-field rules above are checked by the **loader/validator**, not by JSON Schema alone (Schema validates each field's shape; the conditional `allOf` blocks cover rules 3–4 and 7).
 
+### Single source of truth and validator parity
+
+A workflow file is validated on more than one side of the platform (CDK synth-time over `agent/workflows/**`, the Python runtime loader, and — Phase 4 — registry publish), so without discipline the cross-field rules would be re-implemented per side and **drift** — the same `(workflow file) → (valid? / which error)` hazard the repo already learned the hard way with the two Cedar engines (see the cedar-parity note in `CLAUDE.md` / [CEDAR_HITL_GATES.md](./CEDAR_HITL_GATES.md) §15.6). The defense is deliberately the same:
+
+1. **The JSON Schema is the one canonical *shape* contract.** `agent/workflows/schema/workflow.schema.json` is the single artifact for field shape and for the schema-expressible conditionals (rules 3, 4, 7 via `allOf`). Both sides consume *that same file* through a standard library — `ajv` in TypeScript at synth, `jsonschema`/`check-jsonschema` in Python at load — so shape validation is never re-implemented, only re-run.
+2. **The cross-field rules are implemented once, at author/CI time — not duplicated at runtime.** Rules not expressible in JSON Schema (1, 2, 5, 6, 8, 9, 11, 12, 13, 14) live in a **single validator module** that runs at CDK synth / CI lint over `agent/workflows/**`. In Phases 1–3 every workflow is a first-party file baked into the image and already cleared by that CI gate, so the **runtime Python loader performs only JSON-Schema shape validation** (defense-in-depth against a corrupt bundle) and *trusts* the CI-gated cross-field verdict rather than re-deriving it. There is therefore exactly **one** cross-field implementation in Phases 1–3, eliminating the drift surface before it exists.
+3. **A golden corpus locks any future second implementation to parity.** When Phase 4 adds an out-of-band publish path that must validate cross-field rules in a *second* language (registry publish, likely Python), the two implementations are pinned by `contracts/workflow-validation/` — a fixture set of workflow files each annotated with its expected verdict (`valid`, or a specific failing rule id), run against **every** validator implementation in CI. This is exactly the `contracts/cedar-parity/` mechanism applied to the workflow validator, and it is the only thing that catches cross-language drift that per-side unit tests miss. The corpus ships **from Phase 1** (against the single TS validator) so the expected-verdict contract is fixed *before* a second implementation can diverge from it.
+
+So: JSON Schema = canonical shape, consumed not copied; cross-field rules = one implementation until Phase 4 forces a second, at which point the golden corpus is the contract both must satisfy. The validator is a required CI gate (see [Authorship & governance](#authorship--governance)).
+
 ## Promotion is earned, not set
 
 `status: production` is not a label an author flips — it is a state a version *earns* by passing its declared `promotion_gate`. This makes the promotion lifecycle (`draft → validated → production → deprecated`) a machine-checked quality gate rather than a human's say-so, and it slots directly onto the existing [tiered validation pyramid](../decisions/ADR-013-tiered-validation-pyramid.md):
@@ -456,8 +473,9 @@ Adapted from the issue's phases (the issue framed Phase 1 as a `task_type` *alia
 | Phase | Deliverable | Primary files |
 |---|---|---|
 | 0 | This design doc + [ADR-014](../decisions/ADR-014-workflow-driven-tasks.md) + JSON Schema + step-runner skeleton | `docs/design/WORKFLOWS.md`, `docs/decisions/`, `agent/workflows/schema/` |
-| 1 | Step runner + `default/agent-v1` + migrate `new_task` to a workflow file; introduce `workflow_ref` and **remove the `task_type` enum** end-to-end (API/CLI/agent) | `agent/src/workflow/`, `agent/workflows/coding/new-task-v1.yaml`, `cdk/src/handlers/`, `cli/src/` |
-| 2 | Migrate `pr_iteration`, `pr_review`; Cedar principal migration; promotion evals green | `agent/workflows/coding/*`, `agent/policies/`, `agent/tests/` |
+| 1 | Step runner + `default/agent-v1` + migrate `new_task` to a workflow file; introduce `workflow_ref` and **remove the `task_type` enum** end-to-end (API/CLI/agent); the single workflow validator + `contracts/workflow-validation/` golden corpus | `agent/src/workflow/`, `agent/workflows/coding/new-task-v1.yaml`, `cdk/src/handlers/`, `cli/src/`, `contracts/workflow-validation/` |
+| 2a | **Cedar principal migration, on its own PR** — literal `"pr_review"` → `context.read_only`-driven rule, with the regenerated `contracts/cedar-parity/` fixtures reviewed *in isolation* (no workflow migrations in this PR). This is the one change that can *silently weaken* enforcement, so it lands and is reviewed alone, ahead of the workflows that depend on it. | `agent/policies/`, `contracts/cedar-parity/`, `agent/src/policy.py` |
+| 2b | Migrate `pr_iteration`, `pr_review` onto the (already-shipped) read-only principal; promotion evals green | `agent/workflows/coding/*`, `agent/tests/` |
 | 3 | Repo-optional `web_research` workflow (the repo-optional refactor — see [the requires_repo note](#domain--requiresrepo)) | `cdk/src/handlers/`, `agent/workflows/knowledge/` |
 | 4 | Registry-native workflows (#246); Blueprint workflow allow-list + `default_workflow`; inline/repo-local for dev | depends on #246 |
 
@@ -467,10 +485,10 @@ Per #248, the following remain out of scope (deferred to #99 / separate issues):
 
 ## Open questions
 
-These are genuine forks; the repo-optional items (1–2) are **prerequisites for Phase 3**, not deferrable niceties.
+These are genuine forks; the repo-optional items (1–2) are **prerequisites for Phase 3** and must be resolved as **recorded decisions (a short ADR addendum) before the Phase-0 schema is frozen** — each may add or reshape a schema field, so deferring them past schema freeze risks a breaking schema revision. They are not deferrable niceties.
 
-1. **Memory actorId for repo-less tasks (blocking Phase 3).** Memory is keyed on `repo` (`memory.py`). A repo-less task has no actor namespace and fails without a fallback. Decide: per-user (`user:{id}`) or per-workflow namespace, and how cross-task knowledge accrues for knowledge work. Coordinate with [MEMORY.md](./MEMORY.md).
-2. **Artifact delivery contract (blocking Phase 3).** `deliver_artifact` needs a defined S3 bucket, a `task_id`-scoped key scheme, the agent SessionRole IAM grant, a size limit, and how the artifact URL surfaces in `TaskDetail`. The agent SessionRole's `repo` tenant tag also needs a repo-less form.
+1. **Memory actorId for repo-less tasks (blocking Phase 3; resolve before schema freeze).** Memory is keyed on `repo` (`memory.py`). A repo-less task has no actor namespace and fails without a fallback. Decide: per-user (`user:{id}`) or per-workflow namespace, and how cross-task knowledge accrues for knowledge work. May introduce an explicit `actor_namespace` selector on the workflow — which is why it must land before freeze. Coordinate with [MEMORY.md](./MEMORY.md).
+2. **Artifact delivery contract (blocking Phase 3; resolve before schema freeze).** `deliver_artifact` needs a defined S3 bucket, a `task_id`-scoped key scheme, the agent SessionRole IAM grant, a size limit, and how the artifact URL surfaces in `TaskDetail`. The agent SessionRole's `repo` tenant tag also needs a repo-less form. May reshape the `deliver_artifact` step's `target` contract — hence pre-freeze.
 3. **Inline vs registry-only refs.** Should dev-time tasks accept an *inline* workflow body in the request (sandboxed, never `production`), or only refs? Leaning ref-only for production with an inline escape hatch gated behind a feature flag.
 4. **Hydration ownership for steps.** `hydrate_context` is largely orchestrator-side today (and appears as both an orchestrator box and a step in the [Concepts](#concepts) diagram — intentionally, pending this decision). Keep it orchestrator-side with the step as a no-op consumer, or move source-specific fetching (esp. repo-less `urls`) into agent-side handlers? Current lean: orchestrator hydrates declared sources; the agent step only consumes.
 5. **Tool-level vs step-level budgets.** `limits` is workflow-level. Once `agent_config.mcp_servers` are real (Phase 4), the more useful altitude is likely a **per-tool / per-MCP-server budget** rather than a per-step budget — an MCP tool with unbounded cost is a bigger risk than an over-long step. Deferred to the registry phase; lean per-tool.
