@@ -73,14 +73,17 @@ query IssueByIdentifier($identifier: String!) {
 `.trim();
 
 /**
- * Look up a Linear issue by identifier (e.g. `ABCA-42`) by iterating
- * over every active workspace in the registry until one returns a
- * match. Returns the first hit.
+ * Look up a Linear issue by identifier (e.g. `ABCA-42`).
  *
- * For v1 this scan is cheap — typical deployments have 1-2 workspaces.
- * If a stack ever onboards many workspaces sharing identifier prefixes,
- * a followup can store team_key prefixes on the registry row and route
- * directly. Until then, linear-time iteration is fine.
+ * Routing strategy:
+ * 1. Scan active workspaces (one round-trip — typical stacks have 1–2).
+ * 2. If any row's `team_keys` contains the identifier's team key (`ABCA`),
+ *    query that workspace directly and return on hit.
+ * 3. Otherwise fall back to iterating every active workspace until one
+ *    returns a match. This handles legacy rows missing `team_keys` (the
+ *    column was added in #96 and back-fills only on next `setup` /
+ *    `add-workspace` re-run) and the rare case where a team was added in
+ *    Linear after the workspace was registered.
  *
  * @param identifier `ABCA-42`-style Linear issue identifier
  * @param registryTableName name of LinearWorkspaceRegistryTable
@@ -90,7 +93,11 @@ export async function findLinearIssueByIdentifier(
   identifier: string,
   registryTableName: string,
 ): Promise<LinearIssueLocation | null> {
-  let active: Array<{ linear_workspace_id: string; workspace_slug: string }> = [];
+  let active: Array<{
+    linear_workspace_id: string;
+    workspace_slug: string;
+    team_keys: string[] | null;
+  }> = [];
   try {
     const scanResp = await ddb.send(new ScanCommand({
       TableName: registryTableName,
@@ -101,6 +108,7 @@ export async function findLinearIssueByIdentifier(
     active = (scanResp.Items ?? []).map((item) => ({
       linear_workspace_id: item.linear_workspace_id as string,
       workspace_slug: item.workspace_slug as string,
+      team_keys: Array.isArray(item.team_keys) ? (item.team_keys as string[]) : null,
     }));
   } catch (err) {
     logger.warn('Linear issue lookup: failed to scan workspace registry', {
@@ -114,7 +122,33 @@ export async function findLinearIssueByIdentifier(
     return null;
   }
 
+  // Identifier prefix is the part before the first dash (`ABCA-42` → `ABCA`).
+  // Compare uppercase since Linear team keys are upper-case but inbound text
+  // (PR titles, branch names) is mixed-case.
+  const teamKey = identifier.split('-', 1)[0]?.toUpperCase();
+  const prefixMatch = teamKey
+    ? active.find((ws) => ws.team_keys?.some((k) => k.toUpperCase() === teamKey))
+    : undefined;
+
+  // Try the prefix-matched workspace first.
+  if (prefixMatch) {
+    const resolved = await resolveLinearOauthToken(prefixMatch.linear_workspace_id, registryTableName);
+    if (resolved) {
+      const found = await queryIssueByIdentifier(resolved.accessToken, identifier);
+      if (found) {
+        return {
+          issueId: found,
+          linearWorkspaceId: prefixMatch.linear_workspace_id,
+          workspaceSlug: prefixMatch.workspace_slug,
+        };
+      }
+    }
+  }
+
+  // Fallback: iterate workspaces NOT already tried via prefix-match.
+  // Covers legacy rows without `team_keys` and post-registration team adds.
   for (const ws of active) {
+    if (prefixMatch && ws.linear_workspace_id === prefixMatch.linear_workspace_id) continue;
     const resolved = await resolveLinearOauthToken(ws.linear_workspace_id, registryTableName);
     if (!resolved) continue;
 
