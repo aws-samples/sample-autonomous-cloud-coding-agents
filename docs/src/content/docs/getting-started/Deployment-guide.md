@@ -165,6 +165,46 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 - **Allowlist compute types**: Edit `ALLOWED_COMPUTE_TYPES` in `deploy.yml`.
 - **Deploy via PR label**: Add the `deploy:<type>` label to a PR (e.g., `deploy:agentcore`).
 
+## Known deployment issues
+
+### DNS Query Log Config replacement cascade (upgrading from pre-v0.5)
+
+**Affects:** Stacks deployed *before* the tag-exclusion fix ([#222](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/222)). Stacks created after this fix are not affected.
+
+**Symptom:** `UPDATE_FAILED` on `AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation` with error `InvalidRequest: Cannot create association — one already exists for this VPC`.
+
+**Root cause:** The `ResolverQueryLoggingConfig` resource is *create-only* in CloudFormation — any property change (including Tags) triggers a full replacement. Pre-fix stacks have `github:sha` and other tags on this resource. Although the new code excludes it from future tag applications, CloudFormation still attempts to *remove* the now-excluded tags from the existing resource during the update, triggering the replacement cascade:
+
+1. Config is replaced → new physical resource ID
+2. Association detects `ResolverQueryLogConfigId` changed → triggers its own replacement
+3. CloudFormation attempts Create-before-Delete on the association → Route53 Resolver rejects (one association per VPC) → `InvalidRequest`
+
+**Resolution — choose one:**
+
+#### Option A: Manual disassociation via AWS Console (recommended)
+
+1. Open the [Route 53 Resolver console](https://console.aws.amazon.com/route53resolver/home#/query-logging)
+2. Select the query logging configuration named `agent-dns-query-log`
+3. Under **Associated VPCs**, disassociate the VPC
+4. Delete the query logging configuration
+5. Run `mise //cdk:deploy` (or `cdk deploy`) — CloudFormation will recreate both resources without tags
+
+#### Option B: Two-phase deploy (comment-out / re-add)
+
+1. In `cdk/src/stacks/agent.ts`, comment out the `DnsFirewall` construct instantiation (~line 197):
+   ```typescript
+   // new DnsFirewall(this, 'DnsFirewall', {
+   //   vpc: agentVpc.vpc,
+   //   additionalAllowedDomains: additionalDomains,
+   //   observationMode: true,
+   // });
+   ```
+2. Deploy: `mise //cdk:deploy` — this deletes the query log config, association, firewall rules, and related resources
+3. Uncomment the `DnsFirewall` block
+4. Deploy again: `mise //cdk:deploy` — resources are recreated cleanly without tags
+
+Option B is more disruptive (two deploys, brief DNS logging gap) but requires no console access.
+
 ## Related docs
 
 - [Quick start](/getting-started/quick-start) -- Zero-to-first-PR in 6 steps.
