@@ -1,0 +1,157 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { resolveJiraOauthToken } from './jira-oauth-resolver';
+import { logger } from './logger';
+
+/**
+ * Lambda-side helper for posting comments onto Jira Cloud issues via the
+ * Atlassian REST v3 API. Used by the webhook processor to give users
+ * feedback on pre-container failures (guardrail block, concurrency cap,
+ * unmapped project, etc.) — paths where the agent never starts and the
+ * agent-side Jira MCP cannot run.
+ *
+ * Unlike Linear, Jira has no "reaction" primitive. The failure marker
+ * (❌) is folded into the comment text instead of attached as a separate
+ * reaction call.
+ *
+ * All calls are best-effort. Errors are logged at WARN and swallowed —
+ * Jira feedback is advisory and must never gate task-rejection logic.
+ */
+
+const REQUEST_TIMEOUT_MS = 5000;
+
+/**
+ * Wrap a plain message string in Atlassian Document Format. Jira REST v3
+ * comments require ADF, not markdown. We keep this minimal — a single
+ * paragraph with the raw text — because the messages are short, user-
+ * facing strings written by the processor (no embedded markdown to
+ * preserve).
+ */
+function toAdfDocument(message: string): Record<string, unknown> {
+  return {
+    type: 'doc',
+    version: 1,
+    content: [
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: message }],
+      },
+    ],
+  };
+}
+
+async function postComment(
+  accessToken: string,
+  siteUrl: string,
+  issueIdOrKey: string,
+  message: string,
+): Promise<boolean> {
+  // Strip a trailing slash from siteUrl so the URL stays well-formed
+  // whether the registry stored it as `https://x.atlassian.net` or
+  // `https://x.atlassian.net/`.
+  const base = siteUrl.replace(/\/+$/, '');
+  const url = `${base}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ body: toAdfDocument(message) }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      logger.warn('Jira feedback REST non-2xx', { status: resp.status, url });
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn('Jira feedback request failed', {
+      error: err instanceof Error ? err.message : String(err),
+      url,
+    });
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Tenant-scoped feedback context. Resolved once per task by the caller
+ * (webhook processor / orchestrator) and threaded through to the
+ * post-comment helper, so the OAuth resolver runs once per task instead
+ * of once per Jira API call.
+ */
+export interface JiraFeedbackContext {
+  /** Atlassian tenant identifier (`cloudId`) — registry key. */
+  readonly cloudId: string;
+  /** Name of JiraWorkspaceRegistryTable, from CDK stack output. */
+  readonly registryTableName: string;
+}
+
+async function resolveTenantToken(
+  ctx: JiraFeedbackContext,
+): Promise<{ accessToken: string; siteUrl: string } | null> {
+  try {
+    const resolved = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName);
+    if (!resolved) return null;
+    return { accessToken: resolved.accessToken, siteUrl: resolved.siteUrl };
+  } catch (err) {
+    logger.warn('Jira feedback could not resolve OAuth token', {
+      jira_cloud_id: ctx.cloudId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Post a comment onto a Jira issue. Returns true on success, false on any
+ * failure (network, auth, REST errors). Never throws — callers proceed
+ * regardless.
+ */
+export async function postIssueComment(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  body: string,
+): Promise<boolean> {
+  const resolved = await resolveTenantToken(ctx);
+  if (!resolved) return false;
+  return postComment(resolved.accessToken, resolved.siteUrl, issueIdOrKey, body);
+}
+
+/**
+ * Post a feedback comment with the failure marker (❌) folded into the
+ * message text. Mirrors `linear-feedback.reportIssueFailure` semantics
+ * (best-effort, never throws, returns void) so callers don't branch on
+ * the result. The marker is included in `message` by the caller — this
+ * helper exists for symmetry with Linear's API surface.
+ */
+export async function reportIssueFailure(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  message: string,
+): Promise<void> {
+  await Promise.allSettled([postIssueComment(ctx, issueIdOrKey, message)]);
+}
