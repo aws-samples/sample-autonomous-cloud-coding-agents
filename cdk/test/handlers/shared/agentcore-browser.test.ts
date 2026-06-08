@@ -36,12 +36,15 @@ jest.mock('@aws-sdk/credential-provider-node', () => ({
 }));
 
 class FakeWebSocket extends EventEmitter {
-  public sentMessages: string[] = [];
-  public closed = false;
   // Latest instance — tests reach in to drive message events.
   public static last: FakeWebSocket | null = null;
   /** Override per-test to inject failures on construction. */
   public static onConstruct: ((url: string, ws: FakeWebSocket) => void) | null = null;
+  /** Per-test scripted reactions — one per cdpSend call, in order. */
+  public static reactions: Array<(msg: { id: number; method: string }) => Record<string, unknown> | null> = [];
+
+  public sentMessages: string[] = [];
+  public closed = false;
 
   constructor(public url: string) {
     super();
@@ -73,9 +76,6 @@ class FakeWebSocket extends EventEmitter {
   close(): void {
     this.closed = true;
   }
-
-  /** Per-test scripted reactions — one per cdpSend call, in order. */
-  public static reactions: Array<(msg: { id: number; method: string }) => Record<string, unknown> | null> = [];
 }
 
 jest.mock('ws', () => ({
