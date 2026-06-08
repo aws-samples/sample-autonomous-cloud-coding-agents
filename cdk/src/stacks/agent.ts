@@ -880,7 +880,7 @@ export class AgentStack extends Stack {
 
     new CfnOutput(this, 'ScreenshotBucketName', {
       value: githubScreenshot.screenshotBucket.bucket.bucketName,
-      description: 'Private S3 bucket hosting Vercel-preview screenshots (served via CloudFront)',
+      description: 'Private S3 bucket hosting deploy-preview screenshots (served via CloudFront)',
     });
 
     new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
