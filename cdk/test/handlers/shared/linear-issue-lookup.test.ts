@@ -166,7 +166,7 @@ describe('findLinearIssueByIdentifier', () => {
       { linear_workspace_id: 'ws-other', workspace_slug: 'other', team_keys: ['PLAT'] },
     ]));
     resolveLinearOauthTokenMock
-      .mockResolvedValueOnce({ accessToken: 'tok-abca' })  // prefix match
+      .mockResolvedValueOnce({ accessToken: 'tok-abca' }) // prefix match
       .mockResolvedValueOnce({ accessToken: 'tok-other' }); // fallback iter
     mockGraphqlOnce(null); // ABCA workspace doesn't actually have it
     mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-42' });
