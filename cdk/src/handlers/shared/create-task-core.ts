@@ -49,13 +49,12 @@ import {
   createAttachmentRecord,
   INITIAL_APPROVALS_MAX_ENTRIES,
   type InlineAttachment,
-  isPrTaskType,
   type PresignedAttachment,
   type TaskRecord,
-  type TaskType,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -83,6 +82,18 @@ const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
 const s3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
+
+/** Human-readable description of a workflow's required-input contract (for 400s). */
+function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; oneOf?: readonly string[] }): string {
+  const parts: string[] = [];
+  if (requiredInputs.allOf?.length) {
+    parts.push(requiredInputs.allOf.join(' and '));
+  }
+  if (requiredInputs.oneOf?.length) {
+    parts.push(`one of ${requiredInputs.oneOf.join(' or ')}`);
+  }
+  return parts.length > 0 ? parts.join(', plus ') : 'a task specification';
+}
 
 /**
  * Core task creation logic shared by the Cognito create-task handler
@@ -156,27 +167,34 @@ export async function createTaskCore(
     resolvedApprovalGateCap = blueprintCap;
   }
 
-  if (!hasTaskSpec(body)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'At least one of issue_number or task_description is required.', requestId);
+  // Resolve the workflow (#248). workflow_ref replaces task_type: an explicit
+  // ref resolves to its pinned {id, version}; an absent ref falls back to the
+  // platform default. An unknown ref is a 400.
+  if (!isValidWorkflowRef(body.workflow_ref)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid workflow_ref. Expected "<domain>/<name>-vN[@<constraint>]".', requestId);
+  }
+  const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref);
+  if (resolvedWorkflow === null) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `Unknown workflow_ref "${body.workflow_ref}".`, requestId);
+  }
+  const workflow = getWorkflowDescriptor(resolvedWorkflow.id)!;
+  // A pr_* workflow resolves an existing PR rather than opening a new branch.
+  const isPrTask = workflow.requiredInputs.allOf?.includes('pr_number') ?? false;
+
+  if (!hasTaskSpec(body, workflow.requiredInputs)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires ${describeRequiredInputs(workflow.requiredInputs)}.`, requestId);
   }
 
-  // Validate task_type
-  if (!isValidTaskType(body.task_type)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_type. Must be "new_task", "pr_iteration", or "pr_review".', requestId);
-  }
-  const taskType: TaskType = (body.task_type as TaskType) ?? 'new_task';
-  const isPrTask = isPrTaskType(taskType);
-
-  // Validate pr_number
+  // Validate pr_number against the resolved workflow's input contract.
   const prNumberResult = validatePrNumber(body.pr_number);
   if (prNumberResult === null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid pr_number. Must be a positive integer.', requestId);
   }
   if (isPrTask && prNumberResult === undefined) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `pr_number is required when task_type is "${taskType}".`, requestId);
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `pr_number is required for the "${resolvedWorkflow.id}" workflow.`, requestId);
   }
   if (!isPrTask && prNumberResult !== undefined) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed when task_type is "pr_iteration" or "pr_review".', requestId);
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed for a pull-request workflow (e.g. coding/pr-iteration-v1, coding/pr-review-v1).', requestId);
   }
 
   if (body.task_description && !isValidTaskDescriptionLength(body.task_description)) {
@@ -556,7 +574,8 @@ export async function createTaskCore(
     status: initialStatus,
     repo: body.repo,
     ...(body.issue_number !== undefined && { issue_number: body.issue_number }),
-    task_type: taskType,
+    ...(body.workflow_ref !== undefined && { workflow_ref: body.workflow_ref }),
+    resolved_workflow: resolvedWorkflow,
     ...(prNumberResult !== undefined && { pr_number: prNumberResult }),
     ...(body.task_description !== undefined && { task_description: body.task_description }),
     branch_name: branchName,

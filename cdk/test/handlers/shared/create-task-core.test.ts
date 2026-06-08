@@ -141,7 +141,7 @@ describe('createTaskCore', () => {
       user_id: 'user-123',
       status: 'SUBMITTED',
       repo: 'org/repo',
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       task_description: 'Original work',
       branch_name: 'bgagent/existing/slug',
       channel_source: 'api',
@@ -178,7 +178,7 @@ describe('createTaskCore', () => {
           user_id: 'other-user',
           status: 'SUBMITTED',
           repo: 'org/repo',
-          task_type: 'new_task',
+          resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
           branch_name: 'bgagent/existing/slug',
           channel_source: 'api',
           status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
@@ -414,30 +414,42 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  test('creates pr_iteration task with pr_number', async () => {
+  test('resolves the default workflow when workflow_ref is omitted', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_iteration', pr_number: 42 },
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-default',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    // No workflow_ref ⇒ the resolution ladder falls to the platform default.
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+  });
+
+  test('creates a pr-iteration workflow task with pr_number', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/pr-iteration-v1', pr_number: 42 },
       makeContext(),
       'req-pr-1',
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    expect(body.data.task_type).toBe('pr_iteration');
+    expect(body.data.resolved_workflow).toEqual({ id: 'coding/pr-iteration-v1', version: '1.0.0' });
     expect(body.data.pr_number).toBe(42);
     expect(body.data.branch_name).toBe('pending:pr_resolution');
   });
 
-  test('returns 400 for pr_iteration without pr_number', async () => {
+  test('returns 400 for a pr workflow without pr_number', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_iteration', task_description: 'Fix it' },
+      { repo: 'org/repo', workflow_ref: 'coding/pr-iteration-v1', task_description: 'Fix it' },
       makeContext(),
       'req-pr-2',
     );
     expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('pr_number is required');
+    expect(result.body).toContain('pr_number');
   });
 
-  test('returns 400 for pr_number without pr_iteration task_type', async () => {
+  test('returns 400 for pr_number on a non-pr workflow', async () => {
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it', pr_number: 42 } as any,
       makeContext(),
@@ -447,47 +459,47 @@ describe('createTaskCore', () => {
     expect(result.body).toContain('pr_number is only allowed');
   });
 
-  test('returns 400 for invalid task_type', async () => {
+  test('returns 400 for an unknown workflow_ref', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_description: 'Fix it', task_type: 'invalid' as any },
+      { repo: 'org/repo', task_description: 'Fix it', workflow_ref: 'coding/does-not-exist-v1' },
       makeContext(),
       'req-pr-4',
     );
     expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('Invalid task_type');
+    expect(result.body).toContain('Unknown workflow_ref');
   });
 
-  test('creates pr_review task with pr_number', async () => {
+  test('returns 400 for a malformed workflow_ref', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_review', pr_number: 99 },
+      { repo: 'org/repo', task_description: 'Fix it', workflow_ref: 'not-a-valid-ref' },
+      makeContext(),
+      'req-pr-4b',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toContain('Invalid workflow_ref');
+  });
+
+  test('creates a pr-review workflow task with pr_number', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/pr-review-v1', pr_number: 99 },
       makeContext(),
       'req-review-1',
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    expect(body.data.task_type).toBe('pr_review');
+    expect(body.data.resolved_workflow).toEqual({ id: 'coding/pr-review-v1', version: '1.0.0' });
     expect(body.data.pr_number).toBe(99);
     expect(body.data.branch_name).toBe('pending:pr_resolution');
   });
 
-  test('returns 400 for pr_review without pr_number', async () => {
+  test('returns 400 for a pr-review workflow without pr_number', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_review', task_description: 'Review it' },
+      { repo: 'org/repo', workflow_ref: 'coding/pr-review-v1', task_description: 'Review it' },
       makeContext(),
       'req-review-2',
     );
     expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('pr_number is required');
-  });
-
-  test('returns 400 for pr_number with new_task', async () => {
-    const result = await createTaskCore(
-      { repo: 'org/repo', task_description: 'Fix it', pr_number: 42 } as any,
-      makeContext(),
-      'req-review-3',
-    );
-    expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('pr_number is only allowed');
+    expect(result.body).toContain('pr_number');
   });
 
   // -- trace flag (design §10.1) --------------------------------------

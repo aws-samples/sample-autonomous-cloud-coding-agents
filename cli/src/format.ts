@@ -26,8 +26,8 @@ export function formatTaskDetail(task: TaskDetail): string {
     `Status:      ${task.status}`,
     `Repo:        ${task.repo}`,
   ];
-  if (task.task_type && task.task_type !== 'new_task') {
-    lines.push(`Type:        ${task.task_type}`);
+  if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
+    lines.push(`Workflow:    ${task.resolved_workflow.id}`);
   }
   if (task.pr_number !== null) {
     lines.push(`PR #:        ${task.pr_number}`);
@@ -85,7 +85,7 @@ export function formatTaskList(tasks: TaskSummary[]): string {
   const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'DESCRIPTION'];
   const rows = tasks.map(t => {
     let desc = t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-');
-    if (t.task_type === 'pr_iteration' && t.pr_number !== null) {
+    if (t.resolved_workflow?.id === 'coding/pr-iteration-v1' && t.pr_number !== null) {
       desc = `PR #${t.pr_number}` + (t.task_description ? `: ${t.task_description}` : '');
     }
     return [
@@ -161,12 +161,12 @@ export function formatStatusSnapshot(
     // webhook vs. a manual submission.
     `  Channel:       ${task.channel_source || PLACEHOLDER}`,
   ];
-  // Non-default task types carry meaningful context for the default
-  // snapshot (a pr_iteration against #42 is a different mental model
-  // than a new_task). Mirrors the ``formatTaskDetail`` treatment.
-  if (task.task_type && task.task_type !== 'new_task') {
+  // Non-default workflows carry meaningful context for the default
+  // snapshot (a coding/pr-iteration-v1 against #42 is a different mental
+  // model than coding/new-task-v1). Mirrors the ``formatTaskDetail`` treatment.
+  if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
     const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
-    lines.push(`  Type:          ${task.task_type}${prSuffix}`);
+    lines.push(`  Workflow:      ${task.resolved_workflow.id}${prSuffix}`);
   }
   // Render the task description under its own heading with wrapped
   // continuation lines so long prompts stay readable in a ~80-column

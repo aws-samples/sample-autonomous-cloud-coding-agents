@@ -343,7 +343,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     try {
       await emitTaskEvent(task.task_id, 'guardrail_blocked', {
         reason: hydratedContext.guardrail_blocked,
-        task_type: task.task_type,
+        resolved_workflow: task.resolved_workflow?.id,
         pr_number: task.pr_number,
         sources: hydratedContext.sources,
         token_estimate: hydratedContext.token_estimate,
@@ -508,7 +508,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
-    task_type: task.task_type ?? 'new_task',
+    resolved_workflow: task.resolved_workflow ?? { id: 'coding/new-task-v1', version: '1.0.0' },
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
     ...(task.task_description && { prompt: task.task_description }),

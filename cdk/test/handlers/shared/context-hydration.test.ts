@@ -739,7 +739,7 @@ describe('hydrateContext', () => {
 
     const task = {
       ...baseTask,
-      task_type: 'pr_review',
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
       pr_number: 55,
     };
     const result = await hydrateContext(task as any);
@@ -1198,7 +1198,7 @@ describe('hydrateContext — guardrail screening', () => {
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-    task_type: 'pr_iteration',
+    resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
     pr_number: 10,
   };
 
@@ -1277,7 +1277,7 @@ describe('hydrateContext — guardrail screening', () => {
 
     const prReviewTask = {
       ...basePrTask,
-      task_type: 'pr_review',
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
       pr_number: 20,
     };
     const result = await hydrateContext(prReviewTask as any);
@@ -1297,7 +1297,7 @@ describe('hydrateContext — guardrail screening', () => {
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     task_description: 'Fix it',
   };
 
@@ -1432,7 +1432,7 @@ describe('hydrateContext — content_trust metadata', () => {
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     task_description: 'Fix the bug',
   };
 
@@ -1485,7 +1485,7 @@ describe('hydrateContext — content_trust metadata', () => {
 
     const prTask = {
       ...baseTask,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 10,
     };
     const result = await hydrateContext(prTask as any);
@@ -1497,7 +1497,7 @@ describe('hydrateContext — content_trust metadata', () => {
   test('PR fetch fallback includes content_trust for task_description only', async () => {
     const prTask = {
       ...baseTask,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 10,
     };
     // No SM mock — PR fetch will fail

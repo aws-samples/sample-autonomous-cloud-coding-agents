@@ -34,8 +34,18 @@ import type { TaskStatusType } from '../../constructs/task-status';
  */
 export type { TaskStatusType };
 
-/** Valid task types for task creation. */
-export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+/**
+ * A resolved workflow pin: the ``{id, version}`` produced at the create-task
+ * boundary from a ``workflow_ref`` (or the resolution fallback). Replaces the
+ * former ``task_type`` enum end-to-end (#248). Persisted on the TaskRecord and
+ * threaded to the agent so it loads the exact pinned workflow file.
+ *
+ * Keep in sync with ``cli/src/types.ts::ResolvedWorkflow``.
+ */
+export type ResolvedWorkflow = {
+  readonly id: string;
+  readonly version: string;
+};
 
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
@@ -57,11 +67,6 @@ export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
  */
 export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
 
-/** Task types that operate on an existing pull request. */
-export function isPrTaskType(taskType: TaskType): boolean {
-  return taskType === 'pr_iteration' || taskType === 'pr_review';
-}
-
 /**
  * Full task record as stored in DynamoDB.
  */
@@ -71,7 +76,12 @@ export interface TaskRecord {
   readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number?: number;
-  readonly task_type: TaskType;
+  /** The ref the caller supplied (if any); resolution may fall back to a
+   *  default when absent. Persisted for audit alongside ``resolved_workflow``. */
+  readonly workflow_ref?: string;
+  /** The pinned ``{id, version}`` this task runs. Resolved at the create-task
+   *  boundary; optional only on records that predate the cutover. */
+  readonly resolved_workflow?: ResolvedWorkflow;
   readonly pr_number?: number;
   readonly task_description?: string;
   readonly branch_name: string;
@@ -215,7 +225,7 @@ export interface TaskDetail {
   readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -280,7 +290,7 @@ export interface TaskSummary {
   readonly status: TaskStatusType;
   readonly repo: string;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -342,7 +352,9 @@ export interface CreateTaskRequest {
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
-  readonly task_type?: TaskType;
+  /** Workflow selector ``<id>[@<constraint>]``. Replaces ``task_type`` (#248).
+   *  Omitted ⇒ the create-task boundary resolves via the fallback ladder. */
+  readonly workflow_ref?: string;
   readonly pr_number?: number;
   readonly attachments?: readonly Attachment[];
   /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
@@ -560,7 +572,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     status: record.status,
     repo: record.repo,
     issue_number: record.issue_number ?? null,
-    task_type: record.task_type ?? 'new_task',
+    resolved_workflow: record.resolved_workflow ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
@@ -737,7 +749,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     status: record.status,
     repo: record.repo,
     issue_number: record.issue_number ?? null,
-    task_type: record.task_type ?? 'new_task',
+    resolved_workflow: record.resolved_workflow ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,

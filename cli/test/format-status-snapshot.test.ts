@@ -32,7 +32,7 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     status: 'RUNNING',
     repo: 'org/repo',
     issue_number: null,
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     pr_number: null,
     task_description: 'fix bug',
     branch_name: 'bgagent/abc123/fix',
@@ -314,33 +314,44 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).not.toContain('Trace S3:');
   });
 
-  // ---- Type + Reason (PR #52 CLI UX carry-forward) ----
+  // ---- Workflow + Reason (PR #52 CLI UX carry-forward) ----
 
-  test('renders Type line for pr_iteration tasks with PR number', () => {
-    const task = buildTask({ task_type: 'pr_iteration', pr_number: 42 });
+  test('renders Workflow line for pr_iteration tasks with PR number', () => {
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
+      pr_number: 42,
+    });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).toContain('Type:          pr_iteration (PR #42)');
+    expect(rendered).toContain('Workflow:      coding/pr-iteration-v1 (PR #42)');
   });
 
-  test('renders Type line for pr_review tasks', () => {
-    const task = buildTask({ task_type: 'pr_review', pr_number: 7 });
+  test('renders Workflow line for pr_review tasks', () => {
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
+      pr_number: 7,
+    });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).toContain('Type:          pr_review (PR #7)');
+    expect(rendered).toContain('Workflow:      coding/pr-review-v1 (PR #7)');
   });
 
-  test('omits Type line for new_task (the compact default path)', () => {
-    const task = buildTask({ task_type: 'new_task' });
+  test('omits Workflow line for the default coding/new-task-v1 (compact path)', () => {
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+    });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).not.toContain('Type:');
+    expect(rendered).not.toContain('Workflow:');
   });
 
-  test('omits PR-number suffix on Type line when pr_number is absent', () => {
+  test('omits PR-number suffix on Workflow line when pr_number is absent', () => {
     // Defensive: a pr_iteration task without a pr_number would be a
     // server-side data shape oddity, but the renderer must not emit a
     // dangling "PR #undefined".
-    const task = buildTask({ task_type: 'pr_iteration', pr_number: null });
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
+      pr_number: null,
+    });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).toContain('Type:          pr_iteration\n');
+    expect(rendered).toContain('Workflow:      coding/pr-iteration-v1\n');
     expect(rendered).not.toContain('PR #');
   });
 

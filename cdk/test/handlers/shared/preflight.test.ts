@@ -405,7 +405,7 @@ describe('runPreflightChecks', () => {
         json: async () => ({ data: { repository: { viewerPermission: 'TRIAGE' } } }),
       });
 
-    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, 'pr_review');
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, true);
 
     expect(result.passed).toBe(true);
   });
@@ -422,7 +422,7 @@ describe('runPreflightChecks', () => {
         json: async () => ({ data: { repository: { viewerPermission: 'READ' } } }),
       });
 
-    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, 'pr_review');
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, true);
 
     expect(result.passed).toBe(false);
     expect(result.failureReason).toBe(PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS);

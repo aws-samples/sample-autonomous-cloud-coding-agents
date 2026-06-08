@@ -51,7 +51,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: 42,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: null,
       branch_name: 'bgagent/abc/fix',
@@ -89,7 +89,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: 'Fix the bug',
       branch_name: 'bgagent/abc/fix',
@@ -141,7 +141,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: 'Fix the bug',
       branch_name: 'bgagent/abc/fix',
@@ -201,7 +201,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 42,
       task_description: null,
       branch_name: 'pending:pr_resolution',
@@ -227,7 +227,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_type: 'pr_iteration', pr_number: 42 },
+      { repo: 'owner/repo', workflow_ref: 'coding/pr-iteration-v1', pr_number: 42 },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
@@ -239,7 +239,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'pr_review',
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
       pr_number: 55,
       task_description: null,
       branch_name: 'pending:pr_resolution',
@@ -265,7 +265,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_type: 'pr_review', pr_number: 55 },
+      { repo: 'owner/repo', workflow_ref: 'coding/pr-review-v1', pr_number: 55 },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
@@ -322,7 +322,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 42,
       task_description: 'Fix the null check',
       branch_name: 'pending:pr_resolution',
@@ -352,7 +352,7 @@ describe('submit command', () => {
       {
         repo: 'owner/repo',
         task_description: 'Fix the null check',
-        task_type: 'pr_iteration',
+        workflow_ref: 'coding/pr-iteration-v1',
         pr_number: 42,
       },
       undefined,

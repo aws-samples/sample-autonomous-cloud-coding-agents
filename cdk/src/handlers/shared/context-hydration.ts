@@ -22,7 +22,8 @@ import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-sec
 import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
 import { sanitizeExternalContent } from './sanitization';
-import { isPrTaskType, type TaskRecord, type TaskType } from './types';
+import { type TaskRecord } from './types';
+import { workflowIsReadOnly, workflowUsesPr } from './workflows';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -982,7 +983,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     const memoryId = options?.memoryId ?? process.env.MEMORY_ID;
     const tokenSecretArn = options?.githubTokenSecretArn ?? GITHUB_TOKEN_SECRET_ARN;
 
-    const isPrTask = isPrTaskType(task.task_type as TaskType);
+    const workflowId = task.resolved_workflow?.id ?? 'coding/new-task-v1';
+    const isPrTask = workflowUsesPr(workflowId);
 
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
     const [issueResult, memoryResult, prResult] = await Promise.all([
@@ -1047,8 +1049,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     if (isPrTask) {
       if (!prResult) {
         // PR fetch failed — log error and return minimal context
-        logger.error(`PR context fetch failed for ${task.task_type} task`, {
-          task_id: task.task_id, pr_number: task.pr_number, task_type: task.task_type,
+        logger.error(`PR context fetch failed for ${workflowId} task`, {
+          task_id: task.task_id, pr_number: task.pr_number, resolved_workflow: workflowId,
         });
         const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
         const fallbackSources = task.task_description ? ['task_description'] : [];
@@ -1066,8 +1068,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       // Enforce token budget on the assembled PR prompt
       const budgetResult = enforceTokenBudget(undefined, task.task_description, USER_PROMPT_TOKEN_BUDGET);
       let effectiveTaskDescription = budgetResult.taskDescription;
-      if (!effectiveTaskDescription && task.task_type === 'pr_review') {
-        logger.info('Using default task description for pr_review task', { task_id: task.task_id });
+      if (!effectiveTaskDescription && workflowIsReadOnly(workflowId)) {
+        logger.info('Using default task description for read-only PR task', { task_id: task.task_id });
         effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
       }
       userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, prResult, effectiveTaskDescription);

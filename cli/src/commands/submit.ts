@@ -64,8 +64,13 @@ export function makeSubmitCommand(): Command {
     .option('--task <description>', 'Task description')
     .option('--max-turns <number>', 'Maximum agent turns (1-500)', parseInt)
     .option('--max-budget <dollars>', 'Maximum budget in USD (0.01-100)', parseFloat)
-    .option('--pr <number>', 'PR number to iterate on (sets task_type to pr_iteration)', parseInt)
-    .option('--review-pr <number>', 'PR number to review (sets task_type to pr_review)', parseInt)
+    .option('--pr <number>', 'PR number to iterate on (selects the coding/pr-iteration-v1 workflow)', parseInt)
+    .option('--review-pr <number>', 'PR number to review (selects the coding/pr-review-v1 workflow)', parseInt)
+    .option(
+      '--workflow <id>',
+      'Workflow to run, as <id>[@<constraint>] (e.g. coding/new-task-v1). '
+        + 'Overrides the workflow implied by --pr/--review-pr; omit to let the server resolve a default.',
+    )
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
     .option(
@@ -169,6 +174,20 @@ export function makeSubmitCommand(): Command {
         }
       }
 
+      // Resolve the workflow selector. --pr/--review-pr imply the coding pr_*
+      // workflows; an explicit --workflow overrides. The published mapping
+      // (WORKFLOWS.md §"Replacing task types") is new_task→coding/new-task-v1,
+      // pr_iteration→coding/pr-iteration-v1, pr_review→coding/pr-review-v1.
+      // When none is given, workflow_ref is omitted and the server resolves a
+      // default via the fallback ladder.
+      let workflowRef: string | undefined = opts.workflow;
+      if (workflowRef === undefined && opts.pr !== undefined) {
+        workflowRef = 'coding/pr-iteration-v1';
+      } else if (workflowRef === undefined && opts.reviewPr !== undefined) {
+        workflowRef = 'coding/pr-review-v1';
+      }
+      const prNumber = opts.pr ?? opts.reviewPr;
+
       const client = new ApiClient();
       const body: CreateTaskRequest = {
         repo: opts.repo,
@@ -177,8 +196,8 @@ export function makeSubmitCommand(): Command {
         ...(opts.maxTurns !== undefined && { max_turns: opts.maxTurns }),
         ...(opts.maxBudget !== undefined && { max_budget_usd: opts.maxBudget }),
         // Note: --pr and --review-pr are mutually exclusive (validated above).
-        ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
-        ...(opts.reviewPr !== undefined && { task_type: 'pr_review' as const, pr_number: opts.reviewPr }),
+        ...(workflowRef !== undefined && { workflow_ref: workflowRef }),
+        ...(prNumber !== undefined && { pr_number: prNumber }),
         ...(opts.trace && { trace: true }),
         ...(opts.approvalTimeout !== undefined && { approval_timeout_s: opts.approvalTimeout }),
         ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),

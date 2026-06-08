@@ -26,7 +26,7 @@ describe('format', () => {
     status: 'COMPLETED',
     repo: 'owner/repo',
     issue_number: 42,
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     pr_number: null,
     task_description: 'Fix the bug',
     branch_name: 'bgagent/abc123/fix-the-bug',
@@ -95,21 +95,21 @@ describe('format', () => {
       expect(output).not.toContain('Max Turns:');
     });
 
-    test('shows task_type and pr_number for pr_iteration', () => {
+    test('shows workflow and pr_number for pr_iteration', () => {
       const prTask: TaskDetail = {
         ...task,
-        task_type: 'pr_iteration',
+        resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
         pr_number: 42,
         issue_number: null,
       };
       const output = formatTaskDetail(prTask);
-      expect(output).toContain('Type:        pr_iteration');
+      expect(output).toContain('Workflow:    coding/pr-iteration-v1');
       expect(output).toContain('PR #:        42');
     });
 
-    test('omits task_type line for new_task', () => {
+    test('omits workflow line for the default coding/new-task-v1', () => {
       const output = formatTaskDetail(task);
-      expect(output).not.toContain('Type:');
+      expect(output).not.toContain('Workflow:');
       expect(output).not.toContain('PR #:');
     });
 
@@ -189,7 +189,7 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 1,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -210,7 +210,7 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: 'Fix the login bug',
         branch_name: 'bgagent/abc/fix',
@@ -229,7 +229,7 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 42,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
