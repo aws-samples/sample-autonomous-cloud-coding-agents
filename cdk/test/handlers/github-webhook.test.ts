@@ -195,7 +195,7 @@ describe('github-webhook receiver', () => {
 
   test('rolls back the dedup row when processor invoke fails', async () => {
     ddbSend
-      .mockResolvedValueOnce({})  // PutCommand
+      .mockResolvedValueOnce({}) // PutCommand
       .mockResolvedValueOnce({}); // DeleteCommand cleanup
     lambdaSend.mockRejectedValueOnce(new Error('lambda throttled'));
     const res = await handler(event(deploymentStatusBody()));
