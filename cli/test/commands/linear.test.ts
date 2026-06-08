@@ -390,12 +390,16 @@ describe('queryLinearTeamKeys', () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        data: { teams: { nodes: [
-          { key: 'plat' },
-          { key: 'ABCA' },
-          { key: 'PLAT' }, // dedup case-insensitive
-          { key: 'web' },
-        ] } },
+        data: {
+          teams: {
+            nodes: [
+              { key: 'plat' },
+              { key: 'ABCA' },
+              { key: 'PLAT' }, // dedup case-insensitive
+              { key: 'web' },
+            ],
+          },
+        },
       }),
     }) as unknown as typeof fetch;
 
@@ -415,12 +419,16 @@ describe('queryLinearTeamKeys', () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        data: { teams: { nodes: [
-          { key: 'ABCA' },
-          { key: '' },
-          { key: undefined },
-          {}, // missing key entirely
-        ] } },
+        data: {
+          teams: {
+            nodes: [
+              { key: 'ABCA' },
+              { key: '' },
+              { key: undefined },
+              {}, // missing key entirely
+            ],
+          },
+        },
       }),
     }) as unknown as typeof fetch;
 
