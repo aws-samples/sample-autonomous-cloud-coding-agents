@@ -47,12 +47,13 @@ export type TaskStatusType =
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions
  * - ``linear``: Linear label-triggered submissions
+ * - ``jira``: Jira Cloud label-triggered submissions
  *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
 export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
