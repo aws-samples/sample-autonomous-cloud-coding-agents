@@ -32,6 +32,7 @@ from .models import (
     TerminalOutcomes,
     Workflow,
 )
+from .validator import assert_valid, validate_workflow
 
 __all__ = [
     "AgentConfig",
@@ -44,6 +45,8 @@ __all__ = [
     "TerminalOutcomes",
     "Workflow",
     "WorkflowValidationError",
+    "assert_valid",
     "load_workflow",
     "load_workflow_file",
+    "validate_workflow",
 ]

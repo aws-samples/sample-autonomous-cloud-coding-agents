@@ -1,0 +1,76 @@
+{
+  "name": "rule4-readonly-ensure-pr-create",
+  "description": "read_only workflow with ensure_pr strategy:create.",
+  "workflow": {
+    "id": "coding/pr-review-v1",
+    "version": "1.0.0",
+    "domain": "coding",
+    "description": "Review a pull request and post a review. Read-only.",
+    "requires_repo": true,
+    "read_only": true,
+    "prompt": {
+      "template": "registry://prompt/pr-review-workflow"
+    },
+    "hydration": {
+      "sources": [
+        "pull_request",
+        "memory"
+      ]
+    },
+    "agent_config": {
+      "tier": "read-only",
+      "allowed_tools": [
+        "Bash",
+        "Read",
+        "Glob",
+        "Grep",
+        "WebFetch"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny"
+      ]
+    },
+    "repo_config": {
+      "provider": "github",
+      "discover": true
+    },
+    "required_inputs": {
+      "all_of": [
+        "pr_number"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "clone_repo",
+        "name": "setup"
+      },
+      {
+        "kind": "hydrate_context",
+        "name": "context"
+      },
+      {
+        "kind": "run_agent",
+        "name": "review"
+      },
+      {
+        "kind": "post_review",
+        "name": "post",
+        "on_failure": "fail"
+      },
+      {
+        "kind": "ensure_pr",
+        "strategy": "create"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "pr_url"
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "rule-4"
+    ]
+  }
+}
