@@ -5,13 +5,16 @@ import sys
 import uuid
 from datetime import UTC
 
-from models import AttachmentConfig, TaskConfig, TaskType
+from models import AttachmentConfig, TaskConfig
 from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 
-# Task types that operate on an existing pull request.
-PR_TASK_TYPES = frozenset(("pr_iteration", "pr_review"))
+# The platform default workflow id used when a payload omits resolved_workflow
+# (local/batch runs). Mirrors the create-task boundary's coding default.
+DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
+# First-party workflow ids that operate on an existing pull request.
+PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1"))
 
 
 def resolve_github_token() -> str:
@@ -325,7 +328,7 @@ def build_config(
     dry_run: bool = False,
     task_id: str = "",
     system_prompt_overrides: str = "",
-    task_type: str = "new_task",
+    resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
     channel_source: str = "",
@@ -351,6 +354,14 @@ def build_config(
         "ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6"
     )
 
+    # Resolve the workflow id (the create-task boundary already pinned it; local
+    # batch runs default to the coding workflow). Required-input validation is
+    # owned by the create-task boundary now; the agent re-checks only the
+    # pr_number/issue/description shape needed to run.
+    workflow = resolved_workflow or {"id": DEFAULT_WORKFLOW_ID, "version": "1.0.0"}
+    workflow_id = workflow.get("id", DEFAULT_WORKFLOW_ID)
+    is_pr_workflow = workflow_id in PR_WORKFLOW_IDS
+
     errors = []
     if not resolved_repo_url:
         errors.append("repo_url is required (e.g., 'owner/repo')")
@@ -358,19 +369,25 @@ def build_config(
         errors.append("github_token is required")
     if not resolved_aws_region:
         errors.append("aws_region is required for Bedrock")
-    try:
-        task = TaskType(task_type)
-    except ValueError:
-        errors.append(f"Invalid task_type: '{task_type}'")
-        task = None
-    if task and task.is_pr_task:
+    if is_pr_workflow:
         if not pr_number:
-            errors.append("pr_number is required for pr_iteration/pr_review task type")
-    elif task and not resolved_issue_number and not resolved_task_description:
+            errors.append(f"pr_number is required for the {workflow_id!r} workflow")
+    elif not resolved_issue_number and not resolved_task_description:
         errors.append("Either issue_number or task_description is required")
 
     if errors:
         raise ValueError("; ".join(errors))
+
+    # Derive the Phase-1 Cedar principal from the resolved workflow without
+    # touching Cedar (principal migration is Phase 2a). load_workflow gives the
+    # read_only flag the principal keys off; fall back to id-based mapping when
+    # the file can't be loaded (e.g. a registry-only id in a future phase).
+    from workflow import WorkflowValidationError, load_workflow, policy_principal_for
+
+    try:
+        policy_principal = policy_principal_for(load_workflow(workflow_id))
+    except WorkflowValidationError:
+        policy_principal = "pr_review" if workflow_id == "coding/pr-review-v1" else "new_task"
 
     # Validate attachment descriptors into typed models (Pydantic validation
     # surfaces schema mismatches between the orchestrator and agent early).
@@ -394,7 +411,9 @@ def build_config(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         system_prompt_overrides=system_prompt_overrides,
-        task_type=task_type,
+        resolved_workflow=workflow,
+        policy_principal=policy_principal,
+        is_pr_workflow=is_pr_workflow,
         branch_name=branch_name,
         pr_number=pr_number,
         task_id=task_id or uuid.uuid4().hex[:12],

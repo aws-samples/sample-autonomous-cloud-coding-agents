@@ -10,7 +10,7 @@ from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
 
 
 class TestCedarPoliciesInjection:
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -78,7 +78,7 @@ class TestCedarPoliciesInjection:
         assert captured_config is not None
         assert captured_config.cedar_policies == policies
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -241,7 +241,7 @@ class TestCancelSkipsPostHooks:
     pipeline must skip post-hooks so no PR is pushed on a cancelled task.
     """
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -309,7 +309,7 @@ class TestCancelSkipsPostHooks:
         assert result["status"] == "cancelled"
         assert result["task_id"] == "t-cancelled"
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -383,7 +383,7 @@ class TestTraceThreading:
     with a dedicated test.
     """
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -451,7 +451,7 @@ class TestTraceThreading:
         assert captured_config.trace is True
         assert captured_config.user_id == "cognito-sub-trace-user"
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -514,7 +514,7 @@ class TestTraceThreading:
         assert captured_config is not None
         assert captured_config.trace is False
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -582,7 +582,7 @@ class TestTraceThreading:
         assert captured_config is not None
         assert captured_config.initial_approval_gate_count == 17
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -658,7 +658,7 @@ class TestTraceS3Upload:
     TaskRecord update is atomic with terminal-status."""
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -732,7 +732,7 @@ class TestTraceS3Upload:
         assert terminal_result["trace_s3_uri"] == "s3://b/traces/u-1/t-up.jsonl.gz"
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -792,7 +792,7 @@ class TestTraceS3Upload:
         assert result["trace_s3_uri"] is None
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -863,7 +863,7 @@ class TestTraceS3Upload:
         assert not mock_upload.called
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -930,7 +930,7 @@ class TestTraceS3Upload:
         assert result["trace_s3_uri"] is None
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1008,7 +1008,7 @@ class TestTraceS3Upload:
         assert "trace_s3_uri" not in result
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1101,7 +1101,7 @@ class TestTraceS3Upload:
         assert result["task_id"] == "t-cancelled-trace"
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1187,7 +1187,7 @@ class TestTraceCrashPath:
     pipeline exception."""
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1267,7 +1267,7 @@ class TestTraceCrashPath:
         assert crash_result["trace_s3_uri"] == "s3://b/traces/u-1/t-crash.jsonl.gz"
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")

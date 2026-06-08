@@ -561,13 +561,13 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_ensure_pr(step: Step, ctx: StepContext) -> StepOutcome:
-    """Create / push+resolve / resolve a PR (replaces the ``ensure_pr`` branch).
+    """Create / push+resolve / resolve a PR per the step's ``strategy``.
 
     The provider-neutral intent dispatches through the existing GitHub
-    realization. The ``strategy``→behaviour reconciliation (today ``ensure_pr``
-    still keys off ``config.task_type``) is finalized when ``task_type`` is
-    removed (#248 task 8); the strategy is recorded here so the milestone/data is
-    already workflow-driven.
+    realization. ``ensure_pr`` now takes the strategy explicitly (``create`` |
+    ``push_resolve`` | ``resolve``) instead of self-inspecting the removed
+    ``task_type`` (#248 task 8), so the workflow's declared strategy drives the
+    behavior.
     """
     from post_hooks import ensure_pr
 
@@ -580,14 +580,20 @@ def _handle_ensure_pr(step: Step, ctx: StepContext) -> StepOutcome:
         )
     build_passed = bool(ctx.artifacts.get("build_passed", True))
     lint_passed = bool(ctx.artifacts.get("lint_passed", True))
+    strategy = step.strategy or "create"
     pr_url = ensure_pr(
-        ctx.config, ctx.setup, build_passed, lint_passed, agent_result=ctx.agent_result
+        ctx.config,
+        ctx.setup,
+        build_passed,
+        lint_passed,
+        agent_result=ctx.agent_result,
+        strategy=strategy,
     )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status="succeeded",
-        data={"pr_url": pr_url, "strategy": step.strategy or "create"},
+        data={"pr_url": pr_url, "strategy": strategy},
     )
 
 

@@ -372,7 +372,7 @@ def _run_task_background(
     system_prompt_overrides: str = "",
     prompt_version: str = "",
     memory_id: str = "",
-    task_type: str = "new_task",
+    resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
@@ -456,7 +456,7 @@ def _run_task_background(
             system_prompt_overrides=system_prompt_overrides,
             prompt_version=prompt_version,
             memory_id=memory_id,
-            task_type=task_type,
+            resolved_workflow=resolved_workflow,
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
@@ -510,7 +510,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     hydrated_context = inp.get("hydrated_context")
     prompt_version = inp.get("prompt_version", "")
     memory_id = inp.get("memory_id") or os.environ.get("MEMORY_ID", "")
-    task_type = inp.get("task_type", "new_task")
+    resolved_workflow = inp.get("resolved_workflow")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
@@ -616,7 +616,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "system_prompt_overrides": system_prompt_overrides,
         "prompt_version": prompt_version,
         "memory_id": memory_id,
-        "task_type": task_type,
+        "resolved_workflow": resolved_workflow,
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
@@ -638,18 +638,19 @@ def _validate_required_params(params: dict) -> list[str]:
 
     Returns the list of missing field names (empty list = valid). The
     pipeline requires at minimum a ``repo_url`` and either an
-    ``issue_number`` or ``task_description``; ``pr_iteration`` and
-    ``pr_review`` task_types additionally require ``pr_number``.
+    ``issue_number`` or ``task_description``; PR workflows
+    (``coding/pr-iteration-v1`` / ``coding/pr-review-v1``) additionally require
+    ``pr_number``.
     """
     missing: list[str] = []
     if not params.get("repo_url"):
         missing.append("repo_url")
-    task_type = params.get("task_type") or "new_task"
-    if task_type in ("pr_iteration", "pr_review"):
+    workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
+    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1"):
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:
-        # new_task: need EITHER issue_number or task_description.
+        # Non-PR workflow: need EITHER issue_number or task_description.
         has_issue = bool(params.get("issue_number"))
         has_desc = bool(params.get("task_description"))
         if not (has_issue or has_desc):

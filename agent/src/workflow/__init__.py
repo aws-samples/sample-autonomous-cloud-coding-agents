@@ -20,6 +20,7 @@ from .loader import (
     WorkflowValidationError,
     load_workflow,
     load_workflow_file,
+    policy_principal_for,
 )
 from .models import (
     AgentConfig,
@@ -61,6 +62,7 @@ __all__ = [
     "assert_valid",
     "load_workflow",
     "load_workflow_file",
+    "policy_principal_for",
     "run_workflow",
     "validate_workflow",
 ]

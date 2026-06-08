@@ -222,7 +222,7 @@ def _initialize_policy_engine_and_hooks(
     if config.approval_gate_cap is not None:
         engine_kwargs["approval_gate_cap"] = config.approval_gate_cap
     policy_engine = PolicyEngine(
-        task_type=config.task_type,
+        task_type=config.policy_principal,
         repo=config.repo_url,
         extra_policies=cedar_policies if cedar_policies else None,
         **engine_kwargs,
@@ -248,7 +248,7 @@ def _initialize_policy_engine_and_hooks(
         cap_log = " approval_gate_cap=unset approval_gate_cap_source=engine_default"
     log(
         "AGENT",
-        f"Cedar policy engine initialized for task_type={config.task_type}"
+        f"Cedar policy engine initialized for task_type={config.policy_principal}"
         + (f" with {len(cedar_policies)} extra policies" if cedar_policies else "")
         + cap_log,
     )

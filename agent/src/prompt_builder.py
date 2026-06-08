@@ -10,7 +10,6 @@ from config import AGENT_WORKSPACE
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content as sanitize_memory_content
 from shell import log
-from system_prompt import SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from models import HydratedContext, RepoSetup, TaskConfig
@@ -23,12 +22,8 @@ def build_system_prompt(
     overrides: str,
 ) -> str:
     """Assemble the system prompt with task-specific values and memory context."""
-    task_type = config.task_type
-    try:
-        system_prompt = get_system_prompt(task_type)
-    except ValueError:
-        log("ERROR", f"Unknown task_type {task_type!r} — falling back to default system prompt")
-        system_prompt = SYSTEM_PROMPT
+    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    system_prompt = get_system_prompt(workflow_id)
     system_prompt = system_prompt.replace("{repo_url}", config.repo_url)
     system_prompt = system_prompt.replace("{task_id}", config.task_id)
     system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)

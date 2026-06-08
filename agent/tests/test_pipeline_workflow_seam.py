@@ -1,10 +1,9 @@
-"""Tests for the gated workflow-runner seam in pipeline.run_task (#248 task 5).
+"""Tests for the workflow-runner seam in pipeline._execute_agent_step (#248).
 
-The seam ("build it, gate it off") routes the agentic ``run_agent`` step through
-``workflow.run_workflow`` when ``WORKFLOW_RUNNER_ENABLED`` is set AND the task's
-``task_type`` maps to a shipped workflow; otherwise it is the legacy inline
-``run_agent`` call. These tests pin both branches of ``_execute_agent_step`` and
-the task_type→workflow bridge, without standing up the full pipeline.
+Post-cutover (task 8) the workflow runner is the sole agentic path: the single
+``run_agent`` step is dispatched through ``workflow.run_workflow`` (driven by the
+resolved workflow id), while clone/context/post-hooks stay inline. These tests
+pin that path without standing up the full pipeline.
 """
 
 from __future__ import annotations
@@ -14,16 +13,16 @@ from unittest.mock import patch
 import pytest
 
 from models import AgentResult, RepoSetup, TaskConfig
-from pipeline import _execute_agent_step, _workflow_id_for_task_type
+from pipeline import _execute_agent_step
 
 
-def _config(task_type: str = "new_task") -> TaskConfig:
+def _config(workflow_id: str = "coding/new-task-v1") -> TaskConfig:
     return TaskConfig(
         repo_url="owner/repo",
         github_token="ghp_test",
         aws_region="us-east-1",
         task_id="task-1",
-        task_type=task_type,
+        resolved_workflow={"id": workflow_id, "version": "1.0.0"},
         max_turns=10,
     )
 
@@ -32,58 +31,11 @@ def _setup() -> RepoSetup:
     return RepoSetup(repo_dir="/workspace/repo", branch="bgagent/task-1", default_branch="main")
 
 
-class TestWorkflowIdBridge:
-    def test_new_task_maps_to_coding_workflow(self):
-        assert _workflow_id_for_task_type("new_task") == "coding/new-task-v1"
-
-    @pytest.mark.parametrize("tt", ["pr_iteration", "pr_review", "unknown"])
-    def test_unmigrated_task_types_have_no_workflow_yet(self, tt):
-        assert _workflow_id_for_task_type(tt) is None
-
-
 class TestExecuteAgentStep:
-    def _fake_run_agent(self, result: AgentResult):
-        async def fake(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
-            return result
-
-        return fake
-
-    def test_gate_off_uses_inline_run_agent(self, monkeypatch):
-        # Default (flag unset): legacy inline path. run_workflow is lazily
-        # imported from the workflow package, so patch it there and assert the
-        # gate-off branch never reaches it.
-        monkeypatch.delenv("WORKFLOW_RUNNER_ENABLED", raising=False)
-        expected = AgentResult(status="success", session_id="s1")
-        with (
-            patch("pipeline.run_agent", side_effect=self._fake_run_agent(expected)),
-            patch("workflow.run_workflow") as mock_wf,
-        ):
-            out = _execute_agent_step(
-                "prompt", "sysprompt", _config(), _setup(), None, None, None
-            )
-        assert out is expected
-        mock_wf.assert_not_called()
-
-    def test_gate_on_but_unmigrated_task_type_uses_inline(self, monkeypatch):
-        # Flag on, but pr_review has no workflow yet → still the inline path.
-        monkeypatch.setenv("WORKFLOW_RUNNER_ENABLED", "1")
-        expected = AgentResult(status="success")
-        with (
-            patch("pipeline.run_agent", side_effect=self._fake_run_agent(expected)),
-            patch("workflow.run_workflow") as mock_wf,
-        ):
-            out = _execute_agent_step(
-                "prompt", "sys", _config("pr_review"), _setup(), None, None, None
-            )
-        assert out is expected
-        mock_wf.assert_not_called()
-
-    def test_gate_on_new_task_routes_through_runner(self, monkeypatch):
-        # Flag on + new_task → the run_agent step runs through the workflow
-        # runner, and the agent result is threaded back via ctx.agent_result.
-        # run_agent is lazily imported inside the handler from the top-level
-        # `runner` module, so patch it there.
-        monkeypatch.setenv("WORKFLOW_RUNNER_ENABLED", "true")
+    def test_routes_through_runner_and_threads_result(self):
+        # The run_agent step runs through the workflow runner; the agent result
+        # threads back via ctx.agent_result. run_agent is lazily imported inside
+        # the handler from the top-level `runner` module, so patch it there.
         expected = AgentResult(status="success", session_id="wf-session")
 
         async def fake(_p, _s, _c, cwd=None, trajectory=None):
@@ -95,11 +47,10 @@ class TestExecuteAgentStep:
             )
         assert out is expected
 
-    def test_gate_on_only_runs_agent_step_not_post_hooks(self, monkeypatch):
+    def test_only_runs_agent_step_not_post_hooks(self):
         # The seam restricts the runner to the run_agent step: deterministic
         # post-hook handlers (ensure_pr/verify_build) must NOT fire here — the
-        # inline path owns them. We assert ensure_pr's handler is never invoked.
-        monkeypatch.setenv("WORKFLOW_RUNNER_ENABLED", "1")
+        # inline path owns them.
         expected = AgentResult(status="success")
 
         async def fake(_p, _s, _c, cwd=None, trajectory=None):
@@ -115,14 +66,12 @@ class TestExecuteAgentStep:
         mock_ensure_pr.assert_not_called()
         mock_build.assert_not_called()
 
-    def test_run_agent_failure_reraises_to_preserve_error_contract(self, monkeypatch):
+    def test_run_agent_failure_reraises_to_preserve_error_contract(self):
         # When the run_agent step's handler raises, run_workflow captures it into
         # a failed StepOutcome (does not propagate). _execute_agent_step must
         # RE-RAISE so run_task's `except` block restores full error fidelity
         # (log_error_cw mirror + real text) — not silently downgrade to a generic
-        # AgentResult. We assert the original error text is carried in the raise.
-        monkeypatch.setenv("WORKFLOW_RUNNER_ENABLED", "1")
-
+        # AgentResult. The original error text must be carried in the raise.
         async def boom(_p, _s, _c, cwd=None, trajectory=None):
             raise RuntimeError("SDK session expired")
 

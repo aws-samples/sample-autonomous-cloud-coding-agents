@@ -2,26 +2,9 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-
-class TaskType(StrEnum):
-    """Supported task types."""
-
-    new_task = "new_task"
-    pr_iteration = "pr_iteration"
-    pr_review = "pr_review"
-
-    @property
-    def is_pr_task(self) -> bool:
-        return self in (TaskType.pr_iteration, TaskType.pr_review)
-
-    @property
-    def is_read_only(self) -> bool:
-        return self == TaskType.pr_review
 
 
 class IssueComment(BaseModel):
@@ -137,7 +120,19 @@ class TaskConfig(BaseModel):
     max_turns: int = 10
     max_budget_usd: float | None = None
     system_prompt_overrides: str = ""
-    task_type: str = "new_task"
+    # The pinned workflow this task runs ({"id", "version"}), resolved at the
+    # create-task boundary and threaded through the payload (#248). None on
+    # local/batch runs, where the pipeline defaults to coding/new-task-v1.
+    resolved_workflow: dict | None = None
+    # The Cedar principal identity derived from the resolved workflow
+    # (read_only ⇒ "pr_review", else id→legacy map, else "new_task"). Keeps the
+    # existing Agent::TaskAgent::"<id>" principal scheme working in Phase 1
+    # without a Cedar change — the principal migration is Phase 2a.
+    policy_principal: str = "new_task"
+    # True when the resolved workflow operates on an existing PR (pr_* coding
+    # workflows) — gates the "resume existing branch / resolve PR" behavior that
+    # the removed task_type used to signal.
+    is_pr_workflow: bool = False
     branch_name: str = ""
     pr_number: str = ""
     task_id: str = ""

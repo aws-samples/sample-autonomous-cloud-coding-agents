@@ -113,6 +113,31 @@ def _ref_to_path(workflow_id: str) -> Path:
     return _WORKFLOWS_ROOT.joinpath(f"{workflow_id}.yaml")
 
 
+# Maps a first-party workflow id to the legacy Cedar principal identity. Keeps
+# the existing Agent::TaskAgent::"<id>" principal scheme matching in Phase 1
+# without touching Cedar (the principal migration is Phase 2a). A read_only
+# workflow always maps to "pr_review" so the existing read-only hard-deny rules
+# (keyed on the literal "pr_review") keep firing for any read-only workflow.
+_PRINCIPAL_BY_ID = {
+    "coding/new-task-v1": "new_task",
+    "coding/pr-iteration-v1": "pr_iteration",
+    "coding/pr-review-v1": "pr_review",
+}
+
+
+def policy_principal_for(workflow: Workflow) -> str:
+    """Derive the Phase-1 Cedar principal identity for a resolved workflow.
+
+    See ``_PRINCIPAL_BY_ID``. Read-only workflows map to ``"pr_review"``
+    (the read-only principal the Phase-1 Cedar policy knows); everything else
+    maps by id, defaulting to ``"new_task"`` (the writeable default — hard/soft
+    deny still apply).
+    """
+    if workflow.read_only:
+        return "pr_review"
+    return _PRINCIPAL_BY_ID.get(workflow.id, "new_task")
+
+
 def load_workflow(workflow_id: str) -> Workflow:
     """Resolve a first-party workflow id to its parsed ``Workflow``.
 

@@ -28,7 +28,6 @@ from post_hooks import (
 )
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
-from runner import run_agent
 from shell import log, log_error_cw
 from system_prompt import SYSTEM_PROMPT
 from telemetry import (
@@ -146,27 +145,6 @@ def _maybe_upload_trace(
     return trace_s3_uri
 
 
-def _workflow_id_for_task_type(task_type: str) -> str | None:
-    """Map the legacy ``task_type`` to its Phase-1 workflow id, if one ships.
-
-    Only ``new_task`` has a first-party workflow file in Phase 1
-    (``coding/new-task-v1``); ``pr_iteration``/``pr_review`` are migrated in
-    Phase 2b (they depend on the Cedar principal migration). Returns ``None``
-    when no workflow exists yet, so the caller falls back to the inline path.
-
-    This bridge exists only while the seam is gated; tasks 6-8 replace it with a
-    real ``resolved_workflow`` threaded from the create-task boundary, at which
-    point this dict is deleted. The canonical one-to-one ``task_type → workflow``
-    mapping is published in ``docs/design/WORKFLOWS.md`` §"Replacing task types"
-    (and API_CONTRACT.md): ``new_task → coding/new-task-v1``,
-    ``pr_iteration → coding/pr-iteration-v1``, ``pr_review → coding/pr-review-v1``.
-    Only ``new_task`` is wired here because its workflow file ships in Phase 1;
-    the other two land in Phase 2b. Keep this in sync with that table until the
-    cutover removes it.
-    """
-    return {"new_task": "coding/new-task-v1"}.get(task_type)
-
-
 def _execute_agent_step(
     prompt: str,
     system_prompt: str,
@@ -176,32 +154,21 @@ def _execute_agent_step(
     trajectory,
     progress,
 ):
-    """Run the agentic step, optionally via the workflow step runner.
+    """Run the agentic step through the workflow step runner.
 
-    The workflow runner is wired in behind the ``WORKFLOW_RUNNER_ENABLED`` gate
-    (#248 task 5, "build the seam, gate it off"): when the flag is set AND the
-    task's ``task_type`` maps to a shipped workflow, the single ``run_agent``
-    step is dispatched through ``workflow.run_workflow`` — exercising the real
-    handler registry, step milestones, and result threading — while clone,
-    context assembly, and post-hooks stay on the proven inline path. When the
-    flag is unset (default) or no workflow exists yet, this is exactly the legacy
-    ``asyncio.run(run_agent(...))`` call. Default production behavior is
-    unchanged until the task 6-8 cutover flips the default.
+    Post-cutover (#248 task 8), the workflow runner is the sole path: the single
+    ``run_agent`` step is dispatched through ``workflow.run_workflow`` —
+    exercising the real handler registry, step milestones, and result threading —
+    while clone, context assembly, and post-hooks stay inline (moving the full
+    step list onto the runner is a follow-up). The workflow is loaded from the
+    resolved ``{id, version}`` pinned at the create-task boundary.
 
-    Returns the ``AgentResult`` either way, so the surrounding pipeline (cancel
-    short-circuit, post-hooks, result assembly) is identical for both paths.
+    Returns the ``AgentResult`` so the surrounding pipeline (cancel short-circuit,
+    post-hooks, result assembly) is unchanged.
     """
-    enabled = os.environ.get("WORKFLOW_RUNNER_ENABLED", "").lower() in ("1", "true", "yes")
-    workflow_id = _workflow_id_for_task_type(config.task_type) if enabled else None
-
-    if not workflow_id:
-        return asyncio.run(
-            run_agent(prompt, system_prompt, config, cwd=setup.repo_dir, trajectory=trajectory)
-        )
-
     from workflow import StepContext, load_workflow, run_workflow
 
-    log("TASK", f"Workflow runner enabled — executing via workflow {workflow_id!r}")
+    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
     wf = load_workflow(workflow_id)
     ctx = StepContext(
         workflow=wf,
@@ -217,10 +184,10 @@ def _execute_agent_step(
         system_prompt=system_prompt,
         user_prompt=prompt,
     )
-    # Phase-1 seam: drive only the agentic step through the runner; clone,
-    # context assembly, and post-hooks stay on the inline path (tasks 6-8 move
-    # the full step list over). only_kinds keeps the runner from re-running the
-    # deterministic steps the pipeline already owns (double clone / double PR).
+    # Drive only the agentic step through the runner; clone, context assembly,
+    # and post-hooks stay on the inline path. only_kinds keeps the runner from
+    # re-running the deterministic steps the pipeline already owns (double clone
+    # / double PR).
     result = run_workflow(wf, ctx, only_kinds={"run_agent"})
 
     if ctx.agent_result is None:
@@ -228,10 +195,7 @@ def _execute_agent_step(
         # (run_workflow's _run_handler captures the exception into a failed
         # StepOutcome instead of propagating it). Re-raise here so run_task's
         # `except Exception` handles it with full fidelity: the log_error_cw
-        # APPLICATION_LOGS mirror, the span error, and the real error text — the
-        # exact behavior the legacy inline ``asyncio.run(run_agent(...))`` had.
-        # Without this, a fatal agent error would be silently downgraded to a
-        # generic placeholder (code-review finding).
+        # APPLICATION_LOGS mirror, the span error, and the real error text.
         detail = (
             result.failed_step.error
             if result.failed_step and result.failed_step.error
@@ -361,7 +325,7 @@ def run_task(
     system_prompt_overrides: str = "",
     prompt_version: str = "",
     memory_id: str = "",
-    task_type: str = "new_task",
+    resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
@@ -401,7 +365,7 @@ def run_task(
         aws_region=aws_region,
         task_id=task_id,
         system_prompt_overrides=system_prompt_overrides,
-        task_type=task_type,
+        resolved_workflow=resolved_workflow,
         branch_name=branch_name,
         pr_number=pr_number,
         channel_source=channel_source,
@@ -718,19 +682,35 @@ def run_task(
                     "turns_attempted": agent_result.num_turns or agent_result.turns,
                 }
 
+            # Resolve the workflow once for post-hook gating: read_only (replaces
+            # the former task_type=='pr_review' checks) and the ensure_pr
+            # strategy (create / push_resolve / resolve) the workflow declares.
+            from workflow import load_workflow
+
+            _workflow = load_workflow(
+                (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+            )
+            workflow_read_only = _workflow.read_only
+            ensure_pr_strategy = next(
+                (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
+                "create",
+            )
+
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
                 # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)
-                if config.task_type == "pr_review":
-                    safety_committed = False
-                else:
-                    safety_committed = ensure_committed(setup.repo_dir)
+                safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
                 build_passed = verify_build(setup.repo_dir)
                 lint_passed = verify_lint(setup.repo_dir)
                 pr_url = ensure_pr(
-                    config, setup, build_passed, lint_passed, agent_result=agent_result
+                    config,
+                    setup,
+                    build_passed,
+                    lint_passed,
+                    agent_result=agent_result,
+                    strategy=ensure_pr_strategy,
                 )
                 post_span.set_attribute("build.passed", build_passed)
                 post_span.set_attribute("lint.passed", lint_passed)
@@ -763,13 +743,13 @@ def run_task(
             # Default True = assume build was green before, so a post-agent
             # failure IS counted as a regression (conservative).
             build_before = setup.build_before
-            if config.task_type == "pr_review":
-                build_ok = True  # Review task — build status is informational only
+            if workflow_read_only:
+                build_ok = True  # Read-only review — build status is informational only
                 if not build_passed:
-                    log("INFO", "pr_review: build failed — informational only, not gating")
+                    log("INFO", "read-only workflow: build failed — informational only, not gating")
             else:
                 build_ok = build_passed or not build_before
-            if not build_passed and not build_before and config.task_type != "pr_review":
+            if not build_passed and not build_before and not workflow_read_only:
                 log(
                     "WARN",
                     "Post-agent build failed, but build was already failing before "

@@ -813,13 +813,11 @@ class PolicyEngine:
         # IMPL-26: ``approval_ceiling_shrinking`` is emit-once per task.
         self._emitted_ceiling_shrinking: bool = False
 
-        # Validate task_type (non-fatal WARN to match Phase 1 behavior).
-        from models import TaskType
-
-        try:
-            TaskType(task_type)
-        except ValueError:
-            log("WARN", f"Unknown task_type '{task_type}' — using default deny-list policies")
+        # ``task_type`` here is the workflow-derived Cedar principal identity
+        # (config.policy_principal): new_task / pr_iteration / pr_review. The
+        # principal scheme is unchanged in Phase 1 (#248) — only its source moved
+        # from the removed TaskType enum to the resolved workflow. The principal
+        # migration to Agent::Workflow is Phase 2a.
 
         # Import cedarpy lazily so the module still loads in environments
         # without the native extension (tests can monkey-patch).
