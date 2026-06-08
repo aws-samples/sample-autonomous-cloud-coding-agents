@@ -21,24 +21,16 @@ import re
 from typing import Any
 
 from .loader import WorkflowValidationError, validate_shape
+from .runner import STEP_HANDLERS
 
 # --- rule support data -------------------------------------------------------
 
-# Steps the runner has a handler for (rule 8). Mirrors the StepKind enum in the
-# schema; kept here so "kind has a registered handler" is a real check, not a
-# tautology against the schema enum.
-_HANDLER_KINDS = frozenset(
-    {
-        "clone_repo",
-        "hydrate_context",
-        "run_agent",
-        "verify_build",
-        "verify_lint",
-        "ensure_pr",
-        "post_review",
-        "deliver_artifact",
-    }
-)
+# Steps the runner has a handler for (rule 8). Derived from the runner's
+# STEP_HANDLERS registry — the single source of truth for "kind has a registered
+# handler" — rather than a hand-maintained copy that could silently drift from
+# the registry it is supposed to mirror. (Importing runner here is cycle-free:
+# runner imports only shell/models, never the validator.)
+_HANDLER_KINDS = frozenset(STEP_HANDLERS)
 
 # Steps that produce an external side effect — may not be marked on_failure:
 # continue (rule 12), and used by the repo-less shape check (rule 3).
@@ -72,13 +64,29 @@ _INPUT_TO_SOURCE = {
 }
 
 # Maps a terminal outcome to the step kind that must be present to produce it
-# (rule 11). `comment` and `artifact` are both produced by deliver_artifact.
+# (rule 11). `comment` and `artifact` are both produced by deliver_artifact —
+# but by *different* targets, so the kind-presence check is refined by
+# _DELIVER_TARGET_OUTCOMES below.
 _OUTCOME_REQUIRES_STEP = {
     "pr_url": "ensure_pr",
     "review_posted": "post_review",
     "artifact": "deliver_artifact",
     "comment": "deliver_artifact",
 }
+
+# Which terminal outcomes each deliver_artifact ``target`` actually produces
+# (rule 11). A `target: s3` step delivers an artifact but posts no comment, so a
+# workflow declaring `primary: comment` with only an s3 target would never
+# produce its declared outcome. A `deliver_artifact` step with no explicit
+# target is treated as satisfying either outcome (the runtime default is an open
+# question — WORKFLOWS.md open question #2 — so this stays lenient rather than
+# flag a false positive on an unset field).
+_DELIVER_TARGET_OUTCOMES = {
+    "s3": frozenset({"artifact"}),
+    "comment": frozenset({"comment"}),
+    "s3_and_comment": frozenset({"artifact", "comment"}),
+}
+_DELIVER_OUTCOMES = frozenset({"artifact", "comment"})
 
 
 def _resolved_requires_repo(data: dict[str, Any]) -> bool:
@@ -182,7 +190,14 @@ def _rule_5_policy_floor(data: dict[str, Any]) -> list[str]:
 
 
 def _rule_6_tier_ceiling(data: dict[str, Any]) -> list[str]:
-    """Declared reach may not exceed the declared tier."""
+    """Declared reach may not exceed the declared tier.
+
+    Tier ordering is ``read-only < standard < elevated``. Extended reach
+    (``mcp_servers``/``plugins``/``skills``) requires ``elevated``, so *any*
+    sub-elevated tier declaring it exceeds its ceiling — not just ``standard``.
+    Guarding only ``standard`` would let the strictest tier (``read-only``)
+    declare extended reach unchecked.
+    """
     ac = data.get("agent_config", {})
     tier = ac.get("tier")
     msgs = []
@@ -191,11 +206,11 @@ def _rule_6_tier_ceiling(data: dict[str, Any]) -> list[str]:
         bad = sorted(tools & _MUTATING_TOOLS)
         if bad:
             msgs.append(f"read-only tier may not grant mutating tools: {bad}")
-    if tier == "standard":
+    if tier in ("standard", "read-only"):
         for field in _ELEVATED_ONLY_FIELDS:
             if ac.get(field):
                 msgs.append(
-                    f"standard tier may not declare {field} (extended reach requires "
+                    f"{tier} tier may not declare {field} (extended reach requires "
                     "tier: elevated)"
                 )
     return msgs
@@ -266,11 +281,38 @@ def _rule_9_required_inputs_satisfiable(data: dict[str, Any]) -> list[str]:
 
 
 def _rule_11_outcome_step_consistency(data: dict[str, Any]) -> list[str]:
-    """terminal_outcomes.primary must be backed by a step that produces it."""
+    """terminal_outcomes.primary must be backed by a step that produces it.
+
+    Beyond the step *kind* being present, a ``deliver_artifact``-backed outcome
+    (``comment`` / ``artifact``) must have at least one ``deliver_artifact`` step
+    whose ``target`` actually produces that outcome — otherwise a workflow could
+    declare ``primary: comment`` while delivering only to ``s3`` and never post
+    the comment it claims as its terminal product.
+    """
     primary = data.get("terminal_outcomes", {}).get("primary")
     need = _OUTCOME_REQUIRES_STEP.get(primary)
-    if need and need not in _step_kinds(data):
+    if not need:
+        return []
+    if need not in _step_kinds(data):
         return [f"terminal outcome {primary!r} requires a {need} step, none present"]
+    if primary in _DELIVER_OUTCOMES:
+        deliver_steps = [
+            s
+            for s in data.get("steps", [])
+            if isinstance(s, dict) and s.get("kind") == "deliver_artifact"
+        ]
+
+        def _produces(step: dict[str, Any]) -> bool:
+            target = step.get("target")
+            if target is None:
+                return True  # unset target stays lenient (see _DELIVER_TARGET_OUTCOMES)
+            return primary in _DELIVER_TARGET_OUTCOMES.get(target, frozenset())
+
+        if not any(_produces(s) for s in deliver_steps):
+            return [
+                f"terminal outcome {primary!r} requires a deliver_artifact step whose "
+                f"target produces it; none of the declared targets do"
+            ]
     return []
 
 

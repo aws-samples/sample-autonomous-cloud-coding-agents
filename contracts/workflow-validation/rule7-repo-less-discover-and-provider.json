@@ -50,7 +50,7 @@
       },
       {
         "kind": "deliver_artifact",
-        "target": "comment"
+        "target": "s3_and_comment"
       }
     ],
     "terminal_outcomes": {

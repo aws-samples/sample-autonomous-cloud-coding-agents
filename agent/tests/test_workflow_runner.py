@@ -199,14 +199,53 @@ def test_milestone_uses_kind_when_name_absent():
 
 
 class TestCheckpointResume:
-    def test_completed_deterministic_step_skipped_on_resume(self, tmp_path: Path):
+    def test_completed_verify_step_skipped_on_resume(self, tmp_path: Path):
+        # Only steps whose ENTIRE product is in the checkpoint data (and re-applied
+        # via ctx.artifacts) are skippable — verify_build/verify_lint qualify.
+        wf = _workflow(
+            [
+                {"kind": "verify_build", "name": "build"},
+                {"kind": "run_agent", "name": "implement"},
+            ]
+        )
+        cp = WorkflowCheckpoint("task-1", state_dir=tmp_path)
+        calls: list[str] = []
+
+        def build(step, ctx):
+            calls.append("build")
+            return StepOutcome(
+                kind=step.kind, name=_step_key(step), status="succeeded",
+                data={"build_passed": True},
+            )
+
+        def agent(step, ctx):
+            calls.append("agent")
+            return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
+
+        handlers = {"verify_build": build, "run_agent": agent}
+        run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp)
+        assert calls == ["build", "agent"]
+
+        # Resume: a fresh checkpoint object over the same dir sees the prior run.
+        calls.clear()
+        cp2 = WorkflowCheckpoint("task-1", state_dir=tmp_path)
+        result = run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp2)
+        # verify_build is skipped; run_agent re-runs. The skipped step's product
+        # (build_passed) is still re-applied to artifacts via ctx.record(prior).
+        assert calls == ["agent"]
+        assert result.artifacts["build_passed"] is True
+
+    def test_clone_repo_not_skipped_on_resume(self, tmp_path: Path):
+        # clone_repo populates an in-memory product (ctx.setup) that can't be
+        # rebuilt from the JSON checkpoint, so it must re-run (handler-level
+        # idempotency), never be skipped — else ctx.setup would stay None and
+        # break downstream steps.
         wf = _workflow(
             [
                 {"kind": "clone_repo", "name": "setup"},
                 {"kind": "run_agent", "name": "implement"},
             ]
         )
-        cp = WorkflowCheckpoint("task-1", state_dir=tmp_path)
         calls: list[str] = []
 
         def clone(step, ctx):
@@ -218,15 +257,16 @@ class TestCheckpointResume:
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
         handlers = {"clone_repo": clone, "run_agent": agent}
-        run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp)
-        assert calls == ["clone", "agent"]
-
-        # Resume: a fresh checkpoint object over the same dir sees the prior run.
+        run_workflow(
+            wf, _ctx(wf), handlers=handlers,
+            checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
+        )
         calls.clear()
-        cp2 = WorkflowCheckpoint("task-1", state_dir=tmp_path)
-        run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp2)
-        # clone_repo is deterministic+side-effect-free → skipped; run_agent re-runs.
-        assert calls == ["agent"]
+        run_workflow(
+            wf, _ctx(wf), handlers=handlers,
+            checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
+        )
+        assert calls == ["clone", "agent"]  # clone re-runs, not skipped
 
     def test_run_agent_not_skipped_on_resume(self, tmp_path: Path):
         # Agentic/side-effecting steps re-run (idempotently) — never skipped by key.
@@ -284,6 +324,31 @@ class TestCheckpointResume:
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
         assert calls == ["build"]  # prior outcome was failed → re-run
+
+    def test_skipped_step_emits_boundary_milestones(self, tmp_path: Path):
+        # A resumed run must still account for the skipped step in milestones, so
+        # a watcher sees it rather than a gap.
+        wf = _workflow(
+            [
+                {"kind": "verify_build", "name": "build"},
+                {"kind": "run_agent", "name": "implement"},
+            ]
+        )
+        handlers = {
+            "verify_build": _ok({"build_passed": True}),
+            "run_agent": _ok(),
+        }
+        run_workflow(
+            wf, _ctx(wf), handlers=handlers,
+            checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
+        )
+        progress = _RecordingProgress()
+        run_workflow(
+            wf, _ctx(wf, progress), handlers=handlers,
+            checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
+        )
+        assert "step:build:start" in progress.milestones
+        assert "step:build:skipped" in progress.milestones
 
     def test_checkpoint_file_written_to_state_dir(self, tmp_path: Path):
         wf = _workflow([{"kind": "clone_repo", "name": "setup"}])

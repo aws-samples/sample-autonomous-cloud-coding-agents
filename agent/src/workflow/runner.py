@@ -170,13 +170,25 @@ class StepContext:
 _WORKFLOW_STATE_DIR = os.environ.get("WORKFLOW_STATE_DIR", "/mnt/workspace")
 _WORKFLOW_STATE_FILE = "workflow_state.json"
 
-# Side-effecting / agentic steps are NOT skipped on resume by key alone — they
+# Steps a resumed run may skip wholesale. The bar is deliberately narrow: a step
+# is only skippable if its *entire* product is captured in the checkpoint
+# ``data`` and re-applied to the context by ``ctx.record`` (which merges ``data``
+# into ``ctx.artifacts``). ``verify_build``/``verify_lint`` qualify — their whole
+# product is the ``build_passed``/``lint_passed`` boolean that ``ensure_pr`` later
+# reads from ``ctx.artifacts``.
+#
+# ``clone_repo`` and ``hydrate_context`` are deliberately NOT here even though
+# they are deterministic: they populate in-memory products (``ctx.setup``,
+# ``ctx.user_prompt``) that later steps read directly and that cannot be
+# reconstructed from the JSON checkpoint. Skipping them would leave ``ctx.setup``
+# None (breaking ``ensure_pr``) and ``ctx.user_prompt`` empty (an unguided agent
+# loop). They re-run on resume instead, relying on handler-level idempotency
+# (``setup_repo`` tolerating an already-populated workspace — WORKFLOWS.md §"Step
+# execution semantics"). Side-effecting / agentic steps (``run_agent``,
+# ``ensure_pr``, ``post_review``, ``deliver_artifact``) also always re-run: they
 # carry their own idempotency keys (PR branch, review id, artifact S3 key) and
 # the agent loop resumes via its persisted SDK session UUID, not from turn 0.
-# Only deterministic, side-effect-free steps are safe to skip wholesale.
-_RESUMABLE_SKIP_KINDS = frozenset(
-    {"clone_repo", "hydrate_context", "verify_build", "verify_lint"}
-)
+_RESUMABLE_SKIP_KINDS = frozenset({"verify_build", "verify_lint"})
 
 
 class WorkflowCheckpoint:
@@ -282,7 +294,11 @@ def run_workflow(
             prior = completed[key]
             if prior.succeeded:
                 log("WORKFLOW", f"step {key!r} already completed — skipping (resume)")
+                # Emit the boundary milestones even when skipping so a watcher
+                # ('bgagent watch') sees the step accounted for rather than a gap.
+                _milestone(ctx, f"step:{key}:start")
                 ctx.record(prior)
+                _milestone(ctx, f"step:{key}:skipped")
                 continue
 
         _milestone(ctx, f"step:{key}:start")

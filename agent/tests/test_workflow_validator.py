@@ -143,6 +143,24 @@ class TestIndividualRules:
         w["agent_config"]["mcp_servers"] = ["builtin/linear"]
         assert "rule-6" not in validate_workflow(w)
 
+    def test_rule6_read_only_tier_rejects_elevated_fields(self):
+        # read-only is BELOW standard; it must not declare extended reach either.
+        w = _base()
+        w["read_only"] = True
+        w["agent_config"]["tier"] = "read-only"
+        w["agent_config"]["allowed_tools"] = ["Bash", "Read"]
+        w["agent_config"]["cedar_policy_modules"] = ["builtin/hard_deny"]
+        w["agent_config"]["skills"] = ["registry://skill/x-v1"]
+        w["steps"] = [
+            {"kind": "clone_repo"},
+            {"kind": "hydrate_context"},
+            {"kind": "run_agent"},
+            {"kind": "post_review"},
+        ]
+        w["terminal_outcomes"] = {"primary": "review_posted"}
+        w["required_inputs"] = {"all_of": ["task_description"]}
+        assert "rule-6" in validate_workflow(w)
+
     @pytest.mark.parametrize(
         "ref,bad",
         [
@@ -165,6 +183,38 @@ class TestIndividualRules:
     def test_rule11_outcome_requires_step(self):
         w = _base()
         w["terminal_outcomes"] = {"primary": "artifact"}  # no deliver_artifact
+        assert "rule-11" in validate_workflow(w)
+
+    def _repo_less_deliver(self, target: str, primary: str) -> dict:
+        """A repo-less workflow ending in one deliver_artifact step."""
+        w = _base()
+        w["id"] = "knowledge/x-v1"
+        w["domain"] = "knowledge"
+        del w["requires_repo"]
+        w["repo_config"] = {"discover": False}
+        w["hydration"] = {"sources": ["task_description"]}
+        w["required_inputs"] = {"all_of": ["task_description"]}
+        w["steps"] = [
+            {"kind": "hydrate_context"},
+            {"kind": "run_agent"},
+            {"kind": "deliver_artifact", "target": target},
+        ]
+        w["terminal_outcomes"] = {"primary": primary}
+        return w
+
+    def test_rule11_comment_outcome_s3_only_target_flagged(self):
+        # primary=comment but the deliver step only targets s3 → never posts a comment.
+        w = self._repo_less_deliver(target="s3", primary="comment")
+        assert "rule-11" in validate_workflow(w)
+
+    @pytest.mark.parametrize("target", ["comment", "s3_and_comment"])
+    def test_rule11_comment_outcome_satisfied_by_matching_target(self, target):
+        w = self._repo_less_deliver(target=target, primary="comment")
+        assert "rule-11" not in validate_workflow(w)
+
+    def test_rule11_artifact_outcome_comment_only_target_flagged(self):
+        # primary=artifact but the deliver step only posts a comment → no artifact.
+        w = self._repo_less_deliver(target="comment", primary="artifact")
         assert "rule-11" in validate_workflow(w)
 
     def test_rule12_side_effect_continue(self):
