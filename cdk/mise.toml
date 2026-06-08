@@ -58,6 +58,14 @@ run = "npx cdk destroy"
 description = "cdk diff"
 run = "npx cdk diff"
 
+[tasks.integ]
+description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for account 465528542731."
+depends = [":compile"]
+run = [
+  "mkdir -p $TMPDIR",
+  "npx integ-runner --language typescript --directory test/integ --update-on-failed --force",
+]
+
 [tasks.bundle]
 description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"
 run = "node -e \"process.exit(0)\""

@@ -129,6 +129,8 @@ Progressive build-out:
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
+> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. It runs nightly and on `workflow_dispatch` (`.github/workflows/integ.yml`), never on the per-PR path, so it stays out of the merge gate while still exercising real AWS. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
+
 ### Enforcement model
 
 | Event | Required tier | Enforcement |
