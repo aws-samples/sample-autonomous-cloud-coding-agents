@@ -32,9 +32,18 @@ from .models import (
     TerminalOutcomes,
     Workflow,
 )
+from .runner import (
+    STEP_HANDLERS,
+    StepContext,
+    StepOutcome,
+    WorkflowCheckpoint,
+    WorkflowResult,
+    run_workflow,
+)
 from .validator import assert_valid, validate_workflow
 
 __all__ = [
+    "STEP_HANDLERS",
     "AgentConfig",
     "Hydration",
     "Limits",
@@ -42,11 +51,16 @@ __all__ = [
     "PromotionGate",
     "RepoConfig",
     "Step",
+    "StepContext",
+    "StepOutcome",
     "TerminalOutcomes",
     "Workflow",
+    "WorkflowCheckpoint",
+    "WorkflowResult",
     "WorkflowValidationError",
     "assert_valid",
     "load_workflow",
     "load_workflow_file",
+    "run_workflow",
     "validate_workflow",
 ]
