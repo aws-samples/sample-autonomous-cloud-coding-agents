@@ -378,16 +378,20 @@ def build_config(
     if errors:
         raise ValueError("; ".join(errors))
 
-    # Derive the Phase-1 Cedar principal from the resolved workflow without
-    # touching Cedar (principal migration is Phase 2a). load_workflow gives the
-    # read_only flag the principal keys off; fall back to id-based mapping when
-    # the file can't be loaded (e.g. a registry-only id in a future phase).
+    # Derive the Cedar principal + read_only flag from the resolved workflow.
+    # The principal keeps the legacy Agent::TaskAgent::"<id>" scheme; read-only
+    # enforcement keys off ``read_only`` in the Cedar request context (#248
+    # Phase 2a), not the principal. Fall back to id-based mapping when the file
+    # can't be loaded (e.g. a registry-only id in a future phase).
     from workflow import WorkflowValidationError, load_workflow, policy_principal_for
 
     try:
-        policy_principal = policy_principal_for(load_workflow(workflow_id))
+        workflow_obj = load_workflow(workflow_id)
+        policy_principal = policy_principal_for(workflow_obj)
+        workflow_read_only = workflow_obj.read_only
     except WorkflowValidationError:
         policy_principal = "pr_review" if workflow_id == "coding/pr-review-v1" else "new_task"
+        workflow_read_only = workflow_id == "coding/pr-review-v1"
 
     # Validate attachment descriptors into typed models (Pydantic validation
     # surfaces schema mismatches between the orchestrator and agent early).
@@ -413,6 +417,7 @@ def build_config(
         system_prompt_overrides=system_prompt_overrides,
         resolved_workflow=workflow,
         policy_principal=policy_principal,
+        read_only=workflow_read_only,
         is_pr_workflow=is_pr_workflow,
         branch_name=branch_name,
         pr_number=pr_number,

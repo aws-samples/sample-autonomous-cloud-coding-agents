@@ -53,7 +53,10 @@ class TestWorkflowResolution:
                 resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             )
 
-    def test_pr_review_workflow_maps_to_read_only_principal(self):
+    def test_pr_review_workflow_is_read_only_with_pr_review_principal(self):
+        # #248 Phase 2a: pr-review keeps its "pr_review" identity principal, but
+        # read-only enforcement now rides config.read_only (→ context.read_only),
+        # not the principal literal.
         config = build_config(
             repo_url="owner/repo",
             github_token="ghp_test123",
@@ -63,6 +66,7 @@ class TestWorkflowResolution:
         )
         assert config.is_pr_workflow is True
         assert config.policy_principal == "pr_review"
+        assert config.read_only is True
 
     def test_pr_iteration_workflow_maps_to_pr_iteration_principal(self):
         config = build_config(
@@ -73,6 +77,9 @@ class TestWorkflowResolution:
             pr_number="42",
         )
         assert config.policy_principal == "pr_iteration"
+        # pr_iteration is a writeable workflow — must NOT be read-only (else the
+        # context.read_only hard-deny would wrongly block its Write/Edit).
+        assert config.read_only is False
 
 
 class TestBuildConfig:

@@ -113,11 +113,13 @@ def _ref_to_path(workflow_id: str) -> Path:
     return _WORKFLOWS_ROOT.joinpath(f"{workflow_id}.yaml")
 
 
-# Maps a first-party workflow id to the legacy Cedar principal identity. Keeps
-# the existing Agent::TaskAgent::"<id>" principal scheme matching in Phase 1
-# without touching Cedar (the principal migration is Phase 2a). A read_only
-# workflow always maps to "pr_review" so the existing read-only hard-deny rules
-# (keyed on the literal "pr_review") keep firing for any read-only workflow.
+# Maps a first-party workflow id to the legacy Cedar principal identity, keeping
+# the existing Agent::TaskAgent::"<id>" principal scheme. Read-only enforcement
+# no longer rides this principal: since #248 Phase 2a it keys off the
+# ``read_only`` context attribute, so the principal is just an audit/identity
+# tag and a read-only workflow keeps its own id-derived principal (the bridge
+# that forced every read-only workflow onto "pr_review" is gone — see ADR-014
+# addendum 2026-06-08).
 _PRINCIPAL_BY_ID = {
     "coding/new-task-v1": "new_task",
     "coding/pr-iteration-v1": "pr_iteration",
@@ -126,15 +128,14 @@ _PRINCIPAL_BY_ID = {
 
 
 def policy_principal_for(workflow: Workflow) -> str:
-    """Derive the Phase-1 Cedar principal identity for a resolved workflow.
+    """Derive the Cedar principal identity for a resolved workflow.
 
-    See ``_PRINCIPAL_BY_ID``. Read-only workflows map to ``"pr_review"``
-    (the read-only principal the Phase-1 Cedar policy knows); everything else
-    maps by id, defaulting to ``"new_task"`` (the writeable default — hard/soft
-    deny still apply).
+    Maps by id (see ``_PRINCIPAL_BY_ID``), defaulting to ``"new_task"``. This is
+    an identity/audit tag only — read-only enforcement is driven by
+    ``context.read_only`` in the Cedar request (#248 Phase 2a), not by this
+    principal, so hard/soft deny apply regardless of which principal a workflow
+    resolves to.
     """
-    if workflow.read_only:
-        return "pr_review"
     return _PRINCIPAL_BY_ID.get(workflow.id, "new_task")
 
 

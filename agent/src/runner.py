@@ -224,6 +224,7 @@ def _initialize_policy_engine_and_hooks(
     policy_engine = PolicyEngine(
         task_type=config.policy_principal,
         repo=config.repo_url,
+        read_only=config.read_only,
         extra_policies=cedar_policies if cedar_policies else None,
         **engine_kwargs,
     )

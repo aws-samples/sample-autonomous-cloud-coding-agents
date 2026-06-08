@@ -54,35 +54,52 @@ class TestNewTaskPermissions:
         assert result.allowed is True
 
 
-class TestPrReviewPermissions:
+class TestReadOnlyPermissions:
+    # #248 Phase 2a: read-only enforcement keys off the ``read_only`` context
+    # attribute, not the principal literal. A read-only engine forbids
+    # Write/Edit for any principal; reads/globs/greps/bash still pass.
     def test_denies_write(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
         assert result.allowed is False
-        assert "pr_review" in result.reason
 
     def test_denies_edit(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Edit", {"file_path": "src/main.py"})
         assert result.allowed is False
 
+    def test_denies_write_for_any_read_only_principal(self):
+        # The deny attaches to the property, not the "pr_review" literal — a
+        # non-pr_review principal that is read-only is still denied Write.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
+        assert result.allowed is False
+
+    def test_writeable_principal_allows_write(self):
+        # Inverse guard: read_only=False must NOT block Write (the deny is gated
+        # on context.read_only == true). A pr_review principal that is not
+        # read-only can write — proving enforcement no longer rides the literal.
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=False)
+        result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
+        assert result.allowed is True
+
     def test_allows_read(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Read", {"file_path": "src/main.py"})
         assert result.allowed is True
 
     def test_allows_glob(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Glob", {"pattern": "**/*.py"})
         assert result.allowed is True
 
     def test_allows_grep(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Grep", {"pattern": "TODO"})
         assert result.allowed is True
 
     def test_allows_bash(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Bash", {"command": "npm test"})
         assert result.allowed is True
 
@@ -221,7 +238,7 @@ class TestDurationMetrics:
         assert result.duration_ms >= 0
 
     def test_denied_decision_has_nonnegative_duration(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "test.py"})
         assert result.duration_ms >= 0
 

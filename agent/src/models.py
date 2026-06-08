@@ -125,10 +125,15 @@ class TaskConfig(BaseModel):
     # local/batch runs, where the pipeline defaults to coding/new-task-v1.
     resolved_workflow: dict | None = None
     # The Cedar principal identity derived from the resolved workflow
-    # (read_only ⇒ "pr_review", else id→legacy map, else "new_task"). Keeps the
-    # existing Agent::TaskAgent::"<id>" principal scheme working in Phase 1
-    # without a Cedar change — the principal migration is Phase 2a.
+    # (id→legacy map, else "new_task"). The Agent::TaskAgent::"<id>" principal
+    # scheme is unchanged; since #248 Phase 2a, read-only enforcement no longer
+    # keys off this principal — it keys off ``read_only`` below.
     policy_principal: str = "new_task"
+    # Whether the resolved workflow is read-only (may not mutate the working
+    # tree). Threaded into the Cedar request ``context.read_only`` so the
+    # hard-deny Write/Edit rules fire for *any* read-only workflow (#248
+    # Phase 2a), and drives the runner's allowed_tools tightening.
+    read_only: bool = False
     # True when the resolved workflow operates on an existing PR (pr_* coding
     # workflows) — gates the "resume existing branch / resolve PR" behavior that
     # the removed task_type used to signal.

@@ -770,6 +770,7 @@ class PolicyEngine:
         task_type: str,
         repo: str,
         *,
+        read_only: bool = False,
         extra_policies: list[str] | None = None,
         blueprint_hard_policies: str | None = None,
         blueprint_soft_policies: str | None = None,
@@ -781,6 +782,7 @@ class PolicyEngine:
     ) -> None:
         self._task_type = task_type
         self._repo = repo
+        self._read_only = read_only
         self._disabled = False
         self._task_default_timeout_s = task_default_timeout_s
 
@@ -814,10 +816,12 @@ class PolicyEngine:
         self._emitted_ceiling_shrinking: bool = False
 
         # ``task_type`` here is the workflow-derived Cedar principal identity
-        # (config.policy_principal): new_task / pr_iteration / pr_review. The
-        # principal scheme is unchanged in Phase 1 (#248) — only its source moved
-        # from the removed TaskType enum to the resolved workflow. The principal
-        # migration to Agent::Workflow is Phase 2a.
+        # (config.policy_principal): new_task / pr_iteration / pr_review.
+        # Read-only enforcement no longer keys off this principal literal —
+        # since #248 Phase 2a it keys off the ``read_only`` context attribute
+        # (threaded below into every Cedar request), so the hard-deny Write/Edit
+        # rules fire for *any* read-only workflow, not just coding/pr-review.
+        # See ADR-014 addendum 2026-06-08.
 
         # Import cedarpy lazily so the module still loads in environments
         # without the native extension (tests can monkey-patch).
@@ -1060,7 +1064,11 @@ class PolicyEngine:
                     "principal": f'Agent::TaskAgent::"{self._task_type}"',
                     "action": 'Agent::Action::"invoke_tool"',
                     "resource": 'Agent::Tool::"Read"',
-                    "context": {"task_type": self._task_type, "repo": self._repo},
+                    "context": {
+                        "task_type": self._task_type,
+                        "repo": self._repo,
+                        "read_only": self._read_only,
+                    },
                 },
                 policies_text,
                 [
@@ -1147,7 +1155,11 @@ class PolicyEngine:
                 duration_ms=(time.monotonic() - start) * 1000,
             )
 
-        base_context = {"task_type": self._task_type, "repo": self._repo}
+        base_context = {
+            "task_type": self._task_type,
+            "repo": self._repo,
+            "read_only": self._read_only,
+        }
 
         # Compute input_sha separately so a TypeError from json.dumps
         # surfaces with a distinct fail-closed reason instead of being
