@@ -148,6 +148,9 @@ class StepContext:
     config: TaskConfig
     hydrated: HydratedContext | None = None
     progress: _ProgressWriter | None = None
+    # --trace trajectory accumulator, owned by the caller (pipeline) so it
+    # outlives the run_agent step; threaded into run_agent by its handler.
+    trajectory: Any = None
     # products filled in by handlers as the workflow runs:
     setup: RepoSetup | None = None
     system_prompt: str = ""
@@ -267,6 +270,7 @@ def run_workflow(
     *,
     handlers: dict[str, StepHandler] | None = None,
     checkpoint: WorkflowCheckpoint | None = None,
+    only_kinds: frozenset[str] | set[str] | None = None,
 ) -> WorkflowResult:
     """Execute ``workflow.steps`` in order and return the terminal verdict.
 
@@ -280,6 +284,12 @@ def run_workflow(
       on side-effecting steps, so reaching a *succeeded* terminal with a
       half-applied side effect is impossible).
 
+    ``only_kinds`` restricts execution to steps of those kinds (others are passed
+    over without running or checkpointing). This is the Phase-1 seam: the
+    pipeline drives just the agentic ``run_agent`` step through the runner while
+    keeping clone / context / post-hooks on the proven inline path. With the
+    default ``None`` every step runs.
+
     On resume, deterministic side-effect-free steps already recorded in the
     checkpoint are skipped; everything else re-runs (idempotently).
     """
@@ -289,6 +299,9 @@ def run_workflow(
 
     for step in workflow.steps:
         key = _step_key(step)
+
+        if only_kinds is not None and step.kind not in only_kinds:
+            continue
 
         if step.kind in _RESUMABLE_SKIP_KINDS and key in completed:
             prior = completed[key]
@@ -366,33 +379,63 @@ def _milestone(ctx: StepContext, milestone: str) -> None:
 
 
 def _handle_clone_repo(step: Step, ctx: StepContext) -> StepOutcome:
-    """Clone + prepare the repo (replaces the inline ``setup_repo`` call)."""
+    """Clone + prepare the repo (replaces the inline ``setup_repo`` call).
+
+    Idempotent: if ``ctx.setup`` is already populated (the caller pre-cloned, or
+    a resumed run reuses an existing setup) the clone is reused rather than
+    redone — matching WORKFLOWS.md §"Step execution semantics" ("clone_repo need
+    not re-clone a populated /workspace").
+    """
     from repo import setup_repo
 
-    setup = setup_repo(ctx.config)
-    ctx.setup = setup
+    reused = ctx.setup is not None
+    if not reused:
+        ctx.setup = setup_repo(ctx.config)
+    setup = ctx.setup
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status="succeeded",
-        data={"branch": setup.branch, "build_before": setup.build_before},
+        data={"branch": setup.branch, "build_before": setup.build_before, "reused": reused},
     )
 
 
 def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
-    """Consume the orchestrator-assembled ``HydratedContext`` into the prompt.
+    """Consume the orchestrator-assembled ``HydratedContext`` into the prompts.
 
     Hydration is largely orchestrator-side today (WORKFLOWS.md open question #4
     leans "orchestrator hydrates, the agent step only consumes"); this handler is
-    that consumer. The prompt is the hydrated ``user_prompt`` when present.
+    that consumer. It sets BOTH prompts the ``run_agent`` step needs:
+
+    - ``ctx.user_prompt`` — the hydrated ``user_prompt`` when present.
+    - ``ctx.system_prompt`` — built via the existing ``build_system_prompt`` so
+      the workflow path produces the same system prompt as ``pipeline.run_task``
+      (repo_url/branch/workspace/max_turns/setup_notes/memory_context + overrides
+      + channel guidance). Without this the agent loop would run with an empty
+      system prompt (code-review finding). Requires a prior ``clone_repo`` for
+      the ``RepoSetup``; when absent (repo-less workflows) the system prompt is
+      left to the caller, since ``build_system_prompt`` is repo-shaped today.
     """
     if ctx.hydrated is not None:
         ctx.user_prompt = ctx.hydrated.user_prompt
+
+    built_system_prompt = False
+    if ctx.setup is not None and not ctx.system_prompt:
+        from prompt_builder import build_system_prompt
+
+        ctx.system_prompt = build_system_prompt(
+            ctx.config, ctx.setup, ctx.hydrated, ctx.config.system_prompt_overrides
+        )
+        built_system_prompt = True
+
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status="succeeded",
-        data={"hydrated": ctx.hydrated is not None},
+        data={
+            "hydrated": ctx.hydrated is not None,
+            "system_prompt_built": built_system_prompt,
+        },
     )
 
 
@@ -410,7 +453,13 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
 
     cwd = ctx.setup.repo_dir if ctx.setup else AGENT_WORKSPACE
     result = asyncio.run(
-        run_agent(ctx.user_prompt, ctx.system_prompt, ctx.config, cwd=cwd)
+        run_agent(
+            ctx.user_prompt,
+            ctx.system_prompt,
+            ctx.config,
+            cwd=cwd,
+            trajectory=ctx.trajectory,
+        )
     )
     ctx.agent_result = result
     # The agent loop "failing" is not a step failure here: pipeline's
@@ -424,22 +473,52 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
     )
 
 
+def _gate_status(
+    *, passed: bool, gate: str | None, read_only: bool, was_passing_before: bool
+) -> StepStatus:
+    """Map a verify result + the step's ``gate`` to a step status.
+
+    Single place the verify-gate semantics live, shared by ``verify_build`` and
+    ``verify_lint`` (the two were near-identical twins that drifted on the
+    ``read_only`` rule — see the code-review finding). Mirrors ``pipeline.py``'s
+    terminal-status logic so the workflow path and the legacy path agree:
+
+    - ``informational`` (or a ``read_only`` workflow) — never gates.
+    - ``regression_only`` — fails only on a *regression* (was passing before,
+      fails now); a check that was already red before the agent ran is not a
+      regression and does not gate (``build_ok = passed or not build_before`` in
+      pipeline.py).
+    - ``strict`` (or unset) — any failure gates.
+    """
+    if passed:
+        return "succeeded"
+    if gate == "informational" or read_only:
+        return "succeeded"
+    if gate == "regression_only" and not was_passing_before:
+        return "succeeded"
+    return "failed"
+
+
 def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
     """Run ``mise run build``. Gating vs informational is the step's ``gate``."""
     from post_hooks import verify_build
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
     passed = verify_build(repo_dir)
-    # gate: informational never fails the step; strict / regression_only failures
-    # surface as a failed step and let on_failure decide. Regression nuance
-    # (was-it-already-broken) stays in pipeline's terminal status resolution.
-    informational = step.gate == "informational" or ctx.workflow.read_only
-    status: StepStatus = "succeeded" if (passed or informational) else "failed"
+    # was_passing_before defaults True (assume green-before, so a post-agent
+    # failure IS a regression) — the same conservative default pipeline.py uses.
+    was_passing_before = ctx.setup.build_before if ctx.setup else True
+    status = _gate_status(
+        passed=passed,
+        gate=step.gate,
+        read_only=ctx.workflow.read_only,
+        was_passing_before=was_passing_before,
+    )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status=status,
-        error=None if status == "succeeded" else "post-agent build failed",
+        error=None if status == "succeeded" else "post-agent build failed (regression)",
         data={"build_passed": passed},
     )
 
@@ -450,13 +529,18 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
     passed = verify_lint(repo_dir)
-    informational = step.gate == "informational"
-    status: StepStatus = "succeeded" if (passed or informational) else "failed"
+    was_passing_before = ctx.setup.lint_before if ctx.setup else True
+    status = _gate_status(
+        passed=passed,
+        gate=step.gate,
+        read_only=ctx.workflow.read_only,
+        was_passing_before=was_passing_before,
+    )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status=status,
-        error=None if status == "succeeded" else "post-agent lint failed",
+        error=None if status == "succeeded" else "post-agent lint failed (regression)",
         data={"lint_passed": passed},
     )
 

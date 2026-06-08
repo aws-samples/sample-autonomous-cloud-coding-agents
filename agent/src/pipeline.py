@@ -146,6 +146,97 @@ def _maybe_upload_trace(
     return trace_s3_uri
 
 
+def _workflow_id_for_task_type(task_type: str) -> str | None:
+    """Map the legacy ``task_type`` to its Phase-1 workflow id, if one ships.
+
+    Only ``new_task`` has a first-party workflow file in Phase 1
+    (``coding/new-task-v1``); ``pr_iteration``/``pr_review`` are migrated in
+    Phase 2b (they depend on the Cedar principal migration). Returns ``None``
+    when no workflow exists yet, so the caller falls back to the inline path.
+
+    This bridge exists only while the seam is gated; tasks 6-8 replace it with a
+    real ``resolved_workflow`` threaded from the create-task boundary.
+    """
+    return {"new_task": "coding/new-task-v1"}.get(task_type)
+
+
+def _execute_agent_step(
+    prompt: str,
+    system_prompt: str,
+    config,
+    setup,
+    hydrated,
+    trajectory,
+    progress,
+):
+    """Run the agentic step, optionally via the workflow step runner.
+
+    The workflow runner is wired in behind the ``WORKFLOW_RUNNER_ENABLED`` gate
+    (#248 task 5, "build the seam, gate it off"): when the flag is set AND the
+    task's ``task_type`` maps to a shipped workflow, the single ``run_agent``
+    step is dispatched through ``workflow.run_workflow`` — exercising the real
+    handler registry, step milestones, and result threading — while clone,
+    context assembly, and post-hooks stay on the proven inline path. When the
+    flag is unset (default) or no workflow exists yet, this is exactly the legacy
+    ``asyncio.run(run_agent(...))`` call. Default production behavior is
+    unchanged until the task 6-8 cutover flips the default.
+
+    Returns the ``AgentResult`` either way, so the surrounding pipeline (cancel
+    short-circuit, post-hooks, result assembly) is identical for both paths.
+    """
+    enabled = os.environ.get("WORKFLOW_RUNNER_ENABLED", "").lower() in ("1", "true", "yes")
+    workflow_id = _workflow_id_for_task_type(config.task_type) if enabled else None
+
+    if not workflow_id:
+        return asyncio.run(
+            run_agent(prompt, system_prompt, config, cwd=setup.repo_dir, trajectory=trajectory)
+        )
+
+    from workflow import StepContext, load_workflow, run_workflow
+
+    log("TASK", f"Workflow runner enabled — executing via workflow {workflow_id!r}")
+    wf = load_workflow(workflow_id)
+    ctx = StepContext(
+        workflow=wf,
+        config=config,
+        hydrated=hydrated,
+        progress=progress,
+        trajectory=trajectory,
+        # Pre-populate the products the pipeline already built so the
+        # clone_repo/hydrate_context handlers reuse them idempotently rather
+        # than redo setup or rebuild the prompt the pipeline already injected
+        # attachment context into.
+        setup=setup,
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+    )
+    # Phase-1 seam: drive only the agentic step through the runner; clone,
+    # context assembly, and post-hooks stay on the inline path (tasks 6-8 move
+    # the full step list over). only_kinds keeps the runner from re-running the
+    # deterministic steps the pipeline already owns (double clone / double PR).
+    result = run_workflow(wf, ctx, only_kinds={"run_agent"})
+    if not result.succeeded and result.failed_step is not None:
+        log(
+            "WARN",
+            f"Workflow step {result.failed_step.name!r} failed: {result.failed_step.error}",
+        )
+    if ctx.agent_result is None:
+        # The run_agent step did not run (e.g. an earlier step failed terminally).
+        # Surface a structured error rather than returning None to the caller.
+        return AgentResult(
+            status="error",
+            error=(
+                "Workflow ended before the run_agent step produced a result"
+                + (
+                    f" (failed step: {result.failed_step.name})"
+                    if result.failed_step
+                    else ""
+                )
+            ),
+        )
+    return ctx.agent_result
+
+
 def _resolve_overall_task_status(
     agent_result: AgentResult,
     *,
@@ -545,14 +636,14 @@ def run_task(
                 )
             with task_span("task.agent_execution") as agent_span:
                 try:
-                    agent_result = asyncio.run(
-                        run_agent(
-                            prompt,
-                            system_prompt,
-                            config,
-                            cwd=setup.repo_dir,
-                            trajectory=trajectory,
-                        )
+                    agent_result = _execute_agent_step(
+                        prompt,
+                        system_prompt,
+                        config,
+                        setup,
+                        hc,
+                        trajectory,
+                        progress,
                     )
                 except Exception as e:
                     # Fatal agent error: mirror to APPLICATION_LOGS so

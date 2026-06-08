@@ -377,3 +377,173 @@ def test_phase_gated_handlers_fail_loud(unimpl):
     wf = _workflow([{"kind": unimpl}], primary="review_posted")
     with pytest.raises(NotImplementedError):
         STEP_HANDLERS[unimpl](wf.steps[0], _ctx(wf))
+
+
+class TestGateStatus:
+    """The shared verify-gate semantics (verify_build / verify_lint)."""
+
+    def test_passing_always_succeeds(self):
+        from workflow.runner import _gate_status
+
+        assert _gate_status(
+            passed=True, gate="strict", read_only=False, was_passing_before=True
+        ) == "succeeded"
+
+    def test_strict_failure_gates(self):
+        from workflow.runner import _gate_status
+
+        assert _gate_status(
+            passed=False, gate="strict", read_only=False, was_passing_before=True
+        ) == "failed"
+
+    def test_informational_never_gates(self):
+        from workflow.runner import _gate_status
+
+        assert _gate_status(
+            passed=False, gate="informational", read_only=False, was_passing_before=True
+        ) == "succeeded"
+
+    def test_read_only_never_gates(self):
+        from workflow.runner import _gate_status
+
+        # read_only workflows treat verify results as informational (matches
+        # pipeline.py: pr_review build status is informational only).
+        assert _gate_status(
+            passed=False, gate="strict", read_only=True, was_passing_before=True
+        ) == "succeeded"
+
+    def test_regression_only_gates_a_regression(self):
+        from workflow.runner import _gate_status
+
+        # was passing before, fails now → regression → gates.
+        assert _gate_status(
+            passed=False, gate="regression_only", read_only=False, was_passing_before=True
+        ) == "failed"
+
+    def test_regression_only_ignores_preexisting_failure(self):
+        from workflow.runner import _gate_status
+
+        # already broken before the agent ran → not a regression → does NOT gate
+        # (mirrors pipeline.py build_ok = passed or not build_before).
+        assert _gate_status(
+            passed=False, gate="regression_only", read_only=False, was_passing_before=False
+        ) == "succeeded"
+
+
+def _real_ctx(workflow: Workflow, **kw):
+    """A StepContext with a real (minimal) TaskConfig for handler tests."""
+    from models import TaskConfig
+
+    config = TaskConfig(
+        repo_url="owner/repo",
+        github_token="ghp_test",
+        aws_region="us-east-1",
+        task_id="task-1",
+        max_turns=10,
+    )
+    return StepContext(workflow=workflow, config=config, **kw)
+
+
+class TestVerifyHandlers:
+    def test_verify_build_regression_only_passes_when_broken_before(self, monkeypatch):
+        from models import RepoSetup
+        from workflow.runner import _handle_verify_build
+
+        # build red after, but it was already red before → not a regression.
+        monkeypatch.setattr("post_hooks.verify_build", lambda _d: False)
+        wf = _workflow(
+            [{"kind": "verify_build", "name": "build", "gate": "regression_only"},
+             {"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}]
+        )
+        ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b", build_before=False))
+        outcome = _handle_verify_build(wf.steps[0], ctx)
+        assert outcome.succeeded
+        assert outcome.data["build_passed"] is False
+
+    def test_verify_build_regression_only_fails_on_regression(self, monkeypatch):
+        from models import RepoSetup
+        from workflow.runner import _handle_verify_build
+
+        monkeypatch.setattr("post_hooks.verify_build", lambda _d: False)
+        wf = _workflow(
+            [{"kind": "verify_build", "name": "build", "gate": "regression_only"},
+             {"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}]
+        )
+        ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b", build_before=True))
+        assert _handle_verify_build(wf.steps[0], ctx).failed
+
+    def test_verify_lint_read_only_is_informational(self, monkeypatch):
+        from models import RepoSetup
+        from workflow.runner import _handle_verify_lint
+
+        # read_only workflow: a lint failure must not gate (symmetry with build).
+        monkeypatch.setattr("post_hooks.verify_lint", lambda _d: False)
+        wf = _workflow(
+            [{"kind": "clone_repo"}, {"kind": "verify_lint", "name": "lint"},
+             {"kind": "run_agent"}, {"kind": "post_review"}],
+            primary="review_posted", read_only=True,
+        )
+        ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b", lint_before=True))
+        assert _handle_verify_lint(wf.steps[1], ctx).succeeded
+
+
+class TestCloneAndHydrateHandlers:
+    def test_clone_repo_reuses_prepopulated_setup(self, monkeypatch):
+        from models import RepoSetup
+        from workflow.runner import _handle_clone_repo
+
+        called = {"n": 0}
+
+        def fake_setup_repo(_config):
+            called["n"] += 1
+            return RepoSetup(repo_dir="/fresh", branch="fresh")
+
+        monkeypatch.setattr("repo.setup_repo", fake_setup_repo)
+        wf = _workflow([{"kind": "clone_repo"}, {"kind": "run_agent"},
+                        {"kind": "ensure_pr", "strategy": "create"}])
+        pre = RepoSetup(repo_dir="/pre", branch="pre")
+        ctx = _real_ctx(wf, setup=pre)
+        outcome = _handle_clone_repo(wf.steps[0], ctx)
+        assert called["n"] == 0  # setup_repo NOT called — reused
+        assert ctx.setup is pre
+        assert outcome.data["reused"] is True
+
+    def test_clone_repo_clones_when_absent(self, monkeypatch):
+        from models import RepoSetup
+        from workflow.runner import _handle_clone_repo
+
+        monkeypatch.setattr(
+            "repo.setup_repo", lambda _c: RepoSetup(repo_dir="/fresh", branch="fresh")
+        )
+        wf = _workflow([{"kind": "clone_repo"}, {"kind": "run_agent"},
+                        {"kind": "ensure_pr", "strategy": "create"}])
+        ctx = _real_ctx(wf)
+        outcome = _handle_clone_repo(wf.steps[0], ctx)
+        assert ctx.setup is not None and ctx.setup.repo_dir == "/fresh"
+        assert outcome.data["reused"] is False
+
+    def test_hydrate_context_builds_system_prompt(self, monkeypatch):
+        from models import RepoSetup
+        from workflow.runner import _handle_hydrate_context
+
+        monkeypatch.setattr(
+            "prompt_builder.build_system_prompt",
+            lambda _c, _s, _h, _o: "BUILT-SYSTEM-PROMPT",
+        )
+        wf = _workflow([{"kind": "clone_repo"}, {"kind": "hydrate_context"},
+                        {"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}])
+        ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b"))
+        outcome = _handle_hydrate_context(wf.steps[1], ctx)
+        assert ctx.system_prompt == "BUILT-SYSTEM-PROMPT"
+        assert outcome.data["system_prompt_built"] is True
+
+    def test_hydrate_context_skips_build_without_setup(self):
+        from workflow.runner import _handle_hydrate_context
+
+        # repo-less: no setup → system prompt left to the caller, not built here.
+        wf = _workflow([{"kind": "hydrate_context"}, {"kind": "run_agent"},
+                        {"kind": "ensure_pr", "strategy": "create"}])
+        ctx = _real_ctx(wf)
+        outcome = _handle_hydrate_context(wf.steps[0], ctx)
+        assert ctx.system_prompt == ""
+        assert outcome.data["system_prompt_built"] is False
