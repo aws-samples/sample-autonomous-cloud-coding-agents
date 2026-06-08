@@ -42,9 +42,7 @@ _FILES = _workflow_files()
 def test_first_party_workflow_validates(path: Path) -> None:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     violations = validate_workflow(data)
-    assert violations == [], (
-        f"committed workflow {path} fails validation: {violations}"
-    )
+    assert violations == [], f"committed workflow {path} fails validation: {violations}"
 
 
 @pytest.mark.skipif(not _FILES, reason="no first-party workflow files yet (early Phase 1)")

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from workflow import Step, StepContext, StepOutcome, Workflow, run_workflow
-from workflow.runner import WorkflowCheckpoint, _step_key
+from workflow.runner import StepHandler, WorkflowCheckpoint, _step_key
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -54,7 +54,7 @@ class _RecordingProgress:
 
 def _ctx(workflow: Workflow, progress=None) -> StepContext:
     # config is unused by fake handlers; a bare object is enough for the core.
-    return StepContext(workflow=workflow, config=object(), progress=progress)  # type: ignore[arg-type]
+    return StepContext(workflow=workflow, config=object(), progress=progress)  # ty: ignore[invalid-argument-type]
 
 
 def _ok(data=None):
@@ -85,7 +85,7 @@ def _raises(exc: Exception | None = None):
 def test_runs_all_steps_in_order_and_succeeds():
     seen: list[str] = []
 
-    def track(step, ctx):
+    def track(step: Step, ctx: StepContext) -> StepOutcome:
         seen.append(step.kind)
         return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
@@ -97,7 +97,9 @@ def test_runs_all_steps_in_order_and_succeeds():
             {"kind": "ensure_pr", "strategy": "create"},
         ]
     )
-    handlers = {k: track for k in ("clone_repo", "hydrate_context", "run_agent", "ensure_pr")}
+    handlers: dict[str, StepHandler] = {
+        k: track for k in ("clone_repo", "hydrate_context", "run_agent", "ensure_pr")
+    }
     result = run_workflow(wf, _ctx(wf), handlers=handlers)
     assert seen == ["clone_repo", "hydrate_context", "run_agent", "ensure_pr"]
     assert result.succeeded
@@ -120,7 +122,7 @@ def test_on_failure_fail_is_terminal_and_attributed():
     wf = _workflow([{"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}])
     after_ran = {"hit": False}
 
-    def mark(step, ctx):
+    def mark(step: Step, ctx: StepContext) -> StepOutcome:
         after_ran["hit"] = True
         return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
@@ -155,7 +157,7 @@ def test_on_failure_skip_remaining_stops_cleanly():
     )
     ran_ensure = {"hit": False}
 
-    def ensure(step, ctx):
+    def ensure(step: Step, ctx: StepContext) -> StepOutcome:
         ran_ensure["hit"] = True
         return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
@@ -211,18 +213,20 @@ class TestCheckpointResume:
         cp = WorkflowCheckpoint("task-1", state_dir=tmp_path)
         calls: list[str] = []
 
-        def build(step, ctx):
+        def build(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("build")
             return StepOutcome(
-                kind=step.kind, name=_step_key(step), status="succeeded",
+                kind=step.kind,
+                name=_step_key(step),
+                status="succeeded",
                 data={"build_passed": True},
             )
 
-        def agent(step, ctx):
+        def agent(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("agent")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
-        handlers = {"verify_build": build, "run_agent": agent}
+        handlers: dict[str, StepHandler] = {"verify_build": build, "run_agent": agent}
         run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp)
         assert calls == ["build", "agent"]
 
@@ -248,22 +252,26 @@ class TestCheckpointResume:
         )
         calls: list[str] = []
 
-        def clone(step, ctx):
+        def clone(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("clone")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
-        def agent(step, ctx):
+        def agent(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("agent")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
-        handlers = {"clone_repo": clone, "run_agent": agent}
+        handlers: dict[str, StepHandler] = {"clone_repo": clone, "run_agent": agent}
         run_workflow(
-            wf, _ctx(wf), handlers=handlers,
+            wf,
+            _ctx(wf),
+            handlers=handlers,
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
         calls.clear()
         run_workflow(
-            wf, _ctx(wf), handlers=handlers,
+            wf,
+            _ctx(wf),
+            handlers=handlers,
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
         assert calls == ["clone", "agent"]  # clone re-runs, not skipped
@@ -274,7 +282,7 @@ class TestCheckpointResume:
         cp = WorkflowCheckpoint("task-1", state_dir=tmp_path)
         calls: list[str] = []
 
-        def agent(step, ctx):
+        def agent(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("agent")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
@@ -294,7 +302,7 @@ class TestCheckpointResume:
         )
         calls: list[str] = []
 
-        def clone(step, ctx):
+        def clone(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("clone")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
@@ -313,7 +321,7 @@ class TestCheckpointResume:
         run_workflow(wf, _ctx(wf), handlers={"verify_build": _bad()}, checkpoint=cp)
         calls: list[str] = []
 
-        def build(step, ctx):
+        def build(step: Step, ctx: StepContext) -> StepOutcome:
             calls.append("build")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
@@ -339,12 +347,16 @@ class TestCheckpointResume:
             "run_agent": _ok(),
         }
         run_workflow(
-            wf, _ctx(wf), handlers=handlers,
+            wf,
+            _ctx(wf),
+            handlers=handlers,
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
         progress = _RecordingProgress()
         run_workflow(
-            wf, _ctx(wf, progress), handlers=handlers,
+            wf,
+            _ctx(wf, progress),
+            handlers=handlers,
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
         assert "step:build:start" in progress.milestones
@@ -385,61 +397,75 @@ class TestGateStatus:
     def test_passing_always_succeeds(self):
         from workflow.runner import _gate_status
 
-        assert _gate_status(
-            passed=True, gate="strict", read_only=False, was_passing_before=True
-        ) == "succeeded"
+        assert (
+            _gate_status(passed=True, gate="strict", read_only=False, was_passing_before=True)
+            == "succeeded"
+        )
 
     def test_strict_failure_gates(self):
         from workflow.runner import _gate_status
 
-        assert _gate_status(
-            passed=False, gate="strict", read_only=False, was_passing_before=True
-        ) == "failed"
+        assert (
+            _gate_status(passed=False, gate="strict", read_only=False, was_passing_before=True)
+            == "failed"
+        )
 
     def test_informational_never_gates(self):
         from workflow.runner import _gate_status
 
-        assert _gate_status(
-            passed=False, gate="informational", read_only=False, was_passing_before=True
-        ) == "succeeded"
+        assert (
+            _gate_status(
+                passed=False, gate="informational", read_only=False, was_passing_before=True
+            )
+            == "succeeded"
+        )
 
     def test_read_only_never_gates(self):
         from workflow.runner import _gate_status
 
         # read_only workflows treat verify results as informational (matches
         # pipeline.py: pr_review build status is informational only).
-        assert _gate_status(
-            passed=False, gate="strict", read_only=True, was_passing_before=True
-        ) == "succeeded"
+        assert (
+            _gate_status(passed=False, gate="strict", read_only=True, was_passing_before=True)
+            == "succeeded"
+        )
 
     def test_regression_only_gates_a_regression(self):
         from workflow.runner import _gate_status
 
         # was passing before, fails now → regression → gates.
-        assert _gate_status(
-            passed=False, gate="regression_only", read_only=False, was_passing_before=True
-        ) == "failed"
+        assert (
+            _gate_status(
+                passed=False, gate="regression_only", read_only=False, was_passing_before=True
+            )
+            == "failed"
+        )
 
     def test_regression_only_ignores_preexisting_failure(self):
         from workflow.runner import _gate_status
 
         # already broken before the agent ran → not a regression → does NOT gate
         # (mirrors pipeline.py build_ok = passed or not build_before).
-        assert _gate_status(
-            passed=False, gate="regression_only", read_only=False, was_passing_before=False
-        ) == "succeeded"
+        assert (
+            _gate_status(
+                passed=False, gate="regression_only", read_only=False, was_passing_before=False
+            )
+            == "succeeded"
+        )
 
     def test_unset_gate_defaults_to_regression_only(self):
         from workflow.runner import _gate_status
 
         # An unset gate must mirror pipeline.py (which is always regression-only),
         # NOT default to strict: a regression gates, a pre-existing failure does not.
-        assert _gate_status(
-            passed=False, gate=None, read_only=False, was_passing_before=True
-        ) == "failed"
-        assert _gate_status(
-            passed=False, gate=None, read_only=False, was_passing_before=False
-        ) == "succeeded"
+        assert (
+            _gate_status(passed=False, gate=None, read_only=False, was_passing_before=True)
+            == "failed"
+        )
+        assert (
+            _gate_status(passed=False, gate=None, read_only=False, was_passing_before=False)
+            == "succeeded"
+        )
 
 
 def _real_ctx(workflow: Workflow, **kw):
@@ -464,8 +490,11 @@ class TestVerifyHandlers:
         # build red after, but it was already red before → not a regression.
         monkeypatch.setattr("post_hooks.verify_build", lambda _d: False)
         wf = _workflow(
-            [{"kind": "verify_build", "name": "build", "gate": "regression_only"},
-             {"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}]
+            [
+                {"kind": "verify_build", "name": "build", "gate": "regression_only"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
         )
         ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b", build_before=False))
         outcome = _handle_verify_build(wf.steps[0], ctx)
@@ -478,8 +507,11 @@ class TestVerifyHandlers:
 
         monkeypatch.setattr("post_hooks.verify_build", lambda _d: False)
         wf = _workflow(
-            [{"kind": "verify_build", "name": "build", "gate": "regression_only"},
-             {"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}]
+            [
+                {"kind": "verify_build", "name": "build", "gate": "regression_only"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
         )
         ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b", build_before=True))
         assert _handle_verify_build(wf.steps[0], ctx).failed
@@ -491,9 +523,14 @@ class TestVerifyHandlers:
         # read_only workflow: a lint failure must not gate (symmetry with build).
         monkeypatch.setattr("post_hooks.verify_lint", lambda _d: False)
         wf = _workflow(
-            [{"kind": "clone_repo"}, {"kind": "verify_lint", "name": "lint"},
-             {"kind": "run_agent"}, {"kind": "post_review"}],
-            primary="review_posted", read_only=True,
+            [
+                {"kind": "clone_repo"},
+                {"kind": "verify_lint", "name": "lint"},
+                {"kind": "run_agent"},
+                {"kind": "post_review"},
+            ],
+            primary="review_posted",
+            read_only=True,
         )
         ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b", lint_before=True))
         assert _handle_verify_lint(wf.steps[1], ctx).succeeded
@@ -511,8 +548,13 @@ class TestCloneAndHydrateHandlers:
             return RepoSetup(repo_dir="/fresh", branch="fresh")
 
         monkeypatch.setattr("repo.setup_repo", fake_setup_repo)
-        wf = _workflow([{"kind": "clone_repo"}, {"kind": "run_agent"},
-                        {"kind": "ensure_pr", "strategy": "create"}])
+        wf = _workflow(
+            [
+                {"kind": "clone_repo"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
         pre = RepoSetup(repo_dir="/pre", branch="pre")
         ctx = _real_ctx(wf, setup=pre)
         outcome = _handle_clone_repo(wf.steps[0], ctx)
@@ -527,8 +569,13 @@ class TestCloneAndHydrateHandlers:
         monkeypatch.setattr(
             "repo.setup_repo", lambda _c: RepoSetup(repo_dir="/fresh", branch="fresh")
         )
-        wf = _workflow([{"kind": "clone_repo"}, {"kind": "run_agent"},
-                        {"kind": "ensure_pr", "strategy": "create"}])
+        wf = _workflow(
+            [
+                {"kind": "clone_repo"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
         ctx = _real_ctx(wf)
         outcome = _handle_clone_repo(wf.steps[0], ctx)
         assert ctx.setup is not None and ctx.setup.repo_dir == "/fresh"
@@ -542,8 +589,14 @@ class TestCloneAndHydrateHandlers:
             "prompt_builder.build_system_prompt",
             lambda _c, _s, _h, _o: "BUILT-SYSTEM-PROMPT",
         )
-        wf = _workflow([{"kind": "clone_repo"}, {"kind": "hydrate_context"},
-                        {"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}])
+        wf = _workflow(
+            [
+                {"kind": "clone_repo"},
+                {"kind": "hydrate_context"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
         ctx = _real_ctx(wf, setup=RepoSetup(repo_dir="/r", branch="b"))
         outcome = _handle_hydrate_context(wf.steps[1], ctx)
         assert ctx.system_prompt == "BUILT-SYSTEM-PROMPT"
@@ -553,8 +606,13 @@ class TestCloneAndHydrateHandlers:
         from workflow.runner import _handle_hydrate_context
 
         # repo-less: no setup → system prompt left to the caller, not built here.
-        wf = _workflow([{"kind": "hydrate_context"}, {"kind": "run_agent"},
-                        {"kind": "ensure_pr", "strategy": "create"}])
+        wf = _workflow(
+            [
+                {"kind": "hydrate_context"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
         ctx = _real_ctx(wf)
         outcome = _handle_hydrate_context(wf.steps[0], ctx)
         assert ctx.system_prompt == ""

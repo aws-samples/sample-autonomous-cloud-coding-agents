@@ -217,10 +217,7 @@ class WorkflowCheckpoint:
         # Guard against a stale checkpoint from a different task on a reused mount.
         if raw.get("task_id") != self._task_id:
             return {}
-        return {
-            key: StepOutcome.from_checkpoint(oc)
-            for key, oc in raw.get("steps", {}).items()
-        }
+        return {key: StepOutcome.from_checkpoint(oc) for key, oc in raw.get("steps", {}).items()}
 
     def save(self, key: str, outcome: StepOutcome) -> None:
         existing = self.load()
@@ -344,9 +341,7 @@ def run_workflow(
     return WorkflowResult.from_outcomes(ctx, workflow.terminal_outcomes)
 
 
-def _run_handler(
-    handler: StepHandler, step: Step, ctx: StepContext, key: str
-) -> StepOutcome:
+def _run_handler(handler: StepHandler, step: Step, ctx: StepContext, key: str) -> StepOutcome:
     """Invoke a handler, converting any uncaught exception into a failed outcome.
 
     A handler that raises must not crash the runner mid-workflow — the failure is

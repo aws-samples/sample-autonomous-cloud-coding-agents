@@ -210,8 +210,7 @@ def _rule_6_tier_ceiling(data: dict[str, Any]) -> list[str]:
         for field in _ELEVATED_ONLY_FIELDS:
             if ac.get(field):
                 msgs.append(
-                    f"{tier} tier may not declare {field} (extended reach requires "
-                    "tier: elevated)"
+                    f"{tier} tier may not declare {field} (extended reach requires tier: elevated)"
                 )
     return msgs
 

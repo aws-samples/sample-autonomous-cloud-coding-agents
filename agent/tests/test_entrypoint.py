@@ -387,6 +387,7 @@ class TestBuildConfigWorkflow:
             resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             pr_number="42",
         )
+        assert config.resolved_workflow is not None
         assert config.resolved_workflow["id"] == "coding/pr-iteration-v1"
         assert config.is_pr_workflow is True
         assert config.pr_number == "42"
@@ -407,6 +408,7 @@ class TestBuildConfigWorkflow:
             github_token="ghp_test",
             aws_region="us-east-1",
         )
+        assert config.resolved_workflow is not None
         assert config.resolved_workflow["id"] == "coding/new-task-v1"
         assert config.policy_principal == "new_task"
 
@@ -418,6 +420,7 @@ class TestBuildConfigWorkflow:
             resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
             pr_number="55",
         )
+        assert config.resolved_workflow is not None
         assert config.resolved_workflow["id"] == "coding/pr-review-v1"
         assert config.policy_principal == "pr_review"
         assert config.pr_number == "55"
