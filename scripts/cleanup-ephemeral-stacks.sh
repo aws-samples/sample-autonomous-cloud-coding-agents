@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-MAX_AGE_HOURS=${MAX_AGE_HOURS:-4}
+MAX_AGE_HOURS=${MAX_AGE_HOURS:-48}
 DRY_RUN=false
 PREFIX=""
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
