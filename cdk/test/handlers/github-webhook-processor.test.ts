@@ -232,8 +232,8 @@ describe('github-webhook-processor handler', () => {
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractLinearIdentifierMock
-      .mockReturnValueOnce(null)         // title produces no match
-      .mockReturnValueOnce('ABCA-42');   // body does
+      .mockReturnValueOnce(null) // title produces no match
+      .mockReturnValueOnce('ABCA-42'); // body does
     findLinearIssueMock.mockResolvedValueOnce({
       issueId: 'issue-uuid',
       linearWorkspaceId: 'ws-1',
