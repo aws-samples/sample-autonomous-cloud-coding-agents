@@ -4,6 +4,6 @@
   "private": true,
   "description": "Lambda layer bundling @cedar-policy/cedar-wasm for Cedar HITL policy handlers. Pinned version must match cdk/package.json.",
   "dependencies": {
-    "@cedar-policy/cedar-wasm": "4.10.0"
+    "@cedar-policy/cedar-wasm": "4.8.2"
   }
 }
