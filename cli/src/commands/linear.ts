@@ -1658,7 +1658,7 @@ interface LinearWorkspaceMember {
  * what they got and the lookup falls back to scanning if `team_keys` is
  * absent or stale.
  */
-async function queryLinearTeamKeys(authorizationHeader: string): Promise<string[]> {
+export async function queryLinearTeamKeys(authorizationHeader: string): Promise<string[]> {
   try {
     const res = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
