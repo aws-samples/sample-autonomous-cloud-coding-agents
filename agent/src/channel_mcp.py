@@ -1,35 +1,40 @@
 """Channel-specific MCP configuration for the agent container.
 
-For Linear-origin tasks we write (or merge into) ``.mcp.json`` in the cloned
-repo ``cwd`` so the Claude Agent SDK — configured with
-``setting_sources=["project"]`` — picks up the Linear MCP at session start
-and exposes ``mcp__linear-server__*`` tools.
+For inbound channel sources that have a hosted MCP we write (or merge into)
+``.mcp.json`` in the cloned repo ``cwd`` so the Claude Agent SDK — configured
+with ``setting_sources=["project"]`` — picks up the channel MCP at session
+start and exposes the server's tools.
+
+Currently wired channels:
+- ``linear``  → Linear hosted MCP (``mcp__linear-server__*`` tools)
+- ``jira``    → Atlassian Remote MCP (``mcp__jira-server__*`` tools)
 
 For all other channel sources this is a no-op: no MCP is written, and the
-SDK sees no Linear tools. That's the gate keeping Slack/API/webhook tasks
-from touching Linear.
+SDK sees no channel-specific tools.
 
-See: cdk/src/handlers/linear-webhook-processor.ts (inbound), runner.py
-(SDK invocation), plans at ~/.claude/plans/linear-mcp-findings.md.
+See: cdk/src/handlers/{linear,jira}-webhook-processor.ts (inbound),
+runner.py (SDK invocation).
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 from shell import log
+
+# ─── Linear ──────────────────────────────────────────────────────────────────
 
 #: Linear MCP endpoint — hosted by Linear, Streamable HTTP transport.
 LINEAR_MCP_URL = "https://mcp.linear.app/mcp"
 
 #: Key name inside ``mcpServers``. Tools surface as
-#: ``mcp__linear-server__*`` in the Agent SDK (verified in findings).
+#: ``mcp__linear-server__*`` in the Agent SDK.
 LINEAR_MCP_SERVER_KEY = "linear-server"
 
 #: Env var name the MCP server entry reads via ``${LINEAR_API_TOKEN}``
-#: placeholder expansion. Populated from ``LinearApiTokenSecret`` by run.sh.
+#: placeholder expansion. Populated from the OAuth secret by config.py.
 LINEAR_API_TOKEN_ENV = "LINEAR_API_TOKEN"  # noqa: S105 — env var *name*, not a secret value
 
 
@@ -44,11 +49,55 @@ def _linear_server_entry() -> dict[str, Any]:
     }
 
 
+# ─── Jira (Atlassian Remote MCP) ─────────────────────────────────────────────
+
+#: Atlassian Remote MCP endpoint — Streamable HTTP transport.
+#:
+#: NOTE: Atlassian's Remote MCP rolled out in mid-2025 and may still be in
+#: preview / gated rollout when this code first deploys. Confirm the public
+#: URL + auth contract before relying on this in production. If gated, fall
+#: back to a REST shim in a future ``jira_reactions.py`` module (Plan B).
+JIRA_MCP_URL = "https://mcp.atlassian.com/v1/sse"
+
+#: Key name inside ``mcpServers``. Tools surface as ``mcp__jira-server__*``
+#: in the Agent SDK. If this changes the agent prompt's channel addendum
+#: must be updated in lockstep.
+JIRA_MCP_SERVER_KEY = "jira-server"
+
+#: Env var name the Jira MCP server entry reads via ``${JIRA_API_TOKEN}``
+#: placeholder expansion. Populated from the per-tenant OAuth secret by
+#: config.resolve_jira_oauth_token.
+JIRA_API_TOKEN_ENV = "JIRA_API_TOKEN"  # noqa: S105 — env var *name*, not a secret value
+
+
+def _jira_server_entry() -> dict[str, Any]:
+    """Build the `mcpServers` entry for Atlassian's Remote MCP."""
+    return {
+        "type": "http",
+        "url": JIRA_MCP_URL,
+        "headers": {
+            "Authorization": f"Bearer ${{{JIRA_API_TOKEN_ENV}}}",
+        },
+    }
+
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────
+
+#: Per-channel ``mcpServers`` entry builder. The channel_source values mirror
+#: ``ChannelSource`` in cdk/src/handlers/shared/types.ts. Sources that don't
+#: have a hosted MCP (api, webhook, slack) intentionally have no entry here —
+#: the gate in ``configure_channel_mcp`` short-circuits on missing keys.
+CHANNEL_MCP_BUILDERS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
+    "linear": (LINEAR_MCP_SERVER_KEY, _linear_server_entry),
+    "jira": (JIRA_MCP_SERVER_KEY, _jira_server_entry),
+}
+
+
 def _read_existing_mcp_config(path: str) -> dict[str, Any]:
     """Return the parsed .mcp.json at ``path``, or an empty dict if absent/invalid.
 
     Malformed JSON is logged and treated as absent — we prefer to overlay a
-    valid Linear entry than to crash the agent because a user committed a
+    valid channel entry than to crash the agent because a user committed a
     broken .mcp.json to their repo.
     """
     if not os.path.isfile(path):
@@ -67,22 +116,25 @@ def _read_existing_mcp_config(path: str) -> dict[str, Any]:
 def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
     """Write or merge a channel-specific ``.mcp.json`` into ``repo_dir``.
 
-    Gated on ``channel_source``:
-      * ``'linear'`` → ensure the ``linear-server`` entry is present in
+    Looks up ``channel_source`` in :data:`CHANNEL_MCP_BUILDERS`:
+      * present → ensure the corresponding ``mcpServers`` entry is in
         ``.mcp.json`` (merges into any existing config without clobbering
         other servers). Returns True.
-      * anything else → no-op. Returns False.
+      * absent → no-op. Returns False.
 
     Args:
       repo_dir: the cloned-repo working directory the SDK will use as ``cwd``.
       channel_source: inbound channel (``TaskConfig.channel_source``).
 
     Returns:
-      True if a Linear MCP entry was (re)written into ``repo_dir/.mcp.json``,
-      False otherwise (including any non-Linear channel or missing repo_dir).
+      True if a channel MCP entry was (re)written, False otherwise (channel
+      unmapped, missing repo_dir, or write failure).
     """
-    if channel_source != "linear":
+    builder_entry = CHANNEL_MCP_BUILDERS.get(channel_source)
+    if builder_entry is None:
         return False
+
+    server_key, build_entry = builder_entry
 
     if not repo_dir or not os.path.isdir(repo_dir):
         log("WARN", f"configure_channel_mcp: repo_dir missing or not a directory: {repo_dir!r}")
@@ -94,7 +146,7 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
         servers = {}
-    servers[LINEAR_MCP_SERVER_KEY] = _linear_server_entry()
+    servers[server_key] = build_entry()
     config["mcpServers"] = servers
 
     try:
@@ -102,11 +154,11 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
             json.dump(config, f, indent=2)
             f.write("\n")
     except OSError as e:
-        log("ERROR", f"Failed to write Linear MCP config to {mcp_path}: {e}")
+        log("ERROR", f"Failed to write {channel_source} MCP config to {mcp_path}: {e}")
         return False
 
     log(
         "TASK",
-        f"Linear MCP configured at {mcp_path} (server key: {LINEAR_MCP_SERVER_KEY})",
+        f"{channel_source} MCP configured at {mcp_path} (server key: {server_key})",
     )
     return True

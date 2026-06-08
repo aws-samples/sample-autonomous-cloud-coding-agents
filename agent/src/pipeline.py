@@ -14,7 +14,13 @@ from pydantic import ValidationError
 import memory as agent_memory
 import task_state
 from channel_mcp import configure_channel_mcp
-from config import AGENT_WORKSPACE, build_config, get_config, resolve_linear_api_token
+from config import (
+    AGENT_WORKSPACE,
+    build_config,
+    get_config,
+    resolve_jira_oauth_token,
+    resolve_linear_api_token,
+)
 from context import assemble_prompt, fetch_github_issue
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
@@ -466,13 +472,16 @@ def run_task(
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
-            # Channel-specific MCP wiring (Linear only, for v1). Must happen
-            # before discover_project_config so the scan picks up the file we
-            # just wrote. Resolve the API token from Secrets Manager *before*
-            # writing .mcp.json so the child SDK process inherits the env var
-            # that the MCP server entry references via ${LINEAR_API_TOKEN}.
+            # Channel-specific MCP wiring. Must happen before
+            # discover_project_config so the scan picks up the file we just
+            # wrote. Resolve the per-channel access token from Secrets
+            # Manager *before* writing .mcp.json so the child SDK process
+            # inherits the env var that the MCP server entry references
+            # (${LINEAR_API_TOKEN} / ${JIRA_API_TOKEN}).
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
+            elif config.channel_source == "jira":
+                resolve_jira_oauth_token(config.channel_metadata)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
