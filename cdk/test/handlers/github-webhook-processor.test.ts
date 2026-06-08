@@ -156,16 +156,21 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    expect(captureScreenshotMock).toHaveBeenCalledWith('https://preview.example.com');
+    // captureScreenshot now receives a deadline-aware budget (PR-241 B1).
+    expect(captureScreenshotMock).toHaveBeenCalledWith(
+      'https://preview.example.com',
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+    );
     expect(s3Send).toHaveBeenCalledTimes(1);
     const putArg = (s3Send.mock.calls[0][0] as { input: { Key: string; ContentType: string } }).input;
-    expect(putArg.Key).toBe('screenshots/owner_repo/abc1234-42.png');
+    // Key carries the high-entropy suffix added in PR-241 (key entropy).
+    expect(putArg.Key).toMatch(/^screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png$/);
     expect(putArg.ContentType).toBe('image/png');
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     const commentArg = upsertTaskCommentMock.mock.calls[0][0] as { repo: string; issueOrPrNumber: number; body: string };
     expect(commentArg.repo).toBe('owner/repo');
     expect(commentArg.issueOrPrNumber).toBe(17);
-    expect(commentArg.body).toContain('https://d1.cloudfront.net/screenshots/owner_repo/abc1234-42.png');
+    expect(commentArg.body).toMatch(/https:\/\/d1\.cloudfront\.net\/screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png/);
   });
 
   test('aborts when screenshot capture throws', async () => {
@@ -222,7 +227,7 @@ describe('github-webhook-processor handler', () => {
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
     const linearArg = postIssueCommentMock.mock.calls[0];
     expect(linearArg[1]).toBe('issue-uuid');
-    expect(linearArg[2]).toContain('https://d1.cloudfront.net/screenshots/owner_repo/abc1234-42.png');
+    expect(linearArg[2]).toMatch(/https:\/\/d1\.cloudfront\.net\/screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png/);
   });
 
   test('falls back to extractor on PR body when title yields no identifier', async () => {
@@ -232,8 +237,8 @@ describe('github-webhook-processor handler', () => {
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractLinearIdentifierMock
-      .mockReturnValueOnce(null)         // title produces no match
-      .mockReturnValueOnce('ABCA-42');   // body does
+      .mockReturnValueOnce(null) // title produces no match
+      .mockReturnValueOnce('ABCA-42'); // body does
     findLinearIssueMock.mockResolvedValueOnce({
       issueId: 'issue-uuid',
       linearWorkspaceId: 'ws-1',
