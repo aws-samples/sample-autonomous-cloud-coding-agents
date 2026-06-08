@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .deliverers import DELIVER_OUTCOMES as _DELIVER_OUTCOMES
+from .deliverers import produced_outcomes as _deliverer_produces
 from .loader import WorkflowValidationError, validate_shape
 from .runner import STEP_HANDLERS
 
@@ -65,8 +67,8 @@ _INPUT_TO_SOURCE = {
 
 # Maps a terminal outcome to the step kind that must be present to produce it
 # (rule 11). `comment` and `artifact` are both produced by deliver_artifact —
-# but by *different* targets, so the kind-presence check is refined by
-# _DELIVER_TARGET_OUTCOMES below.
+# but by *different* deliverers, so the kind-presence check is refined by the
+# deliverer registry (workflow.deliverers) below.
 _OUTCOME_REQUIRES_STEP = {
     "pr_url": "ensure_pr",
     "review_posted": "post_review",
@@ -74,19 +76,12 @@ _OUTCOME_REQUIRES_STEP = {
     "comment": "deliver_artifact",
 }
 
-# Which terminal outcomes each deliver_artifact ``target`` actually produces
-# (rule 11). A `target: s3` step delivers an artifact but posts no comment, so a
-# workflow declaring `primary: comment` with only an s3 target would never
-# produce its declared outcome. A `deliver_artifact` step with no explicit
-# target is treated as satisfying either outcome (the runtime default is an open
-# question — WORKFLOWS.md open question #2 — so this stays lenient rather than
-# flag a false positive on an unset field).
-_DELIVER_TARGET_OUTCOMES = {
-    "s3": frozenset({"artifact"}),
-    "comment": frozenset({"comment"}),
-    "s3_and_comment": frozenset({"artifact", "comment"}),
-}
-_DELIVER_OUTCOMES = frozenset({"artifact", "comment"})
+# Which terminal outcomes a deliver_artifact ``target`` produces is owned by the
+# deliverer registry (ADR-014 addendum 2026-06-08): ``target`` is an open
+# string naming a registered Python deliverer, each of which declares its
+# produced outcomes. The validator consults that single source of truth (imported
+# at module top as _DELIVER_OUTCOMES / _deliverer_produces) instead of a
+# hardcoded enum, so a new deliverer needs no validator edit.
 
 
 def _resolved_requires_repo(data: dict[str, Any]) -> bool:
@@ -302,10 +297,9 @@ def _rule_11_outcome_step_consistency(data: dict[str, Any]) -> list[str]:
         ]
 
         def _produces(step: dict[str, Any]) -> bool:
-            target = step.get("target")
-            if target is None:
-                return True  # unset target stays lenient (see _DELIVER_TARGET_OUTCOMES)
-            return primary in _DELIVER_TARGET_OUTCOMES.get(target, frozenset())
+            # Consult the deliverer registry: an unset target stays lenient, an
+            # unknown name produces nothing (see workflow.deliverers).
+            return primary in _deliverer_produces(step.get("target"))
 
         if not any(_produces(s) for s in deliver_steps):
             return [

@@ -211,8 +211,8 @@
           },
           "target": {
             "type": "string",
-            "description": "For deliver_artifact: where to deliver the produced output.",
-            "enum": ["s3", "comment", "s3_and_comment"]
+            "description": "For deliver_artifact: the name of a registered Python deliverer (workflow/deliverers.py / DELIVERERS) to route the produced output through. Open string, not a closed enum, so a new delivery method is a registered deliverer, not a schema change (ADR-014 addendum 2026-06-08). First-party names: s3, comment, s3_and_comment. Each deliverer declares the terminal outcomes it produces; validator rule 11 consults that registry.",
+            "minLength": 1
           }
         }
       }

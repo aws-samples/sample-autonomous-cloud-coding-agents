@@ -38,7 +38,11 @@ StepKind = Literal[
 OnFailure = Literal["fail", "continue", "skip_remaining"]
 EnsurePrStrategy = Literal["create", "push_resolve", "resolve"]
 VerifyGate = Literal["strict", "regression_only", "informational"]
-DeliverTarget = Literal["s3", "comment", "s3_and_comment"]
+# deliver_artifact target: an open string naming a registered deliverer
+# (workflow.deliverers / DELIVERERS), not a closed enum — a new delivery method
+# is a registered deliverer, not a model/schema change (ADR-014 addendum
+# 2026-06-08). First-party names: s3, comment, s3_and_comment.
+DeliverTarget = str
 TerminalOutcome = Literal["pr_url", "review_posted", "artifact", "comment"]
 Status = Literal["draft", "validated", "production", "deprecated"]
 

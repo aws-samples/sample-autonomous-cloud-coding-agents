@@ -217,6 +217,13 @@ class TestIndividualRules:
         w = self._repo_less_deliver(target="comment", primary="artifact")
         assert "rule-11" in validate_workflow(w)
 
+    def test_rule11_unknown_deliverer_target_flagged(self):
+        # ADR-014 addendum: target is an open string resolving to a registered
+        # deliverer. An unknown name produces nothing the validator can vouch
+        # for, so a declared primary outcome it doesn't back is flagged.
+        w = self._repo_less_deliver(target="not_a_registered_deliverer", primary="artifact")
+        assert "rule-11" in validate_workflow(w)
+
     def test_rule12_side_effect_continue(self):
         w = _base()
         w["steps"][-1] = {"kind": "ensure_pr", "strategy": "create", "on_failure": "continue"}
