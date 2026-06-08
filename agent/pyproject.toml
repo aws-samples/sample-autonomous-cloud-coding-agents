@@ -33,7 +33,7 @@ dependencies = [
     # in cdk/package.json AND refresh the parity fixtures, in the same
     # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
     # the parity-contract banner in mise.toml.
-    "cedarpy==4.8.0", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.10.0
+    "cedarpy==4.8.4", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.8.2 (both Cedar Rust 4.8.2)
 ]
 
 [tool.uv]
