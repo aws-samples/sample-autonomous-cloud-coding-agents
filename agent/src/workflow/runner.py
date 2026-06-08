@@ -451,6 +451,18 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
     from config import AGENT_WORKSPACE
     from runner import run_agent
 
+    # Fail loud rather than run an unguided agent: an empty system prompt means
+    # no handler/caller built it (e.g. a repo-less workflow whose hydrate_context
+    # skipped build_system_prompt because there is no RepoSetup — WORKFLOWS.md
+    # open question; repo-less prompt assembly lands in Phase 3). Better an
+    # attributable failed step than a silently context-free SDK loop.
+    if not ctx.system_prompt:
+        raise ValueError(
+            "run_agent reached with an empty system prompt — no clone_repo/"
+            "hydrate_context step (or caller) built ctx.system_prompt. Repo-less "
+            "system-prompt assembly is not wired yet (#248 Phase 3)."
+        )
+
     cwd = ctx.setup.repo_dir if ctx.setup else AGENT_WORKSPACE
     result = asyncio.run(
         run_agent(
@@ -484,19 +496,22 @@ def _gate_status(
     terminal-status logic so the workflow path and the legacy path agree:
 
     - ``informational`` (or a ``read_only`` workflow) — never gates.
-    - ``regression_only`` — fails only on a *regression* (was passing before,
-      fails now); a check that was already red before the agent ran is not a
-      regression and does not gate (``build_ok = passed or not build_before`` in
-      pipeline.py).
-    - ``strict`` (or unset) — any failure gates.
+    - ``strict`` — any failure gates.
+    - ``regression_only`` **and the unset default** — fail only on a *regression*
+      (was passing before, fails now); a check that was already red before the
+      agent ran is not a regression and does not gate. This matches pipeline.py's
+      unconditional ``build_ok = passed or not build_before`` — which is
+      regression-only for *every* task — so an unset gate agrees with the legacy
+      path rather than defaulting to the stricter ``strict``.
     """
     if passed:
         return "succeeded"
     if gate == "informational" or read_only:
         return "succeeded"
-    if gate == "regression_only" and not was_passing_before:
-        return "succeeded"
-    return "failed"
+    if gate == "strict":
+        return "failed"
+    # regression_only (explicit) and the unset default: gate only a regression.
+    return "failed" if was_passing_before else "succeeded"
 
 
 def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:

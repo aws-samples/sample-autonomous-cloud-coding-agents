@@ -429,6 +429,18 @@ class TestGateStatus:
             passed=False, gate="regression_only", read_only=False, was_passing_before=False
         ) == "succeeded"
 
+    def test_unset_gate_defaults_to_regression_only(self):
+        from workflow.runner import _gate_status
+
+        # An unset gate must mirror pipeline.py (which is always regression-only),
+        # NOT default to strict: a regression gates, a pre-existing failure does not.
+        assert _gate_status(
+            passed=False, gate=None, read_only=False, was_passing_before=True
+        ) == "failed"
+        assert _gate_status(
+            passed=False, gate=None, read_only=False, was_passing_before=False
+        ) == "succeeded"
+
 
 def _real_ctx(workflow: Workflow, **kw):
     """A StepContext with a real (minimal) TaskConfig for handler tests."""
@@ -547,3 +559,25 @@ class TestCloneAndHydrateHandlers:
         outcome = _handle_hydrate_context(wf.steps[0], ctx)
         assert ctx.system_prompt == ""
         assert outcome.data["system_prompt_built"] is False
+
+
+class TestRunAgentHandler:
+    def test_empty_system_prompt_fails_loud(self):
+        # run_agent must not run an unguided (empty system prompt) agent loop —
+        # it raises so the step is an attributable failure, not a silent no-op.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf)  # system_prompt defaults to ""
+        with pytest.raises(ValueError, match="empty system prompt"):
+            _handle_run_agent(wf.steps[0], ctx)
+
+    def test_empty_system_prompt_surfaces_as_failed_step(self):
+        # Through run_workflow, the raise becomes a failed StepOutcome (the runner
+        # never crashes mid-workflow) attributed to the run_agent step.
+        wf = _workflow([{"kind": "run_agent", "name": "implement"}])
+        result = run_workflow(wf, _real_ctx(wf))
+        assert not result.succeeded
+        assert result.failed_step is not None
+        assert result.failed_step.name == "implement"
+        assert "empty system prompt" in (result.failed_step.error or "")

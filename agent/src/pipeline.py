@@ -155,7 +155,14 @@ def _workflow_id_for_task_type(task_type: str) -> str | None:
     when no workflow exists yet, so the caller falls back to the inline path.
 
     This bridge exists only while the seam is gated; tasks 6-8 replace it with a
-    real ``resolved_workflow`` threaded from the create-task boundary.
+    real ``resolved_workflow`` threaded from the create-task boundary, at which
+    point this dict is deleted. The canonical one-to-one ``task_type → workflow``
+    mapping is published in ``docs/design/WORKFLOWS.md`` §"Replacing task types"
+    (and API_CONTRACT.md): ``new_task → coding/new-task-v1``,
+    ``pr_iteration → coding/pr-iteration-v1``, ``pr_review → coding/pr-review-v1``.
+    Only ``new_task`` is wired here because its workflow file ships in Phase 1;
+    the other two land in Phase 2b. Keep this in sync with that table until the
+    cutover removes it.
     """
     return {"new_task": "coding/new-task-v1"}.get(task_type)
 
@@ -215,25 +222,22 @@ def _execute_agent_step(
     # the full step list over). only_kinds keeps the runner from re-running the
     # deterministic steps the pipeline already owns (double clone / double PR).
     result = run_workflow(wf, ctx, only_kinds={"run_agent"})
-    if not result.succeeded and result.failed_step is not None:
-        log(
-            "WARN",
-            f"Workflow step {result.failed_step.name!r} failed: {result.failed_step.error}",
-        )
+
     if ctx.agent_result is None:
-        # The run_agent step did not run (e.g. an earlier step failed terminally).
-        # Surface a structured error rather than returning None to the caller.
-        return AgentResult(
-            status="error",
-            error=(
-                "Workflow ended before the run_agent step produced a result"
-                + (
-                    f" (failed step: {result.failed_step.name})"
-                    if result.failed_step
-                    else ""
-                )
-            ),
+        # The run_agent step did not produce a result — i.e. its handler raised
+        # (run_workflow's _run_handler captures the exception into a failed
+        # StepOutcome instead of propagating it). Re-raise here so run_task's
+        # `except Exception` handles it with full fidelity: the log_error_cw
+        # APPLICATION_LOGS mirror, the span error, and the real error text — the
+        # exact behavior the legacy inline ``asyncio.run(run_agent(...))`` had.
+        # Without this, a fatal agent error would be silently downgraded to a
+        # generic placeholder (code-review finding).
+        detail = (
+            result.failed_step.error
+            if result.failed_step and result.failed_step.error
+            else "run_agent step produced no result"
         )
+        raise RuntimeError(f"Workflow run_agent step failed: {detail}")
     return ctx.agent_result
 
 

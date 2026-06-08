@@ -114,3 +114,20 @@ class TestExecuteAgentStep:
         assert out is expected
         mock_ensure_pr.assert_not_called()
         mock_build.assert_not_called()
+
+    def test_run_agent_failure_reraises_to_preserve_error_contract(self, monkeypatch):
+        # When the run_agent step's handler raises, run_workflow captures it into
+        # a failed StepOutcome (does not propagate). _execute_agent_step must
+        # RE-RAISE so run_task's `except` block restores full error fidelity
+        # (log_error_cw mirror + real text) — not silently downgrade to a generic
+        # AgentResult. We assert the original error text is carried in the raise.
+        monkeypatch.setenv("WORKFLOW_RUNNER_ENABLED", "1")
+
+        async def boom(_p, _s, _c, cwd=None, trajectory=None):
+            raise RuntimeError("SDK session expired")
+
+        with (
+            patch("runner.run_agent", side_effect=boom),
+            pytest.raises(RuntimeError, match="SDK session expired"),
+        ):
+            _execute_agent_step("p", "s", _config(), _setup(), None, None, None)
