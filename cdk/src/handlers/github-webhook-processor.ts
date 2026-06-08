@@ -326,7 +326,25 @@ async function findPullRequestForSha(
     return null;
   }
 
-  const pulls = (await res.json()) as Array<{
+  // GitHub's contract is a JSON array, but a transient 2xx HTML body or
+  // a malformed payload would crash an unguarded `.find` and throw out
+  // of the (un-DLQ'd) processor. Treat anything non-array as no-PR.
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch (err) {
+    logger.warn('GitHub commit-pulls returned non-JSON body', {
+      repo,
+      sha,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    logger.warn('GitHub commit-pulls did not return an array', { repo, sha });
+    return null;
+  }
+  const pulls = parsed as Array<{
     number?: number;
     state?: string;
     title?: string;
