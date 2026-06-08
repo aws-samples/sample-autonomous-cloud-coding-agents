@@ -2948,10 +2948,10 @@
   resolved "https://registry.yarnpkg.com/@cdklabs/tskb/-/tskb-0.0.4.tgz#6d7af32427ef947dddcb6f1f1d76d75924e33323"
   integrity sha512-NFx1X0l7p5DyHtLLEyNeh1hPN4UN9hTkZkzFs/Mp+kFk7dpdINGmGVpCfRDjJ2DrcNSNENUmT+w8g73TvmBbTw==
 
-"@cedar-policy/cedar-wasm@4.10.0":
-  version "4.10.0"
-  resolved "https://registry.yarnpkg.com/@cedar-policy/cedar-wasm/-/cedar-wasm-4.10.0.tgz#c7731216ff9e7814d367c96ca2b4a93ba2a83e1e"
-  integrity sha512-nb/KxCEefPLVYefYR6o4Qm+uyQ9XzN68di9O4OZyaZZlmrSDbHB4tvHl3CQSy7gj6gztWx/TOEIrnKrADKWZdQ==
+"@cedar-policy/cedar-wasm@4.8.2":
+  version "4.8.2"
+  resolved "https://registry.yarnpkg.com/@cedar-policy/cedar-wasm/-/cedar-wasm-4.8.2.tgz#36868fee0bfe5dcce1755b6bb915ebb419a8956d"
+  integrity sha512-S37Kd4wP/IMZN3pdKEcsV8av7jMj4AKRovxzJEYZNTEYq0Wj4fno3dsw8xHHDXqT0dkQGTNUBuQNF8CTvOgE/Q==
 
 "@clack/core@1.2.0":
   version "1.2.0"

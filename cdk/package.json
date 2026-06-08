@@ -28,7 +28,7 @@
     "@aws-sdk/s3-presigned-post": "^3.1021.0",
     "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@aws/durable-execution-sdk-js": "^1.1.0",
-    "@cedar-policy/cedar-wasm": "4.10.0",
+    "@cedar-policy/cedar-wasm": "4.8.2",
     "aws-cdk-lib": "^2.257.0",
     "cdk-nag": "^2.38.2",
     "constructs": "^10.3.0",
