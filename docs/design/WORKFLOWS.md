@@ -193,12 +193,10 @@ promotion_gate: { requires: [eval:web-research-quality] }   # min-sources / cita
 status: production
 ```
 
-This second example is the **target shape** for repo-less execution — the acceptance criterion it will *eventually* prove is that a task runs end-to-end with no `repo`: `attachments` + `task_description` are sufficient, no `clone_repo`/`ensure_pr` steps run, and the terminal outcome is an uploaded artifact rather than a PR. It is **not yet runnable** (the implementations land in Phase 3), but the schema's `requires_repo:false` promise is no longer a bare forward-declaration: the two platform assumptions that gated it are now **decided** (ADR-014 addendum 2026-06-08), so the Phase-0 schema is frozen:
+This second example is the **target shape** for repo-less execution — the acceptance criterion it proves is that a task runs end-to-end with no `repo`: `attachments` + `task_description` are sufficient, no `clone_repo`/`ensure_pr` steps run, and the terminal outcome is a delivered artifact/comment rather than a PR. **This path is implemented (#248 Phase 3):** the create-task boundary admits a repo-less submission, the pipeline branches to a repo-less flow that drives `hydrate_context → run_agent → deliver_artifact` through the workflow runner, and the two platform assumptions that gated it are **decided** (ADR-014 addendum 2026-06-08):
 
-- **Memory actorId** → per-user `user:{cognito_sub}` fallback when `repo` is absent ([Open questions](#open-questions) #1, resolved). No schema field.
-- **Artifact delivery** → `deliver_artifact.target` names a registered Python deliverer; shared S3 key scheme (`artifacts/{task_id}/`) / SessionRole IAM grant / size limit / `TaskDetail` surfacing pinned ([Open questions](#open-questions) #2, resolved).
-
-`web_research` therefore remains a *schema-expressiveness* fixture for now — the schema it exercises is frozen, but its `deliver_artifact` / repo-less execution path is implemented in Phase 3.
+- **Memory actorId** → per-user `user:{cognito_sub}` fallback when `repo` is absent ([Open questions](#open-questions) #1, resolved). No schema field. The agent writes the episode to the `user:{user_id}` namespace; the orchestrator hydration reads it back.
+- **Artifact delivery** → `deliver_artifact.target` names a registered Python deliverer (`agent/src/workflow/deliverers.py`); the `s3` deliverer uploads the agent's result text to `artifacts/{task_id}/result.md` (SessionRole `s3:PutObject` grant scoped to `artifacts/${task_id}/*`, 5 MiB cap), surfaced on `TaskDetail.artifact_uri`; the `comment` deliverer records a `delivered_comment` milestone for the channel fanout ([Open questions](#open-questions) #2, resolved).
 
 ## The agent-side step runner
 

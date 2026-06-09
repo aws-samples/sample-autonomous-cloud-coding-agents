@@ -132,6 +132,8 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` otherwise. */
+  readonly artifact_uri: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task. Null only on pre-Cedar-HITL records. */

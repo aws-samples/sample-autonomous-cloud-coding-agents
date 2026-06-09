@@ -381,9 +381,13 @@ def test_default_handlers_cover_every_step_kind():
     assert set(STEP_HANDLERS) == set(_HANDLER_KINDS)
 
 
-@pytest.mark.parametrize("unimpl", ["post_review", "deliver_artifact"])
+@pytest.mark.parametrize("unimpl", ["post_review"])
 def test_phase_gated_handlers_fail_loud(unimpl):
-    """Phase 2b/3 handlers are registered but must raise, not silently no-op."""
+    """Still-stubbed handlers are registered but must raise, not silently no-op.
+
+    deliver_artifact graduated from this list in #248 Phase 3 (now implemented);
+    post_review remains a stub until its phase.
+    """
     from workflow import STEP_HANDLERS
 
     wf = _workflow([{"kind": unimpl}], primary="review_posted")

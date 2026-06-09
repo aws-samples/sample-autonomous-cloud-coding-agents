@@ -172,7 +172,10 @@ class TestRepoLessPipeline:
         async def fake_run_agent(_prompt, system_prompt, config, cwd=None, trajectory=None):
             captured_cwd["cwd"] = cwd
             captured_cwd["system_prompt"] = system_prompt
-            return AgentResult(status="success", turns=2, cost_usd=0.02, num_turns=2)
+            return AgentResult(
+                status="success", turns=2, cost_usd=0.02, num_turns=2,
+                result_text="## Summary\nThe three papers argue ...",
+            )
 
         mock_run_agent.side_effect = fake_run_agent
         mock_task_span.return_value = self._mock_span()
@@ -194,12 +197,11 @@ class TestRepoLessPipeline:
         # The repo-less path must never clone a repo or build a PR.
         mock_setup_repo.assert_not_called()
         assert result["pr_url"] is None
-        # Delivery gate (#248 Phase 3): the agent ran, but default/agent-v1's
-        # terminal outcome is `comment`, produced by deliver_artifact — which is
-        # not yet implemented. The task must NOT report success with nothing
-        # delivered; it is a loud, attributable failure that names the gap.
-        assert result["status"] == "error"
-        assert "deliver_artifact is not yet implemented" in result["error"]
+        # default/agent-v1's deliver_artifact target is `comment` (no S3): the
+        # deliverer surfaces the result as a milestone, the task succeeds, and no
+        # artifact URI is produced (comment-only).
+        assert result["status"] == "success"
+        assert result["artifact_uri"] is None
         # Agent ran from the workspace, not a repo dir, with the repo-less prompt
         # (no Repository: / branch placeholders), and the prompt was substituted.
         assert "Repository:" not in captured_cwd["system_prompt"]

@@ -272,6 +272,11 @@ class AgentResult(BaseModel):
     session_id: str = ""
     error: str | None = None
     usage: TokenUsage | None = None
+    # The agent's final result text (ResultMessage.result on success). For a
+    # repo-less knowledge task this IS the deliverable that deliver_artifact
+    # uploads/posts (#248 Phase 3). Empty for coding tasks (their product is the
+    # PR, not the text).
+    result_text: str = ""
 
 
 class TaskResult(BaseModel):
@@ -313,3 +318,7 @@ class TaskResult(BaseModel):
     # TaskRecord's ``trace_s3_uri`` field is set atomically with the
     # terminal-status transition (design §10.1).
     trace_s3_uri: str | None = None
+    # S3 URI of a repo-less workflow's delivered artifact (deliver_artifact, #248
+    # Phase 3), or ``None`` for coding tasks / when no artifact was delivered.
+    # Surfaced on TaskDetail so the user can retrieve the knowledge-task output.
+    artifact_uri: str | None = None

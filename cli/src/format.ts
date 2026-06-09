@@ -54,6 +54,9 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.trace_s3_uri) {
     lines.push(`Trace S3:    ${task.trace_s3_uri}`);
   }
+  if (task.artifact_uri) {
+    lines.push(`Artifact:    ${task.artifact_uri}`);
+  }
   if (task.error_message) {
     lines.push(...formatErrorLines(task));
   }
@@ -196,6 +199,9 @@ export function formatStatusSnapshot(
   }
   if (task.trace_s3_uri) {
     lines.push(`  Trace S3:      ${task.trace_s3_uri}`);
+  }
+  if (task.artifact_uri) {
+    lines.push(`  Artifact:      ${task.artifact_uri}`);
   }
   lines.push(`  Last event:    ${lastEventLine}`);
 

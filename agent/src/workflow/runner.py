@@ -606,15 +606,29 @@ def _handle_post_review(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_deliver_artifact(step: Step, ctx: StepContext) -> StepOutcome:
-    """Deliver a produced artifact (repo-less knowledge work).
+    """Deliver a produced artifact (repo-less knowledge work, #248 Phase 3).
 
-    The artifact-delivery contract (S3 bucket, task_id-scoped key, SessionRole
-    grant, size limit, URL surfacing) is an open question blocking Phase 3 and
-    must be resolved as an ADR addendum before the schema is frozen
-    (WORKFLOWS.md open question #2). Registered now; fails loudly until then.
+    Routes through the named deliverer (``step.target`` → ``workflow.deliverers``):
+    an ``s3``-producing target uploads the agent's result text to
+    ``artifacts/{task_id}/`` and records the URI; a ``comment``-producing target
+    surfaces it as a milestone for the channel fanout. A delivery failure is a
+    *failed* step (terminal FAILED) — never a silent skip — since this is the
+    workflow's side-effecting terminal step.
     """
-    raise NotImplementedError(
-        "deliver_artifact handler lands with the repo-optional workflow (#248 Phase 3)"
+    from .deliverers import deliver
+
+    target = step.target or "s3"
+    result = deliver(target, ctx)
+    data: dict[str, Any] = {}
+    if result.artifact_uri:
+        data["artifact_uri"] = result.artifact_uri
+    if result.comment_posted:
+        data["comment_posted"] = True
+    return StepOutcome(
+        kind=step.kind,
+        name=_step_key(step),
+        status="succeeded",
+        data=data,
     )
 
 

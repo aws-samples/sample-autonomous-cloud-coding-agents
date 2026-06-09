@@ -244,11 +244,12 @@ def _run_repoless_task(
         system_prompt=system_prompt,
         user_prompt=prompt,
     )
-    # Drive hydrate_context + run_agent only. deliver_artifact is deferred to the
-    # next slice (its handler raises NotImplementedError until the S3 artifacts
-    # contract ships); excluding it keeps this a clean "agent runs repo-less" step.
+    # Drive the full repo-less step list: hydrate_context → run_agent →
+    # deliver_artifact. The deliverer uploads the agent's result text to
+    # artifacts/{task_id}/ (and/or surfaces it as a comment), so the declared
+    # terminal outcome is actually produced (#248 Phase 3).
     with task_span("task.agent_execution"):
-        run_workflow(wf, ctx, only_kinds={"hydrate_context", "run_agent"})
+        wf_result = run_workflow(wf, ctx)
 
     agent_result = ctx.agent_result
     if agent_result is None:
@@ -264,36 +265,40 @@ def _run_repoless_task(
         agent_result, build_ok=True, pr_url=None
     )
 
-    # Delivery gate: the workflow declares a terminal outcome (e.g. ``comment`` /
-    # ``artifact``) produced by a ``deliver_artifact`` step. That step is NOT run
-    # in this slice (its handler is a stub until the artifacts contract ships),
-    # so a workflow whose primary outcome is delivery-backed has produced NOTHING
-    # the user can see — reporting ``success`` there is a silent "completed but
-    # delivered nothing". Downgrade to a loud, attributable failure until the
-    # deliverer lands (#248 Phase 3, next slice). Outcomes with no delivery
-    # dependency (none today) would pass through unchanged.
-    from workflow.deliverers import DELIVER_OUTCOMES
-
-    primary_outcome = wf.terminal_outcomes.primary
-    delivery_deferred = (
-        overall_status == "success" and primary_outcome in DELIVER_OUTCOMES
-    )
-    if delivery_deferred:
+    # Delivery gate: deliver_artifact is the workflow's side-effecting terminal
+    # step. If the agent succeeded but the runner reports the workflow did NOT
+    # succeed (a deliver_artifact failure — e.g. no result text, S3 error), the
+    # task produced nothing the user can retrieve, so it is a loud FAILED naming
+    # the failed step rather than a silent "succeeded with no deliverable".
+    artifact_uri = ctx.artifacts.get("artifact_uri")
+    if overall_status == "success" and not wf_result.succeeded:
         overall_status = "error"
+        failed = wf_result.failed_step
         result_error = (
-            f"Agent completed but the workflow's terminal outcome "
-            f"{primary_outcome!r} was not delivered: deliver_artifact is not yet "
-            f"implemented (#248 Phase 3). The agent's work was not lost — re-run "
-            f"once artifact delivery ships."
-        )
-        progress.write_agent_milestone(
-            "delivery_deferred",
-            f"primary_outcome={primary_outcome} — deliver_artifact not yet implemented; "
-            f"task marked FAILED rather than reporting success with no deliverable.",
+            f"Agent completed but delivery failed at step "
+            f"{(failed.name if failed else 'deliver_artifact')!r}: "
+            f"{(failed.error if failed and failed.error else 'unknown delivery error')}"
         )
         log("WARN", result_error)
 
     trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+
+    # Episodic memory for a repo-less task is keyed on user:{user_id} (ADR-014
+    # addendum) — the same namespace the orchestrator fallback + hydration read.
+    # Fail-open: a memory write failure must not fail the task.
+    memory_written = False
+    effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
+    if effective_memory_id and config.user_id:
+        import memory as agent_memory
+
+        memory_written = agent_memory.write_task_episode(
+            memory_id=effective_memory_id,
+            actor=f"user:{config.user_id}",
+            task_id=config.task_id,
+            status="COMPLETED" if overall_status == "success" else "FAILED",
+            cost_usd=agent_result.cost_usd,
+            duration_s=round(duration, 1),
+        )
 
     usage = agent_result.usage
     turns_attempted = agent_result.num_turns or agent_result.turns
@@ -301,6 +306,7 @@ def _run_repoless_task(
         status=overall_status,
         agent_status=agent_result.status,
         pr_url=None,
+        artifact_uri=artifact_uri,
         cost_usd=agent_result.cost_usd,
         turns=turns_attempted,
         turns_attempted=turns_attempted,
@@ -311,11 +317,7 @@ def _run_repoless_task(
         ),
         duration_s=round(duration, 1),
         task_id=config.task_id,
-        # Agent-side episodic memory write for repo-less tasks (keyed on
-        # user:{user_id}) is a follow-up slice; memory_id is threaded in ready
-        # for it. Until then the orchestrator's writeMinimalEpisode fallback is
-        # the only writer to the user:{user_id} namespace.
-        memory_written=False,
+        memory_written=memory_written,
         error=result_error,
         session_id=agent_result.session_id or None,
         input_tokens=usage.input_tokens if usage else None,
@@ -421,7 +423,7 @@ def _write_memory(
     # Memory writes are individually fail-open (return False on error)
     episode_ok = agent_memory.write_task_episode(
         memory_id=memory_id,
-        repo=config.repo_url,
+        actor=config.repo_url,
         task_id=config.task_id,
         status="COMPLETED" if build_passed else "FAILED",
         pr_url=pr_url,

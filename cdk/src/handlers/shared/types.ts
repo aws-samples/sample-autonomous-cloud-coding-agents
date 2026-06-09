@@ -125,6 +125,9 @@ export interface TaskRecord {
    * ``get-trace-url`` handler reads this to issue presigned download URLs.
    */
   readonly trace_s3_uri?: string;
+  /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
+   *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
+  readonly artifact_uri?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
   readonly turns_attempted?: number;
@@ -268,6 +271,9 @@ export interface TaskDetail {
    *  the field being present; CLI download resolves this via the
    *  ``get-trace-url`` handler rather than hitting S3 directly. */
   readonly trace_s3_uri: string | null;
+  /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` for
+   *  coding tasks or comment-only delivery. */
+  readonly artifact_uri: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task (TaskRecord §10.2, §13.6). Surfaced so CLI / dashboard
@@ -603,6 +609,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,
+    artifact_uri: record.artifact_uri ?? null,
     attachments: record.attachments
       ? record.attachments.map(a => ({
         attachment_id: a.attachment_id,

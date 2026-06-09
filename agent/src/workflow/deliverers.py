@@ -13,16 +13,34 @@ is actually produced by some step — the single source of truth for the old
 
 The shared *plumbing* contract every deliverer builds on is frozen in the
 ADR-014 addendum: artifacts upload to a task-scoped key ``artifacts/{task_id}/``
-in the platform artifacts bucket, the agent SessionRole carries a prefix-scoped
-IAM grant, a per-artifact size limit applies, and the delivered URL surfaces on
-``TaskDetail``. The deliverer *implementations* land in Phase 3 (#248); this
-module pins only the contract — names + produced outcomes — so the Phase-0
-schema can freeze.
+in the platform artifacts bucket (``ARTIFACTS_BUCKET_NAME``), the agent
+SessionRole carries a prefix-scoped IAM grant, a per-artifact size limit
+applies, and the delivered URL surfaces on ``TaskDetail`` (``artifact_uri``).
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from shell import log
+
+if TYPE_CHECKING:
+    from .runner import StepContext
+
+# Per-artifact size cap. A repo-less knowledge task's deliverable is text (the
+# agent's final message); 5 MiB is generous for that and bounds a runaway upload.
+MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
+ARTIFACT_KEY_PREFIX = "artifacts"
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    """What a deliverer produced: an artifact S3 URI and/or a posted comment."""
+
+    artifact_uri: str | None = None
+    comment_posted: bool = False
 
 
 @dataclass(frozen=True)
@@ -31,8 +49,8 @@ class Deliverer:
 
     ``produces`` is the set of ``terminal_outcomes`` values this deliverer can
     satisfy (e.g. an S3 upload produces ``artifact``; a comment post produces
-    ``comment``). Used by validator rule 11; the runtime handler (Phase 3) will
-    look up the same registry to dispatch.
+    ``comment``). Used by validator rule 11 and by the runtime ``deliver``
+    dispatcher.
     """
 
     name: str
@@ -48,6 +66,82 @@ DELIVERERS: dict[str, Deliverer] = {
     "comment": Deliverer("comment", frozenset({"comment"})),
     "s3_and_comment": Deliverer("s3_and_comment", frozenset({"artifact", "comment"})),
 }
+
+
+def _artifact_body(ctx: StepContext) -> bytes:
+    """The deliverable bytes: the agent's final result text (#248 Phase 3)."""
+    text = ctx.agent_result.result_text if ctx.agent_result else ""
+    if not text:
+        raise ValueError("deliver_artifact: agent produced no result text to deliver")
+    body = text.encode("utf-8")
+    if len(body) > MAX_ARTIFACT_BYTES:
+        raise ValueError(
+            f"deliver_artifact: artifact is {len(body)} bytes, exceeds the "
+            f"{MAX_ARTIFACT_BYTES}-byte limit"
+        )
+    return body
+
+
+def _upload_to_s3(ctx: StepContext) -> str:
+    """Upload the deliverable to ``artifacts/{task_id}/result.md``; return its URI.
+
+    Mirrors the trace-upload pattern (``telemetry.py``): tenant-scoped S3 client,
+    task_id-scoped key matching the SessionRole grant. Raises on misconfiguration
+    or upload failure — deliver_artifact is a side-effecting terminal step, so a
+    failure must surface as a failed step, not a silent skip.
+    """
+    bucket = os.environ.get("ARTIFACTS_BUCKET_NAME")
+    if not bucket:
+        raise ValueError("deliver_artifact: ARTIFACTS_BUCKET_NAME is not configured")
+    task_id = ctx.config.task_id
+    if not task_id:
+        raise ValueError("deliver_artifact: empty task_id (cannot scope the artifact key)")
+
+    body = _artifact_body(ctx)
+    key = f"{ARTIFACT_KEY_PREFIX}/{task_id}/result.md"
+    from aws_session import tenant_client
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    client = tenant_client("s3", region_name=region)
+    client.put_object(Bucket=bucket, Key=key, Body=body, ContentType="text/markdown")
+    uri = f"s3://{bucket}/{key}"
+    log("WORKFLOW", f"deliver_artifact: uploaded {len(body)} bytes to {uri}")
+    return uri
+
+
+def _post_comment(ctx: StepContext) -> bool:
+    """Surface the deliverable as a milestone for the channel fanout to post.
+
+    The agent has no direct comment channel for a repo-less task (no GitHub repo;
+    Linear MCP is channel-gated). The orchestrator's event fanout owns actual
+    comment delivery, so this records the result as a ``delivered_comment``
+    milestone (carrying the text) that the fanout renders to the originating
+    channel. Returns True when the milestone was written.
+    """
+    if ctx.progress is None:
+        return False
+    body = _artifact_body(ctx).decode("utf-8")
+    ctx.progress.write_agent_milestone("delivered_comment", body)
+    return True
+
+
+def deliver(target: str, ctx: StepContext) -> DeliveryResult:
+    """Run the named deliverer against the step context.
+
+    Raises ``ValueError`` for an unknown target (the validator's rule-8 should
+    prevent this reaching runtime, but fail loud rather than silently no-op).
+    """
+    if target not in DELIVERERS:
+        raise ValueError(
+            f"deliver_artifact: unknown target {target!r} (known: {sorted(DELIVERERS)})"
+        )
+    artifact_uri: str | None = None
+    comment_posted = False
+    if "artifact" in DELIVERERS[target].produces:
+        artifact_uri = _upload_to_s3(ctx)
+    if "comment" in DELIVERERS[target].produces:
+        comment_posted = _post_comment(ctx)
+    return DeliveryResult(artifact_uri=artifact_uri, comment_posted=comment_posted)
 
 # Terminal outcomes that any deliver_artifact deliverer can produce (union over
 # the registry) — the set rule 11 treats as "deliver_artifact-backed".

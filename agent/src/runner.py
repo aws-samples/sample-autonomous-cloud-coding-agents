@@ -471,6 +471,11 @@ async def run_agent(
 
                 err_payload = getattr(message, "result", None)
                 is_terminal_error = bool(getattr(message, "is_error", False))
+                # On a non-error result, ``message.result`` is the agent's final
+                # text — the deliverable for a repo-less knowledge task (#248
+                # Phase 3). Capture it so deliver_artifact can upload/post it.
+                if not is_terminal_error and err_payload:
+                    result.result_text = str(err_payload)
                 # The Claude Code CLI may emit ResultMessage with subtype "success"
                 # while setting is_error for Bedrock entitlement / model-access failures.
                 # Treat that as a hard failure so the pipeline writes FAILED (not COMPLETED).
