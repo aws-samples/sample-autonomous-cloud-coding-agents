@@ -42,6 +42,7 @@ import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
+import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
@@ -647,28 +648,8 @@ export class AgentStack extends Stack {
       attachmentsBucket: attachmentsBucket.bucket,
     });
 
-    // --- Fan-out plane consumer ---
-    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher edits a single issue comment in place; Slack
-    // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
-    new FanOutConsumer(this, 'FanOutConsumer', {
-      taskEventsTable: taskEventsTable.table,
-      taskTable: taskTable.table,
-      repoTable: repoTable.table,
-      githubTokenSecret,
-      // Slack bot-token grant is guarded on this prop — pass the
-      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
-      // workspace tokens. Same scope SlackIntegration uses for its
-      // own writers (PR #79 review #2).
-      slackSecretArnPattern: Stack.of(this).formatArn({
-        service: 'secretsmanager',
-        resource: 'secret',
-        resourceName: 'bgagent/slack/*',
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      }),
-    });
+    // FanOutConsumer is constructed below LinearIntegration so the
+    // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
     // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
@@ -832,6 +813,79 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
       value: linearIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    // --- Fan-out plane consumer ---
+    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
+    // Slack / GitHub / Linear / email per per-channel default filters.
+    // GitHub dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
+    // deterministic final-status comment with cost/turns/duration.
+    // Email remains a log-only stub until SES wires.
+    new FanOutConsumer(this, 'FanOutConsumer', {
+      taskEventsTable: taskEventsTable.table,
+      taskTable: taskTable.table,
+      repoTable: repoTable.table,
+      githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Linear dispatcher reads workspace registry rows + per-workspace
+      // OAuth-secret JSON. Same scope `bgagent-linear-oauth-*` as the
+      // orchestrator and webhook processor — Lambdas in this stack share
+      // the rotated-token write path; the agent runtime gets read-only.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      linearOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+    });
+
+    // --- GitHub deployment-status → screenshot pipeline ---
+    // Listens for Vercel-style preview deploys, screenshots the
+    // `deployment.environment_url` via AgentCore Browser, posts the
+    // image into a fresh PR comment. Default-on: any repo whose
+    // GitHub webhook is configured will get screenshotted on
+    // successful preview deploys; no opt-in flag.
+    const githubScreenshot = new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
+      api: taskApi.api,
+      githubTokenSecret,
+      // When the screenshot lands on a PR linked to a Linear issue
+      // (identifier in the PR title/body), also post the screenshot
+      // as a comment on that Linear issue. Wired through the existing
+      // workspace registry so token resolution reuses the per-workspace
+      // OAuth secrets created by `bgagent linear setup`.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+    });
+
+    new CfnOutput(this, 'GitHubWebhookUrl', {
+      value: `${taskApi.api.url}github/webhook`,
+      description: 'URL to configure as the GitHub webhook target on demo repos (deployment_status events)',
+    });
+
+    new CfnOutput(this, 'GitHubWebhookSecretArn', {
+      value: githubScreenshot.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the GitHub webhook signing secret — paste GitHub\'s value here after configuring the webhook',
+    });
+
+    new CfnOutput(this, 'ScreenshotBucketName', {
+      value: githubScreenshot.screenshotBucket.bucket.bucketName,
+      description: 'Private S3 bucket hosting deploy-preview screenshots (served via CloudFront)',
+    });
+
+    new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
+      value: githubScreenshot.screenshotBucket.distribution.domainName,
+      description: 'CloudFront domain that serves the screenshot bucket anonymously to GitHub PR / Linear renders',
     });
 
     // --- Bedrock model invocation logging (account-level) ---
