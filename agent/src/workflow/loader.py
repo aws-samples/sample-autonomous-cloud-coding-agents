@@ -13,7 +13,7 @@ Phases 1-3 (see WORKFLOWS.md §"Single source of truth and validator parity").
 from __future__ import annotations
 
 import json
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +139,7 @@ def policy_principal_for(workflow: Workflow) -> str:
     return _PRINCIPAL_BY_ID.get(workflow.id, "new_task")
 
 
+@cache
 def load_workflow(workflow_id: str) -> Workflow:
     """Resolve a first-party workflow id to its parsed ``Workflow``.
 
@@ -146,6 +147,13 @@ def load_workflow(workflow_id: str) -> Workflow:
     (orchestrator); the agent loads the pinned file from the image here. The id
     in the file must match the requested id (guards against a misfiled
     workflow).
+
+    Memoized: first-party workflow files are baked into the image and immutable
+    per process, and ``Workflow`` (and its whole model graph) is ``frozen=True``,
+    so the parsed result is safe to share. A single task resolves the same id
+    3-4x (build_config, the run_agent step dispatch, the post-hook reload — see
+    PR review #296); caching parses each file once instead of re-reading and
+    re-validating it every time.
     """
     path = _ref_to_path(workflow_id)
     if not path.is_file():

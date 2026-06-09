@@ -80,7 +80,21 @@ def _artifact_body(ctx: StepContext) -> bytes:
     text = ctx.agent_result.result_text if ctx.agent_result else ""
     if not text:
         raise ValueError("deliver_artifact: agent produced no result text to deliver")
+    # Bound memory BEFORE encoding. UTF-8 uses ≥1 byte per character, so a string
+    # whose character count already exceeds the byte cap cannot possibly fit —
+    # reject it without materializing a second full copy as bytes. This is what
+    # makes the cap actually cap memory on the constrained MicroVM: previously the
+    # bytes were encoded first and the check ran after, so a multi-hundred-MB
+    # result had both the str and its bytes resident before the cap fired
+    # (PR review #296 finding #9).
+    if len(text) > MAX_ARTIFACT_BYTES:
+        raise ValueError(
+            f"deliver_artifact: artifact text is {len(text)} characters, exceeds the "
+            f"{MAX_ARTIFACT_BYTES}-byte limit"
+        )
     body = text.encode("utf-8")
+    # Precise byte check for the borderline case (multibyte chars can push a
+    # within-character-budget string just over the byte cap).
     if len(body) > MAX_ARTIFACT_BYTES:
         raise ValueError(
             f"deliver_artifact: artifact is {len(body)} bytes, exceeds the "

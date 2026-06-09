@@ -91,6 +91,24 @@ class TestDeliver:
         with pytest.raises(ValueError, match="exceeds the"):
             deliver("s3", _ctx(result_text=big))
 
+    def test_oversize_artifact_rejected_before_encoding(self, monkeypatch):
+        # PR review #296 finding #9: the cap must bound memory by rejecting on the
+        # character count BEFORE encoding to UTF-8 bytes (which would materialize a
+        # second full copy). Patch str.encode to prove it is never called on the
+        # oversize path — the up-front character check fires first.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        from workflow.deliverers import _artifact_body
+
+        big = "x" * (MAX_ARTIFACT_BYTES + 1)
+
+        class _NoEncode(str):
+            def encode(self, *a, **k):
+                raise AssertionError("encode() called before the size cap fired")
+
+        ctx = _ctx(result_text=_NoEncode(big))
+        with pytest.raises(ValueError, match="characters, exceeds the"):
+            _artifact_body(ctx)
+
     def test_comment_writes_milestone_no_s3(self):
         progress = MagicMock()
         result = deliver("comment", _ctx(result_text="findings", progress=progress))

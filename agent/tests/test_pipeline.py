@@ -658,6 +658,90 @@ class TestCancelSkipsPostHooks:
 
         mock_ensure_pr.assert_called_once()
 
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_post_hook_workflow_reload_failure_still_opens_pr(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # PR review #296 finding #5: the post-hook reload runs AFTER run_agent has
+        # mutated/committed the tree. If load_workflow raises there (e.g. the
+        # file build_config already fell back on), the task must NOT be stranded
+        # FAILED with no PR — it falls back to the default "create" strategy and
+        # still calls ensure_pr, mirroring build_config's fail-soft handling.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        # Phase marker: the post-hook reload is the only load_workflow call that
+        # happens AFTER the agent runs. Loads before the agent (build_config, the
+        # run_agent step dispatch) must succeed so the task actually starts; the
+        # post-hook reload is the one we force to fail — regardless of how many
+        # pre-agent loads happen (the reviewers noted it's parsed 3-4x/task).
+        agent_ran = {"done": False}
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            agent_ran["done"] = True
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._running_span()
+
+        mock_ensure_pr = MagicMock(return_value="https://github.com/o/r/pull/1")
+
+        from workflow import WorkflowValidationError
+        from workflow import load_workflow as real_load
+
+        def flaky_load(workflow_id):
+            if agent_ran["done"]:
+                raise WorkflowValidationError("simulated post-hook reload failure")
+            return real_load(workflow_id)
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", mock_ensure_pr),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("workflow.load_workflow", side_effect=flaky_load),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-posthook-fallback",
+                resolved_workflow={"id": "coding/new-task-v1", "version": "1.0.0"},
+            )
+
+        # The reload failed but the work was still finalized into a PR.
+        mock_ensure_pr.assert_called_once()
+        assert mock_ensure_pr.call_args.kwargs["strategy"] == "create"
+        assert result["pr_url"] == "https://github.com/o/r/pull/1"
+
+    @staticmethod
+    def _running_span() -> MagicMock:
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        return span
+
 
 # ---------------------------------------------------------------------------
 # Chunk K1 — trace threading into TaskConfig (design §10.1)

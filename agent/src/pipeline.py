@@ -870,19 +870,37 @@ def run_task(
                     "turns_attempted": agent_result.num_turns or agent_result.turns,
                 }
 
-            # Resolve the workflow once for post-hook gating: read_only (replaces
-            # the former task_type=='pr_review' checks) and the ensure_pr
+            # Resolve the post-hook gating inputs: read_only and the ensure_pr
             # strategy (create / push_resolve / resolve) the workflow declares.
-            from workflow import load_workflow
+            #
+            # ``read_only`` comes from ``config`` — build_config already computed
+            # it (with its own fail-soft fallback) and it drove Cedar during the
+            # run, so reusing it keeps the post-hook on the SAME verdict rather
+            # than re-deriving a possibly-divergent one. The workflow file is only
+            # reloaded for the ensure_pr STRATEGY, and that reload is wrapped in
+            # the same WorkflowValidationError fallback build_config uses
+            # (config.py): this code path runs AFTER run_agent has already mutated
+            # / committed the tree, so a load failure here must NOT strand the work
+            # as FAILED with no PR — it falls back to the default "create" strategy
+            # and still opens the PR (PR review #296 finding #5).
+            from workflow import WorkflowValidationError, load_workflow
 
-            _workflow = load_workflow(
-                (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
-            )
-            workflow_read_only = _workflow.read_only
-            ensure_pr_strategy = next(
-                (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
-                "create",
-            )
+            workflow_read_only = config.read_only
+            try:
+                _workflow = load_workflow(
+                    (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+                )
+                ensure_pr_strategy = next(
+                    (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
+                    "create",
+                )
+            except WorkflowValidationError as exc:
+                log(
+                    "WARN",
+                    f"post-hook workflow reload failed ({exc}); defaulting ensure_pr "
+                    "strategy to 'create' so the agent's work is not stranded",
+                )
+                ensure_pr_strategy = "create"
 
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:

@@ -60,15 +60,26 @@ class TestGetSystemPrompt:
             assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
         assert "repo-less" in prompt.lower()
 
+    def test_web_research_has_its_own_registered_prompt(self):
+        # PR review #296 finding #8: knowledge/web-research-v1 now has a
+        # research-specialized prompt rather than silently degrading to the
+        # generic default-agent prompt. It must be distinct from default/agent-v1,
+        # be research-flavored, and carry no repo placeholders (it is repo-less).
+        prompt = get_system_prompt("knowledge/web-research-v1", repo_less=True)
+        assert prompt != get_system_prompt("default/agent-v1")
+        assert "research" in prompt.lower()
+        for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
+            assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+
     def test_repo_less_fallback_uses_repoless_default_not_coding(self):
-        # A repo-less id with no registered prompt (e.g. knowledge/web-research-v1
-        # until its registry prompt ships) must fall back to the repo-less default,
-        # NOT the coding prompt — else it would inherit unsubstitutable {repo_url}.
-        repoless = get_system_prompt("knowledge/web-research-v1", repo_less=True)
+        # An UNREGISTERED repo-less id (e.g. a future registry-only knowledge
+        # workflow) must still fall back to the repo-less default, NOT the coding
+        # prompt — else it would inherit unsubstitutable {repo_url}.
+        repoless = get_system_prompt("knowledge/not-registered-yet-v1", repo_less=True)
         assert repoless == get_system_prompt("default/agent-v1")
         assert "{repo_url}" not in repoless
-        # Without the flag, the same unknown id still falls back to coding.
-        assert get_system_prompt("knowledge/web-research-v1") == get_system_prompt(
+        # Without the flag, the same unknown id falls back to the coding default.
+        assert get_system_prompt("knowledge/not-registered-yet-v1") == get_system_prompt(
             "coding/new-task-v1"
         )
 

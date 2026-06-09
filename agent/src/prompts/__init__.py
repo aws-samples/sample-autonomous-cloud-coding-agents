@@ -13,6 +13,7 @@ from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
+from .web_research import WEB_RESEARCH_PROMPT
 
 DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
 # The fallback template for a repo-less id without its own registered prompt
@@ -27,6 +28,9 @@ _PROMPTS = {
     "coding/pr-review-v1": BASE_PROMPT.replace("{workflow}", PR_REVIEW_WORKFLOW),
     # Repo-less knowledge workflow (#248 Phase 3) — no git/branch/PR placeholders.
     "default/agent-v1": DEFAULT_AGENT_PROMPT,
+    # Repo-less reference knowledge workflow (#248) — research-specialized prompt
+    # so it no longer silently degrades to the generic default-agent prompt.
+    "knowledge/web-research-v1": WEB_RESEARCH_PROMPT,
 }
 
 

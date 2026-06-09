@@ -214,6 +214,42 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     }
     expect([...agentWriteable].sort()).toEqual([...expectedWriteable].sort());
   });
+
+  // #296 finding #10 residual: REPO_LESS_DEFAULT_WORKFLOW_ID (agent/src/config.py)
+  // is the load-failure fallback's notion of "the one repo-less default". It must
+  // (a) match the CDK platform default and (b) actually be requires_repo:false in
+  // the YAML — otherwise the fallback mis-classifies repo-optionality on the very
+  // path that exists to fail closed. DEFAULT_WORKFLOW_ID (the coding default) must
+  // conversely be a repo-bound workflow. Both pinned here so drift fails CI.
+  test('agent default-workflow constants agree with the YAML and CDK default', () => {
+    const configPy = fs.readFileSync(
+      path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
+    );
+    const grab = (name: string): string => {
+      const m = configPy.match(new RegExp(`${name}\\s*=\\s*"([^"]+)"`));
+      expect(m).not.toBeNull();
+      return m![1];
+    };
+    const repoLessDefault = grab('REPO_LESS_DEFAULT_WORKFLOW_ID');
+    const codingDefault = grab('DEFAULT_WORKFLOW_ID');
+
+    // (a) the repo-less default matches the CDK platform default…
+    expect(repoLessDefault).toBe(DEFAULT_WORKFLOW_ID);
+
+    // …and (b) the YAML for each names a workflow with the expected repo-optionality.
+    const docById = new Map<string, Record<string, unknown>>();
+    for (const file of yamlFiles) {
+      const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      docById.set(doc.id as string, doc);
+    }
+    const requiresRepoOf = (id: string): boolean => {
+      const doc = docById.get(id);
+      expect(doc).toBeDefined();
+      return doc!.requires_repo !== undefined ? Boolean(doc!.requires_repo) : doc!.domain === 'coding';
+    };
+    expect(requiresRepoOf(repoLessDefault)).toBe(false);
+    expect(requiresRepoOf(codingDefault)).toBe(true);
+  });
 });
 
 describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
