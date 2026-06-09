@@ -160,8 +160,12 @@ describe('create-task handler', () => {
     expect(body.error.code).toBe('VALIDATION_ERROR');
   });
 
-  test('returns 400 for missing repo', async () => {
-    const event = makeEvent({ body: JSON.stringify({ task_description: 'Fix it' }) });
+  test('returns 400 for missing repo on a repo-bound workflow', async () => {
+    // #248 Phase 3: repo is required only when the resolved workflow's
+    // requires_repo is true. coding/new-task-v1 is repo-bound, so a missing
+    // repo is rejected; a repo-less workflow (default/agent-v1) is not (see
+    // the repo-less acceptance test below).
+    const event = makeEvent({ body: JSON.stringify({ workflow_ref: 'coding/new-task-v1', task_description: 'Fix it' }) });
     const result = await handler(event);
 
     expect(result.statusCode).toBe(400);

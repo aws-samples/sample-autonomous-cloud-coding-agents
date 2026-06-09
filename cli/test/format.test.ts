@@ -95,6 +95,17 @@ describe('format', () => {
       expect(output).not.toContain('Max Turns:');
     });
 
+    test('renders a repo-less placeholder when repo is null (#248 Phase 3)', () => {
+      const repoless: TaskDetail = {
+        ...task,
+        repo: null,
+        resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      };
+      const output = formatTaskDetail(repoless);
+      expect(output).toContain('Repo:        — (repo-less)');
+      expect(output).not.toContain('Repo:        null');
+    });
+
     test('shows workflow and pr_number for pr_iteration', () => {
       const prTask: TaskDetail = {
         ...task,
@@ -239,6 +250,25 @@ describe('format', () => {
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('#42');
+    });
+
+    test('shows a dash for a repo-less task (#248 Phase 3)', () => {
+      const tasks: TaskSummary[] = [{
+        task_id: 'abc',
+        status: 'RUNNING',
+        repo: null,
+        issue_number: null,
+        resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+        pr_number: null,
+        task_description: 'Summarise these papers',
+        branch_name: 'bgagent/abc/task',
+        pr_url: null,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }];
+      const output = formatTaskList(tasks);
+      expect(output).toContain('—');
+      expect(output).not.toContain('null');
     });
 
     test('returns message for empty list', () => {

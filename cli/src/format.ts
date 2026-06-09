@@ -24,7 +24,7 @@ export function formatTaskDetail(task: TaskDetail): string {
   const lines: string[] = [
     `Task:        ${task.task_id}`,
     `Status:      ${task.status}`,
-    `Repo:        ${task.repo}`,
+    `Repo:        ${task.repo ?? '— (repo-less)'}`,
   ];
   if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
     lines.push(`Workflow:    ${task.resolved_workflow.id}`);
@@ -91,7 +91,8 @@ export function formatTaskList(tasks: TaskSummary[]): string {
     return [
       t.task_id,
       t.status,
-      t.repo,
+      // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
+      t.repo ?? '—',
       t.created_at,
       truncate(desc, 40),
     ];
@@ -153,7 +154,7 @@ export function formatStatusSnapshot(
 
   const lines: string[] = [
     header,
-    `  Repo:          ${task.repo}`,
+    `  Repo:          ${task.repo ?? '— (repo-less)'}`,
     // Channel provenance — ``api`` for CLI / Cognito submits,
     // ``webhook`` for HMAC-signed inbound webhook submits. Shown on
     // every task so a user looking at a surprising task's status can

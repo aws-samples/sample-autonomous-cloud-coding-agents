@@ -203,7 +203,9 @@ const MAX_POLL_INTERVAL_MS = 300_000;
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
-  const repoConfig = await loadRepoConfig(task.repo);
+  // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
+  // defaults directly rather than a RepoTable lookup on a missing repo.
+  const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
     logger.info('Loaded per-repo blueprint config', {
@@ -744,9 +746,12 @@ export async function finalizeTask(
           { field: 'cost_usd', task_id: taskId },
           logger,
         );
+        // Memory actorId: repo for coding tasks, user:{user_id} for repo-less
+        // workflows (#248 Phase 3, ADR-014 addendum 2026-06-08).
+        const actorNamespace = task.repo ?? `user:${task.user_id}`;
         const written = await writeMinimalEpisode(
           MEMORY_ID,
-          task.repo,
+          actorNamespace,
           taskId,
           currentStatus,
           durationS ?? undefined,

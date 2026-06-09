@@ -74,7 +74,9 @@ export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
+   *  repo-less workflow (``requires_repo: false``) runs with no repo. */
+  readonly repo?: string;
   readonly issue_number?: number;
   /** The ref the caller supplied (if any); resolution may fall back to a
    *  default when absent. Persisted for audit alongside ``resolved_workflow``. */
@@ -223,7 +225,8 @@ export interface TaskNotificationsConfig {
 export interface TaskDetail {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
@@ -288,7 +291,8 @@ export interface TaskDetail {
 export interface TaskSummary {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
@@ -347,7 +351,11 @@ export interface GetTaskEventsQuery {
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
-  readonly repo: string;
+  /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
+   *  repo-less workflow (``requires_repo: false``) is submitted without it.
+   *  Required-ness is enforced conditionally in ``createTaskCore`` based on
+   *  the resolved workflow's ``requiresRepo``. */
+  readonly repo?: string;
   readonly issue_number?: number;
   readonly task_description?: string;
   readonly max_turns?: number;
@@ -570,7 +578,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
   return {
     task_id: record.task_id,
     status: record.status,
-    repo: record.repo,
+    repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     pr_number: record.pr_number ?? null,
@@ -747,7 +755,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
   return {
     task_id: record.task_id,
     status: record.status,
-    repo: record.repo,
+    repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     pr_number: record.pr_number ?? null,

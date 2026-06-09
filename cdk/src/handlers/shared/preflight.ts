@@ -314,7 +314,7 @@ function pickPrimaryPreflightFailure(failedChecks: PreflightCheckResult[]): Pref
 // ---------------------------------------------------------------------------
 
 export async function runPreflightChecks(
-  repo: string,
+  repo: string | undefined,
   blueprintConfig: BlueprintConfig,
   prNumber?: number,
   readOnly = false,
@@ -327,6 +327,18 @@ export async function runPreflightChecks(
   // repo-optional refactor flips behavior, not structure.
   if (!requiresRepo) {
     return { passed: true, checks };
+  }
+
+  // Past this point requiresRepo is true, so a repo-bound task always carries
+  // a repo (enforced at admission in create-task-core). Narrow for the checks
+  // below, which are repo-specific.
+  if (!repo) {
+    return {
+      passed: false,
+      checks,
+      failureReason: PreflightFailureReason.GITHUB_UNREACHABLE,
+      failureDetail: 'repo-bound workflow has no repo (internal invariant violation)',
+    };
   }
 
   if (blueprintConfig.github_token_secret_arn) {

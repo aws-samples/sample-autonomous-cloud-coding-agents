@@ -362,11 +362,32 @@ def build_config(
     workflow_id = workflow.get("id", DEFAULT_WORKFLOW_ID)
     is_pr_workflow = workflow_id in PR_WORKFLOW_IDS
 
+    # Load the workflow up-front: it drives the Cedar principal, the read_only
+    # flag, AND whether a repo is required (#248 Phase 3). Fall back to id-based
+    # mapping when the file can't be loaded (e.g. a registry-only id in a future
+    # phase) — a repo-less default is the safe assumption only for non-coding.
+    from workflow import WorkflowValidationError, load_workflow, policy_principal_for
+
+    try:
+        workflow_obj = load_workflow(workflow_id)
+        policy_principal = policy_principal_for(workflow_obj)
+        workflow_read_only = workflow_obj.read_only
+        workflow_requires_repo = workflow_obj.resolved_requires_repo
+    except WorkflowValidationError:
+        policy_principal = "pr_review" if workflow_id == "coding/pr-review-v1" else "new_task"
+        workflow_read_only = workflow_id == "coding/pr-review-v1"
+        # Unknown id: default-deny repo-optionality to the coding domain's
+        # assumption (requires a repo) unless it's the repo-less platform default.
+        workflow_requires_repo = workflow_id != DEFAULT_WORKFLOW_ID
+
     errors = []
-    if not resolved_repo_url:
-        errors.append("repo_url is required (e.g., 'owner/repo')")
-    if not resolved_github_token:
-        errors.append("github_token is required")
+    # Repo + GitHub token are required only for repo-bound workflows; a repo-less
+    # workflow (requires_repo:false) runs from task_description/attachments alone.
+    if workflow_requires_repo:
+        if not resolved_repo_url:
+            errors.append("repo_url is required (e.g., 'owner/repo')")
+        if not resolved_github_token:
+            errors.append("github_token is required")
     if not resolved_aws_region:
         errors.append("aws_region is required for Bedrock")
     if is_pr_workflow:
@@ -377,21 +398,6 @@ def build_config(
 
     if errors:
         raise ValueError("; ".join(errors))
-
-    # Derive the Cedar principal + read_only flag from the resolved workflow.
-    # The principal keeps the legacy Agent::TaskAgent::"<id>" scheme; read-only
-    # enforcement keys off ``read_only`` in the Cedar request context (#248
-    # Phase 2a), not the principal. Fall back to id-based mapping when the file
-    # can't be loaded (e.g. a registry-only id in a future phase).
-    from workflow import WorkflowValidationError, load_workflow, policy_principal_for
-
-    try:
-        workflow_obj = load_workflow(workflow_id)
-        policy_principal = policy_principal_for(workflow_obj)
-        workflow_read_only = workflow_obj.read_only
-    except WorkflowValidationError:
-        policy_principal = "pr_review" if workflow_id == "coding/pr-review-v1" else "new_task"
-        workflow_read_only = workflow_id == "coding/pr-review-v1"
 
     # Validate attachment descriptors into typed models (Pydantic validation
     # surfaces schema mismatches between the orchestrator and agent early).

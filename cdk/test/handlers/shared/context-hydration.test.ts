@@ -571,6 +571,27 @@ describe('hydrateContext', () => {
     updated_at: '2024-01-01T00:00:00Z',
   };
 
+  test('repo-less task: assembles from task_description, no GitHub fetch (#248 Phase 3)', async () => {
+    // No repo ⇒ the repo-less branch: no issue/PR fetch, no Repository: line,
+    // prompt is task_description only.
+    const { repo: _omit, ...repoless } = baseTask;
+    const task = {
+      ...repoless,
+      resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+    };
+    const result = await hydrateContext(task as any);
+
+    expect(result.version).toBe(1);
+    expect(result.sources).toContain('task_description');
+    expect(result.sources).not.toContain('issue');
+    expect(result.sources).not.toContain('pull_request');
+    expect(result.user_prompt).toContain('Summarise these papers');
+    expect(result.user_prompt).not.toContain('Repository:');
+    // No GitHub calls for a repo-less task.
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   test('full path: issue + task description', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
     mockFetch

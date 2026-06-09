@@ -80,7 +80,8 @@ export interface ErrorClassification {
 export interface TaskDetail {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
@@ -156,7 +157,8 @@ export interface TraceUrlResponse {
 export interface TaskSummary {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
@@ -231,7 +233,8 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
-  readonly repo: string;
+  /** Optional since #248 Phase 3: repo-less workflows submit without it. */
+  readonly repo?: string;
   readonly issue_number?: number;
   readonly task_description?: string;
   readonly max_turns?: number;

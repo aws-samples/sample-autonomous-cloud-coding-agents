@@ -108,68 +108,11 @@ export async function createTaskCore(
   context: TaskCreationContext,
   requestId: string,
 ): Promise<APIGatewayProxyResult> {
-  // 1. Validate request body
-  if (!body.repo || !isValidRepo(body.repo)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
-  }
-
-  // 1b. Single RepoTable GetItem covers BOTH the onboarding gate AND
-  //     the Cedar HITL blueprint-cap resolution (§4 step 5, decision
-  //     #13). Capturing the cap at submit-time means mid-task blueprint
-  //     edits cannot shift the cap beneath a running task. Previously
-  //     this path issued two back-to-back GetItems for the same key;
-  //     ``lookupRepo`` consolidates them.
-  const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
-  if (!onboarded) {
-    return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
-  }
-  const blueprintCap = repoConfig?.approval_gate_cap;
-  let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
-  if (blueprintCap !== undefined) {
-    if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
-      // Blueprint construct's synth-time validation should have caught
-      // this, but a hand-edited RepoConfig row could bypass it. Fail
-      // closed rather than persisting junk onto the TaskRecord.
-      // 503 (not 500) — the condition is permanent until the blueprint
-      // is re-deployed, but from the user's perspective this is "platform
-      // can't accept this right now"; 500 would misleadingly suggest a
-      // transient internal glitch worth retrying.
-      logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
-        repo: body.repo,
-        blueprint_cap: blueprintCap,
-        request_id: requestId,
-      });
-      return errorResponse(
-        503,
-        ErrorCode.SERVICE_UNAVAILABLE,
-        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is not an integer. `
-          + 'Ask the platform admin to re-deploy the blueprint with a valid cap.',
-        requestId,
-      );
-    }
-    if (blueprintCap < APPROVAL_GATE_CAP_MIN || blueprintCap > APPROVAL_GATE_CAP_MAX) {
-      logger.error('Blueprint misconfiguration — approval_gate_cap out of bounds', {
-        repo: body.repo,
-        blueprint_cap: blueprintCap,
-        min: APPROVAL_GATE_CAP_MIN,
-        max: APPROVAL_GATE_CAP_MAX,
-        request_id: requestId,
-      });
-      return errorResponse(
-        503,
-        ErrorCode.SERVICE_UNAVAILABLE,
-        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is `
-          + `${blueprintCap}; must be between ${APPROVAL_GATE_CAP_MIN} and `
-          + `${APPROVAL_GATE_CAP_MAX}. Ask the platform admin to re-deploy the blueprint.`,
-        requestId,
-      );
-    }
-    resolvedApprovalGateCap = blueprintCap;
-  }
-
-  // Resolve the workflow (#248). workflow_ref replaces task_type: an explicit
-  // ref resolves to its pinned {id, version}; an absent ref falls back to the
-  // platform default. An unknown ref is a 400.
+  // 1. Resolve the workflow first (#248). workflow_ref replaces task_type: an
+  // explicit ref resolves to its pinned {id, version}; an absent ref falls back
+  // to the platform default. An unknown ref is a 400. The resolved workflow's
+  // ``requiresRepo`` then decides whether ``repo`` is mandatory — a repo-less
+  // workflow (Phase 3) is submitted with no repo and skips onboarding.
   if (!isValidWorkflowRef(body.workflow_ref)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid workflow_ref. Expected "<domain>/<name>-vN[@<constraint>]".', requestId);
   }
@@ -178,6 +121,78 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, `Unknown workflow_ref "${body.workflow_ref}".`, requestId);
   }
   const workflow = getWorkflowDescriptor(resolvedWorkflow.id)!;
+
+  // 1a. Repo validation. ``requiresRepo`` decides whether a repo is *mandatory*;
+  // ``requiresRepo: false`` means repo-OPTIONAL (a repo-less workflow may still
+  // run against a repo). A repo, when present, must be well-formed regardless.
+  if (workflow.requiresRepo && !body.repo) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires a repo. Expected format: owner/repo.`, requestId);
+  }
+  if (body.repo && !isValidRepo(body.repo)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid repo. Expected format: owner/repo.', requestId);
+  }
+
+  // 1b. Onboarding gate + Cedar HITL blueprint-cap resolution (§4 step 5,
+  //     decision #13) — runs whenever a repo is present (a repo-less submission
+  //     has no repo to onboard). A single RepoTable GetItem covers BOTH
+  //     (capturing the cap at submit-time means mid-task blueprint edits cannot
+  //     shift the cap beneath a running task). A repo-less task takes the
+  //     platform default cap.
+  let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
+  // Whether the cap came from a blueprint (vs the platform default) — surfaced
+  // in the "Task created" log. A repo-less submission has no blueprint, so it
+  // stays false.
+  let capFromBlueprint = false;
+  if (body.repo) {
+    const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
+    if (!onboarded) {
+      return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
+    }
+    const blueprintCap = repoConfig?.approval_gate_cap;
+    if (blueprintCap !== undefined) {
+      if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
+        // Blueprint construct's synth-time validation should have caught
+        // this, but a hand-edited RepoConfig row could bypass it. Fail
+        // closed rather than persisting junk onto the TaskRecord.
+        // 503 (not 500) — the condition is permanent until the blueprint
+        // is re-deployed, but from the user's perspective this is "platform
+        // can't accept this right now"; 500 would misleadingly suggest a
+        // transient internal glitch worth retrying.
+        logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
+          repo: body.repo,
+          blueprint_cap: blueprintCap,
+          request_id: requestId,
+        });
+        return errorResponse(
+          503,
+          ErrorCode.SERVICE_UNAVAILABLE,
+          `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is not an integer. `
+            + 'Ask the platform admin to re-deploy the blueprint with a valid cap.',
+          requestId,
+        );
+      }
+      if (blueprintCap < APPROVAL_GATE_CAP_MIN || blueprintCap > APPROVAL_GATE_CAP_MAX) {
+        logger.error('Blueprint misconfiguration — approval_gate_cap out of bounds', {
+          repo: body.repo,
+          blueprint_cap: blueprintCap,
+          min: APPROVAL_GATE_CAP_MIN,
+          max: APPROVAL_GATE_CAP_MAX,
+          request_id: requestId,
+        });
+        return errorResponse(
+          503,
+          ErrorCode.SERVICE_UNAVAILABLE,
+          `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is `
+            + `${blueprintCap}; must be between ${APPROVAL_GATE_CAP_MIN} and `
+            + `${APPROVAL_GATE_CAP_MAX}. Ask the platform admin to re-deploy the blueprint.`,
+          requestId,
+        );
+      }
+      resolvedApprovalGateCap = blueprintCap;
+      capFromBlueprint = true;
+    }
+  }
+
   // A pr_* workflow resolves an existing PR rather than opening a new branch.
   const isPrTask = workflow.requiredInputs.allOf?.includes('pr_number') ?? false;
 
@@ -525,7 +540,10 @@ export async function createTaskCore(
 
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
-        const requiredReplayFields = ['task_id', 'user_id', 'status', 'repo', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
+        // ``repo`` is intentionally NOT required here: a repo-less workflow
+        // (#248 Phase 3) persists no repo, so requiring it would wrongly reject
+        // a valid repo-less replay as "incomplete".
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
         const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
         if (missingFields.length > 0) {
           logger.error('Idempotent replay: existing task record is incomplete', {
@@ -572,7 +590,7 @@ export async function createTaskCore(
     task_id: taskId,
     user_id: context.userId,
     status: initialStatus,
-    repo: body.repo,
+    ...(body.repo ? { repo: body.repo } : {}),
     ...(body.issue_number !== undefined && { issue_number: body.issue_number }),
     ...(body.workflow_ref !== undefined && { workflow_ref: body.workflow_ref }),
     resolved_workflow: resolvedWorkflow,
@@ -623,7 +641,7 @@ export async function createTaskCore(
         timestamp: now,
         ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
         metadata: {
-          repo: body.repo,
+          repo: body.repo ?? null,
           issue_number: body.issue_number ?? null,
           channel_source: context.channelSource,
         },
@@ -649,7 +667,7 @@ export async function createTaskCore(
     // "blueprint" when the blueprint explicitly configured the value,
     // "platform_default" when it fell through to 50.
     approval_gate_cap: resolvedApprovalGateCap,
-    approval_gate_cap_source: blueprintCap !== undefined ? 'blueprint' : 'platform_default',
+    approval_gate_cap_source: capFromBlueprint ? 'blueprint' : 'platform_default',
   });
 
   // 8. Async-invoke the orchestrator (fire-and-forget).

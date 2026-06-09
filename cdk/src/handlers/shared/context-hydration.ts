@@ -768,14 +768,17 @@ export function enforceTokenBudget(
  */
 export function assembleUserPrompt(
   taskId: string,
-  repo: string,
+  repo: string | undefined,
   issue?: GitHubIssueContext,
   taskDescription?: string,
 ): string {
   const parts: string[] = [];
 
   parts.push(`Task ID: ${taskId}`);
-  parts.push(`Repository: ${repo}`);
+  // Repo-less workflows (#248 Phase 3) have no repository line.
+  if (repo) {
+    parts.push(`Repository: ${repo}`);
+  }
 
   if (issue) {
     parts.push(`\n## GitHub Issue #${issue.number}: ${sanitizeExternalContent(issue.title)}\n`);
@@ -986,6 +989,36 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     const workflowId = task.resolved_workflow?.id ?? 'coding/new-task-v1';
     const isPrTask = workflowUsesPr(workflowId);
 
+    // Repo-less task (#248 Phase 3): no repo present ⇒ no GitHub issue/PR to
+    // fetch and nothing to clone — the prompt is assembled from task_description
+    // (+ attachments, handled by the agent) only. Keys off repo *absence*, not
+    // the workflow's requires_repo: a repo-optional workflow given a repo still
+    // takes the repo-bound path below. Memory is keyed per-user (user:{user_id})
+    // rather than per-repo (ADR-014 addendum 2026-06-08).
+    if (!task.repo) {
+      const memId = options?.memoryId ?? process.env.MEMORY_ID;
+      const repolessMemory = memId
+        ? await loadMemoryContext(memId, `user:${task.user_id}`, task.task_description)
+        : undefined;
+      const repolessSources: string[] = [];
+      if (repolessMemory) repolessSources.push('memory');
+      if (task.task_description) repolessSources.push('task_description');
+      const repolessPrompt = assembleUserPrompt(task.task_id, undefined, undefined, task.task_description);
+      return {
+        version: 1,
+        user_prompt: repolessPrompt,
+        memory_context: repolessMemory,
+        sources: repolessSources,
+        token_estimate: estimateTokens(repolessPrompt),
+        truncated: false,
+        content_trust: buildContentTrust(repolessSources),
+      };
+    }
+
+    // Past the repo-less early-return, the workflow requires a repo, which
+    // admission guarantees is present — narrow it for the repo-bound path.
+    const repo = task.repo as string;
+
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
     const [issueResult, memoryResult, prResult] = await Promise.all([
       // Issue fetch (skip for PR task types)
@@ -994,7 +1027,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         if (task.issue_number !== undefined && tokenSecretArn) {
           try {
             const token = await resolveGitHubToken(tokenSecretArn);
-            return await fetchGitHubIssue(task.repo, task.issue_number, token) ?? undefined;
+            return await fetchGitHubIssue(repo, task.issue_number, token) ?? undefined;
           } catch (err) {
             logger.warn('Failed to resolve GitHub token or fetch issue', {
               task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
@@ -1005,14 +1038,14 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       })(),
       // Memory context load (fail-open)
       memoryId
-        ? loadMemoryContext(memoryId, task.repo, task.task_description)
+        ? loadMemoryContext(memoryId, repo, task.task_description)
         : Promise.resolve(undefined),
       // PR fetch (only for PR task types)
       (async () => {
         if (isPrTask && task.pr_number !== undefined && tokenSecretArn) {
           try {
             const token = await resolveGitHubToken(tokenSecretArn);
-            return await fetchGitHubPullRequest(task.repo, task.pr_number, token) ?? undefined;
+            return await fetchGitHubPullRequest(repo, task.pr_number, token) ?? undefined;
           } catch (err) {
             logger.warn('Failed to fetch PR context', {
               task_id: task.task_id,
@@ -1052,7 +1085,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         logger.error(`PR context fetch failed for ${workflowId} task`, {
           task_id: task.task_id, pr_number: task.pr_number, resolved_workflow: workflowId,
         });
-        const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
+        const fallbackPrompt = assembleUserPrompt(task.task_id, repo, undefined, task.task_description);
         const fallbackSources = task.task_description ? ['task_description'] : [];
         return {
           version: 1,
@@ -1072,7 +1105,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         logger.info('Using default task description for read-only PR task', { task_id: task.task_id });
         effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
       }
-      userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, prResult, effectiveTaskDescription);
+      userPrompt = assemblePrIterationPrompt(task.task_id, repo, prResult, effectiveTaskDescription);
 
       // Trim PR context if the assembled prompt exceeds the token budget
       let truncated = budgetResult.truncated;
@@ -1108,7 +1141,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         };
         const estimateTrimmed = (): number =>
           estimateTokens(assemblePrIterationPrompt(
-            task.task_id, task.repo, trimmedPr, budgetResult.taskDescription,
+            task.task_id, repo, trimmedPr, budgetResult.taskDescription,
           ));
 
         // Trim oldest issue comments first
@@ -1129,7 +1162,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
           trimmedPr = { ...trimmedPr, review_comments: trimmedReviewComments };
         }
 
-        userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, trimmedPr, budgetResult.taskDescription);
+        userPrompt = assemblePrIterationPrompt(task.task_id, repo, trimmedPr, budgetResult.taskDescription);
         const finalEstimate = estimateTokens(userPrompt);
         if (finalEstimate > USER_PROMPT_TOKEN_BUDGET) {
           logger.warn('Token budget still exceeded after trimming all comments — non-comment content too large', {
@@ -1169,7 +1202,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     const budgetResult = enforceTokenBudget(issue, task.task_description, USER_PROMPT_TOKEN_BUDGET);
     issue = budgetResult.issue;
 
-    userPrompt = assembleUserPrompt(task.task_id, task.repo, issue, budgetResult.taskDescription);
+    userPrompt = assembleUserPrompt(task.task_id, repo, issue, budgetResult.taskDescription);
     const tokenEstimate = estimateTokens(userPrompt);
 
     // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).

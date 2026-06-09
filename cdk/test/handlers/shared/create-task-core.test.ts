@@ -107,6 +107,33 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
   });
 
+  test('accepts a repo-less submission (#248 Phase 3)', async () => {
+    // No repo + the repo-optional default workflow ⇒ 201, no onboarding lookup,
+    // no repo persisted on the record.
+    const result = await createTaskCore(
+      { workflow_ref: 'default/agent-v1', task_description: 'Summarise these papers' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.status).toBe('SUBMITTED');
+    expect(body.data.repo).toBeNull();
+    // Repo-less ⇒ the onboarding/blueprint RepoTable lookup is skipped entirely.
+    expect(mockLookupRepo).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(2); // task + event
+  });
+
+  test('returns 400 when a repo-bound workflow is missing its repo (#248 Phase 3)', async () => {
+    const result = await createTaskCore(
+      { workflow_ref: 'coding/new-task-v1', task_description: 'Fix it' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('repo');
+  });
+
   test('returns 400 when no task spec', async () => {
     const result = await createTaskCore({ repo: 'org/repo' }, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
