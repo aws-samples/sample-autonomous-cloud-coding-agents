@@ -93,6 +93,17 @@ export class TaskTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
+      // NEW_IMAGE stream feeds the #247 orchestration reconciler
+      // (`OrchestrationReconciler`), which reacts to child tasks reaching
+      // terminal status to release dependency-unblocked children. This is
+      // the table's FIRST and only stream consumer — deliberately on
+      // TaskTable rather than TaskEventsTable, whose stream is already at
+      // its 2-consumer limit (FanOutConsumer + ApprovalMetricsPublisher;
+      // see TaskEventsTable). NEW_IMAGE suffices — the reconciler reads
+      // status/build_passed/orchestration_id off the new record image.
+      // Enabling a stream on an existing table is an in-place CFN update
+      // (no table replacement).
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
 

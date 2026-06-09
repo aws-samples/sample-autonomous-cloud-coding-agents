@@ -42,6 +42,8 @@ import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
+import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
@@ -77,6 +79,8 @@ export class AgentStack extends Stack {
     const taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
+    // #247 Mode A: parent/sub-issue orchestration DAG state.
+    const orchestrationTable = new OrchestrationTable(this, 'OrchestrationTable');
     // Cedar HITL approval-gate state (design §10.1). Agent writes PENDING
     // rows + GSI query powers `bgagent pending`; Chunk 5 wires the
     // Approve/Deny Lambdas + fan-out consumer.
@@ -726,10 +730,64 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       repoTable: repoTable.table,
+      // #247 Mode A: enables the webhook processor's orchestration path
+      // (seed DAG + release roots). Sets ORCHESTRATION_TABLE_NAME.
+      orchestrationTable: orchestrationTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
     });
+
+    // #247 Mode A: the reconciler consumes the TaskTable stream and
+    // releases dependency-unblocked children as predecessors reach
+    // terminal-success. It invokes createTaskCore in-process, so it needs
+    // the same task-creation env + invoke permission as the webhook
+    // processor.
+    const orchestrationReconciler = new OrchestrationReconciler(this, 'OrchestrationReconciler', {
+      taskTable: taskTable.table,
+      orchestrationTable: orchestrationTable.table,
+      taskEventsTable: taskEventsTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+    });
+    // createTaskCore (run inside the reconciler) screens descriptions with
+    // the input guardrail, reads repo onboarding/blueprint config, and
+    // async-invokes the orchestrator. Mirror the webhook processor's grants.
+    repoTable.table.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
+    orchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
+    orchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
+    orchestrationReconciler.fn.addEnvironment(
+      'ORCHESTRATOR_FUNCTION_ARN',
+      orchestrator.alias.functionArn,
+    );
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [orchestrator.alias.functionArn],
+    }));
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock',
+          resource: 'guardrail',
+          resourceName: inputGuardrail.guardrailId,
+        }),
+      ],
+    }));
+    // Released child tasks attributed to linear workspaces need the
+    // per-workspace OAuth secret prefix readable (createTaskCore stashes
+    // the ARN; agent reads it). Same prefix grant as the webhook processor.
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
 
     // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
     // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
