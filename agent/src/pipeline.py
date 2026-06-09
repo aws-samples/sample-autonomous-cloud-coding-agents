@@ -219,13 +219,13 @@ def _run_repoless_task(
 ) -> dict:
     """Run a repo-less workflow (#248 Phase 3) and return the result dict.
 
-    No clone / build / PR: the workflow runner drives the repo-less step list
-    (``hydrate_context`` → ``run_agent``) inside the container, then a terminal
-    ``TaskResult`` is assembled and persisted. ``deliver_artifact`` is the
-    workflow's terminal step but its handler is a stub until the artifacts-bucket
-    infra lands (#248 Phase 3 slice 2), so it is intentionally NOT run here —
-    delivery is deferred and called out in the result. The agent loop itself runs
-    to completion, which is what this slice proves (a task runs with no repo).
+    No clone / build / PR: the workflow runner drives the full repo-less step
+    list (``hydrate_context`` → ``run_agent`` → ``deliver_artifact``) inside the
+    container, then a terminal ``TaskResult`` is assembled and persisted. The
+    deliver_artifact step uploads the agent's result text to ``artifacts/{task_id}/``
+    (and/or records a comment milestone), so the workflow's declared terminal
+    outcome is actually produced; a delivery failure surfaces as a terminal
+    FAILED rather than a silent "succeeded with nothing delivered".
     """
     from prompt_builder import build_repoless_system_prompt
     from workflow import StepContext, load_workflow, run_workflow

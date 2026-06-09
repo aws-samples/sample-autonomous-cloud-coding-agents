@@ -13,6 +13,11 @@ from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
 
 DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
+# The fallback template for a repo-less id without its own registered prompt
+# (e.g. knowledge/web-research-v1 until its prompt ships in the #246 registry).
+# Falling back to the *coding* default would leak {repo_url}/{branch_name}
+# placeholders the repo-less prompt builder cannot substitute.
+REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
 
 _PROMPTS = {
     "coding/new-task-v1": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),
@@ -23,11 +28,14 @@ _PROMPTS = {
 }
 
 
-def get_system_prompt(workflow_id: str = DEFAULT_WORKFLOW_ID) -> str:
+def get_system_prompt(workflow_id: str = DEFAULT_WORKFLOW_ID, *, repo_less: bool = False) -> str:
     """Return the system prompt template for the given resolved workflow id.
 
-    Falls back to the default coding workflow's prompt for an id without a
-    built-in template (e.g. ``default/agent-v1`` until its prompt ships, or a
-    registry-only workflow in Phase 4).
+    Falls back to a built-in template for an id without its own (e.g. a
+    registry-only workflow in Phase 4). The fallback is the **repo-less**
+    default-agent prompt when ``repo_less`` is set (so a knowledge workflow never
+    inherits the coding prompt's git/branch/PR placeholders), else the coding
+    default.
     """
-    return _PROMPTS.get(workflow_id, _PROMPTS[DEFAULT_WORKFLOW_ID])
+    fallback = REPO_LESS_DEFAULT_WORKFLOW_ID if repo_less else DEFAULT_WORKFLOW_ID
+    return _PROMPTS.get(workflow_id, _PROMPTS[fallback])

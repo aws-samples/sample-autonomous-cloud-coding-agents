@@ -93,7 +93,7 @@ def build_repoless_system_prompt(
     same Blueprint overrides + channel guidance as the repo-bound path.
     """
     workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
-    system_prompt = get_system_prompt(workflow_id)
+    system_prompt = get_system_prompt(workflow_id, repo_less=True)
     system_prompt = system_prompt.replace("{task_id}", config.task_id)
     system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
     system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))

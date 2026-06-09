@@ -7,9 +7,14 @@
 #
 # Deliberately conservative because it runs when *nothing* was specified:
 # requires_repo:false (no clone), a read-leaning tool set (no Bash/Write/Edit),
-# and delivery as a comment. A caller who wants coding selects (or maps to) a
-# coding workflow. soft_deny is still mandatory (read_only:false) so any future
-# tool addition stays HITL-gated.
+# and delivery to S3 + a comment milestone. A caller who wants coding selects
+# (or maps to) a coding workflow. soft_deny is still mandatory (read_only:false)
+# so any future tool addition stays HITL-gated.
+#
+# Delivery is ``s3_and_comment`` (primary outcome ``artifact``): the S3 upload to
+# artifacts/{task_id}/ is the always-retrievable deliverable (the default often
+# runs for api-origin tasks that have no notification channel), while the comment
+# milestone is rendered by the channel fan-out when one IS present.
 #
 # See docs/design/WORKFLOWS.md §"The default workflow (default/agent-v1)".
 id: default/agent-v1
@@ -39,9 +44,9 @@ required_inputs:
 steps:
   - { kind: hydrate_context,  name: context }
   - { kind: run_agent,        name: respond }
-  - { kind: deliver_artifact, name: deliver, target: comment }
+  - { kind: deliver_artifact, name: deliver, target: s3_and_comment }
 terminal_outcomes:
-  primary: comment
+  primary: artifact
 limits:
   max_turns: 30
 promotion_gate:

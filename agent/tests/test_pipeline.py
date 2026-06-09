@@ -179,11 +179,13 @@ class TestRepoLessPipeline:
 
         mock_run_agent.side_effect = fake_run_agent
         mock_task_span.return_value = self._mock_span()
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
 
         with (
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
             patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("aws_session.tenant_client", return_value=MagicMock()),
         ):
             from pipeline import run_task
 
@@ -197,11 +199,11 @@ class TestRepoLessPipeline:
         # The repo-less path must never clone a repo or build a PR.
         mock_setup_repo.assert_not_called()
         assert result["pr_url"] is None
-        # default/agent-v1's deliver_artifact target is `comment` (no S3): the
-        # deliverer surfaces the result as a milestone, the task succeeds, and no
-        # artifact URI is produced (comment-only).
+        # default/agent-v1 delivers via `s3_and_comment`: the agent's result text
+        # is uploaded to artifacts/{task_id}/ (always retrievable) and a comment
+        # milestone is recorded. Task succeeds with the artifact URI set.
         assert result["status"] == "success"
-        assert result["artifact_uri"] is None
+        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/repoless-1/result.md"
         # Agent ran from the workspace, not a repo dir, with the repo-less prompt
         # (no Repository: / branch placeholders), and the prompt was substituted.
         assert "Repository:" not in captured_cwd["system_prompt"]

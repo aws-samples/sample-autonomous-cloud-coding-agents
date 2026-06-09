@@ -82,6 +82,15 @@ describe('descriptor field accessors', () => {
     expect(workflowRequiresRepo('default/agent-v1')).toBe(false);
   });
 
+  test('knowledge/web-research-v1 is a repo-less, writeable, non-PR workflow (#248 Phase 3)', () => {
+    expect(workflowRequiresRepo('knowledge/web-research-v1')).toBe(false);
+    expect(workflowIsReadOnly('knowledge/web-research-v1')).toBe(false);
+    expect(workflowUsesPr('knowledge/web-research-v1')).toBe(false);
+    expect(resolveWorkflowRef('knowledge/web-research-v1')).toEqual({
+      id: 'knowledge/web-research-v1', version: '1.0.0',
+    });
+  });
+
   test('unknown ids fall back to safe defaults (requires repo, writeable)', () => {
     expect(workflowRequiresRepo('nope/unknown-v1')).toBe(true);
     expect(workflowIsReadOnly('nope/unknown-v1')).toBe(false);

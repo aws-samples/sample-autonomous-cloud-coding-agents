@@ -60,6 +60,18 @@ class TestGetSystemPrompt:
             assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
         assert "repo-less" in prompt.lower()
 
+    def test_repo_less_fallback_uses_repoless_default_not_coding(self):
+        # A repo-less id with no registered prompt (e.g. knowledge/web-research-v1
+        # until its registry prompt ships) must fall back to the repo-less default,
+        # NOT the coding prompt — else it would inherit unsubstitutable {repo_url}.
+        repoless = get_system_prompt("knowledge/web-research-v1", repo_less=True)
+        assert repoless == get_system_prompt("default/agent-v1")
+        assert "{repo_url}" not in repoless
+        # Without the flag, the same unknown id still falls back to coding.
+        assert get_system_prompt("knowledge/web-research-v1") == get_system_prompt(
+            "coding/new-task-v1"
+        )
+
 
 class TestSanitizeMemoryContent:
     def test_strips_script_tags(self):

@@ -372,8 +372,8 @@ required_inputs:
 steps:
   - { kind: hydrate_context,  name: context }
   - { kind: run_agent,        name: respond }
-  - { kind: deliver_artifact, name: deliver, target: comment }
-terminal_outcomes: { primary: comment }
+  - { kind: deliver_artifact, name: deliver, target: s3_and_comment }
+terminal_outcomes: { primary: artifact }
 limits: { max_turns: 30 }
 promotion_gate: { requires: [tests:agent/default] }
 status: production
@@ -382,7 +382,7 @@ status: production
 Design choices, deliberately conservative because this runs when *nothing* was specified:
 
 - **`requires_repo: false`, `tier: standard`, a read-leaning tool set** (`Read/Glob/Grep/WebFetch`, no `Bash`/`Write`/`Edit`). The default must not silently mutate a filesystem or push code on a submission that never asked for it; a caller who wants coding selects (or maps to) a coding workflow. `builtin/soft_deny` is still mandatory (it's `read_only:false` so a future tool addition stays gated).
-- **One agentic step, deliver as a comment.** It honors the request and returns the result through the lightest terminal outcome.
+- **One agentic step, deliver via `s3_and_comment`** (primary outcome `artifact`). The S3 upload to `artifacts/{task_id}/` is the always-retrievable deliverable — the default often runs for `api`-origin tasks that have no notification channel — while the comment milestone is rendered by the channel fan-out when one is present.
 - **Reached only by the resolution fallback** — it is the last rung of the [resolution ladder](#replacing-task-types), used when no `workflow_ref` and no Blueprint default apply.
 - It is a real, governed, promotion-gated workflow like any other (not a hardcoded escape hatch), so its behavior is auditable and overridable per-repo via the Blueprint default.
 

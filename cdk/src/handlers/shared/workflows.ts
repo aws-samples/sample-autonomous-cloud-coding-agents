@@ -90,6 +90,14 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: false,
     requiredInputs: { allOf: ['task_description'] },
   },
+  // Repo-less knowledge workflow (#248 Phase 3) — research → S3 artifact, no repo.
+  'knowledge/web-research-v1': {
+    id: 'knowledge/web-research-v1',
+    version: '1.0.0',
+    requiresRepo: false,
+    readOnly: false,
+    requiredInputs: { allOf: ['task_description'] },
+  },
 };
 
 /** The platform default workflow — the last rung of the resolution ladder. */
