@@ -181,6 +181,33 @@ export interface TaskRecord {
    * atomically on resume (§10.2, §9).
    */
   readonly awaiting_approval_request_id?: string;
+  /**
+   * Linear parent/sub-issue orchestration (issue #247, Mode A).
+   * ``orchestration_id`` PK of the row in ``OrchestrationTable`` whose
+   * DAG this task is a child of. Absent on ordinary (non-orchestrated)
+   * tasks. PR A1 introduces the field; graph discovery (A2) and the
+   * reconciler (A3) populate and read it. Until then it is always
+   * ``undefined`` at runtime.
+   */
+  readonly orchestration_id?: string;
+  /**
+   * Linear orchestration (#247): the ``task_id`` of the parent task
+   * for attribution and rollup, when a parent task exists. Absent on
+   * non-orchestrated tasks and on root children whose parent is the
+   * Linear issue rather than an ABCA task. Introduced in PR A1;
+   * unused at runtime until A2/A3.
+   */
+  readonly parent_task_id?: string;
+  /**
+   * Linear orchestration (#247): sibling ``sub_issue_id``s this child
+   * is blocked by — the predecessors that must reach terminal-success
+   * (``COMPLETED`` with ``build_passed !== false``) before the
+   * reconciler releases this child. Empty/absent for root children.
+   * Authoritative gating state lives on the ``OrchestrationTable`` row;
+   * this is the denormalized copy threaded onto the task record.
+   * Introduced in PR A1; unused at runtime until A3.
+   */
+  readonly depends_on?: readonly string[];
 }
 
 /** Per-channel override for one notification channel. See
