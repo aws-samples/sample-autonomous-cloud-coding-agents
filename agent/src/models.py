@@ -134,6 +134,12 @@ class TaskConfig(BaseModel):
     # hard-deny Write/Edit rules fire for *any* read-only workflow (#248
     # Phase 2a), and drives the runner's allowed_tools tightening.
     read_only: bool = False
+    # Whether the resolved workflow requires a repo. False for repo-less
+    # knowledge workflows (#248 Phase 3): the pipeline skips clone/build/PR and
+    # drives the agent + deliver_artifact steps through the workflow runner.
+    # Defaults True so coding tasks (and any caller that omits it) keep the
+    # repo-bound path.
+    requires_repo: bool = True
     # True when the resolved workflow operates on an existing PR (pr_* coding
     # workflows) — gates the "resume existing branch / resolve PR" behavior that
     # the removed task_type used to signal.

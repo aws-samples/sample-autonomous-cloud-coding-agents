@@ -50,6 +50,16 @@ class TestGetSystemPrompt:
             "coding/new-task-v1"
         )
 
+    def test_repoless_default_agent_prompt_has_no_repo_placeholders(self):
+        # #248 Phase 3: the repo-less workflow's prompt must not carry git/branch/
+        # PR placeholders — there is no repo for build_repoless_system_prompt to
+        # substitute, so a leftover {repo_url}/{branch_name} would render literally.
+        prompt = get_system_prompt("default/agent-v1")
+        assert prompt is not get_system_prompt("coding/new-task-v1")
+        for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
+            assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+        assert "repo-less" in prompt.lower()
+
 
 class TestSanitizeMemoryContent:
     def test_strips_script_tags(self):

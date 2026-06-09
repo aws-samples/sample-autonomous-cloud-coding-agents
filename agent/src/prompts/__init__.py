@@ -7,6 +7,7 @@ the fallback for an unknown/absent id.
 """
 
 from .base import BASE_PROMPT
+from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
@@ -17,6 +18,8 @@ _PROMPTS = {
     "coding/new-task-v1": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),
     "coding/pr-iteration-v1": BASE_PROMPT.replace("{workflow}", PR_ITERATION_WORKFLOW),
     "coding/pr-review-v1": BASE_PROMPT.replace("{workflow}", PR_REVIEW_WORKFLOW),
+    # Repo-less knowledge workflow (#248 Phase 3) — no git/branch/PR placeholders.
+    "default/agent-v1": DEFAULT_AGENT_PROMPT,
 }
 
 

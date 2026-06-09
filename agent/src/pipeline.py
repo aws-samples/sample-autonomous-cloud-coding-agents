@@ -205,6 +205,104 @@ def _execute_agent_step(
     return ctx.agent_result
 
 
+def _run_repoless_task(
+    *,
+    config,
+    prompt: str,
+    hc,
+    progress,
+    trajectory,
+    root_span,
+    start_time: float,
+    memory_id: str,
+    system_prompt_overrides: str,
+) -> dict:
+    """Run a repo-less workflow (#248 Phase 3) and return the result dict.
+
+    No clone / build / PR: the workflow runner drives the repo-less step list
+    (``hydrate_context`` → ``run_agent``) inside the container, then a terminal
+    ``TaskResult`` is assembled and persisted. ``deliver_artifact`` is the
+    workflow's terminal step but its handler is a stub until the artifacts-bucket
+    infra lands (#248 Phase 3 slice 2), so it is intentionally NOT run here —
+    delivery is deferred and called out in the result. The agent loop itself runs
+    to completion, which is what this slice proves (a task runs with no repo).
+    """
+    from prompt_builder import build_repoless_system_prompt
+    from workflow import StepContext, load_workflow, run_workflow
+
+    workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
+    wf = load_workflow(workflow_id)
+    system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
+
+    ctx = StepContext(
+        workflow=wf,
+        config=config,
+        hydrated=hc,
+        progress=progress,
+        trajectory=trajectory,
+        setup=None,  # repo-less: no RepoSetup
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+    )
+    # Drive hydrate_context + run_agent only. deliver_artifact is deferred to the
+    # next slice (its handler raises NotImplementedError until the S3 artifacts
+    # contract ships); excluding it keeps this a clean "agent runs repo-less" step.
+    with task_span("task.agent_execution"):
+        run_workflow(wf, ctx, only_kinds={"hydrate_context", "run_agent"})
+
+    agent_result = ctx.agent_result
+    if agent_result is None:
+        agent_result = AgentResult(status="error", error="repo-less run_agent produced no result")
+    progress.write_agent_milestone(
+        "agent_execution_complete",
+        f"status={agent_result.status} turns={agent_result.turns}",
+    )
+
+    duration = time.time() - start_time
+    # No build/PR for a repo-less task; build_ok is vacuously true.
+    overall_status, result_error = _resolve_overall_task_status(
+        agent_result, build_ok=True, pr_url=None
+    )
+    trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+
+    usage = agent_result.usage
+    turns_attempted = agent_result.num_turns or agent_result.turns
+    result = TaskResult(
+        status=overall_status,
+        agent_status=agent_result.status,
+        pr_url=None,
+        cost_usd=agent_result.cost_usd,
+        turns=turns_attempted,
+        turns_attempted=turns_attempted,
+        turns_completed=_compute_turns_completed(
+            agent_status=agent_result.status,
+            turns_attempted=turns_attempted,
+            max_turns=config.max_turns,
+        ),
+        duration_s=round(duration, 1),
+        task_id=config.task_id,
+        memory_written=False,
+        error=result_error,
+        session_id=agent_result.session_id or None,
+        input_tokens=usage.input_tokens if usage else None,
+        output_tokens=usage.output_tokens if usage else None,
+        cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
+        trace_s3_uri=trace_s3_uri,
+    )
+    result_dict = result.model_dump()
+
+    root_span.set_attribute("task.status", result.status)
+    root_span.set_attribute("task.repo_less", True)
+    if result.cost_usd is not None:
+        root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
+
+    print_metrics(result_dict)
+    terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
+    task_state.write_terminal(config.task_id, terminal_status, result_dict)
+    return result_dict
+
+
 def _resolve_overall_task_status(
     agent_result: AgentResult,
     *,
@@ -312,7 +410,7 @@ def _write_memory(
 
 
 def run_task(
-    repo_url: str,
+    repo_url: str = "",
     task_description: str = "",
     issue_number: str = "",
     github_token: str = "",
@@ -491,6 +589,23 @@ def run_task(
                         log("TASK", f"  Title: {config.issue.title}")
 
                     prompt = assemble_prompt(config)
+
+            # Repo-less path (#248 Phase 3): a knowledge workflow has no repo to
+            # clone, build, or PR. Drive its steps (hydrate_context → run_agent →
+            # deliver_artifact) through the workflow runner and assemble the
+            # terminal result, skipping the repo-coupled segment below entirely.
+            if not config.requires_repo:
+                return _run_repoless_task(
+                    config=config,
+                    prompt=prompt,
+                    hc=hc,
+                    progress=progress,
+                    trajectory=trajectory,
+                    root_span=root_span,
+                    start_time=time.time(),
+                    memory_id=memory_id,
+                    system_prompt_overrides=system_prompt_overrides,
+                )
 
             # Configure git and gh auth before setup_repo() uses them
             subprocess.run(

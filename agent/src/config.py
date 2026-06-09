@@ -424,6 +424,7 @@ def build_config(
         resolved_workflow=workflow,
         policy_principal=policy_principal,
         read_only=workflow_read_only,
+        requires_repo=workflow_requires_repo,
         is_pr_workflow=is_pr_workflow,
         branch_name=branch_name,
         pr_number=pr_number,

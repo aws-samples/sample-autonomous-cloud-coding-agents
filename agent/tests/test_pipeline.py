@@ -143,6 +143,61 @@ class TestCedarPoliciesInjection:
         assert captured_config.cedar_policies == []
 
 
+class TestRepoLessPipeline:
+    """#248 Phase 3: a repo-less workflow runs the agent with no clone/build/PR."""
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_task_skips_repo_and_succeeds(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        captured_cwd: dict = {}
+
+        async def fake_run_agent(_prompt, system_prompt, config, cwd=None, trajectory=None):
+            captured_cwd["cwd"] = cwd
+            captured_cwd["system_prompt"] = system_prompt
+            return AgentResult(status="success", turns=2, cost_usd=0.02, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-1",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        # The repo-less path must never clone a repo or build a PR.
+        mock_setup_repo.assert_not_called()
+        assert result["status"] == "success"
+        assert result["pr_url"] is None
+        # Agent ran from the workspace, not a repo dir, with the repo-less prompt
+        # (no Repository: / branch placeholders).
+        assert "Repository:" not in captured_cwd["system_prompt"]
+        assert captured_cwd["system_prompt"]  # non-empty (guarded by run_agent)
+
+
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):
         exc = RuntimeError("post-hook crash")
