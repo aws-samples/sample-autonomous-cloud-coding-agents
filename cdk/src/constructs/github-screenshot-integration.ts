@@ -186,12 +186,23 @@ export class GitHubScreenshotIntegration extends Construct {
 
     // AgentCore Browser session lifecycle + automation-stream connect.
     // The data-plane API doesn't support per-resource ARNs (sessions
-    // are ephemeral), so resource wildcards are required — annotated
-    // with a cdk-nag suppression below. Action set is narrowed to the
-    // three calls the handler actually makes:
-    //   - StartBrowserSession  (REST, creates session)
-    //   - StopBrowserSession   (REST, finally-block cleanup)
-    //   - ConnectBrowserAutomationStream  (SigV4-presigned WSS dial)
+    // are ephemeral), so the resource wildcard is required — annotated
+    // with a cdk-nag suppression below.
+    //
+    // Actions are scoped to the three calls the handler actually makes:
+    // - StartBrowserSession + StopBrowserSession (REST control plane,
+    //   in the public CLI command list)
+    // - ConnectBrowserAutomationStream (the SigV4-presigned WSS dial;
+    //   not in the public CLI command list, but verified live against
+    //   the deployed dev stack — IAM accepts the action name even
+    //   though aws cli help doesn't surface it)
+    //
+    // Previously this used `bedrock-agentcore:*` which granted the
+    // entire AgentCore action surface (memory, runtime, gateway,
+    // identity, code-interpreter). Per krokoko's PR #241 review item
+    // #1: scope down to least privilege. If a future API change adds a
+    // call we need, IAM will deny with the specific action name in
+    // CloudTrail and we can add it explicitly.
     this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:StartBrowserSession',

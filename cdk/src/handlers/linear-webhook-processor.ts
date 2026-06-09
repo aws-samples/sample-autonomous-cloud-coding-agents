@@ -31,7 +31,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
-const DEFAULT_LABEL_FILTER = 'abca';
+const DEFAULT_LABEL_FILTER = 'bgagent';
 
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
