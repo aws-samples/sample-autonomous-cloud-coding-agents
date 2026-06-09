@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from shell import log
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ─── Linear ──────────────────────────────────────────────────────────────────
 

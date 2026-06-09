@@ -551,11 +551,11 @@ export function makeJiraCommand(): Command {
         console.log('✅ Setup complete.');
         console.log();
         console.log('Next steps:');
-        console.log(`  1. Map a Jira project to a GitHub repo:`);
-        console.log(`       bgagent jira map <PROJECT-KEY> --repo owner/repo`);
-        console.log(`  2. Link your Jira account so triggered tasks attribute to your platform user:`);
-        console.log(`       (an admin runs \`bgagent jira invite-user\` to issue you a code; this command`);
-        console.log(`        is not yet implemented — populate the user-mapping row manually for now.)`);
+        console.log('  1. Map a Jira project to a GitHub repo:');
+        console.log('       bgagent jira map <PROJECT-KEY> --repo owner/repo');
+        console.log('  2. Link your Jira account so triggered tasks attribute to your platform user:');
+        console.log('       (an admin runs `bgagent jira invite-user` to issue you a code; this command');
+        console.log('        is not yet implemented — populate the user-mapping row manually for now.)');
         console.log(`  3. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
       }),
   );

@@ -312,8 +312,8 @@ export async function fetchAccessibleResources(
   const resp = await fetchImpl('https://api.atlassian.com/oauth/token/accessible-resources', {
     method: 'GET',
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Accept': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
     },
   });
   if (!resp.ok) {
