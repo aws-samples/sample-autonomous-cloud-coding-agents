@@ -44,6 +44,7 @@ function makeDdb(): MockDdb {
 
 const TABLE = 'OrchestrationTable';
 const NOW = '2026-06-09T12:00:00.000Z';
+const RC = { platform_user_id: 'platform-user-1' };
 
 describe('deriveOrchestrationId', () => {
   test('is deterministic for the same parent id', () => {
@@ -75,6 +76,7 @@ describe('seedOrchestration — first write', () => {
       repo: 'o/r',
       children: [child('A'), child('B', ['A'])],
       now: NOW,
+      releaseContext: RC,
     });
 
     expect(result.alreadyExisted).toBe(false);
@@ -103,6 +105,7 @@ describe('seedOrchestration — first write', () => {
       repo: 'o/r',
       children: [child('A'), child('B', ['A'])],
       now: NOW,
+      releaseContext: RC,
     });
 
     const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
@@ -124,6 +127,7 @@ describe('seedOrchestration — first write', () => {
       repo: 'o/r',
       children: [child('A', [], { identifier: 'ENG-1', title: 'Do thing' })],
       now: NOW,
+      releaseContext: RC,
     });
 
     const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
@@ -147,6 +151,7 @@ describe('seedOrchestration — first write', () => {
       repo: 'o/r',
       children,
       now: NOW,
+      releaseContext: RC,
     });
 
     expect(result.rowsWritten).toBe(31);
@@ -166,6 +171,7 @@ describe('seedOrchestration — first write', () => {
       repo: 'o/r',
       children: [child('A')],
       now: NOW,
+      releaseContext: RC,
       ttl: 9999999999,
     });
 
@@ -187,6 +193,7 @@ describe('seedOrchestration — idempotent replay', () => {
       repo: 'o/r',
       children: [child('A'), child('B', ['A'])],
       now: NOW,
+      releaseContext: RC,
     });
 
     expect(result.alreadyExisted).toBe(true);
