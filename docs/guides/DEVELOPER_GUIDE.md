@@ -373,3 +373,5 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 | Change how docs are synced | `docs/scripts/sync-starlight.mjs` |
 
 After editing source docs, run `mise //docs:sync` or `mise //docs:build` to regenerate the site.
+
+To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal and external links. The same check runs automatically in CI on pull requests that touch documentation.

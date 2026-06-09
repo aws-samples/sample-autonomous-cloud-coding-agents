@@ -24,3 +24,10 @@ run = "./node_modules/.bin/astro dev"
 description = "astro check"
 depends = [":sync"]
 run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"
+
+[tasks.link-check]
+description = "Check for broken links in Markdown sources"
+run = """
+find guides design decisions .. -maxdepth 1 -name '*.md' | \
+  xargs ./node_modules/.bin/markdown-link-check --config .markdown-link-check.json
+"""

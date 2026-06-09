@@ -8,11 +8,13 @@
     "docs:build": "npm run sync && astro build",
     "build": "npm run docs:build",
     "preview": "astro preview",
-    "security:retire": "retire --path . --severity high"
+    "security:retire": "retire --path . --severity high",
+    "link-check": "find ../docs/guides ../docs/design ../docs/decisions .. -maxdepth 1 -name '*.md' | xargs markdown-link-check --config .markdown-link-check.json"
   },
   "devDependencies": {
     "jest": "^30.3.0",
     "jest-junit": "^16",
+    "markdown-link-check": "^3.13.6",
     "retire": "^5.4.2"
   },
   "dependencies": {

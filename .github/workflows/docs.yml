@@ -10,13 +10,42 @@ on:
       - docs/scripts/**
       - .github/workflows/docs.yml
       - CONTRIBUTING.md
+  pull_request:
+    paths:
+      - docs/**
+      - docs/guides/**
+      - docs/design/**
+      - docs/decisions/**
+      - .github/workflows/docs.yml
+      - CONTRIBUTING.md
+      - AGENTS.md
+      - README.md
   workflow_dispatch: {}
 concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
+  link-check:
+    name: Check broken links
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642195f572a2b2b8a0a4b70 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+      - name: Run markdown link check
+        run: yarn workspace @abca/docs run link-check
   build:
     name: Build documentation
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
