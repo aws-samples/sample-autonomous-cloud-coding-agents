@@ -94,8 +94,16 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
 
   // Only orchestration children carry orchestration_id. Non-orchestration
   // tasks stream through here too (single consumer on the whole table) —
-  // skip them cheaply without a GSI lookup.
-  const orchestrationId = img.orchestration_id?.S;
+  // skip them cheaply.
+  //
+  // createTaskCore persists channel metadata as a nested ``channel_metadata``
+  // MAP, NOT as a top-level attribute — so read orchestration_id from there.
+  // (A top-level ``orchestration_id`` exists on the TaskRecord type for
+  // future use, but createTaskCore doesn't populate it from channel context;
+  // releaseChild threads the id via channelMetadata.orchestration_id.)
+  const orchestrationId =
+    img.orchestration_id?.S
+    ?? img.channel_metadata?.M?.orchestration_id?.S;
   if (!orchestrationId) return null;
 
   const buildPassed = img.build_passed?.BOOL;
