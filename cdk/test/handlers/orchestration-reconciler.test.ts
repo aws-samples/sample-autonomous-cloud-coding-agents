@@ -52,7 +52,15 @@ function taskRecord(fields: {
   if (fields.task_id) img.task_id = { S: fields.task_id };
   if (fields.status) img.status = { S: fields.status };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
-  if (fields.orchestration_id) img.orchestration_id = { S: fields.orchestration_id };
+  // PRODUCTION SHAPE: createTaskCore persists orchestration_id INSIDE the
+  // nested channel_metadata MAP, not as a top-level attribute. The stream
+  // image must mirror that or the reconciler skips every orchestration
+  // child. (Regression: the first dev smoke had orchestration_id only in
+  // channel_metadata and the reconciler — reading it top-level — ignored
+  // all completions, so dependents never released.)
+  if (fields.orchestration_id) {
+    img.channel_metadata = { M: { orchestration_id: { S: fields.orchestration_id } } };
+  }
   return {
     eventName: fields.eventName ?? 'MODIFY',
     dynamodb: { NewImage: img as never },
@@ -142,7 +150,7 @@ describe('orchestration-reconciler handler', () => {
     // B released via createTaskCore.
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
     const ctx = createTaskCoreMock.mock.calls[0][1];
-    expect(ctx.idempotencyKey).toBe('orch_1#B');
+    expect(ctx.idempotencyKey).toBe('orch_1_B');
   });
 
   test('A fails → no release, B skipped (createTaskCore not called)', async () => {
