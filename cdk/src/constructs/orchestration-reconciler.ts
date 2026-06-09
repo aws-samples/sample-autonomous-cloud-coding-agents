@@ -77,7 +77,12 @@ export class OrchestrationReconciler extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(2),
-      memorySize: 256,
+      // 512 MB (not 256): the reconciler bundles createTaskCore, which
+      // pulls in the Bedrock guardrail + S3 attachment-screening SDK
+      // stack. At 256 MB it OOMs during init on every stream event
+      // (Max Memory Used 255/256 MB) and never releases children. The
+      // LinearIntegration webhook processor runs the same code at 512 MB.
+      memorySize: 512,
       environment: {
         ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
         TASK_TABLE_NAME: props.taskTable.tableName,
