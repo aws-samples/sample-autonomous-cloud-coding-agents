@@ -39,6 +39,7 @@ import {
   type DynamoDBDocumentClient,
   BatchWriteCommand,
   GetCommand,
+  QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 import type { SubIssueNode } from './linear-subissue-fetch';
@@ -71,6 +72,22 @@ export interface OrchestrationChildRow {
   readonly ttl?: number;
 }
 
+/**
+ * Release context persisted on the parent-meta row so the reconciler can
+ * release downstream children WITHOUT re-resolving auth (the webhook
+ * already resolved the platform user + Linear OAuth at seed time). The
+ * reconciler runs off the TaskTable stream and has no Linear webhook
+ * payload to re-derive these from.
+ */
+export interface OrchestrationReleaseContext {
+  /** Platform user the children are attributed to (parent's submitter). */
+  readonly platform_user_id: string;
+  /** Linear OAuth secret ARN for the agent's outbound Linear MCP. */
+  readonly linear_oauth_secret_arn?: string;
+  readonly linear_workspace_slug?: string;
+  readonly linear_project_id?: string;
+}
+
 export interface SeedOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
@@ -82,6 +99,8 @@ export interface SeedOrchestrationParams {
   readonly now: string;
   /** Optional TTL epoch seconds. */
   readonly ttl?: number;
+  /** Release context stamped on the meta row for the reconciler. */
+  readonly releaseContext: OrchestrationReleaseContext;
 }
 
 export interface SeedOrchestrationResult {
@@ -117,7 +136,7 @@ const PARENT_META_SK = '#meta';
 export async function seedOrchestration(
   params: SeedOrchestrationParams,
 ): Promise<SeedOrchestrationResult> {
-  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, children, now, ttl } = params;
+  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, children, now, ttl, releaseContext } = params;
   const orchestrationId = deriveOrchestrationId(parentLinearIssueId);
 
   // Idempotency gate: a prior run for this parent already seeded rows.
@@ -155,6 +174,18 @@ export async function seedOrchestration(
     linear_workspace_id: linearWorkspaceId,
     repo,
     child_count: children.length,
+    // Release context for the reconciler (downstream releases run off the
+    // TaskTable stream with no Linear webhook payload to re-derive these).
+    platform_user_id: releaseContext.platform_user_id,
+    ...(releaseContext.linear_oauth_secret_arn !== undefined && {
+      linear_oauth_secret_arn: releaseContext.linear_oauth_secret_arn,
+    }),
+    ...(releaseContext.linear_workspace_slug !== undefined && {
+      linear_workspace_slug: releaseContext.linear_workspace_slug,
+    }),
+    ...(releaseContext.linear_project_id !== undefined && {
+      linear_project_id: releaseContext.linear_project_id,
+    }),
     created_at: now,
     updated_at: now,
     ...(ttl !== undefined && { ttl }),
@@ -187,4 +218,76 @@ export async function seedOrchestration(
   });
 
   return { orchestrationId, rowsWritten, alreadyExisted: false };
+}
+
+/** Sort-key of the parent-meta row. Exported so the reconciler can
+ *  separate it from child rows after a Query. */
+export const ORCHESTRATION_META_SK = PARENT_META_SK;
+
+/** Parsed parent-meta row, including the reconciler's release context. */
+export interface OrchestrationMeta {
+  readonly orchestration_id: string;
+  readonly parent_linear_issue_id: string;
+  readonly linear_workspace_id: string;
+  readonly repo: string;
+  readonly child_count: number;
+  readonly release_context: OrchestrationReleaseContext;
+}
+
+/** All rows for one orchestration: the meta row + every child row. */
+export interface OrchestrationSnapshot {
+  readonly meta: OrchestrationMeta;
+  readonly children: readonly OrchestrationChildRow[];
+}
+
+/**
+ * Load every row for an orchestration (meta + children) in one Query.
+ * Returns null when the orchestration id has no rows (e.g. TTL-reaped).
+ * The reconciler calls this after resolving a terminal child's
+ * orchestration via the ChildTaskIndex GSI.
+ */
+export async function loadOrchestration(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+): Promise<OrchestrationSnapshot | null> {
+  const res = await ddb.send(new QueryCommand({
+    TableName: tableName,
+    KeyConditionExpression: 'orchestration_id = :oid',
+    ExpressionAttributeValues: { ':oid': orchestrationId },
+  }));
+  const items = (res.Items ?? []) as Array<Record<string, unknown>>;
+  if (items.length === 0) return null;
+
+  const metaItem = items.find((i) => i.sub_issue_id === PARENT_META_SK);
+  if (!metaItem) {
+    logger.warn('Orchestration rows present but meta row missing', { orchestration_id: orchestrationId });
+    return null;
+  }
+
+  const children = items
+    .filter((i) => i.sub_issue_id !== PARENT_META_SK)
+    .map((i) => i as unknown as OrchestrationChildRow);
+
+  const meta: OrchestrationMeta = {
+    orchestration_id: orchestrationId,
+    parent_linear_issue_id: metaItem.parent_linear_issue_id as string,
+    linear_workspace_id: metaItem.linear_workspace_id as string,
+    repo: metaItem.repo as string,
+    child_count: (metaItem.child_count as number) ?? children.length,
+    release_context: {
+      platform_user_id: metaItem.platform_user_id as string,
+      ...(metaItem.linear_oauth_secret_arn !== undefined && {
+        linear_oauth_secret_arn: metaItem.linear_oauth_secret_arn as string,
+      }),
+      ...(metaItem.linear_workspace_slug !== undefined && {
+        linear_workspace_slug: metaItem.linear_workspace_slug as string,
+      }),
+      ...(metaItem.linear_project_id !== undefined && {
+        linear_project_id: metaItem.linear_project_id as string,
+      }),
+    },
+  };
+
+  return { meta, children };
 }

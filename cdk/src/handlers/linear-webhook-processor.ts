@@ -25,6 +25,8 @@ import { reportIssueFailure } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
+import { releaseReadyChildren } from './shared/orchestration-release';
+import { loadOrchestration, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -284,6 +286,17 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   //   - transient Linear error → terminal comment; do NOT silently
   //     degrade to a single task (that would drop the epic structure).
   if (ORCHESTRATION_TABLE && resolvedAccessToken) {
+    const releaseContext: OrchestrationReleaseContext = {
+      platform_user_id: platformUserId,
+      ...(channelMetadata.linear_oauth_secret_arn && {
+        linear_oauth_secret_arn: channelMetadata.linear_oauth_secret_arn,
+      }),
+      ...(channelMetadata.linear_workspace_slug && {
+        linear_workspace_slug: channelMetadata.linear_workspace_slug,
+      }),
+      linear_project_id: projectId,
+    };
+
     const discovery = await discoverOrchestration({
       ddb,
       tableName: ORCHESTRATION_TABLE,
@@ -292,6 +305,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       linearWorkspaceId: workspaceId,
       repo,
       now: new Date().toISOString(),
+      releaseContext,
     });
 
     if (discovery.kind === 'rejected') {
@@ -311,15 +325,37 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     if (discovery.kind === 'seeded') {
-      logger.info('Linear orchestration seeded — children released by reconciler', {
+      // Release the ROOT children (layer 0) now — the reconciler only
+      // fires on a child's terminal event, so nothing would start the
+      // graph otherwise. Downstream children are released by the
+      // reconciler as predecessors succeed. On idempotent replay
+      // (alreadyExisted) the roots were released on the first pass and
+      // releaseChild's idempotency key makes a re-release a no-op, so we
+      // still load + release defensively (cheap, and recovers a crash
+      // between seed and root-release on the first pass).
+      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      let releasedRoots = 0;
+      if (snapshot) {
+        const results = await releaseReadyChildren(
+          ddb,
+          ORCHESTRATION_TABLE,
+          snapshot.children,
+          snapshot.meta.release_context,
+          createTaskCore,
+          new Date().toISOString(),
+        );
+        releasedRoots = results.filter((r) => r.kind === 'released').length;
+      }
+      logger.info('Linear orchestration seeded — root children released', {
         issue_id: issue.id,
         orchestration_id: discovery.orchestrationId,
         child_count: discovery.childCount,
         root_count: discovery.rootSubIssueIds.length,
+        released_roots: releasedRoots,
         already_existed: discovery.alreadyExisted,
       });
-      // The reconciler (PR A3) owns child task creation + dependency
-      // gating off OrchestrationTable; the parent issue spawns no task.
+      // The parent issue itself spawns no task; the reconciler (off the
+      // TaskTable stream) releases downstream children as roots succeed.
       return;
     }
     // discovery.kind === 'single_task' → fall through to the single-task

@@ -47,7 +47,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 import { fetchSubIssueGraph, type FetchSubIssueGraphOptions } from './linear-subissue-fetch';
 import { validateDag } from './orchestration-dag';
-import { seedOrchestration } from './orchestration-store';
+import { seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -61,6 +61,8 @@ export interface DiscoverOrchestrationParams {
   readonly now: string;
   /** Optional TTL epoch seconds for the persisted rows. */
   readonly ttl?: number;
+  /** Release context stamped on the meta row for the reconciler. */
+  readonly releaseContext: OrchestrationReleaseContext;
   /** Test seam for the Linear fetch. */
   readonly fetchOptions?: FetchSubIssueGraphOptions;
 }
@@ -86,7 +88,7 @@ export type DiscoverOrchestrationResult =
 export async function discoverOrchestration(
   params: DiscoverOrchestrationParams,
 ): Promise<DiscoverOrchestrationResult> {
-  const { ddb, tableName, accessToken, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, fetchOptions } = params;
+  const { ddb, tableName, accessToken, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, releaseContext, fetchOptions } = params;
 
   // ── 1. Fetch the sub-issue graph from Linear ─────────────────────
   const fetched = await fetchSubIssueGraph(accessToken, parentLinearIssueId, fetchOptions);
@@ -122,6 +124,7 @@ export async function discoverOrchestration(
       repo,
       children: fetched.children,
       now,
+      releaseContext,
       ...(ttl !== undefined && { ttl }),
     });
   } catch (err) {

@@ -47,7 +47,10 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { createTaskCore as CreateTaskCoreFn } from './create-task-core';
 import { logger } from './logger';
-import type { OrchestrationChildRow } from './orchestration-store';
+import type {
+  OrchestrationChildRow,
+  OrchestrationReleaseContext,
+} from './orchestration-store';
 
 export interface ReleaseChildParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -189,6 +192,48 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     base_branch: baseBranch ?? 'main',
   });
   return { kind: 'released', taskId };
+}
+
+/**
+ * Release a batch of child rows (the ``ready`` ones), using a shared
+ * release context (from the meta row). Used both at seed time (release
+ * roots) and by the reconciler (release newly-unblocked dependents).
+ *
+ * Each child is released independently; one failure does not abort the
+ * rest (a transient create failure for child A shouldn't strand B). The
+ * caller logs/handles per-child results — a ``create_failed`` row stays
+ * ``ready`` and is retried on the next reconcile pass.
+ */
+export async function releaseReadyChildren(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  rows: readonly OrchestrationChildRow[],
+  releaseContext: OrchestrationReleaseContext,
+  createTaskCore: typeof CreateTaskCoreFn,
+  now: string,
+): Promise<readonly ReleaseChildResult[]> {
+  const releasable = rows.filter((r) => r.child_status === 'ready');
+  const results: ReleaseChildResult[] = [];
+  for (const row of releasable) {
+    results.push(await releaseChild({
+      ddb,
+      tableName,
+      row,
+      platformUserId: releaseContext.platform_user_id,
+      ...(releaseContext.linear_oauth_secret_arn !== undefined && {
+        linearOauthSecretArn: releaseContext.linear_oauth_secret_arn,
+      }),
+      ...(releaseContext.linear_workspace_slug !== undefined && {
+        linearWorkspaceSlug: releaseContext.linear_workspace_slug,
+      }),
+      ...(releaseContext.linear_project_id !== undefined && {
+        linearProjectId: releaseContext.linear_project_id,
+      }),
+      createTaskCore,
+      now,
+    }));
+  }
+  return results;
 }
 
 /** Pull the task_id out of a createTaskCore success body (best-effort). */

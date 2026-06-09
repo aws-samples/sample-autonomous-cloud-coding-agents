@@ -63,6 +63,7 @@ const base = {
   linearWorkspaceId: 'WS',
   repo: 'o/r',
   now: '2026-06-09T12:00:00.000Z',
+  releaseContext: { platform_user_id: 'platform-user-1' },
 };
 
 describe('discoverOrchestration', () => {
