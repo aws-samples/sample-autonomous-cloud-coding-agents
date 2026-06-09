@@ -90,6 +90,33 @@ class TestInitializePolicyEngineAndHooks:
 
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
+    def test_read_only_threaded_to_engine(self, mock_policy_engine, _mock_build_hooks):
+        # SECURITY (#248 Phase 2a): config.read_only MUST reach
+        # PolicyEngine(read_only=...) — that is the seam between "config computes
+        # read_only" and "Cedar enforces context.read_only". Without this
+        # assertion, dropping the kwarg passes every other test while silently
+        # disabling the Write/Edit hard-deny for read-only workflows.
+        config = _config(read_only=True)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        assert mock_policy_engine.call_args.kwargs["read_only"] is True
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_writeable_read_only_false_threaded_to_engine(
+        self, mock_policy_engine, _mock_build_hooks
+    ):
+        config = _config(read_only=False)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        assert mock_policy_engine.call_args.kwargs["read_only"] is False
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
     def test_pre_approvals_loaded_emitted_with_initial_scopes(
         self, _mock_policy_engine, _mock_build_hooks
     ):

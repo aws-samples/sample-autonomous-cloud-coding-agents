@@ -636,16 +636,29 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
 def _validate_required_params(params: dict) -> list[str]:
     """Check the minimum viable param set for the pipeline.
 
-    Returns the list of missing field names (empty list = valid). The
-    pipeline requires at minimum a ``repo_url`` and either an
-    ``issue_number`` or ``task_description``; PR workflows
-    (``coding/pr-iteration-v1`` / ``coding/pr-review-v1``) additionally require
-    ``pr_number``.
+    Returns the list of missing field names (empty list = valid). A repo-bound
+    workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
+    #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
+    or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
+    ``coding/pr-review-v1``) additionally require ``pr_number``.
     """
     missing: list[str] = []
-    if not params.get("repo_url"):
-        missing.append("repo_url")
     workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
+
+    # Repo is mandatory only for repo-bound workflows. Resolve requires_repo from
+    # the workflow itself (authoritative, matches config.build_config); a load
+    # failure fails SAFE — assume a repo is required so a repo-bound task is never
+    # admitted without one.
+    requires_repo = True
+    try:
+        from workflow import load_workflow
+
+        requires_repo = load_workflow(workflow_id).resolved_requires_repo
+    except Exception:
+        _warn_cw(f"could not resolve requires_repo for {workflow_id!r}; assuming repo required")
+    if requires_repo and not params.get("repo_url"):
+        missing.append("repo_url")
+
     if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1"):
         if not params.get("pr_number"):
             missing.append("pr_number")

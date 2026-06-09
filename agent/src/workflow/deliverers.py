@@ -110,13 +110,18 @@ def _upload_to_s3(ctx: StepContext) -> str:
 
 
 def _post_comment(ctx: StepContext) -> bool:
-    """Surface the deliverable as a milestone for the channel fanout to post.
+    """Record the deliverable as a ``delivered_comment`` progress milestone.
 
     The agent has no direct comment channel for a repo-less task (no GitHub repo;
-    Linear MCP is channel-gated). The orchestrator's event fanout owns actual
-    comment delivery, so this records the result as a ``delivered_comment``
-    milestone (carrying the text) that the fanout renders to the originating
-    channel. Returns True when the milestone was written.
+    Linear MCP is channel-gated). This records the result text as a
+    ``delivered_comment`` milestone on TaskEventsTable — visible in the live event
+    stream (``bgagent watch``) and to any consumer of the task's events.
+
+    NOTE: rendering this milestone to an external channel (Slack/email/GitHub) is
+    NOT yet wired — ``delivered_comment`` is not in the fan-out's
+    ``ROUTABLE_MILESTONES``, so a downstream channel post does not happen today.
+    Returns True only when the milestone was actually recorded (progress writer
+    present), so the caller does not over-report a comment that wasn't emitted.
     """
     if ctx.progress is None:
         return False

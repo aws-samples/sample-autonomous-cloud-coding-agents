@@ -18,8 +18,9 @@ checkpoints completed steps so a resumed session skips work already done
 This module is intentionally decoupled from ``pipeline.py``: the orchestration
 core (the loop, ``on_failure``, checkpoint/resume, terminal-outcome resolution)
 is handler-agnostic and unit-tested with fakes; the real handlers are thin
-wrappers over the existing helpers. Wiring it into ``pipeline.run_task`` is a
-separate step (#248 task 5).
+wrappers over the existing helpers. It is wired into ``pipeline.run_task`` via
+``_execute_agent_step`` (the agentic step on the repo-bound path) and
+``_run_repoless_task`` (the full repo-less step list).
 """
 
 from __future__ import annotations
@@ -282,10 +283,11 @@ def run_workflow(
       half-applied side effect is impossible).
 
     ``only_kinds`` restricts execution to steps of those kinds (others are passed
-    over without running or checkpointing). This is the Phase-1 seam: the
-    pipeline drives just the agentic ``run_agent`` step through the runner while
-    keeping clone / context / post-hooks on the proven inline path. With the
-    default ``None`` every step runs.
+    over without running or checkpointing). It is a permanent dual-mode
+    mechanism, not a transitional seam: the repo-bound pipeline drives just the
+    agentic ``run_agent`` step through the runner (clone / context / post-hooks
+    stay on the proven inline path with their hard-won cancel-safety), while the
+    repo-less path (``_run_repoless_task``) passes ``None`` so every step runs.
 
     On resume, deterministic side-effect-free steps already recorded in the
     checkpoint are skipped; everything else re-runs (idempotently).
@@ -447,15 +449,15 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
     from runner import run_agent
 
     # Fail loud rather than run an unguided agent: an empty system prompt means
-    # no handler/caller built it (e.g. a repo-less workflow whose hydrate_context
-    # skipped build_system_prompt because there is no RepoSetup — WORKFLOWS.md
-    # open question; repo-less prompt assembly lands in Phase 3). Better an
-    # attributable failed step than a silently context-free SDK loop.
+    # no handler/caller built it. The repo-bound path builds it in
+    # hydrate_context (from the RepoSetup); the repo-less path builds it in
+    # _run_repoless_task (via build_repoless_system_prompt) before run_workflow.
+    # An empty prompt here is a wiring bug — better an attributable failed step
+    # than a silently context-free SDK loop.
     if not ctx.system_prompt:
         raise ValueError(
             "run_agent reached with an empty system prompt — no clone_repo/"
-            "hydrate_context step (or caller) built ctx.system_prompt. Repo-less "
-            "system-prompt assembly is not wired yet (#248 Phase 3)."
+            "hydrate_context step (or caller) built ctx.system_prompt."
         )
 
     cwd = ctx.setup.repo_dir if ctx.setup else AGENT_WORKSPACE
@@ -593,15 +595,17 @@ def _handle_ensure_pr(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_post_review(step: Step, ctx: StepContext) -> StepOutcome:
-    """Post a review (review workflows). Implemented with the principal migration.
+    """Post a structured review via a VCS review API (no shipped workflow yet).
 
-    The read-only review path depends on the Cedar principal migration shipped in
-    its own isolated PR (Phase 2a) ahead of the ``pr_review`` workflow migration
-    (Phase 2b). Registered now so the handler-coverage check (validator rule 8)
-    stays honest; it fails loudly rather than silently no-opping.
+    No first-party workflow declares a ``post_review`` step — ``coding/pr-review-v1``
+    resolves its PR via ``ensure_pr(strategy: resolve)`` instead. The handler is
+    registered so the handler-coverage check (validator rule 8) stays honest and
+    fails loudly rather than silently no-opping; it is implemented when a workflow
+    that posts a GitHub Reviews-API review (vs an issue comment) ships.
     """
     raise NotImplementedError(
-        "post_review handler lands with the pr_review workflow migration (#248 Phase 2b)"
+        "post_review has no shipped workflow yet — coding/pr-review-v1 uses "
+        "ensure_pr(strategy: resolve); this handler lands with a future review workflow"
     )
 
 

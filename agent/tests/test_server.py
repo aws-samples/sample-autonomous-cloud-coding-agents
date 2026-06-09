@@ -327,6 +327,31 @@ def test_validate_required_params_pr_workflows_require_pr_number():
     assert missing == []
 
 
+def test_validate_required_params_repoless_workflow_does_not_require_repo():
+    """#248 Phase 3: a repo-less workflow is accepted at the /invocations boundary
+    with no repo_url (the AgentCore-backend admission path).
+
+    Regression guard: repo_url was previously required unconditionally here, which
+    rejected every repo-less task on the AgentCore backend before the pipeline ran.
+    """
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "default/agent-v1", "version": "1.0.0"},
+            "task_description": "Summarise these papers",
+        }
+    )
+    assert missing == []
+
+    # A repo-bound workflow still requires repo_url.
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
+            "task_description": "do the thing",
+        }
+    )
+    assert missing == ["repo_url"]
+
+
 def test_drain_threads_joins_active_threads():
     """_drain_threads joins live background threads on shutdown."""
     stop = threading.Event()
