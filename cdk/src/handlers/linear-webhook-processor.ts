@@ -24,6 +24,7 @@ import { createTaskCore } from './shared/create-task-core';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
+import { discoverOrchestration } from './shared/orchestration-discovery';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -31,6 +32,10 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+// #247 Mode A: name of OrchestrationTable. Unset until PR A3 wires the
+// orchestration stack — while unset, the parent/sub-issue path is fully
+// dormant and the handler behaves exactly as one-issue → one-task.
+const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
 /**
@@ -250,17 +255,75 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // and stash it on the task record. The agent runtime reads it directly
   // (no registry lookup at task-execution time). If the workspace isn't
   // onboarded the agent's outbound Linear MCP simply skips.
+  let resolvedAccessToken: string | undefined;
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (resolved) {
       channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
       channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
+      resolvedAccessToken = resolved.accessToken;
     } else {
       logger.warn('Linear workspace not in registry — agent will run without Linear MCP', {
         linear_workspace_id: workspaceId,
         issue_id: issue.id,
       });
     }
+  }
+
+  // #247 Mode A — parent/sub-issue orchestration. Env-var gated: until
+  // the orchestration stack (PR A3) sets ORCHESTRATION_TABLE_NAME this
+  // whole branch is dormant and the handler behaves exactly as before
+  // (one issue → one task). When enabled AND we have a workspace token,
+  // probe the labeled issue for a sub-issue dependency graph:
+  //   - has sub-issues → seed the DAG and hand off to the reconciler
+  //     (A3) which creates children in dependency order. The parent
+  //     issue itself does NOT spawn a task here (no special label
+  //     needed: a human-authored graph is implicit consent to execute).
+  //   - no sub-issues → fall through to the single-task path below.
+  //   - invalid graph (cycle/dangling) → terminal ❌ comment, no task.
+  //   - transient Linear error → terminal comment; do NOT silently
+  //     degrade to a single task (that would drop the epic structure).
+  if (ORCHESTRATION_TABLE && resolvedAccessToken) {
+    const discovery = await discoverOrchestration({
+      ddb,
+      tableName: ORCHESTRATION_TABLE,
+      accessToken: resolvedAccessToken,
+      parentLinearIssueId: issue.id,
+      linearWorkspaceId: workspaceId,
+      repo,
+      now: new Date().toISOString(),
+    });
+
+    if (discovery.kind === 'rejected') {
+      logger.info('Linear orchestration graph rejected — not creating tasks', {
+        issue_id: issue.id,
+        reason: discovery.reason,
+      });
+      await safeReportIssueFailure(issue.id, workspaceId, `❌ ${discovery.message}`);
+      return;
+    }
+    if (discovery.kind === 'error') {
+      await safeReportIssueFailure(
+        issue.id,
+        workspaceId,
+        `❌ ABCA couldn't read this issue's sub-issues: ${discovery.message}`,
+      );
+      return;
+    }
+    if (discovery.kind === 'seeded') {
+      logger.info('Linear orchestration seeded — children released by reconciler', {
+        issue_id: issue.id,
+        orchestration_id: discovery.orchestrationId,
+        child_count: discovery.childCount,
+        root_count: discovery.rootSubIssueIds.length,
+        already_existed: discovery.alreadyExisted,
+      });
+      // The reconciler (PR A3) owns child task creation + dependency
+      // gating off OrchestrationTable; the parent issue spawns no task.
+      return;
+    }
+    // discovery.kind === 'single_task' → fall through to the single-task
+    // path below (issue had no sub-issues).
   }
 
   // Extract embedded image URLs from the issue description markdown.
