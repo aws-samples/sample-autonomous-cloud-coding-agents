@@ -24,6 +24,13 @@ jobs:
   integ:
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
+    # Run in the `integ` GitHub Environment. This is mandatory, not cosmetic:
+    # AWS_ROLE_TO_ASSUME is an environment-scoped secret (see deploy.yml, where
+    # the diff/deploy jobs each declare an environment), so a job with no
+    # environment resolves it to empty and configure-aws-credentials fails. The
+    # role's OIDC trust also gates on `sub = repo:...:environment:integ`, so the
+    # environment name must be added to that trust policy (account-side setup).
+    environment: integ
     # Only run against main. workflow_dispatch can target any branch, and the
     # job assumes the privileged integ role — without this guard a feature-branch
     # edit to test/integ/*.ts could be dispatched and run against that role.
