@@ -12,7 +12,7 @@ There are five ways to interact with the platform. You can use them independentl
 4. **Slack** - Submit tasks by @mentioning the bot and receive threaded progress notifications with reaction-based status. See the [Slack setup guide](./SLACK_SETUP_GUIDE.md).
 5. **Linear** - Apply a label to a Linear issue to trigger a task; the agent posts progress comments back on the issue via Linear's MCP server. See the [Linear setup guide](./LINEAR_SETUP_GUIDE.md).
 
-For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `pr_review` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
+For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
 ## Roles
 
@@ -229,44 +229,48 @@ Blueprints can configure per-repository settings that override platform defaults
 
 When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
 
-## Task types
+## Workflows
 
-The platform supports three task types that cover the full lifecycle of a code change:
+Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. If you specify nothing, the platform resolves a default (your repo's Blueprint default, or the conservative `default/agent-v1`). Workflows replace the old `task_type` field — see [Workflows](../design/WORKFLOWS.md) for the full design and how to author your own.
 
-| Type | Description | Outcome |
+The shipped workflows that cover the full lifecycle of a code change:
+
+| Workflow | Description | Outcome |
 |---|---|---|
-| `new_task` (default) | Create a new branch, implement changes, and open a new PR. | New pull request |
-| `pr_iteration` | Check out an existing PR's branch, read review feedback, address it, and push updates. | Updated pull request |
-| `pr_review` | Check out an existing PR's branch, analyze the changes read-only, and post a structured review. | Review comments on the PR |
+| `coding/new-task-v1` | Create a new branch, implement changes, and open a new PR. | New pull request |
+| `coding/pr-iteration-v1` | Check out an existing PR's branch, read review feedback, address it, and push updates. | Updated pull request |
+| `coding/pr-review-v1` | Check out an existing PR's branch, analyze the changes read-only, and post a structured review. | Review comments on the PR |
+| `knowledge/web-research-v1` | Research a question from the task description and attachments (no repo required), delivering a written result. | Research artifact |
+| `default/agent-v1` | The conservative fallback when nothing else is selected: run the request through a read-leaning agent and deliver the result. No repo, build, or PR assumptions. | Artifact |
 
-### When to use each type
+### When to use each coding workflow
 
-**`new_task`** - You have a feature request, bug report, or task description and want the agent to implement it from scratch. The agent creates a fresh branch, writes code, runs tests, and opens a new PR. Use this for greenfield work: adding features, fixing bugs, writing tests, refactoring, or updating documentation.
+**`coding/new-task-v1`** (the mapping target for the old `new_task`) - You have a feature request, bug report, or task description and want the agent to implement it from scratch. The agent creates a fresh branch, writes code, runs tests, and opens a new PR. Use this for greenfield work: adding features, fixing bugs, writing tests, refactoring, or updating documentation. Submitted via the CLI with `--issue`/`--task` and no PR flag.
 
-**`pr_iteration`** - A reviewer left feedback on an existing PR and you want the agent to address it. The agent reads the review comments, makes targeted changes, and pushes to the same branch. Use this to accelerate the review-fix-push cycle without context-switching from your current work.
+**`coding/pr-iteration-v1`** (CLI `--pr`) - A reviewer left feedback on an existing PR and you want the agent to address it. The agent reads the review comments, makes targeted changes, and pushes to the same branch. Use this to accelerate the review-fix-push cycle without context-switching from your current work.
 
-**`pr_review`** - You want a structured code review of an existing PR before a human reviewer looks at it. The agent reads the changes and posts review comments without modifying code. Use this as a first-pass review to catch issues early, especially for large PRs or when reviewers are busy.
+**`coding/pr-review-v1`** (CLI `--review-pr`) - You want a structured code review of an existing PR before a human reviewer looks at it. The agent reads the changes and posts review comments without modifying code. Use this as a first-pass review to catch issues early, especially for large PRs or when reviewers are busy.
 
-### Combining task types
+### Combining coding workflows
 
-The three task types work together as a development loop:
+The three coding workflows work together as a development loop:
 
 ```mermaid
 flowchart LR
-    A[new_task] --> B[PR opened]
-    B --> C[pr_review]
+    A[coding/new-task-v1] --> B[PR opened]
+    B --> C[coding/pr-review-v1]
     C --> D{Approved?}
-    D -- No --> E[pr_iteration]
+    D -- No --> E[coding/pr-iteration-v1]
     E --> C
     D -- Yes --> F[Merge]
 ```
 
-1. Submit a `new_task` - the agent implements the change and opens a PR.
-2. Submit a `pr_review` on the new PR - the agent posts structured review comments.
-3. Submit a `pr_iteration` - the agent addresses the review feedback and pushes updates.
+1. Submit a `coding/new-task-v1` task - the agent implements the change and opens a PR.
+2. Submit a `coding/pr-review-v1` task on the new PR - the agent posts structured review comments.
+3. Submit a `coding/pr-iteration-v1` task - the agent addresses the review feedback and pushes updates.
 4. Repeat steps 2-3 until the PR is ready to merge.
 
-You can automate this loop with webhooks: trigger `pr_review` automatically when a PR is opened, and `pr_iteration` when review comments are posted.
+You can automate this loop with webhooks: trigger `coding/pr-review-v1` automatically when a PR is opened, and `coding/pr-iteration-v1` when review comments are posted.
 
 ## Using the REST API
 
@@ -274,7 +278,7 @@ The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack outp
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/tasks` | Create a new task (new_task, pr_iteration, or pr_review) |
+| `POST` | `/tasks` | Create a new task (selects a workflow via `workflow_ref`, or resolves a default) |
 | `GET` | `/tasks` | List your tasks with optional filters (status, repo, pagination) |
 | `GET` | `/tasks/{task_id}` | Get full detail for a specific task |
 | `DELETE` | `/tasks/{task_id}` | Cancel a running or queued task |
@@ -320,16 +324,16 @@ To iterate on an existing pull request (address review feedback):
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-iteration-v1", "pr_number": 42}'
 ```
 
-You can optionally include `task_description` with `pr_iteration` to provide additional instructions alongside the review feedback:
+You can optionally include `task_description` with `coding/pr-iteration-v1` to provide additional instructions alongside the review feedback:
 
 ```bash
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-iteration-v1", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
 ```
 
 To request a read-only review of an existing pull request:
@@ -338,17 +342,19 @@ To request a read-only review of an existing pull request:
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55}'
 ```
 
-You can optionally include `task_description` with `pr_review` to focus the review on specific areas:
+You can optionally include `task_description` with `coding/pr-review-v1` to focus the review on specific areas:
 
 ```bash
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
 ```
+
+> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](../design/WORKFLOWS.md)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
 
 **Request body fields:**
 
@@ -357,12 +363,12 @@ curl -X POST "$API_URL/tasks" \
 | `repo` | string | Yes | GitHub repository in `owner/repo` format |
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
-| `pr_number` | number | | PR number to iterate on or review (required for `pr_iteration` and `pr_review`) |
-| `task_type` | string | No | `new_task` (default), `pr_iteration`, or `pr_review`. |
+| `pr_number` | number | | PR number to iterate on or review (required for `coding/pr-iteration-v1` and `coding/pr-review-v1`) |
+| `workflow_ref` | string | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces the retired `task_type`. Omitted ⇒ the platform resolves a default (`default/agent-v1`). |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
-**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR tasks (`pr_iteration`, `pr_review`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
+**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR workflows (`coding/pr-iteration-v1`, `coding/pr-review-v1`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
 
 **Idempotency:** Include an `Idempotency-Key` header (alphanumeric, dashes, underscores, max 128 chars) to prevent duplicate task creation on retries:
 
@@ -474,6 +480,9 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 # Review a PR with a specific focus area
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
+# Select an explicit workflow (overrides the one --pr/--review-pr would imply)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Research the tradeoffs" --workflow knowledge/web-research-v1
+
 # Submit with attachments (local files)
 node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
   --attachment screenshot.png \
@@ -509,8 +518,9 @@ Created:     2026-04-01T00:39:51.271Z
 | `--repo` | GitHub repository (`owner/repo`). Required. |
 | `--issue` | GitHub issue number. |
 | `--task` | Task description text. |
-| `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
-| `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
+| `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; omit to let the server resolve a default. |
 | `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
@@ -884,7 +894,7 @@ curl -X POST "$API_URL/webhooks/tasks" \
   -d "$BODY"
 ```
 
-The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `task_type`, `pr_number`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported. You can submit `pr_iteration` tasks via webhook to automate PR feedback loops, or `pr_review` tasks to trigger automated code reviews.
+The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `workflow_ref`, `pr_number`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported. You can submit `coding/pr-iteration-v1` tasks via webhook to automate PR feedback loops, or `coding/pr-review-v1` tasks to trigger automated code reviews.
 
 **Example response** (same shape as a successful `POST /tasks`  - `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
 
@@ -989,7 +999,7 @@ If a task fails with a `preflight_failed` event, the platform rejected the run b
 
 - `GITHUB_UNREACHABLE` - The platform could not reach the GitHub API. Check network connectivity and GitHub status.
 - `REPO_NOT_FOUND_OR_NO_ACCESS` - The GitHub PAT does not have access to the target repository, or the repo does not exist.
-- `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the task type. For `new_task` and `pr_iteration`, you need Contents (read/write) and Pull requests (read/write). For `pr_review`, Triage or higher is enough.
+- `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the workflow. For `coding/new-task-v1` and `coding/pr-iteration-v1`, you need Contents (read/write) and Pull requests (read/write). For `coding/pr-review-v1`, Triage or higher is enough.
 - `PR_NOT_FOUND_OR_CLOSED` - The specified PR does not exist or is already closed.
 
 To fix permission issues, update the GitHub PAT in AWS Secrets Manager and submit a new task. See [Developer guide - Repository preparation](./DEVELOPER_GUIDE.md#repository-preparation) for the full permissions table.
@@ -1008,7 +1018,7 @@ Filter by task ID to find logs for a specific task.
 
 ### Notifications (GitHub edit-in-place)
 
-When a task targets a pull request (`pr_iteration` or `pr_review`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
+When a task targets a pull request (`coding/pr-iteration-v1` or `coding/pr-review-v1`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
 
 The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers. Currently the GitHub edit-in-place dispatcher is active; Slack and Email dispatchers are planned.
 
