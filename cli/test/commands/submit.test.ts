@@ -77,7 +77,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', issue_number: 42 },
+      { repo: 'owner/repo', issue_number: 42, workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
@@ -115,7 +115,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'Fix the bug' },
+      { repo: 'owner/repo', task_description: 'Fix the bug', workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
   });
@@ -168,7 +168,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50 },
+      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50, workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
   });
@@ -357,7 +357,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'deep debugging', trace: true },
+      { repo: 'owner/repo', task_description: 'deep debugging', trace: true, workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
   });
@@ -437,6 +437,7 @@ describe('submit command', () => {
       expect(body).toEqual({
         repo: 'owner/repo',
         task_description: 'ok',
+        workflow_ref: 'coding/new-task-v1',
         approval_timeout_s: 120,
       });
     });

@@ -67,6 +67,13 @@ DELIVERERS: dict[str, Deliverer] = {
     "s3_and_comment": Deliverer("s3_and_comment", frozenset({"artifact", "comment"})),
 }
 
+# The target a ``deliver_artifact`` step uses when it omits ``target``. This is
+# the SINGLE source of truth for that default — both the runtime (runner.py's
+# ``_handle_deliver_artifact``) and the validator (``produced_outcomes(None)``)
+# key off it, so the two can never disagree about what an unset target delivers
+# (PR review #296 finding #7).
+DEFAULT_DELIVER_TARGET = "s3"
+
 
 def _artifact_body(ctx: StepContext) -> bytes:
     """The deliverable bytes: the agent's final result text (#248 Phase 3)."""
@@ -157,12 +164,14 @@ DELIVER_OUTCOMES: frozenset[str] = frozenset().union(*(d.produces for d in DELIV
 def produced_outcomes(target: str | None) -> frozenset[str]:
     """Terminal outcomes a deliver_artifact ``target`` produces.
 
-    An unset target stays **lenient** (returns the full deliver outcome set):
-    the runtime default deliverer is not pinned in the schema, so the validator
-    must not flag a false positive on an unset field. An unknown name returns
-    the empty set (it produces nothing the validator can vouch for).
+    An unset target resolves to {@link DEFAULT_DELIVER_TARGET} — the SAME default
+    the runtime applies — so the validator models exactly what will run. (It was
+    previously lenient, returning the full set, which let a ``primary: comment``
+    workflow with no ``target`` pass validation while the runtime silently
+    delivered only to ``s3`` and never posted the comment — PR review #296
+    finding #7.) An unknown name returns the empty set (it produces nothing the
+    validator can vouch for).
     """
-    if target is None:
-        return DELIVER_OUTCOMES
-    deliverer = DELIVERERS.get(target)
+    resolved = DEFAULT_DELIVER_TARGET if target is None else target
+    deliverer = DELIVERERS.get(resolved)
     return deliverer.produces if deliverer is not None else frozenset()

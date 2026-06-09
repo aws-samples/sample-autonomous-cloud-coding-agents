@@ -9,6 +9,7 @@ import pytest
 
 from models import AgentResult, TaskConfig
 from workflow.deliverers import (
+    DEFAULT_DELIVER_TARGET,
     DELIVER_OUTCOMES,
     DELIVERERS,
     MAX_ARTIFACT_BYTES,
@@ -29,10 +30,17 @@ def test_produced_outcomes_match_first_party_contract():
     assert produced_outcomes("s3_and_comment") == frozenset({"artifact", "comment"})
 
 
-def test_unset_target_is_lenient():
-    # An unset target returns the full deliver outcome set (no false positive on
-    # an unpinned runtime default).
-    assert produced_outcomes(None) == DELIVER_OUTCOMES
+def test_unset_target_models_the_runtime_default():
+    # PR review #296 finding #7: an unset target must resolve to the SAME default
+    # the runtime applies (DEFAULT_DELIVER_TARGET), not a lenient full set — so
+    # the validator models exactly what runs. With the default 's3', that is
+    # {'artifact'} only; a primary:comment workflow with no target is correctly
+    # flagged by rule 11 rather than silently never posting the comment.
+    assert DEFAULT_DELIVER_TARGET == "s3"
+    assert produced_outcomes(None) == produced_outcomes(DEFAULT_DELIVER_TARGET)
+    assert produced_outcomes(None) == frozenset({"artifact"})
+    # The full union still exists for rule 11's "is this a deliver-backed
+    # outcome at all" membership check.
     assert frozenset({"artifact", "comment"}) == DELIVER_OUTCOMES
 
 

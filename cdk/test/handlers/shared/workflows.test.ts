@@ -27,6 +27,7 @@ import {
   getWorkflowDescriptor,
   isValidWorkflowRef,
   resolveWorkflowRef,
+  resolveWorkflowRefError,
   workflowIsReadOnly,
   workflowRequiresRepo,
   workflowUsesPr,
@@ -53,8 +54,22 @@ describe('resolveWorkflowRef', () => {
     expect(resolveWorkflowRef('coding/new-task-v1')).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
   });
 
-  test('strips a version constraint and pins to the shipped version', () => {
-    expect(resolveWorkflowRef('coding/pr-review-v1@9.9.9')).toEqual({ id: 'coding/pr-review-v1', version: '1.0.0' });
+  test('accepts a constraint that matches the shipped version', () => {
+    expect(resolveWorkflowRef('coding/pr-review-v1@1.0.0')).toEqual({ id: 'coding/pr-review-v1', version: '1.0.0' });
+  });
+
+  test('rejects an unsatisfiable @version pin instead of silently downgrading (#296 finding #6)', () => {
+    // Previously @9.9.9 was discarded and the task ran 1.0.0 — now it fails to
+    // resolve so the caller can 400 rather than silently run a different version.
+    expect(resolveWorkflowRef('coding/pr-review-v1@9.9.9')).toBeNull();
+    expect(resolveWorkflowRefError('coding/pr-review-v1@9.9.9')).toBe('unsatisfiable_version');
+  });
+
+  test('classifies an unknown id distinctly from a bad version', () => {
+    expect(resolveWorkflowRefError('coding/does-not-exist-v1')).toBe('unknown_id');
+    expect(resolveWorkflowRefError('coding/new-task-v1')).toBeNull();
+    expect(resolveWorkflowRefError('coding/new-task-v1@1.0.0')).toBeNull();
+    expect(resolveWorkflowRefError(undefined)).toBeNull();
   });
 
   test('falls back to the platform default when ref is absent', () => {
@@ -153,7 +168,51 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
       if (yamlModelId !== undefined) {
         expect(WORKFLOW_MODEL_ALLOWLIST).toContain(yamlModelId);
       }
+
+      // required_inputs parity (#296 finding #10): the descriptor's allOf/oneOf
+      // must mirror the YAML's all_of/one_of exactly (order-insensitive). The
+      // admission "is this task spec satisfiable" check keys off the descriptor,
+      // so drift here silently over- or under-constrains submission.
+      const ri = (doc.required_inputs ?? {}) as Record<string, unknown>;
+      const yamlAllOf = (ri.all_of as string[] | undefined);
+      const yamlOneOf = (ri.one_of as string[] | undefined);
+      const norm = (xs?: readonly string[]) => (xs ? [...xs].sort() : undefined);
+      expect(norm(descriptor!.requiredInputs.allOf)).toEqual(norm(yamlAllOf));
+      expect(norm(descriptor!.requiredInputs.oneOf)).toEqual(norm(yamlOneOf));
     }
+  });
+
+  // #296 finding #10: _KNOWN_WRITEABLE_WORKFLOW_IDS (agent/src/config.py) is a
+  // THIRD hand-maintained copy of the writeable set, used by the agent's
+  // load-failure fallback. It must agree with the descriptors: a workflow that
+  // is read_only:false (writeable) and repo-bound — i.e. the agent must allow
+  // writes if its file fails to load — has to be in that set, or its writes get
+  // mis-denied on the fallback path. Cross-check the agent constant against the
+  // CDK descriptors so adding a writeable workflow without updating the agent
+  // list fails CI here.
+  test('agent _KNOWN_WRITEABLE_WORKFLOW_IDS matches the writeable repo-bound descriptors', () => {
+    const configPy = fs.readFileSync(
+      path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
+    );
+    const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\(([^)]*)\)\)/s);
+    expect(match).not.toBeNull();
+    const agentWriteable = new Set(
+      [...match![1].matchAll(/"([^"]+)"/g)].map(m => m[1]),
+    );
+
+    // The expected writeable set from the YAML: read_only:false AND requires_repo
+    // (pr-review is read-only; default/agent-v1 is repo-less and intentionally
+    // excluded so its fallback fails closed — mirrors the constant's own docstring).
+    const expectedWriteable = new Set<string>();
+    for (const file of yamlFiles) {
+      const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      const requiresRepo = doc.requires_repo !== undefined
+        ? Boolean(doc.requires_repo)
+        : doc.domain === 'coding';
+      const readOnly = Boolean(doc.read_only ?? false);
+      if (requiresRepo && !readOnly) expectedWriteable.add(doc.id as string);
+    }
+    expect([...agentWriteable].sort()).toEqual([...expectedWriteable].sort());
   });
 });
 

@@ -620,9 +620,9 @@ def _handle_deliver_artifact(step: Step, ctx: StepContext) -> StepOutcome:
     *failed* step (terminal FAILED) — never a silent skip — since this is the
     workflow's side-effecting terminal step.
     """
-    from .deliverers import deliver
+    from .deliverers import DEFAULT_DELIVER_TARGET, deliver
 
-    target = step.target or "s3"
+    target = step.target or DEFAULT_DELIVER_TARGET
     result = deliver(target, ctx)
     data: dict[str, Any] = {}
     if result.artifact_uri:

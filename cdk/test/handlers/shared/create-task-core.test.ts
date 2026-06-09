@@ -137,6 +137,19 @@ describe('createTaskCore', () => {
     expect(mockSend).toHaveBeenCalledTimes(2); // task + event
   });
 
+  test('returns 400 for an unsatisfiable @version pin (#296 finding #6)', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it', workflow_ref: 'coding/new-task-v1@2.0.0' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('not available');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   test('returns 400 when a repo-bound workflow is missing its repo (#248 Phase 3)', async () => {
     const result = await createTaskCore(
       { workflow_ref: 'coding/new-task-v1', task_description: 'Fix it' },

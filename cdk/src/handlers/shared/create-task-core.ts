@@ -54,7 +54,7 @@ import {
   toTaskDetail,
 } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
-import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef } from './workflows';
+import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -118,7 +118,14 @@ export async function createTaskCore(
   }
   const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref);
   if (resolvedWorkflow === null) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `Unknown workflow_ref "${body.workflow_ref}".`, requestId);
+    // Distinguish an unknown id from an unsatisfiable @version pin so the caller
+    // learns which it is (#296 finding #6 — a bad pin no longer silently runs
+    // the shipped version).
+    const reason = resolveWorkflowRefError(body.workflow_ref);
+    const message = reason === 'unsatisfiable_version'
+      ? `workflow_ref "${body.workflow_ref}" pins a version that is not available.`
+      : `Unknown workflow_ref "${body.workflow_ref}".`;
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, message, requestId);
   }
   const workflow = getWorkflowDescriptor(resolvedWorkflow.id)!;
 

@@ -158,26 +158,62 @@ export function isValidWorkflowRef(value: unknown): boolean {
   return WORKFLOW_REF_PATTERN.test(value);
 }
 
+/** Split a ``workflow_ref`` into its id and optional ``@constraint`` suffix. */
+export function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
+  const at = ref.indexOf('@');
+  if (at === -1) return { id: ref };
+  return { id: ref.slice(0, at), constraint: ref.slice(at + 1) };
+}
+
+/**
+ * Why an explicit ``workflow_ref`` could not be resolved — lets the caller emit
+ * a precise 400 instead of a generic one.
+ *   - ``unknown_id``: the ``<domain>/<name>-vN`` id names no shipped workflow.
+ *   - ``unsatisfiable_version``: the id exists but the ``@constraint`` pins a
+ *     version the platform does not ship (Phase 1 ships exactly one version per
+ *     id, so any constraint other than that version is unsatisfiable).
+ */
+export type WorkflowResolutionError = 'unknown_id' | 'unsatisfiable_version';
+
 /**
  * Resolve a ``workflow_ref`` to a pinned ``{id, version}``, applying the
  * resolution ladder (WORKFLOWS.md §"Replacing task types"):
- *   1. explicit ``workflow_ref`` (strip any ``@constraint``);
+ *   1. explicit ``workflow_ref`` (id + optional ``@constraint``);
  *   2. (Blueprint default — Phase 4, not yet wired);
  *   3. the platform default ``default/agent-v1``.
  *
- * Returns ``null`` when an explicit ref names an unknown workflow (caller
- * returns 400). A constraint suffix is accepted syntactically and, in Phase 1,
- * pins to the single shipped version of that id.
+ * Returns ``null`` when an explicit ref cannot be resolved — either the id is
+ * unknown OR an ``@constraint`` pins a version the platform does not ship. The
+ * constraint is NO LONGER silently discarded (PR review #296 finding #6): a pin
+ * like ``coding/new-task-v1@2.0.0`` fails admission rather than quietly running
+ * ``1.0.0``. Use {@link resolveWorkflowRefError} for which case, to craft the 400.
  */
 export function resolveWorkflowRef(ref?: string | null): ResolvedWorkflow | null {
   if (ref === undefined || ref === null || ref === '') {
     const fallback = DESCRIPTORS[DEFAULT_WORKFLOW_ID];
     return { id: fallback.id, version: fallback.version };
   }
-  const id = ref.split('@', 1)[0];
+  const { id, constraint } = parseWorkflowRef(ref);
   const descriptor = DESCRIPTORS[id];
   if (!descriptor) return null;
+  // Phase 1: exactly one shipped version per id. A constraint must match it
+  // exactly (semver ranges arrive with the registry in Phase 4, #246).
+  if (constraint !== undefined && constraint !== descriptor.version) return null;
   return { id: descriptor.id, version: descriptor.version };
+}
+
+/**
+ * Classify why {@link resolveWorkflowRef} returned ``null`` for an explicit ref,
+ * so the caller can produce a specific 400 message. Returns ``null`` for a ref
+ * that DOES resolve (or an absent ref, which falls back to the default).
+ */
+export function resolveWorkflowRefError(ref?: string | null): WorkflowResolutionError | null {
+  if (ref === undefined || ref === null || ref === '') return null;
+  const { id, constraint } = parseWorkflowRef(ref);
+  const descriptor = DESCRIPTORS[id];
+  if (!descriptor) return 'unknown_id';
+  if (constraint !== undefined && constraint !== descriptor.version) return 'unsatisfiable_version';
+  return null;
 }
 
 /** Look up a descriptor by resolved id (after {@link resolveWorkflowRef}). */

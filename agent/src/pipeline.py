@@ -657,7 +657,17 @@ def run_task(
             # clone, build, or PR. Drive its steps (hydrate_context → run_agent →
             # deliver_artifact) through the workflow runner and assemble the
             # terminal result, skipping the repo-coupled segment below entirely.
-            if not config.requires_repo:
+            #
+            # ``requires_repo: false`` means repo-OPTIONAL, not repo-forbidden:
+            # create-task-core admits and persists a repo for such a workflow,
+            # and the orchestrator then assembles a repo-bound prompt (issue/PR
+            # fetch). Keying the repo-less branch on ``requires_repo`` ALONE made
+            # the agent skip the clone while the prompt promised a repo — the two
+            # halves disagreed (PR review #296 finding #3). So take the repo-less
+            # path only when no repo was actually supplied; when a repo IS present
+            # it is hydrated as context exactly like a coding task (clone → build →
+            # PR), honoring the repo-bound prompt the orchestrator built.
+            if not config.requires_repo and not config.repo_url:
                 return _run_repoless_task(
                     config=config,
                     prompt=prompt,

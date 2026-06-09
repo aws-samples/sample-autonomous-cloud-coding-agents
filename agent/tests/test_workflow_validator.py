@@ -259,6 +259,23 @@ class TestIndividualRules:
         w = self._repo_less_deliver(target="not_a_registered_deliverer", primary="artifact")
         assert "rule-11" in validate_workflow(w)
 
+    def test_rule11_unset_target_comment_outcome_flagged(self):
+        # PR review #296 finding #7: an unset target now resolves to the runtime
+        # default (s3, produces only `artifact`), so a primary:comment workflow
+        # that omits target is flagged — it would never post the comment it
+        # declares. Previously the validator was lenient here (full set) and let
+        # this pass while the runtime silently delivered to s3 only.
+        w = self._repo_less_deliver(target="s3", primary="comment")
+        del w["steps"][2]["target"]  # omit target entirely
+        assert "rule-11" in validate_workflow(w)
+
+    def test_rule11_unset_target_artifact_outcome_passes(self):
+        # The complement: primary:artifact with an unset target is fine, because
+        # the default target (s3) produces `artifact`. Validator and runtime agree.
+        w = self._repo_less_deliver(target="s3", primary="artifact")
+        del w["steps"][2]["target"]
+        assert "rule-11" not in validate_workflow(w)
+
     def test_rule12_side_effect_continue(self):
         w = _base()
         w["steps"][-1] = {"kind": "ensure_pr", "strategy": "create", "on_failure": "continue"}

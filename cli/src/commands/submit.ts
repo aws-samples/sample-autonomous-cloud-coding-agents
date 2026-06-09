@@ -191,13 +191,21 @@ export function makeSubmitCommand(): Command {
       // workflows; an explicit --workflow overrides. The published mapping
       // (WORKFLOWS.md §"Replacing task types") is new_task→coding/new-task-v1,
       // pr_iteration→coding/pr-iteration-v1, pr_review→coding/pr-review-v1.
-      // When none is given, workflow_ref is omitted and the server resolves a
-      // default via the fallback ladder.
       let workflowRef: string | undefined = opts.workflow;
       if (workflowRef === undefined && opts.pr !== undefined) {
         workflowRef = 'coding/pr-iteration-v1';
       } else if (workflowRef === undefined && opts.reviewPr !== undefined) {
         workflowRef = 'coding/pr-review-v1';
+      } else if (workflowRef === undefined && opts.repo) {
+        // A bare repo-present submit (no --workflow/--pr/--review-pr) is the old
+        // `new_task` default: clone → build → open a PR. The SERVER ladder
+        // deliberately resolves an absent workflow_ref to the repo-less
+        // default/agent-v1 (WORKFLOWS.md §"Resolution order"), so the CLI must
+        // send the coding workflow EXPLICITLY rather than omit it — otherwise
+        // `bgagent submit --repo X --task Y` silently regresses from "opens a PR"
+        // to "emits an S3 markdown artifact". A repo-less submit (no --repo, with
+        // --workflow) is unaffected: it carries its explicit workflow_ref above.
+        workflowRef = 'coding/new-task-v1';
       }
       const prNumber = opts.pr ?? opts.reviewPr;
 

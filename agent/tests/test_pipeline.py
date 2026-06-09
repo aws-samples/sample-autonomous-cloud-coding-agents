@@ -370,6 +370,66 @@ class TestRepoLessPipeline:
         ]
         assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
 
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repo_optional_workflow_with_repo_takes_repo_bound_path(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # PR review #296 finding #3: requires_repo:false means repo-OPTIONAL, not
+        # repo-forbidden. When a repo IS supplied for default/agent-v1, the agent
+        # must clone/build/PR (repo-bound path) to match the repo-bound prompt the
+        # orchestrator assembled — NOT silently take the repo-less branch and skip
+        # the clone. So setup_repo MUST be called here.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value="https://github.com/org/repo/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="Do it against this repo",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="repo-optional-1",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        # Repo present + repo-optional workflow ⇒ repo-bound path ran.
+        mock_setup_repo.assert_called_once()
+        assert result["status"] == "success"
+        assert result["pr_url"] == "https://github.com/org/repo/pull/1"
+
 
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):
