@@ -57,6 +57,7 @@ export default defineConfig({
             { slug: 'using/slack-setup-guide' },
             { slug: 'using/linear-setup-guide' },
             { slug: 'using/linear-pak-migration-runbook' },
+            { slug: 'using/deploy-preview-screenshots-guide' },
             { slug: 'using/task-lifecycle' },
             { slug: 'using/what-the-agent-does' },
             { slug: 'using/tips-for-being-a-good-citizen' },
