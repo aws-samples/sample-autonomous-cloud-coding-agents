@@ -59,7 +59,7 @@ description = "cdk diff"
 run = "npx cdk diff"
 
 [tasks.integ]
-description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for account 465528542731."
+description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for the shared integ account."
 depends = [":compile"]
 run = [
   "mkdir -p $TMPDIR",

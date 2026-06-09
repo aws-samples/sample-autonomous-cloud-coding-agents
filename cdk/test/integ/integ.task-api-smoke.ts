@@ -30,6 +30,7 @@
  * stack in the target account. Poll-to-terminal / real agent runs are Phase 1.
  */
 
+import { randomBytes } from 'node:crypto';
 import { ExpectedResult, IntegTest } from '@aws-cdk/integ-tests-alpha';
 import { App, CfnOutput, PhysicalName, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
@@ -49,8 +50,8 @@ class TaskApiSmokeStack extends Stack {
 
   constructor(scope: Construct, id: string) {
     // Environment-agnostic on purpose. integ-runner deploys into whatever
-    // account/region the active AWS credentials resolve to (expected:
-    // 465528542731, where the live backgroundagent-dev stack also runs). An
+    // account/region the active AWS credentials resolve to (the shared account
+    // that also hosts the live backgroundagent-dev stack). An
     // explicit env here would force the IntegTest DeployAssert stack — which is
     // always environment-agnostic — into a cross-region reference it cannot
     // resolve (CrossRegionReferencesRequireExplicitRegion) when it reads this
@@ -103,8 +104,14 @@ const integ = new IntegTest(app, 'TaskApiSmoke', {
 // A throwaway user the assertions authenticate as. The pool disables
 // self-signup, so create + confirm it administratively, then mint a token via
 // the USER_PASSWORD_AUTH flow the app client enables.
+//
+// The password is generated per-synth (not hardcoded) so no credential-shaped
+// literal lives in source. It satisfies the Cognito default policy (>=8 chars,
+// upper + lower + digit + symbol) by construction: a fixed symbol/case scaffold
+// plus 18 bytes of randomness. The user and its pool are destroyed on teardown,
+// so the value never outlives a single run.
 const username = 'integ-smoke@example.com';
-const password = 'Integ-Smoke-Pw-1!';
+const password = `Aa1!${randomBytes(18).toString('base64url')}`;
 
 // Service name MUST be the AWS SDK v2 form 'CognitoIdentityServiceProvider'.
 // The assertion provider's normalizeServiceName() lowercases the string and

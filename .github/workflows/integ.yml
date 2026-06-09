@@ -1,8 +1,9 @@
 name: integ
 
 # Phase-0 deploy-then-verify integration tests (issue #236). integ-runner
-# deploys a trimmed Task API stack into account 465528542731, runs the
-# create-and-persist smoke assertions, then tears the stack down. Deliberately
+# deploys a trimmed Task API stack into the account behind
+# secrets.AWS_ROLE_TO_ASSUME, runs the create-and-persist smoke assertions, then
+# tears the stack down. Deliberately
 # NOT triggered per-PR — it deploys billable resources into a shared account, so
 # it runs only on manual dispatch and on a nightly schedule.
 on:
@@ -60,8 +61,16 @@ jobs:
 
       # Safety net: integ-runner forces teardown on success and failure, but if
       # the run is cancelled or crashes mid-deploy the stack can be stranded in
-      # the shared account. Force-destroy it so we never leak billable resources.
+      # the shared account. Delete it directly via CloudFormation so we never
+      # leak billable resources.
+      #
+      # NOTE: `cdk destroy backgroundagent-integ` would NOT work here — it
+      # synthesizes the main app (src/main.ts), which does not contain the integ
+      # stack, so it exits 0 having deleted nothing. Target the stack by its
+      # literal CloudFormation name instead. delete-stack is idempotent (no-op if
+      # already gone), so `|| true` only guards transient API errors.
       - name: Ensure stack torn down
         if: always()
-        working-directory: cdk
-        run: npx cdk destroy backgroundagent-integ --force || true
+        run: |
+          aws cloudformation delete-stack --stack-name backgroundagent-integ || true
+          aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ || true
