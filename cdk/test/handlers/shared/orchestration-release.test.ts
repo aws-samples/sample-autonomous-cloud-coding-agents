@@ -19,7 +19,8 @@
 
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { releaseChild } from '../../../src/handlers/shared/orchestration-release';
-import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
+import { deriveOrchestrationId, type OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
+import { isValidIdempotencyKey } from '../../../src/handlers/shared/validation';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -48,6 +49,56 @@ function created(taskId: string) {
   return jest.fn().mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: taskId } }) });
 }
 
+describe('releaseChild — idempotency key is accepted by the REAL validator', () => {
+  // Regression: the key was originally `${orchestration_id}#${sub_issue_id}`,
+  // but createTaskCore validates against /^[a-zA-Z0-9_-]{1,128}$/ — the '#'
+  // was rejected with a 400 and the child silently never started. Mocked
+  // createTaskCore tests didn't catch it; this asserts the generated key
+  // against the actual validator with production-shaped ids.
+  test('generated key passes isValidIdempotencyKey for real-world ids', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    const realRow = makeRow({
+      // orch_<32 hex> — exactly what deriveOrchestrationId produces.
+      orchestration_id: deriveOrchestrationId('d27fcf21-4876-4be2-96c0-78099bf152de'),
+      // sub_issue_id is a Linear UUID in production.
+      sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
+    });
+
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: realRow,
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
+    expect(ctx.idempotencyKey).not.toContain('#');
+  });
+
+  test('key stays within the 128-char limit for max-length ids', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        orchestration_id: deriveOrchestrationId('x'.repeat(64)),
+        sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
+      }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.idempotencyKey.length).toBeLessThanOrEqual(128);
+    expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
+  });
+});
+
 describe('releaseChild — happy path', () => {
   test('creates a task and flips the row to released', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
@@ -71,14 +122,14 @@ describe('releaseChild — happy path', () => {
     expect(ctx).toMatchObject({
       userId: 'user-1',
       channelSource: 'linear',
-      idempotencyKey: 'orch_abc#SUB-1',
+      idempotencyKey: 'orch_abc_SUB-1',
     });
     expect(ctx.channelMetadata).toMatchObject({
       orchestration_id: 'orch_abc',
       orchestration_sub_issue_id: 'SUB-1',
       parent_linear_issue_id: 'PARENT',
     });
-    expect(requestId).toBe('orch_abc#SUB-1');
+    expect(requestId).toBe('orch_abc_SUB-1');
 
     // Conditional update flips status + stamps task id.
     const update = ddb.send.mock.calls[0][0] as UpdateCommand;

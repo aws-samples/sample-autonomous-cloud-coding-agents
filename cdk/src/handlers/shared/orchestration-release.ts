@@ -111,7 +111,12 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
 
   // Deterministic idempotency key: same child never creates two tasks.
-  const idempotencyKey = `${row.orchestration_id}#${row.sub_issue_id}`;
+  // Separator is '_' (NOT '#') because createTaskCore validates the key
+  // against /^[a-zA-Z0-9_-]{1,128}$/ — a '#' is rejected with a 400 and
+  // the child silently never starts. orchestration_id (orch_<32hex>) +
+  // '_' + sub_issue_id (a UUID, all hyphens) stays within 128 chars and
+  // inside the allowed charset.
+  const idempotencyKey = `${row.orchestration_id}_${row.sub_issue_id}`;
 
   let result;
   try {
@@ -141,10 +146,17 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // 201 = created; 200 = idempotent replay (task already existed). Both
   // mean "a task exists for this child" — treat alike.
   if (result.statusCode !== 201 && result.statusCode !== 200) {
+    // Log the RESPONSE BODY, not just the status — a bare "status:400"
+    // forces log-archaeology to find the cause (e.g. a rejected
+    // idempotency key, an un-onboarded repo, a guardrail block). The
+    // body carries the user-readable error message and code.
     logger.warn('Orchestration child task creation returned non-success', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
+      repo: row.repo,
       status: result.statusCode,
+      response_body: result.body,
+      idempotency_key: idempotencyKey,
     });
     return { kind: 'create_failed', statusCode: result.statusCode, body: result.body };
   }
