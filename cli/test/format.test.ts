@@ -142,6 +142,20 @@ describe('format', () => {
       expect(output).not.toContain('Trace S3:');
     });
 
+    test('renders Artifact line when artifact_uri is non-null (#248 Phase 3)', () => {
+      const withArtifact: TaskDetail = {
+        ...task,
+        artifact_uri: 's3://artifacts-bkt/artifacts/abc123/result.md',
+      };
+      const output = formatTaskDetail(withArtifact);
+      expect(output).toContain('Artifact:    s3://artifacts-bkt/artifacts/abc123/result.md');
+    });
+
+    test('omits Artifact line when artifact_uri is null', () => {
+      const output = formatTaskDetail(task);
+      expect(output).not.toContain('Artifact:');
+    });
+
     test('shows classified error with raw detail when error_classification is present', () => {
       const failedTask: TaskDetail = {
         ...task,

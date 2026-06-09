@@ -315,6 +315,18 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).not.toContain('Trace S3:');
   });
 
+  test('renders Artifact line when artifact_uri is non-null (#248 Phase 3)', () => {
+    const task = buildTask({ artifact_uri: 's3://artifacts-bkt/artifacts/abc123/result.md' });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Artifact:      s3://artifacts-bkt/artifacts/abc123/result.md');
+  });
+
+  test('omits Artifact line when artifact_uri is null', () => {
+    const task = buildTask();
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Artifact:');
+  });
+
   // ---- Workflow + Reason (PR #52 CLI UX carry-forward) ----
 
   test('renders Workflow line for pr_iteration tasks with PR number', () => {
