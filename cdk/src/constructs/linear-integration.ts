@@ -51,6 +51,15 @@ export interface LinearIntegrationProps {
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
+  /**
+   * OrchestrationTable for #247 Mode A parent/sub-issue orchestration.
+   * When provided, the webhook processor probes labeled parent issues for
+   * a sub-issue graph (seeds the DAG + releases root children). When
+   * omitted, the orchestration path is dormant (ORCHESTRATION_TABLE_NAME
+   * unset) and the processor behaves as one-issue → one-task.
+   */
+  readonly orchestrationTable?: dynamodb.ITable;
+
   /** Orchestrator Lambda function ARN for async task invocation. */
   readonly orchestratorFunctionArn?: string;
 
@@ -194,12 +203,21 @@ export class LinearIntegration extends Construct {
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+        // #247 Mode A: when set, enables parent/sub-issue orchestration
+        // (seed DAG + release roots). Unset → orchestration path dormant.
+        ...(props.orchestrationTable && {
+          ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
+        }),
       },
       bundling: commonBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
     this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    // #247: seed the orchestration DAG + release root children.
+    if (props.orchestrationTable) {
+      props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
     // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
     // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant
     // the webhook processor Get + Put on the prefix so it can read tokens

@@ -24,6 +24,9 @@ import { createTaskCore } from './shared/create-task-core';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
+import { discoverOrchestration } from './shared/orchestration-discovery';
+import { releaseReadyChildren } from './shared/orchestration-release';
+import { loadOrchestration, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -31,6 +34,10 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+// #247 Mode A: name of OrchestrationTable. Unset until PR A3 wires the
+// orchestration stack — while unset, the parent/sub-issue path is fully
+// dormant and the handler behaves exactly as one-issue → one-task.
+const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
 /**
@@ -278,6 +285,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // skip, the user mapping lookup would fail, and we'd burn agent
   // quota for no observable result. Drop the event explicitly here
   // rather than rely on downstream lookups to incidentally block it.
+  //
+  // #247: also capture the access token — the orchestration path below
+  // needs it to fetch the sub-issue graph. Past this block ``resolved``
+  // is guaranteed present (we return otherwise), so the token is set
+  // whenever the registry table is configured.
+  let resolvedAccessToken: string | undefined;
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -289,6 +302,97 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     }
     channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
+    resolvedAccessToken = resolved.accessToken;
+  }
+
+  // #247 Mode A — parent/sub-issue orchestration. Env-var gated: until
+  // the orchestration stack (PR A3) sets ORCHESTRATION_TABLE_NAME this
+  // whole branch is dormant and the handler behaves exactly as before
+  // (one issue → one task). When enabled AND we have a workspace token,
+  // probe the labeled issue for a sub-issue dependency graph:
+  //   - has sub-issues → seed the DAG and hand off to the reconciler
+  //     (A3) which creates children in dependency order. The parent
+  //     issue itself does NOT spawn a task here (no special label
+  //     needed: a human-authored graph is implicit consent to execute).
+  //   - no sub-issues → fall through to the single-task path below.
+  //   - invalid graph (cycle/dangling) → terminal ❌ comment, no task.
+  //   - transient Linear error → terminal comment; do NOT silently
+  //     degrade to a single task (that would drop the epic structure).
+  if (ORCHESTRATION_TABLE && resolvedAccessToken) {
+    const releaseContext: OrchestrationReleaseContext = {
+      platform_user_id: platformUserId,
+      ...(channelMetadata.linear_oauth_secret_arn && {
+        linear_oauth_secret_arn: channelMetadata.linear_oauth_secret_arn,
+      }),
+      ...(channelMetadata.linear_workspace_slug && {
+        linear_workspace_slug: channelMetadata.linear_workspace_slug,
+      }),
+      linear_project_id: projectId,
+    };
+
+    const discovery = await discoverOrchestration({
+      ddb,
+      tableName: ORCHESTRATION_TABLE,
+      accessToken: resolvedAccessToken,
+      parentLinearIssueId: issue.id,
+      linearWorkspaceId: workspaceId,
+      repo,
+      now: new Date().toISOString(),
+      releaseContext,
+    });
+
+    if (discovery.kind === 'rejected') {
+      logger.info('Linear orchestration graph rejected — not creating tasks', {
+        issue_id: issue.id,
+        reason: discovery.reason,
+      });
+      await safeReportIssueFailure(issue.id, workspaceId, `❌ ${discovery.message}`);
+      return;
+    }
+    if (discovery.kind === 'error') {
+      await safeReportIssueFailure(
+        issue.id,
+        workspaceId,
+        `❌ ABCA couldn't read this issue's sub-issues: ${discovery.message}`,
+      );
+      return;
+    }
+    if (discovery.kind === 'seeded') {
+      // Release the ROOT children (layer 0) now — the reconciler only
+      // fires on a child's terminal event, so nothing would start the
+      // graph otherwise. Downstream children are released by the
+      // reconciler as predecessors succeed. On idempotent replay
+      // (alreadyExisted) the roots were released on the first pass and
+      // releaseChild's idempotency key makes a re-release a no-op, so we
+      // still load + release defensively (cheap, and recovers a crash
+      // between seed and root-release on the first pass).
+      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      let releasedRoots = 0;
+      if (snapshot) {
+        const results = await releaseReadyChildren(
+          ddb,
+          ORCHESTRATION_TABLE,
+          snapshot.children,
+          snapshot.meta.release_context,
+          createTaskCore,
+          new Date().toISOString(),
+        );
+        releasedRoots = results.filter((r) => r.kind === 'released').length;
+      }
+      logger.info('Linear orchestration seeded — root children released', {
+        issue_id: issue.id,
+        orchestration_id: discovery.orchestrationId,
+        child_count: discovery.childCount,
+        root_count: discovery.rootSubIssueIds.length,
+        released_roots: releasedRoots,
+        already_existed: discovery.alreadyExisted,
+      });
+      // The parent issue itself spawns no task; the reconciler (off the
+      // TaskTable stream) releases downstream children as roots succeed.
+      return;
+    }
+    // discovery.kind === 'single_task' → fall through to the single-task
+    // path below (issue had no sub-issues).
   }
 
   // Extract embedded image URLs from the issue description markdown.
