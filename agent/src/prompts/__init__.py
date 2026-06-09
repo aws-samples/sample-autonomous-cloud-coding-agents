@@ -6,6 +6,8 @@ per WORKFLOWS.md). The lookup is keyed by workflow id; ``DEFAULT_WORKFLOW_ID`` i
 the fallback for an unknown/absent id.
 """
 
+from shell import log
+
 from .base import BASE_PROMPT
 from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
@@ -38,4 +40,13 @@ def get_system_prompt(workflow_id: str = DEFAULT_WORKFLOW_ID, *, repo_less: bool
     default.
     """
     fallback = REPO_LESS_DEFAULT_WORKFLOW_ID if repo_less else DEFAULT_WORKFLOW_ID
+    if workflow_id not in _PROMPTS:
+        # No registered prompt for this id (typo, or a registry-only workflow
+        # whose prompt ships in Phase 4). Surface it: silently substituting a
+        # generic prompt degrades agent behavior with zero signal otherwise.
+        log(
+            "WARN",
+            f"no registered system prompt for workflow {workflow_id!r}; "
+            f"falling back to {fallback!r}",
+        )
     return _PROMPTS.get(workflow_id, _PROMPTS[fallback])

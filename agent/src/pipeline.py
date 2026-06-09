@@ -253,7 +253,19 @@ def _run_repoless_task(
 
     agent_result = ctx.agent_result
     if agent_result is None:
-        agent_result = AgentResult(status="error", error="repo-less run_agent produced no result")
+        # The run_agent step never produced a result — surface the underlying
+        # failed-step error (e.g. the SDK loop raised) rather than a generic
+        # message, so the terminal error is diagnosable.
+        failed = wf_result.failed_step
+        underlying = failed.error if failed and failed.error else None
+        agent_result = AgentResult(
+            status="error",
+            error=(
+                f"repo-less run_agent produced no result: {underlying}"
+                if underlying
+                else "repo-less run_agent produced no result"
+            ),
+        )
     progress.write_agent_milestone(
         "agent_execution_complete",
         f"status={agent_result.status} turns={agent_result.turns}",

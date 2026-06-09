@@ -342,7 +342,9 @@ class TestWriteTerminalArtifactUri:
                 calls.append(kwargs)
 
         monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-        task_state.write_terminal("t-noart", "COMPLETED", {"pr_url": "https://github.com/o/r/pull/1"})
+        task_state.write_terminal(
+            "t-noart", "COMPLETED", {"pr_url": "https://github.com/o/r/pull/1"}
+        )
         assert "artifact_uri" not in calls[0]["UpdateExpression"]
 
     def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(

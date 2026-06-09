@@ -1,13 +1,14 @@
 # The migrated `pr_review` task type: review an existing pull request without
 # mutating it. Selected via workflow_ref (pr_review → coding/pr-review-v1).
 #
-# read_only:true with Write/Edit dropped from allowed_tools (validator rule 4 —
+# read_only:true with Write/Edit dropped from allowed_tools (validator rule 6 —
 # read-only tier may not grant mutating tools). Read-only is enforced by Cedar
 # `context.read_only == true` (hard-deny read_only_forbid_write/edit) AND by the
 # trimmed allowed_tools — defense in depth. It resolves the existing PR URL
 # without pushing via ensure_pr(strategy: resolve); the post_review step is not
-# used (and has no shipped handler). The Cedar principal is the id-derived audit
-# identity "pr_review" — enforcement keys off context.read_only, not the principal.
+# used (its registered handler is intentionally unimplemented). The Cedar
+# principal is the id-derived audit identity "pr_review" — enforcement keys off
+# context.read_only, not the principal.
 id: coding/pr-review-v1
 version: 1.0.0
 domain: coding

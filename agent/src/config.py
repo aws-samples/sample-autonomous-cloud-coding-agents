@@ -24,9 +24,7 @@ PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1"))
 # on the write-deny invariant). pr-review-v1 is intentionally excluded (it is
 # read-only); default/agent-v1 is excluded because its conservative posture
 # should fail closed too.
-_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
-    ("coding/new-task-v1", "coding/pr-iteration-v1")
-)
+_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(("coding/new-task-v1", "coding/pr-iteration-v1"))
 
 
 def resolve_github_token() -> str:

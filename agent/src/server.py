@@ -651,11 +651,17 @@ def _validate_required_params(params: dict) -> list[str]:
     # admitted without one.
     requires_repo = True
     try:
-        from workflow import load_workflow
+        from workflow import WorkflowValidationError, load_workflow
 
-        requires_repo = load_workflow(workflow_id).resolved_requires_repo
-    except Exception:
-        _warn_cw(f"could not resolve requires_repo for {workflow_id!r}; assuming repo required")
+        try:
+            requires_repo = load_workflow(workflow_id).resolved_requires_repo
+        except WorkflowValidationError:
+            # Expected failure modes (missing/corrupt/schema-invalid file, or a
+            # future registry-only id) — fail SAFE (repo required). A genuine
+            # programming error is NOT caught here so it surfaces loudly.
+            _warn_cw(f"could not resolve requires_repo for {workflow_id!r}; assuming repo required")
+    except ImportError:
+        _warn_cw(f"workflow loader unavailable for {workflow_id!r}; assuming repo required")
     if requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
 

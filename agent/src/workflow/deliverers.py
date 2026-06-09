@@ -148,11 +148,10 @@ def deliver(target: str, ctx: StepContext) -> DeliveryResult:
         comment_posted = _post_comment(ctx)
     return DeliveryResult(artifact_uri=artifact_uri, comment_posted=comment_posted)
 
+
 # Terminal outcomes that any deliver_artifact deliverer can produce (union over
 # the registry) — the set rule 11 treats as "deliver_artifact-backed".
-DELIVER_OUTCOMES: frozenset[str] = frozenset().union(
-    *(d.produces for d in DELIVERERS.values())
-)
+DELIVER_OUTCOMES: frozenset[str] = frozenset().union(*(d.produces for d in DELIVERERS.values()))
 
 
 def produced_outcomes(target: str | None) -> frozenset[str]:

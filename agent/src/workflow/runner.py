@@ -52,7 +52,7 @@ class StepOutcome:
 
     ``data`` carries kind-specific products the runner threads forward and uses
     for terminal-outcome resolution — e.g. ``{"pr_url": ...}`` from ``ensure_pr``
-    or ``{"artifact_key": ...}`` from ``deliver_artifact``.
+    or ``{"artifact_uri": ...}`` from ``deliver_artifact``.
     """
 
     kind: str
@@ -98,8 +98,9 @@ class WorkflowResult:
     the agent SDK result status stays authoritative in ``pipeline.py``. This
     result layers the declarative *artifact* check on top: ``terminal_outcome``
     is the primary outcome the workflow declared, and ``artifacts`` collects what
-    the steps actually produced (``pr_url``, ``review_posted``, ``artifact_key``,
-    ``comment_posted``) so the caller can confirm the declared product exists.
+    the steps actually produced (``pr_url`` from ``ensure_pr``; ``artifact_uri`` /
+    ``comment_posted`` from ``deliver_artifact``) so the caller can confirm the
+    declared product exists.
     """
 
     status: Literal["succeeded", "failed"]

@@ -173,7 +173,10 @@ class TestRepoLessPipeline:
             captured_cwd["cwd"] = cwd
             captured_cwd["system_prompt"] = system_prompt
             return AgentResult(
-                status="success", turns=2, cost_usd=0.02, num_turns=2,
+                status="success",
+                turns=2,
+                cost_usd=0.02,
+                num_turns=2,
                 result_text="## Summary\nThe three papers argue ...",
             )
 
@@ -250,6 +253,63 @@ class TestRepoLessPipeline:
         mock_setup_repo.assert_not_called()
         assert result["status"] == "error"
         # Terminal state persisted as FAILED (not left dangling / not COMPLETED).
+        terminal_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_agent_success_but_delivery_failure_is_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # The delivery gate: the agent succeeds but the side-effecting
+        # deliver_artifact step fails (here: ARTIFACTS_BUCKET_NAME unset, so
+        # _upload_to_s3 raises). This must surface as a loud terminal FAILED
+        # naming the failed step — NOT a silent "succeeded with nothing
+        # delivered" (the exact silent-failure the gate exists to prevent).
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.delenv("ARTIFACTS_BUCKET_NAME", raising=False)
+
+        async def fake_run_agent(_prompt, system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(
+                status="success",
+                turns=2,
+                cost_usd=0.02,
+                num_turns=2,
+                result_text="## Summary\nThe three papers argue ...",
+            )
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-3",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        mock_setup_repo.assert_not_called()
+        # Agent succeeded, but delivery failed → overall error, no artifact URI.
+        assert result["status"] == "error"
+        assert result["artifact_uri"] is None
+        # The error names the failed delivery step so the failure is diagnosable.
+        assert "deliver" in (result["error"] or "").lower()
         terminal_calls = [
             c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
         ]
