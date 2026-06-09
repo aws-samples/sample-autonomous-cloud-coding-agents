@@ -133,7 +133,7 @@ Progressive build-out:
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
-> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. It runs nightly and on `workflow_dispatch` (`.github/workflows/integ.yml`), never on the per-PR path, so it stays out of the merge gate while still exercising real AWS. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
+> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the `integ` environment's admin-approval gate so it never assumes the privileged role unattended, and posts a required `integ-smoke` status that blocks merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
 
 ### Enforcement model
 

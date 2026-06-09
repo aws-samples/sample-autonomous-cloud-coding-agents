@@ -1,19 +1,34 @@
 name: integ
 
 # Phase-0 deploy-then-verify integration tests (issue #236). integ-runner
-# deploys a trimmed Task API stack into the account behind
+# deploys a trimmed Task API stack into the shared account behind
 # secrets.AWS_ROLE_TO_ASSUME, runs the create-and-persist smoke assertions, then
-# tears the stack down. Deliberately
-# NOT triggered per-PR — it deploys billable resources into a shared account, so
-# it runs only on manual dispatch and on a nightly schedule.
+# tears the stack down.
+#
+# Trigger model mirrors deploy.yml: build.yml completes -> workflow_run picks it
+# up in the trusted base-repo context (secrets/OIDC available even for fork PRs)
+# -> we resolve whether the PR touches cdk/** or agent/** -> an admin approves
+# the `integ` environment gate -> deploy/assert/destroy runs against the shared
+# account -> a commit status `integ-smoke` is posted back to the PR head so it
+# shows up as a (required) check that blocks merge.
+#
+# Local dev path is unchanged: run `mise //cdk:integ` with your own AWS creds.
+#
+# Nightly schedule was intentionally dropped (previously 07:00 UTC) — the per-PR
+# path plus manual dispatch is the agreed coverage; this is not an oversight.
 on:
+  # zizmor: ignore[dangerous-triggers] — intentional; workflow_run is required so
+  # fork PRs can run against the shared account (a fork `pull_request` job gets no
+  # secrets/OIDC). Mitigations: build-success guard, path-filter, `integ`
+  # environment approval gate (admin reviews fork test code before it runs with
+  # the privileged role), least-privilege role, status-only tokens per job.
+  workflow_run:
+    workflows: [build]
+    types: [completed]
   workflow_dispatch: {}
-  schedule:
-    # Nightly: 07:00 UTC
-    - cron: "0 7 * * *"
 
-# Only one integ run at a time against the shared account — overlapping
-# deploys would collide on the backgroundagent-integ stack.
+# Only one integ run at a time against the shared account — overlapping deploys
+# would collide on the single hardcoded `backgroundagent-integ` stack name.
 concurrency:
   group: cdk-integ
   cancel-in-progress: false
@@ -21,21 +36,100 @@ concurrency:
 permissions: {}
 
 jobs:
+  # Decides whether this PR needs the integ run (touches cdk/** or agent/**) and
+  # posts the gating `integ-smoke` status. Always runs on a successful build so
+  # docs/cli-only PRs get an immediate green (skipped) status and never deadlock
+  # the required check.
+  resolve:
+    # Manual dispatch is restricted to main (defence in depth — the `integ`
+    # environment approval is the primary gate). PR runs come via workflow_run.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+      pull-requests: read
+      actions: read
+    outputs:
+      applicable: ${{ steps.decide.outputs.applicable }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      head_repo: ${{ steps.decide.outputs.head_repo }}
+    steps:
+      - name: Resolve applicability and post pending status
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Empty for workflow_dispatch.
+          PR_NUMBER_FROM_EVENT: ${{ github.event.workflow_run.pull_requests[0].number }}
+          WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WF_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: |
+          set -euo pipefail
+
+          # workflow_dispatch: no PR context — run against the dispatched ref
+          # (the job's own checkout defaults). Mark applicable, skip status post.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "applicable=true" >> "$GITHUB_OUTPUT"
+            echo "head_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "head_repo=${REPO}" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — running integ against ${GITHUB_SHA}."
+            exit 0
+          fi
+
+          HEAD_SHA="$WF_HEAD_SHA"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_repo=${WF_HEAD_REPO}" >> "$GITHUB_OUTPUT"
+
+          post_status() {
+            # $1=state $2=description
+            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+              -f context=integ-smoke \
+              -f state="$1" \
+              -f description="$2" \
+              -f target_url="${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}" \
+              >/dev/null
+          }
+
+          resolve_pr_number() {
+            if [[ -n "$PR_NUMBER_FROM_EVENT" ]]; then
+              echo "$PR_NUMBER_FROM_EVENT"
+              return
+            fi
+            gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true
+          }
+          PR_NUMBER=$(resolve_pr_number)
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "::warning::No PR resolved for $HEAD_SHA — nothing to gate; skipping."
+            echo "applicable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Path-filter must happen here (not on.pull_request.paths) because the
+          # trigger is workflow_run.
+          CHANGED=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          if echo "$CHANGED" | grep -Eq '^(cdk|agent)/'; then
+            post_status pending "awaiting admin approval / running"
+            echo "applicable=true" >> "$GITHUB_OUTPUT"
+            echo "PR #$PR_NUMBER touches cdk/** or agent/** — integ applies."
+          else
+            post_status success "skipped — no cdk/** or agent/** changes"
+            echo "applicable=false" >> "$GITHUB_OUTPUT"
+            echo "PR #$PR_NUMBER has no cdk/** or agent/** changes — integ skipped (green)."
+          fi
+
+  # The admin-gated deploy -> assert -> destroy. The `integ` environment's
+  # required reviewer is the approval gate; while it waits, the integ-smoke
+  # status stays pending and merge stays blocked.
   integ:
+    needs: resolve
+    if: needs.resolve.outputs.applicable == 'true'
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
-    # Run in the `integ` GitHub Environment. This is mandatory, not cosmetic:
-    # AWS_ROLE_TO_ASSUME is an environment-scoped secret (see deploy.yml, where
-    # the diff/deploy jobs each declare an environment), so a job with no
-    # environment resolves it to empty and configure-aws-credentials fails. The
-    # role's OIDC trust also gates on `sub = repo:...:environment:integ`, so the
-    # environment name must be added to that trust policy (account-side setup).
     environment: integ
-    # Only run against main. workflow_dispatch can target any branch, and the
-    # job assumes the privileged integ role — without this guard a feature-branch
-    # edit to test/integ/*.ts could be dispatched and run against that role.
-    # Complements the OIDC trust-policy `sub` restriction (defence in depth).
-    if: github.ref == 'refs/heads/main'
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -44,9 +138,14 @@ jobs:
       CI: "true"
       MISE_EXPERIMENTAL: "1"
     steps:
-      - name: Checkout
+      - name: Checkout PR head (incl. forks)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          # Approving the `integ` environment authorizes this fork-authored test
+          # code to run with the privileged role — the approver MUST review
+          # cdk/test/integ/** changes before approving.
+          repository: ${{ needs.resolve.outputs.head_repo }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
           persist-credentials: false
 
       - name: Configure AWS credentials
@@ -88,3 +187,34 @@ jobs:
         run: |
           aws cloudformation delete-stack --stack-name backgroundagent-integ || true
           aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ || true
+
+  # Post the final integ-smoke status back to the PR head so the check flips from
+  # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
+  report:
+    needs: [resolve, integ]
+    if: always() && needs.resolve.outputs.applicable == 'true' && github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Post final integ-smoke status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          INTEG_RESULT: ${{ needs.integ.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$INTEG_RESULT" == "success" ]]; then
+            STATE=success
+            DESC="deploy → assert → destroy passed"
+          else
+            STATE=failure
+            DESC="integ run ${INTEG_RESULT}"
+          fi
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f context=integ-smoke \
+            -f state="$STATE" \
+            -f description="$DESC" \
+            -f target_url="${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}" \
+            >/dev/null
