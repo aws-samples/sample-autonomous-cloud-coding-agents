@@ -296,9 +296,13 @@ export class TaskApi extends Construct {
                       },
                     },
                     {
-                      // GitHub deployment_status webhook (Vercel preview
-                      // screenshot pipeline) — absolute deploy URLs trip
-                      // GenericRFI_BODY. HMAC-verified in Lambda.
+                      // GitHub deployment_status webhook (preview-deploy
+                      // screenshot pipeline). The full payload (workflow run
+                      // history + deploy URLs + deployment metadata) exceeds
+                      // 8 KB and trips SizeRestrictions_BODY. HMAC-verified
+                      // in Lambda. (CloudWatch BlockedRequests metric
+                      // confirmed: SizeRestrictions_BODY fired, not RFI —
+                      // GenericRFI_BODY has never blocked on this WebACL.)
                       byteMatchStatement: {
                         fieldToMatch: { uriPath: {} },
                         positionalConstraint: 'EXACTLY',

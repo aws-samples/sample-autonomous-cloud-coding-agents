@@ -65,7 +65,7 @@ Architecture notes:
 - **Lambda-only.** No agent runtime is involved post-PR — the screenshot job is deterministic; an LLM would only add cost without changing behavior.
 - **AWS-managed default browser.** AgentCore Browser ships an `aws.browser.v1` session you can attach to without provisioning your own browser resource.
 - **Private S3 + CloudFront with OAC.** Screenshot bucket is fully private; CloudFront serves images anonymously over HTTPS so GitHub markdown image embeds (and Linear's, when configured) can render them without auth.
-- **WAF exemption.** The `/v1/github/webhook` path is excluded from the AWSManagedRulesCommonRuleSet because deployment_status payloads (which embed absolute deploy URLs) trip `GenericRFI_BODY` otherwise.
+- **WAF exemption.** The `/v1/github/webhook` path is exempted from the `SizeRestrictions_BODY` rule in `AWSManagedRulesCommonRuleSet` because the full `deployment_status` payload (workflow run history + deploy URLs + deployment metadata) exceeds the 8 KB body-size limit. All other CRS rules (LFI, RFI, XSS, SQLi, …) still evaluate against the path; HMAC verification in Lambda authenticates the body.
 
 ## Prerequisites
 

@@ -188,6 +188,10 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   // `unexpected-response` event surfaces HTTP-level handshake failures
   // (e.g. 403 from misaligned SigV4) so we can log a meaningful error
   // instead of an empty `error` event.
+  //
+  // Failure paths must close the socket — without `terminate()` on the
+  // open-timeout path, a hung handshake leaks the underlying TCP
+  // connection per failed attempt (review nit, PR #241).
   await new Promise<void>((resolve, reject) => {
     const onOpen = (): void => {
       cleanup();
@@ -195,10 +199,12 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     };
     const onError = (err: Error): void => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket error: ${err.message || '(no message)'}`));
     };
     const onUnexpectedResponse = (_req: unknown, res: { statusCode?: number }): void => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket handshake failed: HTTP ${res.statusCode ?? '?'}`));
     };
     const cleanup = (): void => {
@@ -211,6 +217,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     ws.on('unexpected-response', onUnexpectedResponse);
     setTimeout(() => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket open timeout after ${timeoutMs}ms`));
     }, remaining());
   });
