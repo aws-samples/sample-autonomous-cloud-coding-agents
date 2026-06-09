@@ -22,6 +22,8 @@ import * as path from 'path';
 import * as yaml from 'js-yaml';
 import {
   DEFAULT_WORKFLOW_ID,
+  WORKFLOW_MODEL_ALLOWLIST,
+  disallowedWorkflowModel,
   getWorkflowDescriptor,
   isValidWorkflowRef,
   resolveWorkflowRef,
@@ -138,6 +140,37 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
         : doc.domain === 'coding';
       expect(descriptor!.requiresRepo).toBe(resolvedRequiresRepo);
       expect(descriptor!.readOnly).toBe(Boolean(doc.read_only ?? false));
+
+      // Rule 13 mirror: the descriptor's modelId must match the YAML's
+      // agent_config.model.id (undefined when the workflow declares no model).
+      const agentConfig = (doc.agent_config ?? {}) as Record<string, unknown>;
+      const model = (agentConfig.model ?? undefined) as Record<string, unknown> | undefined;
+      const yamlModelId = model?.id as string | undefined;
+      expect(descriptor!.modelId).toBe(yamlModelId);
+
+      // And any declared model must itself be on the platform allow-list —
+      // otherwise the workflow ships un-submittable (every task 400s at rule 13).
+      if (yamlModelId !== undefined) {
+        expect(WORKFLOW_MODEL_ALLOWLIST).toContain(yamlModelId);
+      }
     }
+  });
+});
+
+describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
+  test('returns null for a workflow that declares no model (inherits default)', () => {
+    // No shipped workflow pins a model today, so all resolve to null (admitted).
+    expect(disallowedWorkflowModel('coding/new-task-v1')).toBeNull();
+    expect(disallowedWorkflowModel('default/agent-v1')).toBeNull();
+    expect(disallowedWorkflowModel('knowledge/web-research-v1')).toBeNull();
+  });
+
+  test('returns null for an unknown id (unreachable here; create-core 400s first)', () => {
+    expect(disallowedWorkflowModel('nope/unknown-v1')).toBeNull();
+  });
+
+  test('the allow-list covers both bare and us-prefixed inference-profile ids', () => {
+    expect(WORKFLOW_MODEL_ALLOWLIST).toContain('anthropic.claude-sonnet-4-6');
+    expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
   });
 });

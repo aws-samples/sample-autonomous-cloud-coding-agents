@@ -195,6 +195,68 @@ describe('submit command', () => {
     ).rejects.toThrow('At least one of --issue, --task, --pr, or --review-pr is required');
   });
 
+  test('errors when --repo is omitted without --workflow', async () => {
+    // #248 LOW: --repo is no longer a hard requiredOption (repo-less workflows
+    // need to be submittable), but it stays mandatory unless --workflow selects
+    // a workflow the server can admit repo-less.
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--task', 'Research the tradeoffs',
+      ]),
+    ).rejects.toThrow('--repo is required');
+  });
+
+  test('errors when --repo is omitted with --pr (PR workflows need a repo)', async () => {
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--pr', '42',
+        '--workflow', 'coding/pr-iteration-v1',
+      ]),
+    ).rejects.toThrow('--repo is required with --pr/--review-pr');
+  });
+
+  test('submits a repo-less task: --workflow + --task, no --repo (#248 Phase 3)', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'abc',
+      status: 'SUBMITTED',
+      repo: null,
+      issue_number: null,
+      resolved_workflow: { id: 'knowledge/web-research-v1', version: '1.0.0' },
+      pr_number: null,
+      task_description: 'Research the tradeoffs',
+      branch_name: null,
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+      max_budget_usd: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--workflow', 'knowledge/web-research-v1',
+      '--task', 'Research the tradeoffs',
+    ]);
+
+    // No ``repo`` key in the body — the server admits it as repo-less.
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { workflow_ref: 'knowledge/web-research-v1', task_description: 'Research the tradeoffs' },
+      undefined,
+    );
+  });
+
   test('submits a pr_iteration task with --pr', async () => {
     mockCreateTask.mockResolvedValue({
       task_id: 'pr-abc',

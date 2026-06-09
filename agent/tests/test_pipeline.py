@@ -315,6 +315,61 @@ class TestRepoLessPipeline:
         ]
         assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
 
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_artifact_outcome_without_uri_is_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # Code-review MEDIUM #1: WORKFLOWS.md defines primary:artifact success as
+        # "agent-success AND an S3 key present". The earlier gate only caught a
+        # deliverer that RAISED; a deliverer that returns success WITHOUT writing
+        # an artifact_uri would silently pass. Here run_workflow reports succeeded
+        # but leaves ctx.artifacts empty — the task must still be a loud FAILED.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        mock_task_span.return_value = self._mock_span()
+
+        from workflow import WorkflowResult
+
+        def fake_run_workflow(wf, ctx, only_kinds=None):
+            # Agent succeeded, but no artifact_uri lands in ctx.artifacts.
+            ctx.agent_result = AgentResult(
+                status="success", turns=1, cost_usd=0.01, num_turns=1, result_text="done"
+            )
+            return WorkflowResult.from_outcomes(ctx, wf.terminal_outcomes)
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("workflow.run_workflow", side_effect=fake_run_workflow),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-4",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        mock_setup_repo.assert_not_called()
+        assert result["status"] == "error"
+        assert result["artifact_uri"] is None
+        # The error names the artifact/S3 contract so the failure is diagnosable.
+        assert "artifact" in (result["error"] or "").lower()
+        terminal_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
+
 
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):

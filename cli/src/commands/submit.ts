@@ -59,7 +59,7 @@ function collect<T>(value: T, previous: readonly T[]): readonly T[] {
 export function makeSubmitCommand(): Command {
   return new Command('submit')
     .description('Submit a new task')
-    .requiredOption('--repo <owner/repo>', 'GitHub repository (owner/repo)')
+    .option('--repo <owner/repo>', 'GitHub repository (owner/repo). Required unless --workflow selects a repo-less workflow (e.g. knowledge/web-research-v1).')
     .option('--issue <number>', 'GitHub issue number', parseInt)
     .option('--task <description>', 'Task description')
     .option('--max-turns <number>', 'Maximum agent turns (1-500)', parseInt)
@@ -107,6 +107,19 @@ export function makeSubmitCommand(): Command {
       }
       if (opts.pr === undefined && opts.reviewPr === undefined && opts.issue === undefined && !opts.task) {
         throw new CliError('At least one of --issue, --task, --pr, or --review-pr is required.');
+      }
+      // --repo is required for repo-bound workflows (the common case) but a
+      // repo-less workflow (e.g. knowledge/web-research-v1, default/agent-v1)
+      // runs without one. The CLI can't see each workflow's requires_repo flag
+      // (the server owns that), so the rule is: --repo is mandatory UNLESS the
+      // caller explicitly selected a workflow with --workflow — then the server
+      // admits or rejects based on that workflow's requires_repo. --pr/--review-pr
+      // always imply a repo-bound coding workflow, so they still require --repo.
+      if (!opts.repo && !opts.workflow) {
+        throw new CliError('--repo is required (omit it only with --workflow for a repo-less workflow).');
+      }
+      if (!opts.repo && (opts.pr !== undefined || opts.reviewPr !== undefined)) {
+        throw new CliError('--repo is required with --pr/--review-pr (PR workflows operate on a repo).');
       }
       if (opts.issue !== undefined && isNaN(opts.issue)) {
         throw new CliError('--issue must be a valid number.');
@@ -190,7 +203,9 @@ export function makeSubmitCommand(): Command {
 
       const client = new ApiClient();
       const body: CreateTaskRequest = {
-        repo: opts.repo,
+        // Omitted entirely for a repo-less workflow (#248 Phase 3) — sending
+        // ``repo: undefined`` would serialize as an explicit null on some paths.
+        ...(opts.repo && { repo: opts.repo }),
         ...(opts.issue !== undefined && { issue_number: opts.issue }),
         ...(opts.task && { task_description: opts.task }),
         ...(opts.maxTurns !== undefined && { max_turns: opts.maxTurns }),

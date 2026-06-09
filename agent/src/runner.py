@@ -274,6 +274,38 @@ def _initialize_policy_engine_and_hooks(
     return policy_engine, hooks
 
 
+# The built-in full tool surface, used when a config carries no workflow tool
+# list (legacy/batch callers that never resolved a workflow).
+_FULL_TOOL_SURFACE = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
+# Tools that mutate the working tree — dropped from the SDK surface for any
+# read-only workflow.
+_WRITE_TOOLS = frozenset(("Write", "Edit"))
+
+
+def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
+    """Resolve the SDK ``allowed_tools`` list for a task.
+
+    This is the second enforcement layer the design promises alongside Cedar's
+    ``context.read_only`` (WORKFLOWS.md §"Agent configuration"):
+
+    - The resolved workflow's ``agent_config.allowed_tools`` (threaded onto
+      ``config.allowed_tools``) is passed to the SDK verbatim. An empty list —
+      legacy/batch callers that never resolved a workflow — falls back to the
+      built-in full surface.
+    - ``Write``/``Edit`` are dropped whenever ``config.read_only`` is true, so a
+      read-only lane physically cannot mutate the tree even where Cedar's
+      ``read_only`` rules do not fire (e.g. a ``read_only:false`` default that
+      restricts tools by list alone, like ``default/agent-v1``).
+
+    The Cedar PreToolUse hooks still enforce per-task restrictions on top of
+    whatever is allowed here; this list only ever narrows the surface.
+    """
+    tools = list(config.allowed_tools) if config.allowed_tools else list(_FULL_TOOL_SURFACE)
+    if config.read_only:
+        tools = [t for t in tools if t not in _WRITE_TOOLS]
+    return tools
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -318,9 +350,8 @@ async def run_agent(
     else:
         log("WARN", "claude CLI not found on PATH")
 
-    # All tools are allowed at the SDK level; Cedar policy engine enforces
-    # per-task-type restrictions via PreToolUse hooks.
-    allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
+    # SDK tool surface — see _resolve_allowed_tools for the policy.
+    allowed_tools = _resolve_allowed_tools(config)
 
     # Create trajectory writer and Cedar policy engine with hook matchers.
     # ``trace=config.trace`` is load-bearing: this writer emits the turn /

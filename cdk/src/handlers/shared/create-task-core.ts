@@ -54,7 +54,7 @@ import {
   toTaskDetail,
 } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
-import { getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef } from './workflows';
+import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -121,6 +121,16 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, `Unknown workflow_ref "${body.workflow_ref}".`, requestId);
   }
   const workflow = getWorkflowDescriptor(resolvedWorkflow.id)!;
+
+  // 1a-model. Rule 13 (WORKFLOWS.md §"Model selection"): a workflow that pins a
+  // preferred model must pin one on the platform allow-list. An unpermitted id
+  // FAILS admission rather than silently downgrading (fail-closed, consistent
+  // with the rest of admission). Workflows that declare no model inherit the
+  // Blueprint/platform default and are always admitted.
+  const badModel = disallowedWorkflowModel(resolvedWorkflow.id);
+  if (badModel !== null) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requests model "${badModel}", which is not on the platform allow-list.`, requestId);
+  }
 
   // 1a. Repo validation. ``requiresRepo`` decides whether a repo is *mandatory*;
   // ``requiresRepo: false`` means repo-OPTIONAL (a repo-less workflow may still

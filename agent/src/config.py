@@ -383,6 +383,7 @@ def build_config(
         policy_principal = policy_principal_for(workflow_obj)
         workflow_read_only = workflow_obj.read_only
         workflow_requires_repo = workflow_obj.resolved_requires_repo
+        workflow_allowed_tools = list(workflow_obj.agent_config.allowed_tools)
     except WorkflowValidationError as exc:
         # The pinned workflow file failed to load (corrupt YAML, schema drift, a
         # future registry-only id). This is the one place read_only/requires_repo
@@ -397,6 +398,10 @@ def build_config(
         # requires_repo: the repo-less platform default is the only id that does
         # NOT require a repo; every other id (coding or unknown) requires one.
         workflow_requires_repo = workflow_id != REPO_LESS_DEFAULT_WORKFLOW_ID
+        # Tool surface is unknown without the file; empty = the runner falls back
+        # to its built-in full surface. read_only (above, fail-closed) still drops
+        # Write/Edit, so the write-deny invariant holds even on this path.
+        workflow_allowed_tools = []
 
     errors = []
     # Repo + GitHub token are required only for repo-bound workflows; a repo-less
@@ -442,6 +447,7 @@ def build_config(
         resolved_workflow=workflow,
         policy_principal=policy_principal,
         read_only=workflow_read_only,
+        allowed_tools=workflow_allowed_tools,
         requires_repo=workflow_requires_repo,
         is_pr_workflow=is_pr_workflow,
         branch_name=branch_name,

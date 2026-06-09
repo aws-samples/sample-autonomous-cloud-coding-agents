@@ -139,6 +139,15 @@ class TaskConfig(BaseModel):
     # hard-deny Write/Edit rules fire for *any* read-only workflow (#248
     # Phase 2a), and drives the runner's allowed_tools tightening.
     read_only: bool = False
+    # The SDK tool surface for this task, from the resolved workflow's
+    # ``agent_config.allowed_tools`` (#248). This is the second enforcement layer
+    # the design promises alongside ``read_only``: ``run_agent`` passes it to
+    # ``ClaudeAgentOptions.allowed_tools`` verbatim, and drops ``Write``/``Edit``
+    # when ``read_only`` is true. Empty list means "fall back to the built-in
+    # full surface" so legacy/batch callers that never resolved a workflow keep
+    # working unchanged; a workflow that wants to restrict tools MUST declare a
+    # non-empty list (every shipped workflow does).
+    allowed_tools: list[str] = Field(default_factory=list)
     # Whether the resolved workflow requires a repo. False for repo-less
     # knowledge workflows (#248 Phase 3): the pipeline skips clone/build/PR and
     # drives the agent + deliver_artifact steps through the workflow runner.

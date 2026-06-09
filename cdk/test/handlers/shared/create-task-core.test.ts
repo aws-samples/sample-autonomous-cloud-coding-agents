@@ -52,6 +52,16 @@ jest.mock('../../../src/handlers/shared/repo-config', () => ({
   lookupRepo: mockLookupRepo,
 }));
 
+// Partial-mock the workflows module: keep every real resolver/descriptor, but
+// make ``disallowedWorkflowModel`` controllable so the rule-13 admission path
+// can be exercised without shipping a workflow that pins a bad model. Defaults
+// to the real implementation (null for all shipped workflows) via beforeEach.
+const mockDisallowedWorkflowModel = jest.fn();
+jest.mock('../../../src/handlers/shared/workflows', () => {
+  const actual = jest.requireActual('../../../src/handlers/shared/workflows');
+  return { ...actual, disallowedWorkflowModel: mockDisallowedWorkflowModel };
+});
+
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
@@ -83,6 +93,9 @@ beforeEach(() => {
   // Default: repo is onboarded, no blueprint config (submit path
   // resolves to the platform-default approval_gate_cap of 50).
   mockLookupRepo.mockResolvedValue({ onboarded: true, config: null });
+  // Default: the resolved workflow's model is permitted (matches the real
+  // implementation for every shipped workflow). Rule-13 tests override this.
+  mockDisallowedWorkflowModel.mockReturnValue(null);
 });
 
 describe('createTaskCore', () => {
@@ -160,6 +173,34 @@ describe('createTaskCore', () => {
     expect(body.data.repo).toBe('org/repo');
     // Repo present ⇒ the onboarding/blueprint lookup DID run.
     expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
+  });
+
+  test('returns 400 when the resolved workflow pins a disallowed model (rule 13)', async () => {
+    // WORKFLOWS.md rule 13: a workflow whose agent_config.model.id is not on the
+    // platform allow-list FAILS admission (no silent downgrade).
+    mockDisallowedWorkflowModel.mockReturnValue('anthropic.some-unapproved-model');
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('not on the platform allow-list');
+    // Rejected at admission — no task/event writes, no orchestrator invoke.
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('admits a task when the resolved workflow model is permitted (rule 13 pass)', async () => {
+    mockDisallowedWorkflowModel.mockReturnValue(null);
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
   });
 
   test('returns 400 when no task spec', async () => {

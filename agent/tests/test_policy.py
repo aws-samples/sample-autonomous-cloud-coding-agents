@@ -104,6 +104,40 @@ class TestReadOnlyPermissions:
         assert result.allowed is True
 
 
+class TestReadOnlyMissingAttributeFailsClosed:
+    """The read-only forbid rules are ``when { context.read_only == true }``.
+    If ``read_only`` is ABSENT from the context, Cedar errors on the attribute
+    access, SKIPS the forbid rule, and the base permit wins → native Allow
+    (proven by contracts/cedar-parity/read-only-missing-attribute.json on both
+    engines). Production safety on this path therefore does NOT rest on Cedar's
+    native decision — it rests on ``_eval_tier`` re-raising on
+    ``diagnostics.errors`` so the outer handler maps to a fail-closed DENY.
+    These tests pin that re-raise + injection discipline (#248).
+    """
+
+    def test_eval_tier_reraises_on_missing_read_only_attribute(self):
+        # Drive _eval_tier directly with a context that omits read_only against
+        # the hard-deny tier. cedarpy returns Allow + diagnostics.errors; the
+        # re-raise is the ONLY thing standing between that Allow and a write.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        with pytest.raises(RuntimeError, match="Cedar policy parse/eval errors"):
+            engine._eval_tier(
+                policies_text=engine._hard_policies,
+                action="invoke_tool",
+                resource_type="Agent::Tool",
+                resource_id="Write",
+                context={},  # read_only deliberately absent
+            )
+
+    def test_evaluate_tool_use_always_injects_read_only(self):
+        # The companion guard: evaluate_tool_use must ALWAYS put read_only in the
+        # context so the missing-attribute path above is never reached in normal
+        # operation. A read-only engine denies Write through the normal path.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        result = engine.evaluate_tool_use("Write", {"file_path": "src/app.py"})
+        assert result.allowed is False
+
+
 class TestProtectedPaths:
     def test_denies_write_to_git_dir(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")

@@ -278,11 +278,18 @@ def _run_repoless_task(
     )
 
     # Delivery gate: deliver_artifact is the workflow's side-effecting terminal
-    # step. If the agent succeeded but the runner reports the workflow did NOT
-    # succeed (a deliver_artifact failure — e.g. no result text, S3 error), the
-    # task produced nothing the user can retrieve, so it is a loud FAILED naming
-    # the failed step rather than a silent "succeeded with no deliverable".
+    # step. WORKFLOWS.md defines primary:artifact success as "agent-success AND
+    # an S3 artifact key is present" — so the gate has two arms:
+    #   1. the runner reported a failed step (deliver_artifact raised), or
+    #   2. the workflow's primary outcome is `artifact` but no artifact_uri was
+    #      produced — i.e. delivery "succeeded" without writing the retrievable
+    #      key the contract requires.
+    # Either way the task produced nothing the user can retrieve, so it is a loud
+    # FAILED rather than a silent "succeeded with no deliverable". Arm 2 closes
+    # the gap where a deliverer that returns without raising (but also without an
+    # S3 key) would otherwise pass the gate (code-review MEDIUM #1).
     artifact_uri = ctx.artifacts.get("artifact_uri")
+    primary_outcome = wf.terminal_outcomes.primary
     if overall_status == "success" and not wf_result.succeeded:
         overall_status = "error"
         failed = wf_result.failed_step
@@ -290,6 +297,14 @@ def _run_repoless_task(
             f"Agent completed but delivery failed at step "
             f"{(failed.name if failed else 'deliver_artifact')!r}: "
             f"{(failed.error if failed and failed.error else 'unknown delivery error')}"
+        )
+        log("WARN", result_error)
+    elif overall_status == "success" and primary_outcome == "artifact" and not artifact_uri:
+        overall_status = "error"
+        result_error = (
+            "Agent completed and delivery reported success, but no artifact_uri "
+            "was produced — the workflow's primary outcome is 'artifact', which "
+            "requires a retrievable S3 key (WORKFLOWS.md success contract)."
         )
         log("WARN", result_error)
 

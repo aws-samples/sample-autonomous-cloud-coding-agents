@@ -55,6 +55,45 @@ export interface WorkflowDescriptor {
   /** Whether the workflow runs read-only (drives the preflight permission level). */
   readonly readOnly: boolean;
   readonly requiredInputs: WorkflowRequiredInputs;
+  /**
+   * The workflow's declared preferred Bedrock model (`agent_config.model.id` in
+   * the YAML), if any. Validated against {@link WORKFLOW_MODEL_ALLOWLIST} at the
+   * create-task boundary (WORKFLOWS.md rule 13). `undefined` ⇒ the workflow
+   * declared no model and inherits the Blueprint/platform default — always
+   * admitted. A declared id MUST be on the allow-list or admission fails (no
+   * silent downgrade). Keep in lockstep with the YAML's `agent_config.model.id`.
+   */
+  readonly modelId?: string;
+}
+
+/**
+ * Platform allow-list of Bedrock model ids a workflow may pin via
+ * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection"). Mirrors
+ * the foundation models the agent runtime is granted to invoke (`BEDROCK_MODEL_IDS`
+ * in `cdk/src/constructs/ecs-agent-cluster.ts`), accepting both the bare id and
+ * the `us.`-prefixed cross-region inference-profile form the runtime resolves.
+ * A future Phase 4 will source this from the repo Blueprint; until then it is a
+ * single platform-wide list checked at admission.
+ */
+export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
+  'anthropic.claude-sonnet-4-6',
+  'us.anthropic.claude-sonnet-4-6',
+  'anthropic.claude-opus-4-20250514-v1:0',
+  'us.anthropic.claude-opus-4-20250514-v1:0',
+  'anthropic.claude-haiku-4-5-20251001-v1:0',
+  'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+];
+
+/**
+ * Validate a resolved workflow's declared model against the platform allow-list
+ * (WORKFLOWS.md rule 13). Returns the offending id when the workflow pins a
+ * model NOT on the allow-list (caller fails admission — no silent downgrade);
+ * returns `null` when the workflow declares no model or its model is permitted.
+ */
+export function disallowedWorkflowModel(id: string): string | null {
+  const modelId = DESCRIPTORS[id]?.modelId;
+  if (modelId === undefined) return null;
+  return WORKFLOW_MODEL_ALLOWLIST.includes(modelId) ? null : modelId;
 }
 
 /**
