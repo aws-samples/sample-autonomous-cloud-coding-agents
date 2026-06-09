@@ -63,7 +63,10 @@ description = "CDK deploy-then-verify integration tests (integ-runner). Needs AW
 depends = [":compile"]
 run = [
   "mkdir -p $TMPDIR",
-  "npx integ-runner --language typescript --directory test/integ --update-on-failed --force",
+  # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
+  # snapshot to diff against or update. --force re-runs the deploy-then-verify
+  # unconditionally, which is what we want in CI.
+  "npx integ-runner --language typescript --directory test/integ --force",
 ]
 
 [tasks.bundle]

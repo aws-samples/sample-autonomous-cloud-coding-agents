@@ -24,6 +24,11 @@ jobs:
   integ:
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
+    # Only run against main. workflow_dispatch can target any branch, and the
+    # job assumes the privileged integ role — without this guard a feature-branch
+    # edit to test/integ/*.ts could be dispatched and run against that role.
+    # Complements the OIDC trust-policy `sub` restriction (defence in depth).
+    if: github.ref == 'refs/heads/main'
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -41,7 +46,9 @@ jobs:
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ vars.AWS_REGION }}
+          # Fall back to us-east-1 if the repo variable is unset, so the action
+          # never runs region-less (which would fail credential resolution).
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Install mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
