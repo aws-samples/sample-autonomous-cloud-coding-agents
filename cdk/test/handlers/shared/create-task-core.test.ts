@@ -134,6 +134,34 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.message).toContain('repo');
   });
 
+  test('rejects a malformed repo on a repo-bound workflow (#248 Phase 3)', async () => {
+    // The repo-present-but-malformed branch: a repo-bound workflow with a
+    // bad-format repo is a 400 with the new "Invalid repo." message.
+    const result = await createTaskCore(
+      { workflow_ref: 'coding/new-task-v1', repo: 'not-a-repo', task_description: 'Fix it' } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('Invalid repo');
+  });
+
+  test('repo-OPTIONAL workflow given a valid repo runs the repo-bound path (#248 Phase 3)', async () => {
+    // default/agent-v1 is repo-optional; when a repo IS supplied it must still
+    // be onboarded-checked and persisted (requires_repo:false means optional,
+    // not forbidden).
+    const result = await createTaskCore(
+      { workflow_ref: 'default/agent-v1', repo: 'org/repo', task_description: 'Do it' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.repo).toBe('org/repo');
+    // Repo present ⇒ the onboarding/blueprint lookup DID run.
+    expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
+  });
+
   test('returns 400 when no task spec', async () => {
     const result = await createTaskCore({ repo: 'org/repo' }, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);

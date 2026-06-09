@@ -110,10 +110,15 @@ class HydratedContext(BaseModel):
 class TaskConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
-    repo_url: str
+    # repo_url / github_token default to "" so a repo-less TaskConfig (#248
+    # Phase 3) is constructible. The _validate_requires_repo_has_repo validator
+    # below enforces that a repo-BOUND config (requires_repo=True, the default)
+    # still carries a repo_url — so dropping the field-level requirement does not
+    # weaken the coding-path invariant.
+    repo_url: str = ""
     issue_number: str = ""
     task_description: str = ""
-    github_token: str
+    github_token: str = ""
     aws_region: str
     anthropic_model: str = "us.anthropic.claude-sonnet-4-6"
     dry_run: bool = False
@@ -212,6 +217,27 @@ class TaskConfig(BaseModel):
                 "is uploaded to traces/<user_id>/<task_id>.jsonl.gz (design "
                 "§10.1), and the get-trace-url handler refuses keys outside "
                 "the caller's traces/<user_id>/ prefix."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_requires_repo_has_repo(self) -> Self:
+        """Fail at construction when a repo-bound config has no repo (#248 Phase 3).
+
+        ``requires_repo`` defaults True, so a config that requires a repo but
+        carries an empty ``repo_url`` is an illegal state the repo-bound pipeline
+        (clone/build/PR) cannot run. The create-task boundary and ``build_config``
+        already enforce this upstream; this validator makes the invariant
+        self-enforcing on the type so a directly-constructed ``TaskConfig`` (tests,
+        future call sites) cannot represent it silently. Mirrors
+        ``_validate_trace_requires_user_id`` above.
+        """
+        if self.requires_repo and not self.repo_url:
+            raise ValueError(
+                "requires_repo=True requires a non-empty repo_url. A repo-less "
+                "workflow must set requires_repo=False (resolved from the "
+                "workflow's requires_repo); a repo-bound workflow must supply "
+                "repo_url ('owner/repo')."
             )
         return self
 

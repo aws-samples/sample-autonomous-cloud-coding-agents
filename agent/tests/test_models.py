@@ -271,6 +271,25 @@ class TestTaskConfig:
         assert config.trace is True
         assert config.user_id == "cognito-sub-abc-123"
 
+    def test_requires_repo_with_empty_repo_url_raises(self):
+        """#248 Phase 3: requires_repo=True (the default) + empty repo_url is illegal."""
+        with pytest.raises(ValidationError, match="requires_repo=True requires a non-empty"):
+            TaskConfig(
+                aws_region="us-east-1",
+                task_description="x",
+                # repo_url defaults to "" and requires_repo defaults True
+            )
+
+    def test_repoless_config_with_empty_repo_url_constructs(self):
+        """A repo-less config (requires_repo=False) is valid with no repo_url."""
+        config = TaskConfig(
+            aws_region="us-east-1",
+            task_description="Summarise these papers",
+            requires_repo=False,
+        )
+        assert config.requires_repo is False
+        assert config.repo_url == ""
+
     def test_trace_false_allows_empty_user_id(self):
         """Negative control: local batch runs (trace=False, user_id='') still work."""
         config = TaskConfig(

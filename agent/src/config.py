@@ -13,8 +13,20 @@ AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 # The platform default workflow id used when a payload omits resolved_workflow
 # (local/batch runs). Mirrors the create-task boundary's coding default.
 DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
+# The repo-less platform default workflow (#248 Phase 3) — the one first-party
+# id whose ``requires_repo`` is false. Used by the load-failure fallback to
+# decide repo-optionality without loading the file.
+REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
 # First-party workflow ids that operate on an existing pull request.
 PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1"))
+# First-party workflow ids that are writeable (NOT read-only). Used only by the
+# load-failure fallback to bias an unrecognised id toward read-only (fail closed
+# on the write-deny invariant). pr-review-v1 is intentionally excluded (it is
+# read-only); default/agent-v1 is excluded because its conservative posture
+# should fail closed too.
+_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
+    ("coding/new-task-v1", "coding/pr-iteration-v1")
+)
 
 
 def resolve_github_token() -> str:
@@ -317,7 +329,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
 
 def build_config(
-    repo_url: str,
+    repo_url: str = "",
     task_description: str = "",
     issue_number: str = "",
     github_token: str = "",
@@ -373,12 +385,20 @@ def build_config(
         policy_principal = policy_principal_for(workflow_obj)
         workflow_read_only = workflow_obj.read_only
         workflow_requires_repo = workflow_obj.resolved_requires_repo
-    except WorkflowValidationError:
+    except WorkflowValidationError as exc:
+        # The pinned workflow file failed to load (corrupt YAML, schema drift, a
+        # future registry-only id). This is the one place read_only/requires_repo
+        # can be wrong without a loud failure, so: (1) log it, and (2) fail
+        # *closed* — assume read-only (deny writes) for any id we don't recognise
+        # as a known writeable coding workflow, rather than fail-open to writeable.
+        log("ERROR", f"workflow {workflow_id!r} failed to load ({exc}); using fallback policy")
         policy_principal = "pr_review" if workflow_id == "coding/pr-review-v1" else "new_task"
-        workflow_read_only = workflow_id == "coding/pr-review-v1"
-        # Unknown id: default-deny repo-optionality to the coding domain's
-        # assumption (requires a repo) unless it's the repo-less platform default.
-        workflow_requires_repo = workflow_id != DEFAULT_WORKFLOW_ID
+        # Known writeable coding workflows are the only ids that fall back to
+        # writeable; everything else (incl. an unrecognised id) is read-only.
+        workflow_read_only = workflow_id not in _KNOWN_WRITEABLE_WORKFLOW_IDS
+        # requires_repo: the repo-less platform default is the only id that does
+        # NOT require a repo; every other id (coding or unknown) requires one.
+        workflow_requires_repo = workflow_id != REPO_LESS_DEFAULT_WORKFLOW_ID
 
     errors = []
     # Repo + GitHub token are required only for repo-bound workflows; a repo-less

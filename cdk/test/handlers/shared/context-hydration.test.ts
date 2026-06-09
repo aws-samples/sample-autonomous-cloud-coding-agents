@@ -592,6 +592,50 @@ describe('hydrateContext', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  test('repo-less task: memory is keyed per-user (user:{user_id}), not per-repo (#248 Phase 3)', async () => {
+    // ADR-014 addendum: a repo-less task has no repo namespace; memory keys on
+    // user:{user_id}. This is the assertion that pins the per-user keying.
+    const { repo: _omit, ...repoless } = baseTask;
+    const task = {
+      ...repoless,
+      user_id: 'cognito-sub-xyz',
+      resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+    };
+    mockLoadMemoryContext.mockResolvedValueOnce({ repo_knowledge: ['prior'], past_episodes: [] });
+
+    const result = await hydrateContext(task as any, { memoryId: 'mem-test-1' });
+
+    expect(mockLoadMemoryContext).toHaveBeenCalledWith(
+      'mem-test-1', 'user:cognito-sub-xyz', 'Summarise these papers',
+    );
+    expect(result.sources).toContain('memory');
+  });
+
+  test('repo-OPTIONAL workflow given a repo takes the repo-bound path (#248 Phase 3)', async () => {
+    // default/agent-v1 is repo-optional, but when a repo IS present the repo-bound
+    // branch runs (issue fetch, repo-keyed memory) — keyed on repo presence, not
+    // the workflow flag.
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ number: 7, title: 'T', body: 'B', comments: 0 }),
+    });
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const task = {
+      ...baseTask, // has repo: 'org/repo'
+      resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      issue_number: 7,
+      task_description: 'Do it',
+    };
+    const result = await hydrateContext(task as any);
+
+    // Repo present ⇒ Repository: line + issue fetched (repo-bound path).
+    expect(result.user_prompt).toContain('Repository: org/repo');
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
   test('full path: issue + task description', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
     mockFetch

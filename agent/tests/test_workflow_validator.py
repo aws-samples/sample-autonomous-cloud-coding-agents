@@ -175,6 +175,41 @@ class TestIndividualRules:
         w["agent_config"]["cedar_policy_modules"] = ["builtin/hard_deny", "builtin/soft_deny", ref]
         assert ("rule-8" in validate_workflow(w)) is bad
 
+    def test_rule8_unknown_deliver_target_flagged(self):
+        # ADR-014 addendum: deliver_artifact.target must name a registered
+        # deliverer. rule-8 catches an unknown target universally (rule-11 only
+        # catches it when it collides with the primary outcome).
+        w = _base()
+        w["id"] = "knowledge/x-v1"
+        w["domain"] = "knowledge"
+        del w["requires_repo"]
+        w["repo_config"] = {"discover": False}
+        w["hydration"] = {"sources": ["task_description"]}
+        w["required_inputs"] = {"all_of": ["task_description"]}
+        w["steps"] = [
+            {"kind": "hydrate_context"},
+            {"kind": "run_agent"},
+            {"kind": "deliver_artifact", "target": "typo_target"},
+        ]
+        w["terminal_outcomes"] = {"primary": "artifact"}
+        assert "rule-8" in validate_workflow(w)
+
+    def test_rule8_known_deliver_target_ok(self):
+        w = _base()
+        w["id"] = "knowledge/x-v1"
+        w["domain"] = "knowledge"
+        del w["requires_repo"]
+        w["repo_config"] = {"discover": False}
+        w["hydration"] = {"sources": ["task_description"]}
+        w["required_inputs"] = {"all_of": ["task_description"]}
+        w["steps"] = [
+            {"kind": "hydrate_context"},
+            {"kind": "run_agent"},
+            {"kind": "deliver_artifact", "target": "s3"},
+        ]
+        w["terminal_outcomes"] = {"primary": "artifact"}
+        assert "rule-8" not in validate_workflow(w)
+
     def test_rule9_unsatisfiable_input(self):
         w = _base()
         w["required_inputs"] = {"all_of": ["pr_number"]}  # no pull_request source

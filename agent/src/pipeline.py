@@ -263,6 +263,36 @@ def _run_repoless_task(
     overall_status, result_error = _resolve_overall_task_status(
         agent_result, build_ok=True, pr_url=None
     )
+
+    # Delivery gate: the workflow declares a terminal outcome (e.g. ``comment`` /
+    # ``artifact``) produced by a ``deliver_artifact`` step. That step is NOT run
+    # in this slice (its handler is a stub until the artifacts contract ships),
+    # so a workflow whose primary outcome is delivery-backed has produced NOTHING
+    # the user can see — reporting ``success`` there is a silent "completed but
+    # delivered nothing". Downgrade to a loud, attributable failure until the
+    # deliverer lands (#248 Phase 3, next slice). Outcomes with no delivery
+    # dependency (none today) would pass through unchanged.
+    from workflow.deliverers import DELIVER_OUTCOMES
+
+    primary_outcome = wf.terminal_outcomes.primary
+    delivery_deferred = (
+        overall_status == "success" and primary_outcome in DELIVER_OUTCOMES
+    )
+    if delivery_deferred:
+        overall_status = "error"
+        result_error = (
+            f"Agent completed but the workflow's terminal outcome "
+            f"{primary_outcome!r} was not delivered: deliver_artifact is not yet "
+            f"implemented (#248 Phase 3). The agent's work was not lost — re-run "
+            f"once artifact delivery ships."
+        )
+        progress.write_agent_milestone(
+            "delivery_deferred",
+            f"primary_outcome={primary_outcome} — deliver_artifact not yet implemented; "
+            f"task marked FAILED rather than reporting success with no deliverable.",
+        )
+        log("WARN", result_error)
+
     trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
 
     usage = agent_result.usage
@@ -281,6 +311,10 @@ def _run_repoless_task(
         ),
         duration_s=round(duration, 1),
         task_id=config.task_id,
+        # Agent-side episodic memory write for repo-less tasks (keyed on
+        # user:{user_id}) is a follow-up slice; memory_id is threaded in ready
+        # for it. Until then the orchestrator's writeMinimalEpisode fallback is
+        # the only writer to the user:{user_id} namespace.
         memory_written=False,
         error=result_error,
         session_id=agent_result.session_id or None,

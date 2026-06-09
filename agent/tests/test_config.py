@@ -81,6 +81,53 @@ class TestWorkflowResolution:
         # context.read_only hard-deny would wrongly block its Write/Edit).
         assert config.read_only is False
 
+    def test_repoless_default_workflow_does_not_require_repo(self):
+        # #248 Phase 3: default/agent-v1 is the repo-less platform default.
+        config = build_config(
+            task_description="Summarise these papers",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+        )
+        assert config.requires_repo is False
+        assert config.repo_url == ""
+
+    def test_workflow_load_failure_fails_closed(self, monkeypatch):
+        # When the pinned workflow file can't load, the fallback must fail CLOSED:
+        # an unrecognised id is treated as read-only (deny writes) and repo-bound,
+        # rather than fail-open to writeable. Coding ids that ARE known-writeable
+        # keep their writeable posture.
+        import workflow as workflow_mod
+        from workflow import WorkflowValidationError
+
+        def boom(_workflow_id):
+            raise WorkflowValidationError("simulated load failure")
+
+        # build_config does `from workflow import load_workflow` at call time, so
+        # patch the name on the workflow package the import resolves against.
+        monkeypatch.setattr(workflow_mod, "load_workflow", boom)
+
+        # Unknown id → read-only + requires repo (fail closed on both axes).
+        cfg = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test123",
+            task_description="x",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "knowledge/mystery-v1", "version": "1.0.0"},
+        )
+        assert cfg.read_only is True
+        assert cfg.requires_repo is True
+
+        # Known-writeable coding id keeps writeable even on load failure.
+        cfg2 = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test123",
+            task_description="x",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "coding/new-task-v1", "version": "1.0.0"},
+        )
+        assert cfg2.read_only is False
+        assert cfg2.requires_repo is True
+
 
 class TestBuildConfig:
     def test_valid_config_returns_task_config(self):

@@ -146,11 +146,18 @@ class TestCedarPoliciesInjection:
 class TestRepoLessPipeline:
     """#248 Phase 3: a repo-less workflow runs the agent with no clone/build/PR."""
 
+    @staticmethod
+    def _mock_span() -> MagicMock:
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        return span
+
     @patch("runner.run_agent")
     @patch("repo.setup_repo")
     @patch("pipeline.task_span")
     @patch("pipeline.task_state")
-    def test_repoless_task_skips_repo_and_succeeds(
+    def test_repoless_task_skips_repo_and_runs_agent(
         self,
         _mock_task_state,
         mock_task_span,
@@ -168,11 +175,7 @@ class TestRepoLessPipeline:
             return AgentResult(status="success", turns=2, cost_usd=0.02, num_turns=2)
 
         mock_run_agent.side_effect = fake_run_agent
-
-        mock_span = MagicMock()
-        mock_span.__enter__ = MagicMock(return_value=mock_span)
-        mock_span.__exit__ = MagicMock(return_value=False)
-        mock_task_span.return_value = mock_span
+        mock_task_span.return_value = self._mock_span()
 
         with (
             patch("pipeline.get_disk_usage", return_value=0),
@@ -190,12 +193,63 @@ class TestRepoLessPipeline:
 
         # The repo-less path must never clone a repo or build a PR.
         mock_setup_repo.assert_not_called()
-        assert result["status"] == "success"
         assert result["pr_url"] is None
+        # Delivery gate (#248 Phase 3): the agent ran, but default/agent-v1's
+        # terminal outcome is `comment`, produced by deliver_artifact — which is
+        # not yet implemented. The task must NOT report success with nothing
+        # delivered; it is a loud, attributable failure that names the gap.
+        assert result["status"] == "error"
+        assert "deliver_artifact is not yet implemented" in result["error"]
         # Agent ran from the workspace, not a repo dir, with the repo-less prompt
-        # (no Repository: / branch placeholders).
+        # (no Repository: / branch placeholders), and the prompt was substituted.
         assert "Repository:" not in captured_cwd["system_prompt"]
-        assert captured_cwd["system_prompt"]  # non-empty (guarded by run_agent)
+        assert "repoless-1" in captured_cwd["system_prompt"]  # {task_id} substituted
+        assert "{task_id}" not in captured_cwd["system_prompt"]
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_task_agent_no_result_is_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # The run_agent handler can fail to populate ctx.agent_result (its
+        # exception is captured into a failed StepOutcome). The repo-less path
+        # synthesizes an error AgentResult → terminal FAILED, not a crash.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        async def boom(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            raise RuntimeError("model exploded")
+
+        mock_run_agent.side_effect = boom
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-2",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        mock_setup_repo.assert_not_called()
+        assert result["status"] == "error"
+        # Terminal state persisted as FAILED (not left dangling / not COMPLETED).
+        terminal_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
 
 
 class TestChainPriorAgentError:

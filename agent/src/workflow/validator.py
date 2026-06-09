@@ -21,6 +21,7 @@ import re
 from typing import Any
 
 from .deliverers import DELIVER_OUTCOMES as _DELIVER_OUTCOMES
+from .deliverers import DELIVERERS as _DELIVERERS
 from .deliverers import produced_outcomes as _deliverer_produces
 from .loader import WorkflowValidationError, validate_shape
 from .runner import STEP_HANDLERS
@@ -226,11 +227,25 @@ def _rule_7_repo_config_gating(data: dict[str, Any]) -> list[str]:
 
 
 def _rule_8_refs_resolve(data: dict[str, Any]) -> list[str]:
-    """Every step kind has a handler; every asset ref is syntactically resolvable."""
+    """Every step kind has a handler; every asset ref is syntactically resolvable.
+
+    Includes ``deliver_artifact.target`` (an open string since the ADR-014
+    addendum): it must name a registered deliverer in ``DELIVERERS``, so a typo
+    is caught universally here rather than only when it collides with the
+    primary terminal outcome (rule 11).
+    """
     msgs = []
     for kind in _step_kinds(data):
         if kind not in _HANDLER_KINDS:
             msgs.append(f"step kind {kind!r} has no registered handler")
+    for step in data.get("steps", []):
+        if isinstance(step, dict) and step.get("kind") == "deliver_artifact":
+            target = step.get("target")
+            if target is not None and target not in _DELIVERERS:
+                msgs.append(
+                    f"deliver_artifact target {target!r} is not a registered deliverer "
+                    f"(known: {sorted(_DELIVERERS)})"
+                )
     for field in (
         "cedar_policy_modules",
         "mcp_servers",
