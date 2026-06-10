@@ -399,75 +399,75 @@ class TestGateStatus:
     """The shared verify-gate semantics (verify_build / verify_lint)."""
 
     def test_passing_always_succeeds(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         assert (
-            _gate_status(passed=True, gate="strict", read_only=False, was_passing_before=True)
+            gate_status(passed=True, gate="strict", read_only=False, was_passing_before=True)
             == "succeeded"
         )
 
     def test_strict_failure_gates(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         assert (
-            _gate_status(passed=False, gate="strict", read_only=False, was_passing_before=True)
+            gate_status(passed=False, gate="strict", read_only=False, was_passing_before=True)
             == "failed"
         )
 
     def test_informational_never_gates(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         assert (
-            _gate_status(
+            gate_status(
                 passed=False, gate="informational", read_only=False, was_passing_before=True
             )
             == "succeeded"
         )
 
     def test_read_only_never_gates(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # read_only workflows treat verify results as informational (matches
         # pipeline.py: pr_review build status is informational only).
         assert (
-            _gate_status(passed=False, gate="strict", read_only=True, was_passing_before=True)
+            gate_status(passed=False, gate="strict", read_only=True, was_passing_before=True)
             == "succeeded"
         )
 
     def test_regression_only_gates_a_regression(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # was passing before, fails now → regression → gates.
         assert (
-            _gate_status(
+            gate_status(
                 passed=False, gate="regression_only", read_only=False, was_passing_before=True
             )
             == "failed"
         )
 
     def test_regression_only_ignores_preexisting_failure(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # already broken before the agent ran → not a regression → does NOT gate
         # (mirrors pipeline.py build_ok = passed or not build_before).
         assert (
-            _gate_status(
+            gate_status(
                 passed=False, gate="regression_only", read_only=False, was_passing_before=False
             )
             == "succeeded"
         )
 
     def test_unset_gate_defaults_to_regression_only(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # An unset gate must mirror pipeline.py (which is always regression-only),
         # NOT default to strict: a regression gates, a pre-existing failure does not.
         assert (
-            _gate_status(passed=False, gate=None, read_only=False, was_passing_before=True)
+            gate_status(passed=False, gate=None, read_only=False, was_passing_before=True)
             == "failed"
         )
         assert (
-            _gate_status(passed=False, gate=None, read_only=False, was_passing_before=False)
+            gate_status(passed=False, gate=None, read_only=False, was_passing_before=False)
             == "succeeded"
         )
 
