@@ -76,6 +76,12 @@ What's shipped and what's coming next.
 - [ ] **Slack dispatcher** - Log-only stub; pending full Slack Block Kit integration
 - [ ] **Email dispatcher** - Log-only stub; pending SES integration
 
+### Channels
+
+- [x] **Slack integration** - @mention task submission, `bgagent slack link` / `setup`, file attachments on submit, threaded progress notifications. See [SLACK_SETUP_GUIDE.md](./SLACK_SETUP_GUIDE.md)
+- [x] **Linear integration** - Label-triggered tasks, `bgagent linear setup` / `link`, progress comments on issues. See [LINEAR_SETUP_GUIDE.md](./LINEAR_SETUP_GUIDE.md)
+- [x] **Linear parent/sub-issue orchestration** - Label a parent issue with sub-issues and a `blocked by` graph; ABCA builds a DAG (rejecting cycles), creates child tasks in dependency order, gates blocked children until predecessors succeed, stacks child PRs on their predecessors' branches, and posts an aggregate rollup comment on the parent. A scheduled backstop recovers children whose terminal events were lost. See [LINEAR_SETUP_GUIDE.md](./LINEAR_SETUP_GUIDE.md#parentsub-issue-orchestration) (#247)
+
 ### Observability
 
 - [x] **OpenTelemetry** - Custom spans for pipeline phases with CloudWatch querying
