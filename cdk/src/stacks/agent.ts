@@ -919,6 +919,8 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'JiraWorkspaceRegistryTableName', {
       value: jiraIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Jira workspace registry — `bgagent jira setup` writes a row per OAuth-installed tenant',
+    });
+
     // --- GitHub deployment-status → screenshot pipeline ---
     // Listens for GitHub deployment_status events from any provider
     // (Vercel, Amplify Hosting, Netlify, GitHub Actions custom CD),
