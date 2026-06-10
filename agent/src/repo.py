@@ -72,6 +72,42 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
             label="checkout-pr-branch",
             cwd=repo_dir,
         )
+    elif config.base_branch:
+        # #247 A4: stacked child. Branch from the predecessor's branch
+        # (linear) or from main (diamond) so the child sees predecessor
+        # code without waiting for a human merge. fetch the base first —
+        # it is an unmerged sibling branch that the fresh clone may not
+        # have locally.
+        log("SETUP", f"Creating branch {branch} from base {config.base_branch}")
+        fetch_res = run_cmd(
+            ["git", "fetch", "origin", config.base_branch],
+            label="fetch-base-branch",
+            cwd=repo_dir,
+            check=False,
+        )
+        if fetch_res.returncode == 0:
+            run_cmd(
+                ["git", "checkout", "-b", branch, f"origin/{config.base_branch}"],
+                label="create-branch-from-base",
+                cwd=repo_dir,
+            )
+        else:
+            # Base branch not found on origin (e.g. predecessor PR already
+            # merged + branch deleted, or a transient fetch error). Fall
+            # back to a normal branch off the current HEAD so the child
+            # still runs rather than failing setup; the predecessor's code
+            # is likely in the default branch by now anyway.
+            notes.append(
+                f"base branch '{config.base_branch}' not fetchable; "
+                "branched off default instead"
+            )
+            log("SETUP", f"Base branch not found; creating {branch} off HEAD")
+            run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
+
+        # Diamond: merge each predecessor branch into this child's branch
+        # so it sees ALL predecessors' code (the base only gave it one).
+        for pred_branch in config.merge_branches:
+            _merge_predecessor_branch(repo_dir, pred_branch, notes)
     else:
         log("SETUP", f"Creating branch: {branch}")
         run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
@@ -130,9 +166,12 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         notes.append("Initial lint (mise run lint): OK")
         lint_before = True
 
-    # Detect default branch
-    # For PR tasks (pr_iteration, pr_review): use base_branch from orchestrator if available
-    if config.task_type in PR_TASK_TYPES and config.base_branch:
+    # Detect default branch (used as the PR base + the commit-diff range).
+    # - PR tasks: base_branch from the orchestrator (the PR's real base).
+    # - #247 A4 stacked children: base_branch is the predecessor's branch
+    #   (linear) or main (diamond) — the child's PR targets it.
+    # - Otherwise: detect the repo default (main/master).
+    if config.base_branch:
         default_branch = config.base_branch
     else:
         default_branch = detect_default_branch(config.repo_url, repo_dir)
@@ -148,6 +187,50 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         lint_before=lint_before,
         default_branch=default_branch,
     )
+
+
+def _merge_predecessor_branch(repo_dir: str, pred_branch: str, notes: list[str]) -> None:
+    """Merge a predecessor branch into the current child branch (#247 A4 diamond).
+
+    Fetches the predecessor branch and merges it so the child sees its
+    code. On a clean merge: done. On a CONFLICT: abort the merge (leaving
+    the working tree clean) and record a note. We deliberately do NOT leave
+    the repo in a conflicted state — the agent runs AFTER setup and a
+    half-merged tree would break its build/lint baseline. Instead the
+    predecessor branch remains fetched (``origin/<pred_branch>``) and the
+    note tells the agent to integrate it as part of its task. This keeps
+    conflict resolution agent-driven (per #247 design) without corrupting
+    the deterministic setup phase.
+    """
+    fetch_res = run_cmd(
+        ["git", "fetch", "origin", pred_branch],
+        label="fetch-predecessor",
+        cwd=repo_dir,
+        check=False,
+    )
+    if fetch_res.returncode != 0:
+        notes.append(f"predecessor branch '{pred_branch}' not fetchable; skipped merge")
+        log("SETUP", f"Predecessor branch not found, skipping merge: {pred_branch}")
+        return
+
+    merge_res = run_cmd(
+        ["git", "merge", "--no-edit", f"origin/{pred_branch}"],
+        label="merge-predecessor",
+        cwd=repo_dir,
+        check=False,
+    )
+    if merge_res.returncode == 0:
+        log("SETUP", f"Merged predecessor branch: {pred_branch}")
+        notes.append(f"merged predecessor branch '{pred_branch}'")
+        return
+
+    # Conflict (or other merge failure): abort to keep the tree clean.
+    run_cmd(["git", "merge", "--abort"], label="merge-abort", cwd=repo_dir, check=False)
+    notes.append(
+        f"predecessor branch '{pred_branch}' conflicts with this branch; "
+        f"merge aborted — integrate origin/{pred_branch} as part of the task"
+    )
+    log("SETUP", f"Predecessor merge conflicted, aborted: {pred_branch}")
 
 
 def _install_commit_hook(repo_dir: str) -> None:

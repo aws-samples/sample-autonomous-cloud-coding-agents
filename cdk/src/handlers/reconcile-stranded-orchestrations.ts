@@ -172,6 +172,8 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
 
   const results = await releaseReadyChildren(
     ddb, ORCHESTRATION_TABLE, releasableRows, fresh.meta.release_context, createTaskCore, now,
+    // #247 A4: full child set for predecessor-branch-derived base selection.
+    fresh.children,
   );
   const released = results.filter((r) => r.kind === 'released').length;
   if (released > 0) {

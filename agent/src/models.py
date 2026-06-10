@@ -183,6 +183,11 @@ class TaskConfig(BaseModel):
     approval_gate_cap: int | None = None
     issue: GitHubIssue | None = None
     base_branch: str | None = None
+    # #247 A4: predecessor branches to merge into this child's branch
+    # before work, for a diamond child (2+ predecessors) that branches off
+    # main but must see all predecessors' code. Empty for root + linear
+    # children (linear children stack via ``base_branch`` instead).
+    merge_branches: list[str] = Field(default_factory=list)
     # Attachments from the orchestrator payload (Phase 3). Validated as
     # AttachmentConfig models. Empty list for tasks without attachments.
     attachments: list[AttachmentConfig] = Field(default_factory=list)

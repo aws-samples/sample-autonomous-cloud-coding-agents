@@ -511,6 +511,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     task_type: task.task_type ?? 'new_task',
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
+    // #247 A4: orchestration children carry their stacked base branch +
+    // (diamond case) predecessor branches to merge in, via channel_metadata.
+    // The PR-task ``resolved_base_branch`` path above wins if both are set
+    // (a task is never both a PR-iteration and an orchestration child).
+    ...(!hydratedContext.resolved_base_branch
+      && task.channel_metadata?.orchestration_base_branch
+      && { base_branch: task.channel_metadata.orchestration_base_branch }),
+    ...(task.channel_metadata?.orchestration_merge_branches
+      && { merge_branches: parseMergeBranches(task.channel_metadata.orchestration_merge_branches) }),
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
@@ -887,4 +896,26 @@ async function decrementConcurrency(userId: string): Promise<void> {
       logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+/**
+ * Parse the JSON-encoded predecessor merge-branch list that the
+ * orchestration release path stashes in
+ * ``channel_metadata.orchestration_merge_branches`` (#247 A4, diamond
+ * case). Best-effort: a malformed value yields an empty list rather than
+ * failing the orchestration — the child still branches off its base, it
+ * just won't have the predecessor code merged in (surfaced as a normal
+ * build failure if it actually needed it, never a silent crash here).
+ */
+function parseMergeBranches(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed) && parsed.every((b) => typeof b === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through
+  }
+  logger.warn('Ignoring malformed orchestration_merge_branches', { raw });
+  return [];
 }
