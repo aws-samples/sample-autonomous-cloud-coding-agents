@@ -62,6 +62,20 @@ export interface OrchestrationChildRow {
   readonly repo: string;
   readonly depends_on: readonly string[];
   readonly child_status: ChildStatus;
+  /**
+   * The ABCA ``task_id`` created for this child once released. Stamped by
+   * ``releaseChild`` alongside the ``child_status → released`` flip;
+   * absent until the child is released. The ``ChildTaskIndex`` GSI is
+   * keyed on this so the reconciler resolves a terminal task back to its
+   * orchestration row.
+   */
+  readonly child_task_id?: string;
+  /**
+   * The released child task's head branch (#247 A4). Persisted on the
+   * release flip so a DEPENDENT child can stack on / merge it. Absent
+   * until released.
+   */
+  readonly child_branch_name?: string;
   /** Linear human identifier, when known (e.g. ``ENG-42``). */
   readonly linear_identifier?: string;
   /** Sub-issue title, used to build the child task description. */

@@ -27,6 +27,15 @@ description = "Jest tests"
 depends = [":compile"]
 run = ["mkdir -p $TMPDIR", "yarn test"]
 
+# Focused, low-footprint test run for iterating on one file/pattern:
+#   mise //cdk:testf -- orchestration-release
+# Skips coverage (the heaviest phase) and runs a single worker, so it
+# won't spawn the worker fleet that OOMs the Mac on the 1240-test
+# stack-synth suite. Use //cdk:test for the full coverage run (CI parity).
+[tasks.testf]
+description = "Focused jest run (no coverage, single worker)"
+run = "yarn jest --coverage=false --runInBand"
+
 [tasks.synth]
 description = "cdk synth"
 run = ["mkdir -p $TMPDIR", "yarn synth"]

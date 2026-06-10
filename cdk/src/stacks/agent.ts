@@ -46,6 +46,7 @@ import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-int
 import { LinearIntegration } from '../constructs/linear-integration';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
+import { StrandedOrchestrationReconciler } from '../constructs/stranded-orchestration-reconciler';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
@@ -790,6 +791,48 @@ export class AgentStack extends Stack {
     // per-workspace OAuth secret prefix readable (createTaskCore stashes
     // the ARN; agent reads it). Same prefix grant as the webhook processor.
     orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+
+    // #303: scheduled backstop that recovers orchestrations whose terminal
+    // events were lost while the live reconciler was unavailable. Runs the
+    // same createTaskCore release path, so it needs the identical grants
+    // (repo config, guardrail, orchestrator invoke, linear-oauth secret).
+    const strandedOrchestrationReconciler = new StrandedOrchestrationReconciler(
+      this, 'StrandedOrchestrationReconciler', {
+        orchestrationTable: orchestrationTable.table,
+        taskTable: taskTable.table,
+        taskEventsTable: taskEventsTable.table,
+        orchestratorFunctionArn: orchestrator.alias.functionArn,
+      },
+    );
+    repoTable.table.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
+    strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
+    strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [orchestrator.alias.functionArn],
+    }));
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock',
+          resource: 'guardrail',
+          resourceName: inputGuardrail.guardrailId,
+        }),
+      ],
+    }));
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
       resources: [
         Stack.of(this).formatArn({

@@ -192,33 +192,57 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     }
   }
 
-  // 2. Release newly-unblocked children. Mark them ``ready`` first so the
-  //    shared release helper (which releases ``ready`` rows) picks them
-  //    up, then releaseChild flips ready → released conditionally.
-  if (plan.toRelease.length > 0) {
-    const releasableRows = snapshot.children
-      .filter((c) => plan.toRelease.includes(c.sub_issue_id))
-      .map((c) => ({ ...c, child_status: 'ready' as const }));
+  // 2. Re-evaluate releasability against a FRESH read, not the initial
+  //    snapshot.
+  //
+  //    Concurrency (failure-matrix row 3): when two predecessors of the
+  //    same child D finish simultaneously, each reconciler invocation
+  //    loads its own snapshot, persists only ITS child as succeeded, and
+  //    — working from its stale snapshot — sees D's OTHER predecessor not
+  //    yet succeeded, so neither releases D and it strands ``blocked``.
+  //    The plan's ``toRelease`` (computed from the initial snapshot) is
+  //    therefore unreliable under concurrency. Reloading after the
+  //    status write means whichever invocation reads last sees BOTH
+  //    predecessors succeeded and releases D; the conditional
+  //    ready→released flip in releaseChild dedups if both happen to see it.
+  const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  const freshChildren = fresh?.children ?? snapshot.children;
+  const succeeded = new Set(
+    freshChildren.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
+  );
+  const releasableRows = freshChildren
+    .filter((c) => c.child_status === 'blocked' && c.depends_on.every((d) => succeeded.has(d)))
+    .map((c) => ({ ...c, child_status: 'ready' as const }));
+
+  if (releasableRows.length > 0) {
     const results = await releaseReadyChildren(
       ddb,
       ORCHESTRATION_TABLE,
       releasableRows,
-      snapshot.meta.release_context,
+      (fresh ?? snapshot).meta.release_context,
       createTaskCore,
       now,
+      // #247 A4: pass the full child set so each releasable child's base
+      // branch can be derived from its predecessors' persisted branches.
+      freshChildren,
     );
     logger.info('Reconciler released children', {
       orchestration_id: orchestrationId,
       trigger_sub_issue_id: subIssueId,
       released: results.filter((r) => r.kind === 'released').length,
-      requested: plan.toRelease.length,
+      requested: releasableRows.length,
     });
   }
 
-  if (plan.orchestrationComplete) {
+  // Completion check against the fresh view: every child terminal
+  // (succeeded/failed/skipped — released is NOT terminal).
+  const allTerminal = freshChildren.every((c) =>
+    c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
+  );
+  if (allTerminal) {
     logger.info('Orchestration complete', {
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: snapshot.meta.parent_linear_issue_id,
+      parent_linear_issue_id: (fresh ?? snapshot).meta.parent_linear_issue_id,
     });
     // Parent rollup / terminal comment is emitted by the fan-out plane
     // (#243) in PR A5; nothing to do here beyond the log breadcrumb.
