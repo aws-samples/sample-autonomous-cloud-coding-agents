@@ -254,6 +254,21 @@ class TestTaskConfig:
         assert config.task_type == "new_task"
         assert config.cedar_policies == []
         assert config.issue is None
+        # #247 A4: defaults for stacked-child fields.
+        assert config.base_branch is None
+        assert config.merge_branches == []
+
+    def test_a4_stacked_child_fields(self):
+        # Diamond child: base off main + predecessor branches to merge in.
+        config = TaskConfig(
+            repo_url="owner/repo",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            base_branch="main",
+            merge_branches=["bgagent/taskB/b", "bgagent/taskC/c"],
+        )
+        assert config.base_branch == "main"
+        assert config.merge_branches == ["bgagent/taskB/b", "bgagent/taskC/c"]
 
     def test_mutable_assignment(self):
         config = TaskConfig(
