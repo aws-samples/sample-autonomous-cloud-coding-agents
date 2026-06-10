@@ -222,6 +222,9 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
       (fresh ?? snapshot).meta.release_context,
       createTaskCore,
       now,
+      // #247 A4: pass the full child set so each releasable child's base
+      // branch can be derived from its predecessors' persisted branches.
+      freshChildren,
     );
     logger.info('Reconciler released children', {
       orchestration_id: orchestrationId,
