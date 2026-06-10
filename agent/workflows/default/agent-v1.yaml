@@ -1,0 +1,54 @@
+# The platform default workflow — the last rung of the resolution ladder
+# (WORKFLOWS.md §"Replacing task types"): used when a submission carries no
+# workflow_ref and no Blueprint default applies. Run the user's request through
+# the agent and deliver the result, with no assumptions about repos, PRs, or
+# builds. A real, governed, promotion-gated workflow — not a hardcoded escape
+# hatch — so its behavior is auditable and overridable per-repo via the Blueprint.
+#
+# Deliberately conservative because it runs when *nothing* was specified:
+# requires_repo:false (no clone), a read-leaning tool set (no Bash/Write/Edit),
+# and delivery to S3 + a comment milestone. A caller who wants coding selects
+# (or maps to) a coding workflow. soft_deny is still mandatory (read_only:false)
+# so any future tool addition stays HITL-gated.
+#
+# Delivery is ``s3_and_comment`` (primary outcome ``artifact``): the S3 upload to
+# artifacts/{task_id}/ is the always-retrievable deliverable (the default often
+# runs for api-origin tasks that have no notification channel), while the comment
+# milestone is rendered by the channel fan-out when one IS present.
+#
+# See docs/design/WORKFLOWS.md §"The default workflow (default/agent-v1)".
+id: default/agent-v1
+version: 1.0.0
+domain: hybrid
+description: >-
+  Run the user's request through the agent and deliver the result. Minimal
+  default — no repo, build, or PR assumptions.
+# No clone; if a repo is supplied it is hydrated as context, not scaffolded.
+requires_repo: false
+read_only: false
+prompt:
+  template: registry://prompt/default-agent-workflow
+  placeholders: [task_description, memory_context, max_turns]
+hydration:
+  sources: [task_description, attachments, memory]
+agent_config:
+  tier: standard
+  # Conservative: no Bash/Write/Edit by default. The default must not silently
+  # mutate a filesystem or push code on a submission that never asked for it.
+  allowed_tools: [Read, Glob, Grep, WebFetch]
+  cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
+repo_config:
+  discover: false
+required_inputs:
+  all_of: [task_description]
+steps:
+  - { kind: hydrate_context,  name: context }
+  - { kind: run_agent,        name: respond }
+  - { kind: deliver_artifact, name: deliver, target: s3_and_comment }
+terminal_outcomes:
+  primary: artifact
+limits:
+  max_turns: 30
+promotion_gate:
+  requires: [tests:agent/default]
+status: production

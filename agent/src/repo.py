@@ -3,7 +3,7 @@
 import os
 import subprocess
 
-from config import AGENT_WORKSPACE, PR_TASK_TYPES
+from config import AGENT_WORKSPACE
 from models import RepoSetup, TaskConfig
 from shell import log, run_cmd, slugify
 
@@ -17,7 +17,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     repo_dir = f"{AGENT_WORKSPACE}/{config.task_id}"
     notes: list[str] = []
 
-    if config.task_type in PR_TASK_TYPES and config.branch_name:
+    if config.is_pr_workflow and config.branch_name:
         branch = config.branch_name
     else:
         # Derive branch slug from issue title or task description
@@ -60,7 +60,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     )
 
     # Branch setup
-    if config.task_type in PR_TASK_TYPES and config.branch_name:
+    if config.is_pr_workflow and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
         run_cmd(
             ["git", "fetch", "origin", branch],
@@ -132,7 +132,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
 
     # Detect default branch
     # For PR tasks (pr_iteration, pr_review): use base_branch from orchestrator if available
-    if config.task_type in PR_TASK_TYPES and config.base_branch:
+    if config.is_pr_workflow and config.base_branch:
         default_branch = config.base_branch
     else:
         default_branch = detect_default_branch(config.repo_url, repo_dir)

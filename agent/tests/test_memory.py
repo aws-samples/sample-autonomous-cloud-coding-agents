@@ -8,6 +8,7 @@ import pytest
 from memory import (
     _SCHEMA_VERSION,
     MEMORY_SOURCE_TYPES,
+    _validate_actor,
     _validate_repo,
     write_repo_learnings,
     write_task_episode,
@@ -44,6 +45,25 @@ class TestValidateRepo:
     def test_invalid_empty(self):
         with pytest.raises(ValueError, match="does not match"):
             _validate_repo("")
+
+
+class TestValidateActor:
+    """``_validate_actor`` accepts an ``owner/repo`` OR a ``user:{id}`` namespace
+    (repo-less knowledge tasks, #248 Phase 3) and rejects anything else."""
+
+    def test_valid_repo(self):
+        _validate_actor("owner/repo")  # delegates to _validate_repo, no raise
+
+    def test_valid_user_namespace(self):
+        _validate_actor("user:cog-sub-123")  # should not raise
+
+    def test_invalid_empty_user_id(self):
+        with pytest.raises(ValueError, match="non-empty user id"):
+            _validate_actor("user:")
+
+    def test_invalid_not_a_repo(self):
+        with pytest.raises(ValueError, match="does not match"):
+            _validate_actor("not-a-repo")
 
 
 class TestSchemaVersion:
@@ -91,6 +111,21 @@ class TestWriteTaskEpisode:
         sanitized = sanitize_external_content(content)
         expected = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
         assert hash_value == expected
+
+    @patch("memory._get_client")
+    def test_user_namespace_actor_writes_event(self, mock_get_client):
+        """A repo-less knowledge task keys the episode on ``user:{id}`` (#248
+        Phase 3) and the write reaches create_event with that actorId — guards
+        against a regression that re-tightens the write path to repo-only (which
+        would silently stop repo-less memory writes, since the caller fails open)."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        result = write_task_episode("mem-1", "user:cog-sub-123", "task-1", "COMPLETED")
+
+        assert result is True
+        call_kwargs = mock_client.create_event.call_args[1]
+        assert call_kwargs["actorId"] == "user:cog-sub-123"
 
 
 class TestWriteRepoLearnings:
