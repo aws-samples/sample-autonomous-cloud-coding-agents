@@ -22,7 +22,11 @@ import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
 import { postIssueComment } from './shared/linear-feedback';
-import { extractLinearIdentifier, findLinearIssueByIdentifier } from './shared/linear-issue-lookup';
+import {
+  extractLinearIdentifier,
+  extractLinearIdentifierFromBranch,
+  findLinearIssueByIdentifier,
+} from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
 
 const s3 = new S3Client({});
@@ -208,7 +212,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // reviewers who live in Linear. Only fires when the registry table
   // is configured AND the PR title/body carries a Linear identifier.
   if (LINEAR_WORKSPACE_REGISTRY_TABLE) {
-    const identifier = extractLinearIdentifier(pr.title) ?? extractLinearIdentifier(pr.body);
+    // Branch-name first — it deterministically encodes this PR's own
+    // issue (`bgagent/{taskId}/abca-151-...`). Title/body are ambiguous
+    // fallbacks: in a stacked #247 orchestration the body often names a
+    // predecessor issue before the one the PR closes, and
+    // `extractLinearIdentifier` returns the first match in document
+    // order — which would misroute the screenshot to the predecessor.
+    const identifier =
+      extractLinearIdentifierFromBranch(pr.headRefName)
+      ?? extractLinearIdentifier(pr.title)
+      ?? extractLinearIdentifier(pr.body);
     if (identifier) {
       const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
       if (linearIssue) {
@@ -252,6 +265,12 @@ interface OpenPr {
   readonly number: number;
   readonly title: string;
   readonly body: string;
+  /**
+   * Head branch ref (e.g. `bgagent/{taskId}/abca-151-...`). The
+   * authoritative source for the linked Linear issue — see
+   * `extractLinearIdentifierFromBranch`.
+   */
+  readonly headRefName: string;
 }
 
 /**
@@ -288,9 +307,17 @@ async function findPullRequestForShaWithRetry(
  * "List pull requests associated with a commit" GitHub API
  * (https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit).
  *
- * Returns the first OPEN PR (with title/body), or null if none.
- * Closed/merged PRs are filtered out — v1 only screenshots active
- * reviews.
+ * Returns the OPEN PR that the deploy is *for*, or null if none.
+ *
+ * Selection (issue #247): for a stacked PR chain the commit-pulls API
+ * returns every open PR whose history contains `sha` — i.e. the PR that
+ * introduced the commit AND all PRs stacked on top of it. We must pick
+ * the PR whose own head is `sha` (the one that introduced it), because
+ * the screenshot is of that PR's deploy and the downstream router reads
+ * its branch name. Fall back to the first open PR only when no head
+ * matches (e.g. `sha` is a merge/base commit), preserving prior
+ * behaviour. Closed/merged PRs are filtered out — v1 only screenshots
+ * active reviews.
  */
 async function findPullRequestForSha(
   repo: string,
@@ -349,13 +376,18 @@ async function findPullRequestForSha(
     state?: string;
     title?: string;
     body?: string | null;
+    head?: { ref?: string; sha?: string } | null;
   }>;
-  const open = pulls.find((p) => p.state === 'open' && typeof p.number === 'number');
-  if (!open) return null;
+  const openPulls = pulls.filter((p) => p.state === 'open' && typeof p.number === 'number');
+  if (openPulls.length === 0) return null;
+  // Prefer the PR whose own head is this SHA (the PR that introduced the
+  // commit); fall back to the first open PR for non-head SHAs.
+  const owner = openPulls.find((p) => p.head?.sha === sha) ?? openPulls[0];
   return {
-    number: open.number!,
-    title: open.title ?? '',
-    body: open.body ?? '',
+    number: owner.number!,
+    title: owner.title ?? '',
+    body: owner.body ?? '',
+    headRefName: owner.head?.ref ?? '',
   };
 }
 
