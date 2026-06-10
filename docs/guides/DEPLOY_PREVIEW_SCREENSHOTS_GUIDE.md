@@ -130,7 +130,7 @@ The CLI prints the webhook URL and the values to paste into GitHub.
 bgagent github set-webhook-secret
 ```
 
-Paste the same secret you used in 4b. The CLI writes it to the stack's `GitHubWebhookSecret` Secrets Manager entry, where the receiver Lambda reads it for HMAC verification.
+Paste the same secret you generated in 3b. The CLI writes it to the stack's `GitHubWebhookSecret` Secrets Manager entry, where the receiver Lambda reads it for HMAC verification.
 
 ### Step 4 — Smoke test
 
@@ -200,5 +200,6 @@ You forgot Step 2's "Vercel Authentication: Disabled" toggle. Toggle it off, pus
 Things to think about before using this on a real product:
 
 - **Deploy protection.** This guide turns Vercel Authentication off so the headless browser can render the preview. For real use, you'll want it back on with a signed bypass token (or your provider's equivalent) and the bypass injected onto the preview URL the screenshot processor navigates to.
-- **IAM scope.** The screenshot processor's IAM grants `bedrock-agentcore:*`; tightening to the specific Browser action set is preferable.
-- **Sensitive content.** If your previews include PII or other regulated content, consider CloudFront access logs + a WAF in front of the public CDN, and shorten screenshot retention below the 30-day default (constant in `cdk/src/constructs/screenshot-bucket.ts`).
+- **IAM scope.** The screenshot processor's IAM is scoped to the three AgentCore Browser actions the handler calls — `StartBrowserSession`, `StopBrowserSession`, `ConnectBrowserAutomationStream` — plus standard Lambda + S3 + Secrets Manager grants. The first two are control-plane writes; the third is the data-plane SigV4-presigned WSS handshake (it's published in the [AWS Service Authorization Reference for `bedrock-agentcore`](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html), which also notes it takes no resource types or condition keys). Resource is `*` because Browser sessions are ephemeral and the data-plane stream actions don't support resource-level scoping. A cdk-nag IAM5 suppression annotates the resource wildcard.
+- **SSRF surface.** The processor navigates AgentCore Browser to `deployment_status.environment_url` from the verified webhook payload. The handler validates the URL up front (https only, no literal-IP, no localhost / link-local / loopback) so a forged payload can't pivot the browser at private hosts. AgentCore Browser also runs outside the customer VPC, so IMDS and private-subnet pivots are neutralized regardless. Stricter operators can add an explicit hostname allowlist by editing `isAllowedScreenshotUrl` in `cdk/src/handlers/shared/screenshot-url.ts`.
+- **Screenshot URL enumerability.** The bucket is private, but CloudFront serves anonymously and the path follows `screenshots/<owner>_<repo>/<sha>-<8-byte-random>.png`. The 64-bit random suffix makes URLs unguessable for an outside reader (the prefix is enumerable from the public PR; the suffix is not). If your previews regularly render PII or other regulated content, consider also enabling CloudFront access logs + a WAF in front of the CDN and shortening screenshot retention below the 30-day default (constant in `cdk/src/constructs/screenshot-bucket.ts`).
