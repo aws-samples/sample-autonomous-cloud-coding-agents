@@ -46,8 +46,9 @@ export function generateTempPassword(): string {
   const pickFrom = (set: string): string => set[crypto.randomInt(set.length)];
 
   // One required char from each class, then 14 more random chars (>= 12 total).
+  const RANDOM_FILL_CHARS = 14;
   const chars: string[] = [pickFrom(upper), pickFrom(lower), pickFrom(digit), pickFrom(symbol)];
-  for (let i = 0; i < 14; i += 1) {
+  for (let i = 0; i < RANDOM_FILL_CHARS; i += 1) {
     chars.push(pickFrom(all));
   }
 
@@ -209,7 +210,8 @@ function isLikelyEmail(value: string): boolean {
 }
 
 function printInviteSummary(email: string, tempPassword: string, bundle: string): void {
-  const bar = '─'.repeat(64);
+  const SUMMARY_BAR_WIDTH = 64;
+  const bar = '─'.repeat(SUMMARY_BAR_WIDTH);
   console.log();
   console.log(`✓ Created Cognito user ${email}`);
   console.log('✓ Set permanent password (no first-login change required)');
