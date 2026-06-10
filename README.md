@@ -146,6 +146,10 @@ A documentation site is available containing all design documents, roadmap and g
 
 The example provided in this repository is for experimental and educational purposes only. It demonstrates concepts and techniques but is not intended for direct use in production environments.
 
+## Operational Metrics Collection
+
+Autonomous Background Coding Agent samples may collect anonymous operational metrics, including: the region a construct is deployed, the name and version of the construct deployed, and related information. We may use the metrics to maintain, provide, develop, and improve the constructs and AWS services.
+
 ## License
 
 This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) file.

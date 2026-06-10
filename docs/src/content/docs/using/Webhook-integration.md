@@ -88,7 +88,7 @@ curl -X POST "$API_URL/webhooks/tasks" \
   -d "$BODY"
 ```
 
-The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `task_type`, `pr_number`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported. You can submit `pr_iteration` tasks via webhook to automate PR feedback loops, or `pr_review` tasks to trigger automated code reviews.
+The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, `task_description`, `workflow_ref`, `pr_number`, `max_turns`, `max_budget_usd` fields). The `Idempotency-Key` header is also supported. You can submit `coding/pr-iteration-v1` tasks via webhook to automate PR feedback loops, or `coding/pr-review-v1` tasks to trigger automated code reviews.
 
 **Example response** (same shape as a successful `POST /tasks`  - `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
 

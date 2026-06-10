@@ -284,6 +284,7 @@ function resolveConstantsReference(
   let value: unknown = SHARED_CONSTANTS;
   for (const seg of segments) {
     if (value == null || typeof value !== 'object') return undefined;
+    // nosemgrep: javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop -- read-only walk down build-time-trusted contracts/constants.json; `seg` keys come from this script's own TS AST, not external input, and no object property is ever assigned (value is reassigned, never written).
     value = (value as Record<string, unknown>)[seg];
   }
   if (value == null || typeof value === 'object') return undefined;

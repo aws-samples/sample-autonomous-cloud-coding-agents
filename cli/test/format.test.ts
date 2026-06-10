@@ -26,7 +26,7 @@ describe('format', () => {
     status: 'COMPLETED',
     repo: 'owner/repo',
     issue_number: 42,
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     pr_number: null,
     task_description: 'Fix the bug',
     branch_name: 'bgagent/abc123/fix-the-bug',
@@ -49,6 +49,7 @@ describe('format', () => {
     turns_completed: null,
     trace: false,
     trace_s3_uri: null,
+    artifact_uri: null,
     attachments: null,
     approval_gate_count: 0,
     approval_gate_cap: 50,
@@ -95,21 +96,32 @@ describe('format', () => {
       expect(output).not.toContain('Max Turns:');
     });
 
-    test('shows task_type and pr_number for pr_iteration', () => {
+    test('renders a repo-less placeholder when repo is null (#248 Phase 3)', () => {
+      const repoless: TaskDetail = {
+        ...task,
+        repo: null,
+        resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      };
+      const output = formatTaskDetail(repoless);
+      expect(output).toContain('Repo:        — (repo-less)');
+      expect(output).not.toContain('Repo:        null');
+    });
+
+    test('shows workflow and pr_number for pr_iteration', () => {
       const prTask: TaskDetail = {
         ...task,
-        task_type: 'pr_iteration',
+        resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
         pr_number: 42,
         issue_number: null,
       };
       const output = formatTaskDetail(prTask);
-      expect(output).toContain('Type:        pr_iteration');
+      expect(output).toContain('Workflow:    coding/pr-iteration-v1');
       expect(output).toContain('PR #:        42');
     });
 
-    test('omits task_type line for new_task', () => {
+    test('omits workflow line for the default coding/new-task-v1', () => {
       const output = formatTaskDetail(task);
-      expect(output).not.toContain('Type:');
+      expect(output).not.toContain('Workflow:');
       expect(output).not.toContain('PR #:');
     });
 
@@ -128,6 +140,20 @@ describe('format', () => {
     test('omits Trace S3 line when trace_s3_uri is null', () => {
       const output = formatTaskDetail(task);
       expect(output).not.toContain('Trace S3:');
+    });
+
+    test('renders Artifact line when artifact_uri is non-null (#248 Phase 3)', () => {
+      const withArtifact: TaskDetail = {
+        ...task,
+        artifact_uri: 's3://artifacts-bkt/artifacts/abc123/result.md',
+      };
+      const output = formatTaskDetail(withArtifact);
+      expect(output).toContain('Artifact:    s3://artifacts-bkt/artifacts/abc123/result.md');
+    });
+
+    test('omits Artifact line when artifact_uri is null', () => {
+      const output = formatTaskDetail(task);
+      expect(output).not.toContain('Artifact:');
     });
 
     test('shows classified error with raw detail when error_classification is present', () => {
@@ -189,7 +215,7 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 1,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -210,7 +236,7 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: 'Fix the login bug',
         branch_name: 'bgagent/abc/fix',
@@ -229,7 +255,7 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 42,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -239,6 +265,25 @@ describe('format', () => {
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('#42');
+    });
+
+    test('shows a dash for a repo-less task (#248 Phase 3)', () => {
+      const tasks: TaskSummary[] = [{
+        task_id: 'abc',
+        status: 'RUNNING',
+        repo: null,
+        issue_number: null,
+        resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+        pr_number: null,
+        task_description: 'Summarise these papers',
+        branch_name: 'bgagent/abc/task',
+        pr_url: null,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }];
+      const output = formatTaskList(tasks);
+      expect(output).toContain('—');
+      expect(output).not.toContain('null');
     });
 
     test('returns message for empty list', () => {
