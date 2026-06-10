@@ -159,12 +159,15 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
         "transition the issue state to `In Review` (fall back to `In Progress` "
         "if that state doesn't exist). If neither exists, skip the state "
         "transition — the PR comment alone is enough. Do not invent state "
-        "names or loop on `list_issue_statuses`.\n"
-        "3. **On completion or failure** — call `mcp__linear-server__save_comment` "
-        "with the final status (succeeded / failed + short reason).\n\n"
-        "Keep comments concise. Do not mirror the full agent transcript back to "
-        "Linear. Even small tasks must post all three updates — users rely on "
-        "them to track progress."
+        "names or loop on `list_issue_statuses`.\n\n"
+        "**Do NOT post a final 'task completed' or 'task failed' comment.** "
+        "The platform fan-out plane (issue #239) posts a structured "
+        "✅/⚠️/❌ summary on terminal events with cost / turns / duration / "
+        "PR-link metrics that you don't have visibility into. A redundant "
+        "agent-side completion comment would just stack two near-identical "
+        "comments on the issue.\n\n"
+        "Keep the start + PR-opened comments concise. Do not mirror the full "
+        "agent transcript back to Linear."
     )
 
 
