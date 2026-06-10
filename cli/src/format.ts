@@ -24,10 +24,10 @@ export function formatTaskDetail(task: TaskDetail): string {
   const lines: string[] = [
     `Task:        ${task.task_id}`,
     `Status:      ${task.status}`,
-    `Repo:        ${task.repo}`,
+    `Repo:        ${task.repo ?? '— (repo-less)'}`,
   ];
-  if (task.task_type && task.task_type !== 'new_task') {
-    lines.push(`Type:        ${task.task_type}`);
+  if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
+    lines.push(`Workflow:    ${task.resolved_workflow.id}`);
   }
   if (task.pr_number !== null) {
     lines.push(`PR #:        ${task.pr_number}`);
@@ -53,6 +53,9 @@ export function formatTaskDetail(task: TaskDetail): string {
   }
   if (task.trace_s3_uri) {
     lines.push(`Trace S3:    ${task.trace_s3_uri}`);
+  }
+  if (task.artifact_uri) {
+    lines.push(`Artifact:    ${task.artifact_uri}`);
   }
   if (task.error_message) {
     lines.push(...formatErrorLines(task));
@@ -85,13 +88,14 @@ export function formatTaskList(tasks: TaskSummary[]): string {
   const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'DESCRIPTION'];
   const rows = tasks.map(t => {
     let desc = t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-');
-    if (t.task_type === 'pr_iteration' && t.pr_number !== null) {
+    if (t.resolved_workflow?.id === 'coding/pr-iteration-v1' && t.pr_number !== null) {
       desc = `PR #${t.pr_number}` + (t.task_description ? `: ${t.task_description}` : '');
     }
     return [
       t.task_id,
       t.status,
-      t.repo,
+      // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
+      t.repo ?? '—',
       t.created_at,
       truncate(desc, 40),
     ];
@@ -153,7 +157,7 @@ export function formatStatusSnapshot(
 
   const lines: string[] = [
     header,
-    `  Repo:          ${task.repo}`,
+    `  Repo:          ${task.repo ?? '— (repo-less)'}`,
     // Channel provenance — ``api`` for CLI / Cognito submits,
     // ``webhook`` for HMAC-signed inbound webhook submits. Shown on
     // every task so a user looking at a surprising task's status can
@@ -161,12 +165,12 @@ export function formatStatusSnapshot(
     // webhook vs. a manual submission.
     `  Channel:       ${task.channel_source || PLACEHOLDER}`,
   ];
-  // Non-default task types carry meaningful context for the default
-  // snapshot (a pr_iteration against #42 is a different mental model
-  // than a new_task). Mirrors the ``formatTaskDetail`` treatment.
-  if (task.task_type && task.task_type !== 'new_task') {
+  // Non-default workflows carry meaningful context for the default
+  // snapshot (a coding/pr-iteration-v1 against #42 is a different mental
+  // model than coding/new-task-v1). Mirrors the ``formatTaskDetail`` treatment.
+  if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
     const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
-    lines.push(`  Type:          ${task.task_type}${prSuffix}`);
+    lines.push(`  Workflow:      ${task.resolved_workflow.id}${prSuffix}`);
   }
   // Render the task description under its own heading with wrapped
   // continuation lines so long prompts stay readable in a ~80-column
@@ -195,6 +199,9 @@ export function formatStatusSnapshot(
   }
   if (task.trace_s3_uri) {
     lines.push(`  Trace S3:      ${task.trace_s3_uri}`);
+  }
+  if (task.artifact_uri) {
+    lines.push(`  Artifact:      ${task.artifact_uri}`);
   }
   lines.push(`  Last event:    ${lastEventLine}`);
 

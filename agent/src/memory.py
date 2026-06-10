@@ -53,6 +53,20 @@ def _validate_repo(repo: str) -> None:
         )
 
 
+def _validate_actor(actor: str) -> None:
+    """Validate a memory actorId: an ``owner/repo`` OR a ``user:{id}`` namespace.
+
+    Repo-less knowledge tasks (#248 Phase 3) key memory on ``user:{user_id}``
+    instead of a repo (ADR-014 addendum). Accept both forms so the same write
+    path serves coding and knowledge tasks; reject anything else.
+    """
+    if actor.startswith("user:"):
+        if not actor[len("user:") :]:
+            raise ValueError("actor 'user:' namespace requires a non-empty user id")
+        return
+    _validate_repo(actor)
+
+
 def _log_error(func_name: str, err: Exception, memory_id: str, task_id: str) -> None:
     """Log memory write failure with severity based on exception type."""
     is_programming_error = isinstance(err, (TypeError, ValueError, AttributeError, KeyError))
@@ -67,7 +81,7 @@ def _log_error(func_name: str, err: Exception, memory_id: str, task_id: str) -> 
 
 def write_task_episode(
     memory_id: str,
-    repo: str,
+    actor: str,
     task_id: str,
     status: str,
     pr_url: str | None = None,
@@ -81,9 +95,10 @@ def write_task_episode(
     status, PR URL, cost, duration, and any self-feedback from the
     agent's "## Agent notes" section in the PR body.
 
-    Uses actorId=repo and sessionId=task_id so the extraction strategy
-    namespace templates (/{actorId}/episodes/{sessionId}/) place records
-    into the correct per-repo, per-task namespace.
+    Uses actorId=``actor`` and sessionId=task_id so the extraction strategy
+    namespace templates (/{actorId}/episodes/{sessionId}/) place records into
+    the correct namespace. ``actor`` is an ``owner/repo`` for coding tasks or a
+    ``user:{user_id}`` namespace for repo-less knowledge tasks (#248 Phase 3).
 
     Metadata includes source_type='agent_episode' for provenance tracking
     and content_sha256 for integrity auditing on read (schema v3).
@@ -91,7 +106,7 @@ def write_task_episode(
     Returns True on success, False on failure (fail-open).
     """
     try:
-        _validate_repo(repo)
+        _validate_actor(actor)
         client = _get_client()
 
         parts = [
@@ -124,7 +139,7 @@ def write_task_episode(
 
         client.create_event(
             memoryId=memory_id,
-            actorId=repo,
+            actorId=actor,
             sessionId=task_id,
             eventTimestamp=_iso_now(),
             payload=[
