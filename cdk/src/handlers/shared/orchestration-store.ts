@@ -40,6 +40,7 @@ import {
   BatchWriteCommand,
   GetCommand,
   QueryCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 import type { SubIssueNode } from './linear-subissue-fetch';
@@ -232,6 +233,39 @@ export async function seedOrchestration(
   });
 
   return { orchestrationId, rowsWritten, alreadyExisted: false };
+}
+
+/**
+ * Claim the right to post the parent rollup comment exactly once (#247
+ * A5). The orchestration can reach "all children terminal" on more than
+ * one TaskTable-stream event (the last child's record often gets two
+ * MODIFYs — e.g. status→COMPLETED then pr_url/build_passed written — both
+ * observing all-terminal), which without a guard posts the rollup twice.
+ *
+ * Conditionally stamps ``rollup_posted_at`` on the parent-meta row. The
+ * first caller wins (returns true → post the comment); a racing/repeat
+ * caller loses the conditional write (returns false → skip). Mirrors the
+ * release-flip idempotency pattern.
+ */
+export async function claimRollup(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  now: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
+      UpdateExpression: 'SET rollup_posted_at = :now',
+      ConditionExpression: 'attribute_not_exists(rollup_posted_at)',
+      ExpressionAttributeValues: { ':now': now },
+    }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
 }
 
 /** Sort-key of the parent-meta row. Exported so the reconciler can
