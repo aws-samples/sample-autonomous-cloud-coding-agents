@@ -3,10 +3,9 @@
     { "pattern": "^https?://localhost" },
     { "pattern": "^https?://127\\.0\\.0\\.1" },
     { "pattern": "^https?://example\\.com" },
-    { "pattern": "^https?://www\\.npmjs\\.com" },
+    { "pattern": "^https?://www\\.npmjs\\.com/package/", "_comment": "npmjs returns 403 to automated requests; retryOn429 does not cover this" },
     { "pattern": "^/sample-autonomous-cloud-coding-agents/" },
-    { "pattern": "^link$" },
-    { "pattern": "github\\.com/aws/aws-cdk/blob/main/packages/aws-cdk/lib/api/bootstrap" }
+    { "pattern": "^link$", "_comment": "Masks intentional placeholder in ADR-004 example prose" }
   ],
   "replacementPatterns": [
     { "pattern": "^/", "replacement": "{{BASEURL}}/" }
@@ -20,5 +19,5 @@
   "retryOn429": true,
   "retryCount": 3,
   "fallbackRetryDelay": "10s",
-  "aliveStatusCodes": [200, 206, 301, 302, 307, 308]
+  "aliveStatusCodes": [200, 206]
 }

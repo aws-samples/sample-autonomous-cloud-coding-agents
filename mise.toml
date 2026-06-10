@@ -77,6 +77,7 @@ run = [
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "//docs:link-check" },
 ]
 
 ##################

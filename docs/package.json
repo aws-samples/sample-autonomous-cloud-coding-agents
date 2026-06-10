@@ -9,7 +9,7 @@
     "build": "npm run docs:build",
     "preview": "astro preview",
     "security:retire": "retire --path . --severity high",
-    "link-check": "find ../docs/guides ../docs/design ../docs/decisions .. -maxdepth 1 -name '*.md' | xargs markdown-link-check --config .markdown-link-check.json"
+    "link-check": "mise run link-check"
   },
   "devDependencies": {
     "jest": "^30.3.0",

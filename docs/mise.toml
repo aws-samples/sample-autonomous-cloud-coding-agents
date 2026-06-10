@@ -28,6 +28,15 @@ run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"
 [tasks.link-check]
 description = "Check for broken links in Markdown sources"
 run = """
-find guides design decisions .. -maxdepth 1 -name '*.md' | \
-  xargs ./node_modules/.bin/markdown-link-check --config .markdown-link-check.json
+#!/usr/bin/env bash
+set -euo pipefail
+filelist=$(mktemp)
+trap 'rm -f "$filelist"' EXIT
+{ find guides design decisions -name '*.md'; find .. -maxdepth 1 -name '*.md'; } > "$filelist"
+count=$(wc -l < "$filelist")
+if [ "$count" -lt 10 ]; then
+  echo "ERROR: expected ≥10 Markdown files but found $count — scan may be misconfigured" >&2
+  exit 1
+fi
+xargs -r ./node_modules/.bin/markdown-link-check --config .markdown-link-check.json < "$filelist"
 """
