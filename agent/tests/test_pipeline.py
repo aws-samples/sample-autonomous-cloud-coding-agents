@@ -10,7 +10,7 @@ from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
 
 
 class TestCedarPoliciesInjection:
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -78,7 +78,7 @@ class TestCedarPoliciesInjection:
         assert captured_config is not None
         assert captured_config.cedar_policies == policies
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -141,6 +141,294 @@ class TestCedarPoliciesInjection:
 
         assert captured_config is not None
         assert captured_config.cedar_policies == []
+
+
+class TestRepoLessPipeline:
+    """#248 Phase 3: a repo-less workflow runs the agent with no clone/build/PR."""
+
+    @staticmethod
+    def _mock_span() -> MagicMock:
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        return span
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_task_skips_repo_and_runs_agent(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        captured_cwd: dict = {}
+
+        async def fake_run_agent(_prompt, system_prompt, config, cwd=None, trajectory=None):
+            captured_cwd["cwd"] = cwd
+            captured_cwd["system_prompt"] = system_prompt
+            return AgentResult(
+                status="success",
+                turns=2,
+                cost_usd=0.02,
+                num_turns=2,
+                result_text="## Summary\nThe three papers argue ...",
+            )
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("aws_session.tenant_client", return_value=MagicMock()),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-1",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        # The repo-less path must never clone a repo or build a PR.
+        mock_setup_repo.assert_not_called()
+        assert result["pr_url"] is None
+        # default/agent-v1 delivers via `s3_and_comment`: the agent's result text
+        # is uploaded to artifacts/{task_id}/ (always retrievable) and a comment
+        # milestone is recorded. Task succeeds with the artifact URI set.
+        assert result["status"] == "success"
+        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/repoless-1/result.md"
+        # Agent ran from the workspace, not a repo dir, with the repo-less prompt
+        # (no Repository: / branch placeholders), and the prompt was substituted.
+        assert "Repository:" not in captured_cwd["system_prompt"]
+        assert "repoless-1" in captured_cwd["system_prompt"]  # {task_id} substituted
+        assert "{task_id}" not in captured_cwd["system_prompt"]
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_task_agent_no_result_is_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # The run_agent handler can fail to populate ctx.agent_result (its
+        # exception is captured into a failed StepOutcome). The repo-less path
+        # synthesizes an error AgentResult → terminal FAILED, not a crash.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        async def boom(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            raise RuntimeError("model exploded")
+
+        mock_run_agent.side_effect = boom
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-2",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        mock_setup_repo.assert_not_called()
+        assert result["status"] == "error"
+        # Terminal state persisted as FAILED (not left dangling / not COMPLETED).
+        terminal_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_agent_success_but_delivery_failure_is_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # The delivery gate: the agent succeeds but the side-effecting
+        # deliver_artifact step fails (here: ARTIFACTS_BUCKET_NAME unset, so
+        # _upload_to_s3 raises). This must surface as a loud terminal FAILED
+        # naming the failed step — NOT a silent "succeeded with nothing
+        # delivered" (the exact silent-failure the gate exists to prevent).
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.delenv("ARTIFACTS_BUCKET_NAME", raising=False)
+
+        async def fake_run_agent(_prompt, system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(
+                status="success",
+                turns=2,
+                cost_usd=0.02,
+                num_turns=2,
+                result_text="## Summary\nThe three papers argue ...",
+            )
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-3",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        mock_setup_repo.assert_not_called()
+        # Agent succeeded, but delivery failed → overall error, no artifact URI.
+        assert result["status"] == "error"
+        assert result["artifact_uri"] is None
+        # The error names the failed delivery step so the failure is diagnosable.
+        assert "deliver" in (result["error"] or "").lower()
+        terminal_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repoless_artifact_outcome_without_uri_is_error(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # Code-review MEDIUM #1: WORKFLOWS.md defines primary:artifact success as
+        # "agent-success AND an S3 key present". The earlier gate only caught a
+        # deliverer that RAISED; a deliverer that returns success WITHOUT writing
+        # an artifact_uri would silently pass. Here run_workflow reports succeeded
+        # but leaves ctx.artifacts empty — the task must still be a loud FAILED.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        mock_task_span.return_value = self._mock_span()
+
+        from workflow import WorkflowResult
+
+        def fake_run_workflow(wf, ctx, only_kinds=None):
+            # Agent succeeded, but no artifact_uri lands in ctx.artifacts.
+            ctx.agent_result = AgentResult(
+                status="success", turns=1, cost_usd=0.01, num_turns=1, result_text="done"
+            )
+            return WorkflowResult.from_outcomes(ctx, wf.terminal_outcomes)
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("workflow.run_workflow", side_effect=fake_run_workflow),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Summarise these three papers",
+                aws_region="us-east-1",
+                task_id="repoless-4",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        mock_setup_repo.assert_not_called()
+        assert result["status"] == "error"
+        assert result["artifact_uri"] is None
+        # The error names the artifact/S3 contract so the failure is diagnosable.
+        assert "artifact" in (result["error"] or "").lower()
+        terminal_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_repo_optional_workflow_with_repo_takes_repo_bound_path(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # PR review #296 finding #3: requires_repo:false means repo-OPTIONAL, not
+        # repo-forbidden. When a repo IS supplied for default/agent-v1, the agent
+        # must clone/build/PR (repo-bound path) to match the repo-bound prompt the
+        # orchestrator assembled — NOT silently take the repo-less branch and skip
+        # the clone. So setup_repo MUST be called here.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value="https://github.com/org/repo/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="Do it against this repo",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="repo-optional-1",
+                resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        # Repo present + repo-optional workflow ⇒ repo-bound path ran.
+        mock_setup_repo.assert_called_once()
+        assert result["status"] == "success"
+        assert result["pr_url"] == "https://github.com/org/repo/pull/1"
 
 
 class TestChainPriorAgentError:
@@ -241,7 +529,7 @@ class TestCancelSkipsPostHooks:
     pipeline must skip post-hooks so no PR is pushed on a cancelled task.
     """
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -309,7 +597,7 @@ class TestCancelSkipsPostHooks:
         assert result["status"] == "cancelled"
         assert result["task_id"] == "t-cancelled"
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -370,6 +658,90 @@ class TestCancelSkipsPostHooks:
 
         mock_ensure_pr.assert_called_once()
 
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_post_hook_workflow_reload_failure_still_opens_pr(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # PR review #296 finding #5: the post-hook reload runs AFTER run_agent has
+        # mutated/committed the tree. If load_workflow raises there (e.g. the
+        # file build_config already fell back on), the task must NOT be stranded
+        # FAILED with no PR — it falls back to the default "create" strategy and
+        # still calls ensure_pr, mirroring build_config's fail-soft handling.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        # Phase marker: the post-hook reload is the only load_workflow call that
+        # happens AFTER the agent runs. Loads before the agent (build_config, the
+        # run_agent step dispatch) must succeed so the task actually starts; the
+        # post-hook reload is the one we force to fail — regardless of how many
+        # pre-agent loads happen (the reviewers noted it's parsed 3-4x/task).
+        agent_ran = {"done": False}
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            agent_ran["done"] = True
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._running_span()
+
+        mock_ensure_pr = MagicMock(return_value="https://github.com/o/r/pull/1")
+
+        from workflow import WorkflowValidationError
+        from workflow import load_workflow as real_load
+
+        def flaky_load(workflow_id):
+            if agent_ran["done"]:
+                raise WorkflowValidationError("simulated post-hook reload failure")
+            return real_load(workflow_id)
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", mock_ensure_pr),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("workflow.load_workflow", side_effect=flaky_load),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-posthook-fallback",
+                resolved_workflow={"id": "coding/new-task-v1", "version": "1.0.0"},
+            )
+
+        # The reload failed but the work was still finalized into a PR.
+        mock_ensure_pr.assert_called_once()
+        assert mock_ensure_pr.call_args.kwargs["strategy"] == "create"
+        assert result["pr_url"] == "https://github.com/o/r/pull/1"
+
+    @staticmethod
+    def _running_span() -> MagicMock:
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        return span
+
 
 # ---------------------------------------------------------------------------
 # Chunk K1 — trace threading into TaskConfig (design §10.1)
@@ -383,7 +755,7 @@ class TestTraceThreading:
     with a dedicated test.
     """
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -451,7 +823,7 @@ class TestTraceThreading:
         assert captured_config.trace is True
         assert captured_config.user_id == "cognito-sub-trace-user"
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -514,7 +886,7 @@ class TestTraceThreading:
         assert captured_config is not None
         assert captured_config.trace is False
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -582,7 +954,7 @@ class TestTraceThreading:
         assert captured_config is not None
         assert captured_config.initial_approval_gate_count == 17
 
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -658,7 +1030,7 @@ class TestTraceS3Upload:
     TaskRecord update is atomic with terminal-status."""
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -732,7 +1104,7 @@ class TestTraceS3Upload:
         assert terminal_result["trace_s3_uri"] == "s3://b/traces/u-1/t-up.jsonl.gz"
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -792,7 +1164,7 @@ class TestTraceS3Upload:
         assert result["trace_s3_uri"] is None
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -863,7 +1235,7 @@ class TestTraceS3Upload:
         assert not mock_upload.called
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -930,7 +1302,7 @@ class TestTraceS3Upload:
         assert result["trace_s3_uri"] is None
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1008,7 +1380,7 @@ class TestTraceS3Upload:
         assert "trace_s3_uri" not in result
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1101,7 +1473,7 @@ class TestTraceS3Upload:
         assert result["task_id"] == "t-cancelled-trace"
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1187,7 +1559,7 @@ class TestTraceCrashPath:
     pipeline exception."""
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
@@ -1267,7 +1639,7 @@ class TestTraceCrashPath:
         assert crash_result["trace_s3_uri"] == "s3://b/traces/u-1/t-crash.jsonl.gz"
 
     @patch("pipeline.upload_trace_to_s3")
-    @patch("pipeline.run_agent")
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")

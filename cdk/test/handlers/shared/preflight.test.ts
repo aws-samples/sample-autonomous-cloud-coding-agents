@@ -299,6 +299,26 @@ describe('runPreflightChecks', () => {
     expect(failedChecks.length).toBeGreaterThanOrEqual(1);
   });
 
+  test('repo-less workflow (requiresRepo=false) short-circuits to passed (#248 Phase 3)', async () => {
+    // No repo to pre-flight: returns passed with no checks and no GitHub calls.
+    const result = await runPreflightChecks(undefined, baseBlueprintConfig, undefined, false, false);
+
+    expect(result.passed).toBe(true);
+    expect(result.checks).toHaveLength(0);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test('repo-bound workflow with no repo fails closed (internal invariant) (#248 Phase 3)', async () => {
+    // requiresRepo=true but repo undefined should never happen (admission
+    // enforces it); if it does, the guard fails closed and loud, not crash/pass.
+    const result = await runPreflightChecks(undefined, baseBlueprintConfig, undefined, false, true);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
+    expect(result.failureDetail).toContain('invariant');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   test('passes when prNumber is provided and PR is open', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
@@ -405,7 +425,7 @@ describe('runPreflightChecks', () => {
         json: async () => ({ data: { repository: { viewerPermission: 'TRIAGE' } } }),
       });
 
-    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, 'pr_review');
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, true);
 
     expect(result.passed).toBe(true);
   });
@@ -422,7 +442,7 @@ describe('runPreflightChecks', () => {
         json: async () => ({ data: { repository: { viewerPermission: 'READ' } } }),
       });
 
-    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, 'pr_review');
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 7, true);
 
     expect(result.passed).toBe(false);
     expect(result.failureReason).toBe(PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS);
