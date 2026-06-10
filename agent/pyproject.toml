@@ -34,6 +34,12 @@ dependencies = [
     # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
     # the parity-contract banner in mise.toml.
     "cedarpy==4.8.4", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.8.2 (both Cedar Rust 4.8.2)
+    # Workflow-driven tasks (#248): the step runner loads YAML workflow files
+    # and validates them against agent/workflows/schema/workflow.schema.json.
+    # Both were previously only transitively present; declared directly so the
+    # workflow loader does not depend on another package's transitive pin.
+    "pyyaml==6.0.3", #https://pypi.org/project/PyYAML/
+    "jsonschema==4.26.0", #https://pypi.org/project/jsonschema/
 ]
 
 [tool.uv]
