@@ -53,6 +53,35 @@ export function extractLinearIdentifier(text: string | null | undefined): string
 }
 
 /**
+ * Pull the Linear identifier out of an ABCA-generated git branch name.
+ *
+ * This is the *authoritative* identifier source for the screenshot
+ * router, and it must be tried before PR title/body. ABCA derives every
+ * task branch as `bgagent/{taskId}/{slug}` where the slug is
+ * `slugify("ABCA-151: <title>")` — so the identifier is ALWAYS the
+ * leading slug segment (see `generateBranchName` / `slugify` in
+ * `gateway.ts`, and the `${identifier}: ${title}` description built in
+ * `linear-webhook-processor.ts` / `orchestration-release.ts`).
+ *
+ * Why branch-first matters (issue #247): in a stacked sub-issue
+ * orchestration, an agent's PR *body* commonly narrates the predecessor
+ * issue ("cherry-picked from ABCA-151 … Closes ABCA-152") before the
+ * issue the PR actually closes. `extractLinearIdentifier` returns the
+ * first match in document order, so body-first routing misattributes the
+ * screenshot to the predecessor. The branch name has no such ambiguity —
+ * it encodes exactly one issue, the PR's own.
+ *
+ * The slug is lowercased by `slugify`, so we upper-case before matching
+ * (the identifier regex anchors on `[A-Z]`). The ULID `taskId` segment
+ * contains no `-`, so it can never produce a false `<KEY>-<n>` match
+ * ahead of the real identifier.
+ */
+export function extractLinearIdentifierFromBranch(branchName: string | null | undefined): string | null {
+  if (!branchName) return null;
+  return extractLinearIdentifier(branchName.toUpperCase());
+}
+
+/**
  * Resolved Linear issue location, paired with the workspace that owns
  * it. The screenshot processor uses these to construct a
  * LinearFeedbackContext + issueId for postIssueComment.

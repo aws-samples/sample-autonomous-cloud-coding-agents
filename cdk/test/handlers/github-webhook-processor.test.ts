@@ -45,9 +45,11 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 
 const findLinearIssueMock = jest.fn();
 const extractLinearIdentifierMock = jest.fn();
+const extractFromBranchMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-issue-lookup', () => ({
   findLinearIssueByIdentifier: (...args: unknown[]) => findLinearIssueMock(...args),
   extractLinearIdentifier: (...args: unknown[]) => extractLinearIdentifierMock(...args),
+  extractLinearIdentifierFromBranch: (...args: unknown[]) => extractFromBranchMock(...args),
 }));
 
 process.env.SCREENSHOT_BUCKET_NAME = 'screenshot-bucket';
@@ -88,6 +90,7 @@ describe('github-webhook-processor handler', () => {
     postIssueCommentMock.mockReset();
     findLinearIssueMock.mockReset();
     extractLinearIdentifierMock.mockReset();
+    extractFromBranchMock.mockReset();
     jest.restoreAllMocks();
   });
 
@@ -147,6 +150,32 @@ describe('github-webhook-processor handler', () => {
     }
   });
 
+  test('picks the head-SHA owner when commit-pulls returns a stacked chain (#247)', async () => {
+    // A stacked sub-issue chain: the deploy SHA `abc1234` is the head of
+    // PR 73, but the commit-pulls API also lists PRs 74 and 75 stacked on
+    // top (their history contains the commit). The PR whose own head is
+    // the SHA must win, so the screenshot routes to 73's branch.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([
+      { number: 73, state: 'open', title: 't73', body: 'b73', head: { ref: 'bgagent/01T/abca-152-x', sha: 'abc1234' } },
+      { number: 74, state: 'open', title: 't74', body: 'b74', head: { ref: 'bgagent/01T/abca-153-y', sha: 'def5678' } },
+      { number: 75, state: 'open', title: 't75', body: 'b75', head: { ref: 'bgagent/01T/abca-154-z', sha: 'aaa9999' } },
+    ]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce('ABCA-152');
+    findLinearIssueMock.mockResolvedValueOnce({ issueId: 'issue-152', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' });
+    postIssueCommentMock.mockResolvedValueOnce(true);
+
+    await handler(payload());
+
+    const commentArg = upsertTaskCommentMock.mock.calls[0][0] as { issueOrPrNumber: number };
+    expect(commentArg.issueOrPrNumber).toBe(73);
+    expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01T/abca-152-x');
+    expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-152');
+  });
+
   test('happy path: PR found → screenshot → S3 → PR comment posted', async () => {
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{ number: 17, state: 'open', title: 'feat: add x', body: 'body' }]);
@@ -203,10 +232,12 @@ describe('github-webhook-processor handler', () => {
 
   test('Linear branch fires when registry table set + identifier in PR title', async () => {
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    fetchOk([{ number: 17, state: 'open', title: 'ABCA-42 fix login', body: 'body' }]);
+    // No branch identifier here — exercises the title fallback path.
+    fetchOk([{ number: 17, state: 'open', title: 'ABCA-42 fix login', body: 'body', head: { ref: 'feature-x', sha: 'abc1234' } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce(null);
     extractLinearIdentifierMock.mockReturnValueOnce('ABCA-42');
     findLinearIssueMock.mockResolvedValueOnce({
       issueId: 'issue-uuid',
@@ -225,12 +256,48 @@ describe('github-webhook-processor handler', () => {
     expect(linearArg[2]).toContain('https://d1.cloudfront.net/screenshots/owner_repo/abc1234-42.png');
   });
 
-  test('falls back to extractor on PR body when title yields no identifier', async () => {
+  test('branch-name identifier wins over a predecessor named in the PR body (#247 stacked PR)', async () => {
+    // The #247 Lisbon-epic regression: PR #73 (closes ABCA-152) carries a
+    // body that mentions ABCA-151 ("cherry-picked from predecessor branch
+    // ABCA-151") BEFORE the issue it closes. Branch-first routing must win
+    // so the screenshot lands on ABCA-152, not the predecessor.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    fetchOk([{ number: 17, state: 'open', title: 'feat: add foo', body: 'closes ABCA-42' }]);
+    fetchOk([{
+      number: 73,
+      state: 'open',
+      title: 'feat(destinations): add Lisbon destination card',
+      body: 'cherry-picked from predecessor branch ABCA-151 ... Closes ABCA-152',
+      head: { ref: 'bgagent/01TASK/abca-152-link-lisbon-from-destinationsht', sha: 'abc1234' },
+    }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    // Real branch extractor behaviour: pulls ABCA-152 from the branch.
+    extractFromBranchMock.mockReturnValueOnce('ABCA-152');
+    findLinearIssueMock.mockResolvedValueOnce({
+      issueId: 'issue-152',
+      linearWorkspaceId: 'ws-1',
+      workspaceSlug: 'abca',
+    });
+    postIssueCommentMock.mockResolvedValueOnce(true);
+
+    await handler(payload());
+
+    // Routed to ABCA-152 from the branch; title/body extractor never consulted.
+    expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01TASK/abca-152-link-lisbon-from-destinationsht');
+    expect(findLinearIssueMock).toHaveBeenCalledWith('ABCA-152', 'LinearWorkspaceRegistry');
+    expect(extractLinearIdentifierMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-152');
+  });
+
+  test('falls back to title then body when branch yields no identifier', async () => {
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'feat: add foo', body: 'closes ABCA-42', head: { ref: 'random-branch', sha: 'abc1234' } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce(null); // branch produces no match
     extractLinearIdentifierMock
       .mockReturnValueOnce(null) // title produces no match
       .mockReturnValueOnce('ABCA-42'); // body does
@@ -243,6 +310,7 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
+    expect(extractFromBranchMock).toHaveBeenCalledTimes(1);
     expect(extractLinearIdentifierMock).toHaveBeenCalledTimes(2);
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
   });
