@@ -44,6 +44,14 @@ updates:
     groups:
       all-python:
         patterns: ["*"]
+    ignore:
+      # Cedar engine parity — bump in lockstep with @cedar-policy/cedar-wasm via a
+      # dedicated coordinated PR. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23).
+      - dependency-name: "cedarpy"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
 
   - package-ecosystem: "npm"
     directories:
@@ -59,3 +67,11 @@ updates:
     groups:
       all-npm:
         patterns: ["*"]
+    ignore:
+      # Cedar engine parity — bump in lockstep with cedarpy via a dedicated
+      # coordinated PR. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23).
+      - dependency-name: "@cedar-policy/cedar-wasm"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"

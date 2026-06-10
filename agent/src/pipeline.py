@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -28,7 +29,6 @@ from post_hooks import (
 )
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
-from runner import run_agent
 from shell import log, log_error_cw
 from system_prompt import SYSTEM_PROMPT
 from telemetry import (
@@ -38,6 +38,9 @@ from telemetry import (
     print_metrics,
     upload_trace_to_s3,
 )
+
+if TYPE_CHECKING:
+    from workflow import Workflow
 
 _SDK_NO_RESULT_MESSAGE = (
     "Agent SDK stream ended without a ResultMessage (agent_status=unknown). "
@@ -146,6 +149,305 @@ def _maybe_upload_trace(
     return trace_s3_uri
 
 
+def _execute_agent_step(
+    prompt: str,
+    system_prompt: str,
+    config,
+    setup,
+    hydrated,
+    trajectory,
+    progress,
+):
+    """Run the agentic step through the workflow step runner.
+
+    Post-cutover (#248 task 8), the workflow runner is the sole path: the single
+    ``run_agent`` step is dispatched through ``workflow.run_workflow`` —
+    exercising the real handler registry, step milestones, and result threading —
+    while clone, context assembly, and post-hooks stay inline (moving the full
+    step list onto the runner is a follow-up). The workflow is loaded from the
+    resolved ``{id, version}`` pinned at the create-task boundary.
+
+    Returns the ``AgentResult`` so the surrounding pipeline (cancel short-circuit,
+    post-hooks, result assembly) is unchanged.
+    """
+    from workflow import StepContext, load_workflow, run_workflow
+
+    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    wf = load_workflow(workflow_id)
+    ctx = StepContext(
+        workflow=wf,
+        config=config,
+        hydrated=hydrated,
+        progress=progress,
+        trajectory=trajectory,
+        # Pre-populate the products the pipeline already built so the
+        # clone_repo/hydrate_context handlers reuse them idempotently rather
+        # than redo setup or rebuild the prompt the pipeline already injected
+        # attachment context into.
+        setup=setup,
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+    )
+    # Drive only the agentic step through the runner; clone, context assembly,
+    # and post-hooks stay on the inline path. only_kinds keeps the runner from
+    # re-running the deterministic steps the pipeline already owns (double clone
+    # / double PR).
+    result = run_workflow(wf, ctx, only_kinds={"run_agent"})
+
+    if ctx.agent_result is None:
+        # The run_agent step did not produce a result — i.e. its handler raised
+        # (run_workflow's _run_handler captures the exception into a failed
+        # StepOutcome instead of propagating it). Re-raise here so run_task's
+        # `except Exception` handles it with full fidelity: the log_error_cw
+        # APPLICATION_LOGS mirror, the span error, and the real error text.
+        detail = (
+            result.failed_step.error
+            if result.failed_step and result.failed_step.error
+            else "run_agent step produced no result"
+        )
+        raise RuntimeError(f"Workflow run_agent step failed: {detail}")
+    return ctx.agent_result
+
+
+def _run_repoless_task(
+    *,
+    config,
+    prompt: str,
+    hc,
+    progress,
+    trajectory,
+    root_span,
+    start_time: float,
+    memory_id: str,
+    system_prompt_overrides: str,
+) -> dict:
+    """Run a repo-less workflow (#248 Phase 3) and return the result dict.
+
+    No clone / build / PR: the workflow runner drives the full repo-less step
+    list (``hydrate_context`` → ``run_agent`` → ``deliver_artifact``) inside the
+    container, then a terminal ``TaskResult`` is assembled and persisted. The
+    deliver_artifact step uploads the agent's result text to ``artifacts/{task_id}/``
+    (and/or records a comment milestone), so the workflow's declared terminal
+    outcome is actually produced; a delivery failure surfaces as a terminal
+    FAILED rather than a silent "succeeded with nothing delivered".
+    """
+    from prompt_builder import build_repoless_system_prompt
+    from workflow import StepContext, load_workflow, run_workflow
+
+    workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
+    wf = load_workflow(workflow_id)
+    system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
+
+    ctx = StepContext(
+        workflow=wf,
+        config=config,
+        hydrated=hc,
+        progress=progress,
+        trajectory=trajectory,
+        setup=None,  # repo-less: no RepoSetup
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+    )
+    # Drive the full repo-less step list: hydrate_context → run_agent →
+    # deliver_artifact. The deliverer uploads the agent's result text to
+    # artifacts/{task_id}/ (and/or surfaces it as a comment), so the declared
+    # terminal outcome is actually produced (#248 Phase 3).
+    with task_span("task.agent_execution"):
+        wf_result = run_workflow(wf, ctx)
+
+    agent_result = ctx.agent_result
+    if agent_result is None:
+        # The run_agent step never produced a result — surface the underlying
+        # failed-step error (e.g. the SDK loop raised) rather than a generic
+        # message, so the terminal error is diagnosable.
+        failed = wf_result.failed_step
+        underlying = failed.error if failed and failed.error else None
+        agent_result = AgentResult(
+            status="error",
+            error=(
+                f"repo-less run_agent produced no result: {underlying}"
+                if underlying
+                else "repo-less run_agent produced no result"
+            ),
+        )
+    progress.write_agent_milestone(
+        "agent_execution_complete",
+        f"status={agent_result.status} turns={agent_result.turns}",
+    )
+
+    duration = time.time() - start_time
+    # No build/PR for a repo-less task; build_ok is vacuously true.
+    overall_status, result_error = _resolve_overall_task_status(
+        agent_result, build_ok=True, pr_url=None
+    )
+
+    # Delivery gate: deliver_artifact is the workflow's side-effecting terminal
+    # step. WORKFLOWS.md defines primary:artifact success as "agent-success AND
+    # an S3 artifact key is present" — so the gate has two arms:
+    #   1. the runner reported a failed step (deliver_artifact raised), or
+    #   2. the workflow's primary outcome is `artifact` but no artifact_uri was
+    #      produced — i.e. delivery "succeeded" without writing the retrievable
+    #      key the contract requires.
+    # Either way the task produced nothing the user can retrieve, so it is a loud
+    # FAILED rather than a silent "succeeded with no deliverable". Arm 2 closes
+    # the gap where a deliverer that returns without raising (but also without an
+    # S3 key) would otherwise pass the gate (code-review MEDIUM #1).
+    artifact_uri = ctx.artifacts.get("artifact_uri")
+    primary_outcome = wf.terminal_outcomes.primary
+    if overall_status == "success" and not wf_result.succeeded:
+        overall_status = "error"
+        failed = wf_result.failed_step
+        result_error = (
+            f"Agent completed but delivery failed at step "
+            f"{(failed.name if failed else 'deliver_artifact')!r}: "
+            f"{(failed.error if failed and failed.error else 'unknown delivery error')}"
+        )
+        log("WARN", result_error)
+    elif overall_status == "success" and primary_outcome == "artifact" and not artifact_uri:
+        overall_status = "error"
+        result_error = (
+            "Agent completed and delivery reported success, but no artifact_uri "
+            "was produced — the workflow's primary outcome is 'artifact', which "
+            "requires a retrievable S3 key (WORKFLOWS.md success contract)."
+        )
+        log("WARN", result_error)
+
+    trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+
+    # Episodic memory for a repo-less task is keyed on user:{user_id} (ADR-014
+    # addendum) — the same namespace the orchestrator fallback + hydration read.
+    # Fail-open: a memory write failure must not fail the task.
+    memory_written = False
+    effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
+    if effective_memory_id and config.user_id:
+        import memory as agent_memory
+
+        memory_written = agent_memory.write_task_episode(
+            memory_id=effective_memory_id,
+            actor=f"user:{config.user_id}",
+            task_id=config.task_id,
+            status="COMPLETED" if overall_status == "success" else "FAILED",
+            cost_usd=agent_result.cost_usd,
+            duration_s=round(duration, 1),
+        )
+
+    usage = agent_result.usage
+    turns_attempted = agent_result.num_turns or agent_result.turns
+    result = TaskResult(
+        status=overall_status,
+        agent_status=agent_result.status,
+        pr_url=None,
+        artifact_uri=artifact_uri,
+        cost_usd=agent_result.cost_usd,
+        turns=turns_attempted,
+        turns_attempted=turns_attempted,
+        turns_completed=_compute_turns_completed(
+            agent_status=agent_result.status,
+            turns_attempted=turns_attempted,
+            max_turns=config.max_turns,
+        ),
+        duration_s=round(duration, 1),
+        task_id=config.task_id,
+        memory_written=memory_written,
+        error=result_error,
+        session_id=agent_result.session_id or None,
+        input_tokens=usage.input_tokens if usage else None,
+        output_tokens=usage.output_tokens if usage else None,
+        cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
+        trace_s3_uri=trace_s3_uri,
+    )
+    result_dict = result.model_dump()
+
+    root_span.set_attribute("task.status", result.status)
+    root_span.set_attribute("task.repo_less", True)
+    if result.cost_usd is not None:
+        root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
+
+    print_metrics(result_dict)
+    terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
+    task_state.write_terminal(config.task_id, terminal_status, result_dict)
+    return result_dict
+
+
+def _apply_post_hook_gates(
+    workflow: Workflow | None,
+    *,
+    read_only: bool,
+    build_passed: bool,
+    lint_passed: bool,
+    build_before: bool,
+    lint_before: bool,
+) -> bool:
+    """Resolve the coding lane's post-hook verify gates against the workflow (#301).
+
+    Decision (issue #301 acceptance criteria): the inline post-hook path
+    CONSULTS each declared ``verify_build`` / ``verify_lint`` step's ``gate``
+    through the runner's ``gate_status`` — the single place gate semantics live —
+    rather than routing the post-hooks through the runner's step handlers.
+    Routing through the runner would also change failure-path side effects (a
+    gating ``verify_build`` with ``on_failure: fail`` stops the runner *before*
+    ``ensure_pr``, stranding committed work with no PR), which is the broader
+    half-migrated-runner unification the issue defers. Here the inline ordering
+    (verify → ensure_pr always runs) is preserved; only the task verdict honors
+    the declared gate.
+
+    Per-step semantics:
+
+    - A declared step gates per its ``gate`` (``strict`` | ``regression_only`` |
+      ``informational``; unset = ``regression_only``), but only when its
+      ``on_failure`` is ``fail`` — ``continue``/``skip_remaining`` steps are
+      advisory for the task verdict, matching the runner.
+    - An undeclared ``verify_build`` keeps the legacy regression-only gating
+      (identical to ``gate_status`` with ``gate=None``).
+    - An undeclared ``verify_lint`` never gates (legacy: lint is not used for
+      terminal status unless a workflow opts in by declaring the step).
+    - ``workflow is None`` (post-hook reload failed) falls back to the legacy
+      gating for both, so a corrupt file cannot strand the agent's work.
+    """
+    from workflow import gate_status
+
+    steps = list(workflow.steps) if workflow is not None else []
+    gates_ok = True
+    for kind, passed, was_passing_before in (
+        ("verify_build", build_passed, build_before),
+        ("verify_lint", lint_passed, lint_before),
+    ):
+        step = next((s for s in steps if s.kind == kind), None)
+        if step is None:
+            if kind == "verify_lint":
+                continue
+            gate, gating, on_failure = None, True, "fail"
+        else:
+            gate, gating, on_failure = step.gate, step.on_failure == "fail", step.on_failure
+        status = gate_status(
+            passed=passed,
+            gate=gate,
+            read_only=read_only,
+            was_passing_before=was_passing_before,
+        )
+        if passed:
+            continue
+        label = gate or "regression_only"
+        if status == "succeeded":
+            if read_only:
+                log("INFO", f"read-only workflow: {kind} failed — informational only, not gating")
+            elif gate == "informational":
+                log("INFO", f"{kind} failed — gate=informational, not gating")
+            else:
+                log(
+                    "WARN",
+                    f"Post-agent {kind} failed, but it was already failing before "
+                    "agent changes — not counting as regression",
+                )
+        elif gating:
+            log("WARN", f"{kind} failed — gate={label} gates the task")
+            gates_ok = False
+        else:
+            log("INFO", f"{kind} failed — gate={label} but on_failure={on_failure}, not gating")
+    return gates_ok
+
+
 def _resolve_overall_task_status(
     agent_result: AgentResult,
     *,
@@ -230,7 +532,7 @@ def _write_memory(
     # Memory writes are individually fail-open (return False on error)
     episode_ok = agent_memory.write_task_episode(
         memory_id=memory_id,
-        repo=config.repo_url,
+        actor=config.repo_url,
         task_id=config.task_id,
         status="COMPLETED" if build_passed else "FAILED",
         pr_url=pr_url,
@@ -253,7 +555,7 @@ def _write_memory(
 
 
 def run_task(
-    repo_url: str,
+    repo_url: str = "",
     task_description: str = "",
     issue_number: str = "",
     github_token: str = "",
@@ -266,7 +568,7 @@ def run_task(
     system_prompt_overrides: str = "",
     prompt_version: str = "",
     memory_id: str = "",
-    task_type: str = "new_task",
+    resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
@@ -306,7 +608,7 @@ def run_task(
         aws_region=aws_region,
         task_id=task_id,
         system_prompt_overrides=system_prompt_overrides,
-        task_type=task_type,
+        resolved_workflow=resolved_workflow,
         branch_name=branch_name,
         pr_number=pr_number,
         channel_source=channel_source,
@@ -433,6 +735,33 @@ def run_task(
 
                     prompt = assemble_prompt(config)
 
+            # Repo-less path (#248 Phase 3): a knowledge workflow has no repo to
+            # clone, build, or PR. Drive its steps (hydrate_context → run_agent →
+            # deliver_artifact) through the workflow runner and assemble the
+            # terminal result, skipping the repo-coupled segment below entirely.
+            #
+            # ``requires_repo: false`` means repo-OPTIONAL, not repo-forbidden:
+            # create-task-core admits and persists a repo for such a workflow,
+            # and the orchestrator then assembles a repo-bound prompt (issue/PR
+            # fetch). Keying the repo-less branch on ``requires_repo`` ALONE made
+            # the agent skip the clone while the prompt promised a repo — the two
+            # halves disagreed (PR review #296 finding #3). So take the repo-less
+            # path only when no repo was actually supplied; when a repo IS present
+            # it is hydrated as context exactly like a coding task (clone → build →
+            # PR), honoring the repo-bound prompt the orchestrator built.
+            if not config.requires_repo and not config.repo_url:
+                return _run_repoless_task(
+                    config=config,
+                    prompt=prompt,
+                    hc=hc,
+                    progress=progress,
+                    trajectory=trajectory,
+                    root_span=root_span,
+                    start_time=time.time(),
+                    memory_id=memory_id,
+                    system_prompt_overrides=system_prompt_overrides,
+                )
+
             # Configure git and gh auth before setup_repo() uses them
             subprocess.run(
                 ["git", "config", "--global", "user.name", "bgagent"],
@@ -545,14 +874,14 @@ def run_task(
                 )
             with task_span("task.agent_execution") as agent_span:
                 try:
-                    agent_result = asyncio.run(
-                        run_agent(
-                            prompt,
-                            system_prompt,
-                            config,
-                            cwd=setup.repo_dir,
-                            trajectory=trajectory,
-                        )
+                    agent_result = _execute_agent_step(
+                        prompt,
+                        system_prompt,
+                        config,
+                        setup,
+                        hc,
+                        trajectory,
+                        progress,
                     )
                 except Exception as e:
                     # Fatal agent error: mirror to APPLICATION_LOGS so
@@ -623,19 +952,56 @@ def run_task(
                     "turns_attempted": agent_result.num_turns or agent_result.turns,
                 }
 
+            # Resolve the post-hook gating inputs: read_only, the ensure_pr
+            # strategy (create / push_resolve / resolve), and the verify steps'
+            # declared gates (#301) the workflow declares.
+            #
+            # ``read_only`` comes from ``config`` — build_config already computed
+            # it (with its own fail-soft fallback) and it drove Cedar during the
+            # run, so reusing it keeps the post-hook on the SAME verdict rather
+            # than re-deriving a possibly-divergent one. The workflow file is
+            # reloaded for the ensure_pr STRATEGY and the verify-step GATES, and
+            # that reload is wrapped in the same WorkflowValidationError fallback
+            # build_config uses (config.py): this code path runs AFTER run_agent
+            # has already mutated / committed the tree, so a load failure here
+            # must NOT strand the work as FAILED with no PR — it falls back to
+            # the default "create" strategy + legacy regression-only gating and
+            # still opens the PR (PR review #296 finding #5).
+            from workflow import WorkflowValidationError, load_workflow
+
+            workflow_read_only = config.read_only
+            _workflow = None
+            try:
+                _workflow = load_workflow(
+                    (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+                )
+                ensure_pr_strategy = next(
+                    (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
+                    "create",
+                )
+            except WorkflowValidationError as exc:
+                log(
+                    "WARN",
+                    f"post-hook workflow reload failed ({exc}); defaulting ensure_pr "
+                    "strategy to 'create' so the agent's work is not stranded",
+                )
+                ensure_pr_strategy = "create"
+
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
                 # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)
-                if config.task_type == "pr_review":
-                    safety_committed = False
-                else:
-                    safety_committed = ensure_committed(setup.repo_dir)
+                safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
                 build_passed = verify_build(setup.repo_dir)
                 lint_passed = verify_lint(setup.repo_dir)
                 pr_url = ensure_pr(
-                    config, setup, build_passed, lint_passed, agent_result=agent_result
+                    config,
+                    setup,
+                    build_passed,
+                    lint_passed,
+                    agent_result=agent_result,
+                    strategy=ensure_pr_strategy,
                 )
                 post_span.set_attribute("build.passed", build_passed)
                 post_span.set_attribute("lint.passed", lint_passed)
@@ -663,23 +1029,19 @@ def run_task(
 
             # Overall status: do not infer success from PR/build when the SDK never
             # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
-            # NOTE: lint_passed is intentionally NOT used for terminal status.
+            # Gating honors each verify step's declared ``gate`` via the runner's
+            # gate_status (#301); an undeclared verify_lint never gates (legacy).
             agent_status = agent_result.status
-            # Default True = assume build was green before, so a post-agent
-            # failure IS counted as a regression (conservative).
-            build_before = setup.build_before
-            if config.task_type == "pr_review":
-                build_ok = True  # Review task — build status is informational only
-                if not build_passed:
-                    log("INFO", "pr_review: build failed — informational only, not gating")
-            else:
-                build_ok = build_passed or not build_before
-            if not build_passed and not build_before and config.task_type != "pr_review":
-                log(
-                    "WARN",
-                    "Post-agent build failed, but build was already failing before "
-                    "agent changes — not counting as regression",
-                )
+            build_ok = _apply_post_hook_gates(
+                _workflow,
+                read_only=workflow_read_only,
+                build_passed=build_passed,
+                lint_passed=lint_passed,
+                # setup defaults assume green-before, so a post-agent failure IS
+                # counted as a regression (conservative).
+                build_before=setup.build_before,
+                lint_before=setup.lint_before,
+            )
             overall_status, result_error = _resolve_overall_task_status(
                 agent_result,
                 build_ok=build_ok,

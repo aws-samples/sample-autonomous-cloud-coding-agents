@@ -49,7 +49,7 @@ export default defineConfig({
           label: 'Using the Platform',
           items: [
             { slug: 'using/overview' },
-            { slug: 'using/task-types' },
+            { slug: 'using/workflows' },
             { slug: 'using/authentication' },
             { slug: 'using/using-the-rest-api' },
             { slug: 'using/using-the-cli' },
@@ -57,6 +57,7 @@ export default defineConfig({
             { slug: 'using/slack-setup-guide' },
             { slug: 'using/linear-setup-guide' },
             { slug: 'using/linear-pak-migration-runbook' },
+            { slug: 'using/deploy-preview-screenshots-guide' },
             { slug: 'using/task-lifecycle' },
             { slug: 'using/what-the-agent-does' },
             { slug: 'using/tips-for-being-a-good-citizen' },

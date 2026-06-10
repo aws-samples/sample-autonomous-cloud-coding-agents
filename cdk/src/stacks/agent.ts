@@ -41,6 +41,7 @@ import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
+import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
@@ -320,6 +321,9 @@ export class AgentStack extends Stack {
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
       // terminal state when the submit payload enabled ``trace``.
       TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
+      // Repo-less deliverable artifacts (#248 Phase 3): a deliver_artifact step
+      // uploads its product to ``artifacts/<task_id>/`` in the same bucket.
+      ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
       MAX_TURNS: '100',
@@ -828,6 +832,44 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
       value: linearIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    // --- GitHub deployment-status → screenshot pipeline ---
+    // Listens for GitHub deployment_status events from any provider
+    // (Vercel, Amplify Hosting, Netlify, GitHub Actions custom CD),
+    // screenshots the `deployment.environment_url` via AgentCore
+    // Browser, posts the image into a fresh PR comment. Default-on:
+    // any repo whose GitHub webhook is configured will get
+    // screenshotted on successful preview deploys; no opt-in flag.
+    const githubScreenshot = new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
+      api: taskApi.api,
+      githubTokenSecret,
+      // When the screenshot lands on a PR linked to a Linear issue
+      // (identifier in the PR title/body), also post the screenshot
+      // as a comment on that Linear issue. Wired through the existing
+      // workspace registry so token resolution reuses the per-workspace
+      // OAuth secrets created by `bgagent linear setup`.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+    });
+
+    new CfnOutput(this, 'GitHubWebhookUrl', {
+      value: `${taskApi.api.url}github/webhook`,
+      description: 'URL to configure as the GitHub webhook target on demo repos (deployment_status events)',
+    });
+
+    new CfnOutput(this, 'GitHubWebhookSecretArn', {
+      value: githubScreenshot.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the GitHub webhook signing secret — paste GitHub\'s value here after configuring the webhook',
+    });
+
+    new CfnOutput(this, 'ScreenshotBucketName', {
+      value: githubScreenshot.screenshotBucket.bucket.bucketName,
+      description: 'Private S3 bucket hosting preview-deploy screenshots (served via CloudFront)',
+    });
+
+    new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
+      value: githubScreenshot.screenshotBucket.distribution.domainName,
+      description: 'CloudFront domain that serves the screenshot bucket anonymously to GitHub PR / Linear renders',
     });
 
     // --- Bedrock model invocation logging (account-level) ---
