@@ -1,0 +1,15 @@
+{
+  "name": "read-only-false-permits-write",
+  "description": "#248 Phase 2a: the read-only Write/Edit hard-deny is GATED on context.read_only == true. With read_only=false, Write falls through to base_permit. Proves the deny attaches to the property and does NOT block writeable workflows — the inverse of read-only-forbid-write.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"read_only_forbid_write\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource == Agent::Tool::\"Write\") when { context.read_only == true };\n@tier(\"hard\") @rule_id(\"read_only_forbid_edit\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource == Agent::Tool::\"Edit\") when { context.read_only == true };",
+  "input": {
+    "principal": { "type": "Agent::TaskAgent", "id": "new_task" },
+    "action":    { "type": "Agent::Action",    "id": "invoke_tool" },
+    "resource":  { "type": "Agent::Tool",      "id": "Write" },
+    "context":   { "read_only": false }
+  },
+  "expected": {
+    "decision": "allow",
+    "matching_rule_ids": ["base_permit"]
+  }
+}

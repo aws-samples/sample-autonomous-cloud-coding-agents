@@ -1,0 +1,54 @@
+# The migrated `pr_review` task type: review an existing pull request without
+# mutating it. Selected via workflow_ref (pr_review → coding/pr-review-v1).
+#
+# read_only:true with Write/Edit dropped from allowed_tools (validator rule 6 —
+# read-only tier may not grant mutating tools). Read-only is enforced by Cedar
+# `context.read_only == true` (hard-deny read_only_forbid_write/edit) AND by the
+# trimmed allowed_tools — defense in depth. It resolves the existing PR URL
+# without pushing via ensure_pr(strategy: resolve); the post_review step is not
+# used (its registered handler is intentionally unimplemented). The Cedar
+# principal is the id-derived audit identity "pr_review" — enforcement keys off
+# context.read_only, not the principal.
+id: coding/pr-review-v1
+version: 1.0.0
+domain: coding
+description: Review an existing pull request and post findings; never mutates the PR.
+requires_repo: true
+read_only: true
+prompt:
+  template: registry://prompt/coding-pr-review-workflow
+  placeholders:
+    - repo_url
+    - task_id
+    - workspace
+    - branch_name
+    - default_branch
+    - max_turns
+    - setup_notes
+    - memory_context
+    - pr_number
+hydration:
+  sources: [pull_request, memory, task_description]
+agent_config:
+  tier: read-only
+  # No Write/Edit — read-only tier may not grant mutating tools (validator rule 6).
+  allowed_tools: [Bash, Read, Glob, Grep, WebFetch]
+  cedar_policy_modules: [builtin/hard_deny]
+repo_config:
+  provider: github
+  discover: true
+required_inputs:
+  all_of: [pr_number]
+steps:
+  - { kind: clone_repo,      name: setup }
+  - { kind: hydrate_context, name: context }
+  - { kind: run_agent,       name: review }
+  - { kind: verify_build,    name: build, gate: informational }
+  - { kind: ensure_pr,       name: resolve_pr, strategy: resolve }
+terminal_outcomes:
+  primary: pr_url
+limits:
+  max_turns: 100
+promotion_gate:
+  requires: [tests:agent/pr_review]
+status: production

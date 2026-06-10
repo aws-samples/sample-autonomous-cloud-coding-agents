@@ -311,6 +311,42 @@ class TestWriteTerminalTraceS3Uri:
         update_expr = calls[0]["UpdateExpression"]
         assert "trace_s3_uri" not in update_expr
 
+
+class TestWriteTerminalArtifactUri:
+    """#248 Phase 3 — write_terminal persists artifact_uri so a repo-less task's
+    delivered S3 artifact is discoverable via TaskDetail. Regression guard: the
+    field was previously dropped by the write_terminal allowlist."""
+
+    def test_artifact_uri_written_when_present(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-art",
+            "COMPLETED",
+            {"artifact_uri": "s3://bkt/artifacts/t-art/result.md"},
+        )
+        update_expr = calls[0]["UpdateExpression"]
+        assert "artifact_uri = :au" in update_expr
+        assert calls[0]["ExpressionAttributeValues"][":au"] == "s3://bkt/artifacts/t-art/result.md"
+
+    def test_artifact_uri_omitted_when_absent(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-noart", "COMPLETED", {"pr_url": "https://github.com/o/r/pull/1"}
+        )
+        assert "artifact_uri" not in calls[0]["UpdateExpression"]
+
     def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
         self,
         monkeypatch,

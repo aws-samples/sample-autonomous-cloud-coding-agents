@@ -115,7 +115,7 @@ interface MemoryRecordSummary {
 function processMemoryRecords(
   records: MemoryRecordSummary[],
   out: string[],
-  repo: string,
+  actorNamespace: string,
   namespacePath: string,
   recordType: string,
 ): void {
@@ -128,7 +128,7 @@ function processMemoryRecords(
       // during extraction (summarization, consolidation). Log at WARN so
       // CloudWatch alarms can detect spikes (genuine tampering or write bugs).
       logger.warn('Memory record hash mismatch (expected for extracted records)', {
-        repo,
+        actor_namespace: actorNamespace,
         namespace_path: namespacePath,
         record_type: recordType,
         expected_hash: record.metadata?.content_sha256?.stringValue ?? '(none)',
@@ -180,17 +180,19 @@ function getClient(): BedrockAgentCoreClient {
  */
 export async function loadMemoryContext(
   memoryId: string,
-  repo: string,
+  actorNamespace: string,
   taskDescription?: string,
 ): Promise<MemoryContext | undefined> {
   try {
     const client = getClient();
 
     // Namespace paths derived from the strategy templates configured in agent-memory.ts.
-    // Events are written with actorId = repo, so extracted records land at
-    // /{repo}/knowledge/ and /{repo}/episodes/{taskId}/.
-    const semanticNamespacePath = `/${repo}/knowledge/`;
-    const episodicNamespacePath = `/${repo}/episodes/`;
+    // Events are written with actorId = the namespace key (a repo for coding
+    // tasks, ``user:{user_id}`` for repo-less workflows — ADR-014 addendum
+    // 2026-06-08), so extracted records land at /{actorNamespace}/knowledge/
+    // and /{actorNamespace}/episodes/{taskId}/.
+    const semanticNamespacePath = `/${actorNamespace}/knowledge/`;
+    const episodicNamespacePath = `/${actorNamespace}/episodes/`;
 
     // Run semantic and episodic searches in parallel
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
@@ -227,11 +229,11 @@ export async function loadMemoryContext(
     const pastEpisodes: string[] = [];
 
     if (semanticResult?.memoryRecordSummaries) {
-      processMemoryRecords(semanticResult.memoryRecordSummaries, repoKnowledge, repo, semanticNamespacePath, 'repo_knowledge');
+      processMemoryRecords(semanticResult.memoryRecordSummaries, repoKnowledge, actorNamespace, semanticNamespacePath, 'repo_knowledge');
     }
 
     if (episodicResult?.memoryRecordSummaries) {
-      processMemoryRecords(episodicResult.memoryRecordSummaries, pastEpisodes, repo, episodicNamespacePath, 'past_episode');
+      processMemoryRecords(episodicResult.memoryRecordSummaries, pastEpisodes, actorNamespace, episodicNamespacePath, 'past_episode');
     }
 
     if (repoKnowledge.length === 0 && pastEpisodes.length === 0) {
@@ -262,7 +264,7 @@ export async function loadMemoryContext(
     }
 
     logger.info('Memory context loaded', {
-      repo,
+      actor_namespace: actorNamespace,
       repo_knowledge_count: budgetedKnowledge.length,
       past_episodes_count: budgetedEpisodes.length,
       total_tokens: totalTokens,
@@ -279,7 +281,7 @@ export async function loadMemoryContext(
     const level = isProgrammingError ? 'error' : 'warn';
     logger[level]('Memory context load failed (fail-open)', {
       memoryId,
-      repo,
+      actor_namespace: actorNamespace,
       error: err instanceof Error ? err.message : String(err),
       error_type: err instanceof Error ? err.constructor.name : typeof err,
       metric_type: isProgrammingError ? 'memory_load_bug' : 'memory_load_infra_failure',
@@ -310,7 +312,7 @@ export async function loadMemoryContext(
  */
 export async function writeMinimalEpisode(
   memoryId: string,
-  repo: string,
+  actorNamespace: string,
   taskId: string,
   status: TaskStatusType,
   durationS?: number,
@@ -333,7 +335,7 @@ export async function writeMinimalEpisode(
 
     await client.send(new CreateEventCommand({
       memoryId,
-      actorId: repo,
+      actorId: actorNamespace,
       sessionId: taskId,
       eventTimestamp: new Date(),
       payload: [{
@@ -351,7 +353,7 @@ export async function writeMinimalEpisode(
       },
     }));
 
-    logger.info('Minimal episode written by orchestrator fallback', { taskId, repo });
+    logger.info('Minimal episode written by orchestrator fallback', { taskId, actorNamespace });
     return true;
   } catch (err) {
     const isProgrammingError = err instanceof TypeError

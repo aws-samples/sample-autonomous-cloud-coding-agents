@@ -428,7 +428,7 @@ describe('classifyError', () => {
       user_id: 'user-1',
       status: 'FAILED',
       repo: 'owner/repo',
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       branch_name: 'bgagent/task-1/fix',
       channel_source: 'api',
       status_created_at: 'FAILED#2026-01-01T00:00:00Z',

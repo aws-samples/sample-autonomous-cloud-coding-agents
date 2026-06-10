@@ -51,7 +51,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: 42,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: null,
       branch_name: 'bgagent/abc/fix',
@@ -77,7 +77,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', issue_number: 42 },
+      { repo: 'owner/repo', issue_number: 42, workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
@@ -89,7 +89,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: 'Fix the bug',
       branch_name: 'bgagent/abc/fix',
@@ -115,7 +115,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'Fix the bug' },
+      { repo: 'owner/repo', task_description: 'Fix the bug', workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
   });
@@ -141,7 +141,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: 'Fix the bug',
       branch_name: 'bgagent/abc/fix',
@@ -168,7 +168,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50 },
+      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50, workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
   });
@@ -195,13 +195,75 @@ describe('submit command', () => {
     ).rejects.toThrow('At least one of --issue, --task, --pr, or --review-pr is required');
   });
 
+  test('errors when --repo is omitted without --workflow', async () => {
+    // #248 LOW: --repo is no longer a hard requiredOption (repo-less workflows
+    // need to be submittable), but it stays mandatory unless --workflow selects
+    // a workflow the server can admit repo-less.
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--task', 'Research the tradeoffs',
+      ]),
+    ).rejects.toThrow('--repo is required');
+  });
+
+  test('errors when --repo is omitted with --pr (PR workflows need a repo)', async () => {
+    const cmd = makeSubmitCommand();
+    await expect(
+      cmd.parseAsync([
+        'node', 'test',
+        '--pr', '42',
+        '--workflow', 'coding/pr-iteration-v1',
+      ]),
+    ).rejects.toThrow('--repo is required with --pr/--review-pr');
+  });
+
+  test('submits a repo-less task: --workflow + --task, no --repo (#248 Phase 3)', async () => {
+    mockCreateTask.mockResolvedValue({
+      task_id: 'abc',
+      status: 'SUBMITTED',
+      repo: null,
+      issue_number: null,
+      resolved_workflow: { id: 'knowledge/web-research-v1', version: '1.0.0' },
+      pr_number: null,
+      task_description: 'Research the tradeoffs',
+      branch_name: null,
+      session_id: null,
+      pr_url: null,
+      error_message: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      duration_s: null,
+      cost_usd: null,
+      build_passed: null,
+      max_turns: null,
+      max_budget_usd: null,
+    });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--workflow', 'knowledge/web-research-v1',
+      '--task', 'Research the tradeoffs',
+    ]);
+
+    // No ``repo`` key in the body — the server admits it as repo-less.
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { workflow_ref: 'knowledge/web-research-v1', task_description: 'Research the tradeoffs' },
+      undefined,
+    );
+  });
+
   test('submits a pr_iteration task with --pr', async () => {
     mockCreateTask.mockResolvedValue({
       task_id: 'pr-abc',
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 42,
       task_description: null,
       branch_name: 'pending:pr_resolution',
@@ -227,7 +289,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_type: 'pr_iteration', pr_number: 42 },
+      { repo: 'owner/repo', workflow_ref: 'coding/pr-iteration-v1', pr_number: 42 },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
@@ -239,7 +301,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'pr_review',
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
       pr_number: 55,
       task_description: null,
       branch_name: 'pending:pr_resolution',
@@ -265,7 +327,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_type: 'pr_review', pr_number: 55 },
+      { repo: 'owner/repo', workflow_ref: 'coding/pr-review-v1', pr_number: 55 },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
@@ -295,7 +357,7 @@ describe('submit command', () => {
     ]);
 
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'deep debugging', trace: true },
+      { repo: 'owner/repo', task_description: 'deep debugging', trace: true, workflow_ref: 'coding/new-task-v1' },
       undefined,
     );
   });
@@ -322,7 +384,7 @@ describe('submit command', () => {
       status: 'SUBMITTED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 42,
       task_description: 'Fix the null check',
       branch_name: 'pending:pr_resolution',
@@ -352,7 +414,7 @@ describe('submit command', () => {
       {
         repo: 'owner/repo',
         task_description: 'Fix the null check',
-        task_type: 'pr_iteration',
+        workflow_ref: 'coding/pr-iteration-v1',
         pr_number: 42,
       },
       undefined,
@@ -375,6 +437,7 @@ describe('submit command', () => {
       expect(body).toEqual({
         repo: 'owner/repo',
         task_description: 'ok',
+        workflow_ref: 'coding/new-task-v1',
         approval_timeout_s: 120,
       });
     });

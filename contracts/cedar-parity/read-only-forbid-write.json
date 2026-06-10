@@ -1,0 +1,15 @@
+{
+  "name": "read-only-forbid-write",
+  "description": "#248 Phase 2a: read-only enforcement keys off context.read_only (not a principal literal). With read_only=true, invoke_tool on Write is hard-denied for ANY principal. Locks the property-keyed deny against a silent stop-matching regression.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"read_only_forbid_write\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource == Agent::Tool::\"Write\") when { context.read_only == true };\n@tier(\"hard\") @rule_id(\"read_only_forbid_edit\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource == Agent::Tool::\"Edit\") when { context.read_only == true };",
+  "input": {
+    "principal": { "type": "Agent::TaskAgent", "id": "pr_review" },
+    "action":    { "type": "Agent::Action",    "id": "invoke_tool" },
+    "resource":  { "type": "Agent::Tool",      "id": "Write" },
+    "context":   { "read_only": true }
+  },
+  "expected": {
+    "decision": "deny",
+    "matching_rule_ids": ["read_only_forbid_write"]
+  }
+}

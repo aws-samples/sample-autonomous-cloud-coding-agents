@@ -203,7 +203,9 @@ const MAX_POLL_INTERVAL_MS = 300_000;
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
-  const repoConfig = await loadRepoConfig(task.repo);
+  // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
+  // defaults directly rather than a RepoTable lookup on a missing repo.
+  const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
     logger.info('Loaded per-repo blueprint config', {
@@ -343,7 +345,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     try {
       await emitTaskEvent(task.task_id, 'guardrail_blocked', {
         reason: hydratedContext.guardrail_blocked,
-        task_type: task.task_type,
+        resolved_workflow: task.resolved_workflow?.id,
         pr_number: task.pr_number,
         sources: hydratedContext.sources,
         token_estimate: hydratedContext.token_estimate,
@@ -508,7 +510,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
-    task_type: task.task_type ?? 'new_task',
+    resolved_workflow: task.resolved_workflow ?? { id: 'coding/new-task-v1', version: '1.0.0' },
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
     ...(task.task_description && { prompt: task.task_description }),
@@ -744,9 +746,12 @@ export async function finalizeTask(
           { field: 'cost_usd', task_id: taskId },
           logger,
         );
+        // Memory actorId: repo for coding tasks, user:{user_id} for repo-less
+        // workflows (#248 Phase 3, ADR-014 addendum 2026-06-08).
+        const actorNamespace = task.repo ?? `user:${task.user_id}`;
         const written = await writeMinimalEpisode(
           MEMORY_ID,
-          task.repo,
+          actorNamespace,
           taskId,
           currentStatus,
           durationS ?? undefined,

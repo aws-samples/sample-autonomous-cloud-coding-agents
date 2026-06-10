@@ -2,26 +2,9 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-
-class TaskType(StrEnum):
-    """Supported task types."""
-
-    new_task = "new_task"
-    pr_iteration = "pr_iteration"
-    pr_review = "pr_review"
-
-    @property
-    def is_pr_task(self) -> bool:
-        return self in (TaskType.pr_iteration, TaskType.pr_review)
-
-    @property
-    def is_read_only(self) -> bool:
-        return self == TaskType.pr_review
 
 
 class IssueComment(BaseModel):
@@ -127,17 +110,54 @@ class HydratedContext(BaseModel):
 class TaskConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
-    repo_url: str
+    # repo_url / github_token default to "" so a repo-less TaskConfig (#248
+    # Phase 3) is constructible. The _validate_requires_repo_has_repo validator
+    # below enforces that a repo-BOUND config (requires_repo=True, the default)
+    # still carries a repo_url — so dropping the field-level requirement does not
+    # weaken the coding-path invariant.
+    repo_url: str = ""
     issue_number: str = ""
     task_description: str = ""
-    github_token: str
+    github_token: str = ""
     aws_region: str
     anthropic_model: str = "us.anthropic.claude-sonnet-4-6"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None
     system_prompt_overrides: str = ""
-    task_type: str = "new_task"
+    # The pinned workflow this task runs ({"id", "version"}), resolved at the
+    # create-task boundary and threaded through the payload (#248). None on
+    # local/batch runs, where the pipeline defaults to coding/new-task-v1.
+    resolved_workflow: dict | None = None
+    # The Cedar principal identity derived from the resolved workflow
+    # (id→legacy map, else "new_task"). The Agent::TaskAgent::"<id>" principal
+    # scheme is unchanged; since #248 Phase 2a, read-only enforcement no longer
+    # keys off this principal — it keys off ``read_only`` below.
+    policy_principal: str = "new_task"
+    # Whether the resolved workflow is read-only (may not mutate the working
+    # tree). Threaded into the Cedar request ``context.read_only`` so the
+    # hard-deny Write/Edit rules fire for *any* read-only workflow (#248
+    # Phase 2a), and drives the runner's allowed_tools tightening.
+    read_only: bool = False
+    # The SDK tool surface for this task, from the resolved workflow's
+    # ``agent_config.allowed_tools`` (#248). This is the second enforcement layer
+    # the design promises alongside ``read_only``: ``run_agent`` passes it to
+    # ``ClaudeAgentOptions.allowed_tools`` verbatim, and drops ``Write``/``Edit``
+    # when ``read_only`` is true. Empty list means "fall back to the built-in
+    # full surface" so legacy/batch callers that never resolved a workflow keep
+    # working unchanged; a workflow that wants to restrict tools MUST declare a
+    # non-empty list (every shipped workflow does).
+    allowed_tools: list[str] = Field(default_factory=list)
+    # Whether the resolved workflow requires a repo. False for repo-less
+    # knowledge workflows (#248 Phase 3): the pipeline skips clone/build/PR and
+    # drives the agent + deliver_artifact steps through the workflow runner.
+    # Defaults True so coding tasks (and any caller that omits it) keep the
+    # repo-bound path.
+    requires_repo: bool = True
+    # True when the resolved workflow operates on an existing PR (pr_* coding
+    # workflows) — gates the "resume existing branch / resolve PR" behavior that
+    # the removed task_type used to signal.
+    is_pr_workflow: bool = False
     branch_name: str = ""
     pr_number: str = ""
     task_id: str = ""
@@ -209,6 +229,27 @@ class TaskConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_requires_repo_has_repo(self) -> Self:
+        """Fail at construction when a repo-bound config has no repo (#248 Phase 3).
+
+        ``requires_repo`` defaults True, so a config that requires a repo but
+        carries an empty ``repo_url`` is an illegal state the repo-bound pipeline
+        (clone/build/PR) cannot run. The create-task boundary and ``build_config``
+        already enforce this upstream; this validator makes the invariant
+        self-enforcing on the type so a directly-constructed ``TaskConfig`` (tests,
+        future call sites) cannot represent it silently. Mirrors
+        ``_validate_trace_requires_user_id`` above.
+        """
+        if self.requires_repo and not self.repo_url:
+            raise ValueError(
+                "requires_repo=True requires a non-empty repo_url. A repo-less "
+                "workflow must set requires_repo=False (resolved from the "
+                "workflow's requires_repo); a repo-bound workflow must supply "
+                "repo_url ('owner/repo')."
+            )
+        return self
+
 
 class RepoSetup(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -240,6 +281,11 @@ class AgentResult(BaseModel):
     session_id: str = ""
     error: str | None = None
     usage: TokenUsage | None = None
+    # The agent's final result text (ResultMessage.result on success). For a
+    # repo-less knowledge task this IS the deliverable that deliver_artifact
+    # uploads/posts (#248 Phase 3). Empty for coding tasks (their product is the
+    # PR, not the text).
+    result_text: str = ""
 
 
 class TaskResult(BaseModel):
@@ -281,3 +327,7 @@ class TaskResult(BaseModel):
     # TaskRecord's ``trace_s3_uri`` field is set atomically with the
     # terminal-status transition (design §10.1).
     trace_s3_uri: str | None = None
+    # S3 URI of a repo-less workflow's delivered artifact (deliver_artifact, #248
+    # Phase 3), or ``None`` for coding tasks / when no artifact was delivered.
+    # Surfaced on TaskDetail so the user can retrieve the knowledge-task output.
+    artifact_uri: str | None = None

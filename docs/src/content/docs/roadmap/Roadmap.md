@@ -20,9 +20,11 @@ What's shipped and what's coming next.
 
 ### Task types
 
-- [x] **`new_task`** - Branch, implement, build/test, open PR
-- [x] **`pr_iteration`** - Check out PR branch, read review feedback, address it, push
-- [x] **`pr_review`** - Read-only structured code review via GitHub Reviews API (no Write/Edit tools)
+- [x] **Workflow-driven tasks** - Task types are declarative, versioned **workflow** files (`agent/workflows/**`) interpreted by an agent-side step runner, not hardcoded `task_type` branches. Selected via `workflow_ref` (the `task_type` enum is removed). New task types are authored as YAML + registered step handlers, not core-code changes ([ADR-014](/architecture/adr-014-workflow-driven-tasks), [WORKFLOWS.md](/architecture/workflows))
+- [x] **`coding/new-task-v1`** - Branch, implement, build/test, open PR
+- [x] **`coding/pr-iteration-v1`** - Check out PR branch, read review feedback, address it, push
+- [x] **`coding/pr-review-v1`** - Read-only structured code review via GitHub Reviews API (no Write/Edit tools)
+- [x] **Repo-less (knowledge) workflows** - `requires_repo:false` workflows run end-to-end with no GitHub repo: `hydrate_context → run_agent → deliver_artifact`, delivering the agent's result to S3 (`artifacts/{task_id}/`) surfaced on `TaskDetail.artifact_uri`. Ships a reference `knowledge/web-research-v1` workflow; memory keys on `user:{user_id}`
 
 ### Onboarding and customization
 

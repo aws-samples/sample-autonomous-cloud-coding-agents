@@ -1,0 +1,50 @@
+# The migrated `pr_iteration` task type: iterate on an existing pull request —
+# push follow-up commits to its branch and resolve the PR URL. Selected via
+# workflow_ref (the new_task→coding mapping: pr_iteration → coding/pr-iteration-v1).
+#
+# Faithful migration of the inline pr_iteration behavior using
+# ensure_pr(strategy: push_resolve). Its Cedar principal is the id-derived audit
+# identity "pr_iteration" (writeable); since Phase 2a, read-only enforcement keys
+# off context.read_only, not the principal — and this workflow is not read-only.
+id: coding/pr-iteration-v1
+version: 1.0.0
+domain: coding
+description: Iterate on an existing pull request — push follow-up commits and resolve the PR.
+requires_repo: true
+read_only: false
+prompt:
+  template: registry://prompt/coding-pr-iteration-workflow
+  placeholders:
+    - repo_url
+    - task_id
+    - workspace
+    - branch_name
+    - default_branch
+    - max_turns
+    - setup_notes
+    - memory_context
+    - pr_number
+hydration:
+  sources: [pull_request, memory, task_description]
+agent_config:
+  tier: standard
+  allowed_tools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch]
+  cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
+repo_config:
+  provider: github
+  discover: true
+required_inputs:
+  all_of: [pr_number]
+steps:
+  - { kind: clone_repo,      name: setup }
+  - { kind: hydrate_context, name: context }
+  - { kind: run_agent,       name: iterate }
+  - { kind: verify_build,    name: build, gate: regression_only }
+  - { kind: ensure_pr,       name: resolve_pr, strategy: push_resolve }
+terminal_outcomes:
+  primary: pr_url
+limits:
+  max_turns: 100
+promotion_gate:
+  requires: [tests:agent/pr_iteration]
+status: production

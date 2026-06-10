@@ -233,7 +233,7 @@ describe('hydrateAndTransition', () => {
       ...mockHydratedContext,
       guardrail_blocked: 'PR context blocked by content policy',
     });
-    const prTask = { ...baseTask, task_type: 'pr_iteration', pr_number: 10 };
+    const prTask = { ...baseTask, resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' }, pr_number: 10 };
     await expect(hydrateAndTransition(prTask as any)).rejects.toThrow(
       'Guardrail blocked: PR context blocked by content policy',
     );
@@ -245,7 +245,7 @@ describe('hydrateAndTransition', () => {
     const guardrailEvent = putCalls.find((item: any) => item.event_type === 'guardrail_blocked');
     expect(guardrailEvent).toBeDefined();
     expect(guardrailEvent.metadata.reason).toBe('PR context blocked by content policy');
-    expect(guardrailEvent.metadata.task_type).toBe('pr_iteration');
+    expect(guardrailEvent.metadata.resolved_workflow).toBe('coding/pr-iteration-v1');
     expect(guardrailEvent.metadata.pr_number).toBe(10);
     expect(guardrailEvent.metadata.sources).toEqual(['task_description']);
     expect(guardrailEvent.metadata.token_estimate).toBe(20);
@@ -265,7 +265,7 @@ describe('hydrateAndTransition', () => {
       ...mockHydratedContext,
       guardrail_blocked: 'PR context blocked by content policy',
     });
-    const prTask = { ...baseTask, task_type: 'pr_iteration', pr_number: 10 };
+    const prTask = { ...baseTask, resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' }, pr_number: 10 };
     await expect(hydrateAndTransition(prTask as any)).rejects.toThrow(
       'Guardrail blocked: PR context blocked by content policy',
     );

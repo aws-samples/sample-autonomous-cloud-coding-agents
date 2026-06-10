@@ -1,4 +1,4 @@
-"""Unit tests for models.py — TaskType enum and Pydantic models."""
+"""Unit tests for models.py — Pydantic models (the TaskType enum was removed in #248)."""
 
 import pytest
 from pydantic import ValidationError
@@ -13,42 +13,8 @@ from models import (
     RepoSetup,
     TaskConfig,
     TaskResult,
-    TaskType,
     TokenUsage,
 )
-
-
-class TestTaskType:
-    def test_new_task_value(self):
-        assert TaskType.new_task == "new_task"
-
-    def test_pr_iteration_value(self):
-        assert TaskType.pr_iteration == "pr_iteration"
-
-    def test_pr_review_value(self):
-        assert TaskType.pr_review == "pr_review"
-
-    def test_new_task_is_not_pr_task(self):
-        assert not TaskType.new_task.is_pr_task
-
-    def test_pr_iteration_is_pr_task(self):
-        assert TaskType.pr_iteration.is_pr_task
-
-    def test_pr_review_is_pr_task(self):
-        assert TaskType.pr_review.is_pr_task
-
-    def test_new_task_is_not_read_only(self):
-        assert not TaskType.new_task.is_read_only
-
-    def test_pr_iteration_is_not_read_only(self):
-        assert not TaskType.pr_iteration.is_read_only
-
-    def test_pr_review_is_read_only(self):
-        assert TaskType.pr_review.is_read_only
-
-    def test_str_enum_membership(self):
-        assert TaskType.new_task == "new_task"
-        assert TaskType.pr_review == "pr_review"
 
 
 class TestIssueComment:
@@ -251,7 +217,9 @@ class TestTaskConfig:
             aws_region="us-east-1",
         )
         assert config.repo_url == "owner/repo"
-        assert config.task_type == "new_task"
+        assert config.policy_principal == "new_task"
+        assert config.resolved_workflow is None
+        assert config.is_pr_workflow is False
         assert config.cedar_policies == []
         assert config.issue is None
 
@@ -302,6 +270,25 @@ class TestTaskConfig:
         )
         assert config.trace is True
         assert config.user_id == "cognito-sub-abc-123"
+
+    def test_requires_repo_with_empty_repo_url_raises(self):
+        """#248 Phase 3: requires_repo=True (the default) + empty repo_url is illegal."""
+        with pytest.raises(ValidationError, match="requires_repo=True requires a non-empty"):
+            TaskConfig(
+                aws_region="us-east-1",
+                task_description="x",
+                # repo_url defaults to "" and requires_repo defaults True
+            )
+
+    def test_repoless_config_with_empty_repo_url_constructs(self):
+        """A repo-less config (requires_repo=False) is valid with no repo_url."""
+        config = TaskConfig(
+            aws_region="us-east-1",
+            task_description="Summarise these papers",
+            requires_repo=False,
+        )
+        assert config.requires_repo is False
+        assert config.repo_url == ""
 
     def test_trace_false_allows_empty_user_id(self):
         """Negative control: local batch runs (trace=False, user_id='') still work."""

@@ -552,6 +552,17 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // A repo-less workflow (#248 Phase 3) has no GitHub repo to comment on —
+  // skip the GitHub channel entirely. (resolveCommentTarget would also return
+  // null below, but guarding on repo first narrows the type for upsertParams.)
+  if (!task.repo) {
+    logger.info('[fanout/github] repo-less task — skipping GitHub channel', {
+      event: 'fanout.github.no_repo',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
   const targetNumber = resolveCommentTarget(task);
   if (targetNumber === null) {
     // No issue / PR to comment on (API-submitted new_task with only a

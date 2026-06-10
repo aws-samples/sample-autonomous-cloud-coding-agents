@@ -36,6 +36,7 @@ import {
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
 import type { TaskRecord } from './shared/types';
+import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
 interface OrchestrateTaskEvent {
   readonly task_id: string;
@@ -100,7 +101,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       if (TERMINAL_STATUSES.includes(current.status)) {
         return false;
       }
-      const result = await runPreflightChecks(task.repo, blueprintConfig, task.pr_number, task.task_type);
+      const workflowId = task.resolved_workflow?.id ?? 'coding/new-task-v1';
+      const result = await runPreflightChecks(
+        task.repo,
+        blueprintConfig,
+        task.pr_number,
+        workflowIsReadOnly(workflowId),
+        workflowRequiresRepo(workflowId),
+      );
       if (!result.passed) {
         const errorMessage = `Pre-flight check failed: ${result.failureReason}${result.failureDetail ? ' — ' + result.failureDetail : ''}`;
         await failTask(taskId, current.status, errorMessage, task.user_id, true);
