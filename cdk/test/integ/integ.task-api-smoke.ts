@@ -186,14 +186,36 @@ getTask.expect(
 
 // Verify the user_id linkage directly in DynamoDB — the API's TaskDetail
 // response intentionally omits user_id, so assert it at the source. The value
-// is the Cognito sub (unknown at synth time); assert it persisted as a
-// non-empty string.
+// is the Cognito sub (unknown at synth time).
+//
+// The `.+` regex only confirms user_id persisted as a NON-EMPTY string; it does
+// not (and cannot, at synth time) check that the value equals this caller's sub.
+// The real identity binding is proven transitively by the chain above: the
+// authenticated GET /tasks/{id} returns 200 for the same task_id the POST
+// created, which means the row was written under, and is readable by, the token
+// we minted. This getItem just guards against a regression that writes a blank
+// or missing user_id.
 const getItem = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   TableName: stack.taskTable.table.tableName,
   Key: { task_id: { S: createTask.getAttString('body.data.task_id') } },
 });
 getItem.assertAtPath('Item.user_id.S', ExpectedResult.stringLikeRegexp('.+'));
 
+// Negative path: an unauthenticated POST /tasks must be rejected by the API's
+// Cognito authorizer (401) before any record is created. No getAttString is
+// read off this call, so flattenResponse stays false and the inline .expect()
+// works against the nested apiCallResponse.
+const unauthPost = integ.assertions.httpApiCall(`${stack.taskApi.api.url}tasks`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    repo: 'aws-samples/sample-autonomous-cloud-coding-agents',
+    task_description: 'this request should be rejected (no auth)',
+    max_turns: 1,
+  }),
+});
+unauthPost.expect(ExpectedResult.objectLike({ status: 401 }));
+
 // Chain the calls so they execute in order: create user → set password → auth →
-// POST → GET → DynamoDB read.
-createUser.next(setPassword).next(auth).next(createTask).next(getTask).next(getItem);
+// POST → GET → DynamoDB read → unauthenticated POST (must 401).
+createUser.next(setPassword).next(auth).next(createTask).next(getTask).next(getItem).next(unauthPost);

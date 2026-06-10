@@ -27,6 +27,9 @@ stopwords = ["test-signing-secret-abc123"]
 id = "aws-account-id"
 description = "AWS account ID (12-digit, bare or in ARN/role context)"
 regex = '''(?:^|[^0-9])([0-9]{12})(?:[^0-9]|$)'''
+# Report/redact capture group 1 (the bare 12-digit ID) rather than the whole
+# match, which would include the non-digit delimiter neighbours.
+secretGroup = 1
 keywords = [
     "account",
     "aws",

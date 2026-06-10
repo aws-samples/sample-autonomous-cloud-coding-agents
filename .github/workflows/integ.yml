@@ -50,7 +50,6 @@ jobs:
     permissions:
       statuses: write
       pull-requests: read
-      actions: read
     outputs:
       applicable: ${{ steps.decide.outputs.applicable }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
@@ -83,6 +82,12 @@ jobs:
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
           echo "head_repo=${WF_HEAD_REPO}" >> "$GITHUB_OUTPUT"
 
+          # Track whether we've posted a terminal integ-smoke status. If the job
+          # dies (failed API call, runner crash) before reaching one, the EXIT
+          # trap posts `error` so the required check resolves instead of hanging
+          # pending forever and silently blocking merge.
+          STATUS_POSTED=""
+
           post_status() {
             # $1=state $2=description
             gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
@@ -91,7 +96,23 @@ jobs:
               -f description="$2" \
               -f target_url="${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}" \
               >/dev/null
+            STATUS_POSTED="yes"
           }
+
+          on_exit() {
+            rc=$?
+            # Only meaningful in the workflow_run (PR) context and only if we have
+            # a SHA to post against and haven't already posted a terminal status.
+            if [[ $rc -ne 0 && -z "$STATUS_POSTED" && -n "${HEAD_SHA:-}" ]]; then
+              gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+                -f context=integ-smoke \
+                -f state=error \
+                -f description="resolve step failed before gating" \
+                -f target_url="${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}" \
+                >/dev/null 2>&1 || true
+            fi
+          }
+          trap on_exit EXIT
 
           resolve_pr_number() {
             if [[ -n "$PR_NUMBER_FROM_EVENT" ]]; then
@@ -108,9 +129,33 @@ jobs:
             exit 0
           fi
 
+          # Fork-PR safety: only run fork-authored code after a maintainer has
+          # applied the `safe-to-test` label (defence in depth on top of the
+          # `integ` environment approval). If it's absent, leave the status
+          # pending and don't run — re-trigger once the label is added.
+          if [[ "$WF_HEAD_REPO" != "$REPO" ]]; then
+            if ! LABELS=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '.[].name'); then
+              echo "::error::Failed to read labels for PR #$PR_NUMBER."
+              exit 1
+            fi
+            if ! echo "$LABELS" | grep -qx 'safe-to-test'; then
+              post_status pending "awaiting safe-to-test label on fork PR"
+              echo "applicable=false" >> "$GITHUB_OUTPUT"
+              echo "Fork PR #$PR_NUMBER lacks safe-to-test label — not running."
+              exit 0
+            fi
+          fi
+
           # Path-filter must happen here (not on.pull_request.paths) because the
-          # trigger is workflow_run.
-          CHANGED=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          # trigger is workflow_run. Fail loud on API error: a failed or truncated
+          # /files response must NOT fall through to a false-green skip. With
+          # `set -e`, an assignment inside an `if !` condition does not trip
+          # errexit, so we handle the failure explicitly and let the EXIT trap
+          # post `error`.
+          if ! CHANGED=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename'); then
+            echo "::error::Failed to list changed files for PR #$PR_NUMBER."
+            exit 1
+          fi
           if echo "$CHANGED" | grep -Eq '^(cdk|agent)/'; then
             post_status pending "awaiting admin approval / running"
             echo "applicable=true" >> "$GITHUB_OUTPUT"
@@ -184,15 +229,25 @@ jobs:
       # already gone), so `|| true` only guards transient API errors.
       - name: Ensure stack torn down
         if: always()
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         run: |
+          set -euo pipefail
           aws cloudformation delete-stack --stack-name backgroundagent-integ || true
-          aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ || true
+          # No `|| true` on the wait: a DELETE_FAILED must surface loudly so we
+          # never silently leak billable resources in the shared account.
+          aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
   report:
     needs: [resolve, integ]
-    if: always() && needs.resolve.outputs.applicable == 'true' && github.event_name == 'workflow_run'
+    if: >-
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.applicable == 'true' &&
+      github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     permissions:
       statuses: write
