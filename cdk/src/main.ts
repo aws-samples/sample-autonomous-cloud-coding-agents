@@ -38,7 +38,7 @@ const stack = new AgentStack(
   stackName,
   {
     env: devEnv,
-    description: 'ABCA Development Stack',
+    description: 'ABCA Development Stack (uksb-wt64nei4u6)',
   },
 );
 
