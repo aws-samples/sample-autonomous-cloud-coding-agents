@@ -1,0 +1,69 @@
+{
+  "name": "combined-schema-and-cross-field",
+  "description": "Missing steps (schema) + version major mismatch (rule-1) + no run_agent (rule-2) + unbacked pr_url outcome (rule-11).",
+  "workflow": {
+    "id": "coding/new-task-v1",
+    "version": "9.9.9",
+    "domain": "coding",
+    "description": "Implement a GitHub issue and open a PR.",
+    "requires_repo": true,
+    "read_only": false,
+    "prompt": {
+      "template": "registry://prompt/coding-new-task-workflow"
+    },
+    "hydration": {
+      "sources": [
+        "issue",
+        "memory",
+        "task_description"
+      ]
+    },
+    "agent_config": {
+      "tier": "standard",
+      "allowed_tools": [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebFetch"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny",
+        "builtin/soft_deny"
+      ]
+    },
+    "repo_config": {
+      "provider": "github",
+      "discover": true
+    },
+    "required_inputs": {
+      "one_of": [
+        "issue_number",
+        "task_description"
+      ]
+    },
+    "terminal_outcomes": {
+      "primary": "pr_url"
+    },
+    "limits": {
+      "max_turns": 100
+    },
+    "promotion_gate": {
+      "requires": [
+        "tests:agent/new_task"
+      ]
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "rule-1",
+      "rule-11",
+      "rule-2",
+      "schema"
+    ]
+  }
+}

@@ -160,8 +160,12 @@ describe('create-task handler', () => {
     expect(body.error.code).toBe('VALIDATION_ERROR');
   });
 
-  test('returns 400 for missing repo', async () => {
-    const event = makeEvent({ body: JSON.stringify({ task_description: 'Fix it' }) });
+  test('returns 400 for missing repo on a repo-bound workflow', async () => {
+    // #248 Phase 3: repo is required only when the resolved workflow's
+    // requires_repo is true. coding/new-task-v1 is repo-bound, so a missing
+    // repo is rejected; a repo-less workflow (default/agent-v1) is not (see
+    // the repo-less acceptance test below).
+    const event = makeEvent({ body: JSON.stringify({ workflow_ref: 'coding/new-task-v1', task_description: 'Fix it' }) });
     const result = await handler(event);
 
     expect(result.statusCode).toBe(400);
@@ -179,18 +183,23 @@ describe('create-task handler', () => {
     expect(body.error.code).toBe('VALIDATION_ERROR');
   });
 
-  test('returns 400 when neither issue_number nor task_description provided', async () => {
+  test('returns 400 when the resolved workflow has no satisfiable input', async () => {
+    // No workflow_ref ⇒ resolves to default/agent-v1, which requires
+    // task_description; a bare repo satisfies nothing.
     const event = makeEvent({ body: JSON.stringify({ repo: 'org/repo' }) });
     const result = await handler(event);
 
     expect(result.statusCode).toBe(400);
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('VALIDATION_ERROR');
-    expect(body.error.message).toContain('issue_number');
+    expect(body.error.message).toContain('task_description');
   });
 
-  test('accepts issue_number without task_description', async () => {
-    const event = makeEvent({ body: JSON.stringify({ repo: 'org/repo', issue_number: 42 }) });
+  test('accepts issue_number without task_description for the coding workflow', async () => {
+    // coding/new-task-v1 accepts one_of issue_number/task_description.
+    const event = makeEvent({
+      body: JSON.stringify({ repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 42 }),
+    });
     const result = await handler(event);
 
     expect(result.statusCode).toBe(201);
@@ -206,7 +215,7 @@ describe('create-task handler', () => {
       user_id: 'user-123',
       status: 'SUBMITTED',
       repo: 'org/repo',
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       task_description: 'Fix the bug',
       branch_name: 'bgagent/existing-task/slug',
       channel_source: 'api',
@@ -303,7 +312,9 @@ describe('create-task handler', () => {
   });
 
   test('skips guardrail when task uses issue_number only', async () => {
-    const event = makeEvent({ body: JSON.stringify({ repo: 'org/repo', issue_number: 42 }) });
+    const event = makeEvent({
+      body: JSON.stringify({ repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 42 }),
+    });
     const result = await handler(event);
 
     expect(result.statusCode).toBe(201);
