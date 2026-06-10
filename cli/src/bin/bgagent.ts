@@ -111,8 +111,9 @@ if (require.main === module) {
       // keep-alive timeout. Observed in Scenarios 6 and 7-extended
       // deploy validation where ``bgagent watch`` had to be ``pkill``-ed
       // after the task reached COMPLETED.
+      const EXIT_FLUSH_DELAY_MS = 50;
       setTimeout(() => {
         process.exit(process.exitCode ?? 0);
-      }, 50).unref();
+      }, EXIT_FLUSH_DELAY_MS).unref();
     });
 }

@@ -203,7 +203,7 @@ describe('loadMemoryContext', () => {
     expect(mockLoggerWarn).toHaveBeenCalledWith(
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
-        repo: 'owner/repo',
+        actor_namespace: 'owner/repo',
         namespace_path: '/owner/repo/knowledge/',
         record_type: 'repo_knowledge',
         expected_hash: wrongHash,
@@ -235,7 +235,7 @@ describe('loadMemoryContext', () => {
     expect(mockLoggerWarn).toHaveBeenCalledWith(
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
-        repo: 'owner/repo',
+        actor_namespace: 'owner/repo',
         namespace_path: '/owner/repo/episodes/',
         record_type: 'past_episode',
         expected_hash: wrongHash,
