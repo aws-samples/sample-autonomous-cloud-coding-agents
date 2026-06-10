@@ -17,10 +17,11 @@
  *  SOFTWARE.
  */
 
-import { GetCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, BatchWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   seedOrchestration,
   deriveOrchestrationId,
+  claimRollup,
 } from '../../../src/handlers/shared/orchestration-store';
 import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 
@@ -201,5 +202,34 @@ describe('seedOrchestration — idempotent replay', () => {
     // Only the Get fired — no BatchWrite.
     expect(ddb.send).toHaveBeenCalledTimes(1);
     expect(ddb.send.mock.calls[0][0]).toBeInstanceOf(GetCommand);
+  });
+});
+
+describe('claimRollup — exactly-once parent rollup', () => {
+  function makeDdb(): MockDdb { return { send: jest.fn() }; }
+
+  test('first claim wins (conditional write succeeds) → true', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({});
+    const won = await claimRollup(ddb as never, TABLE, 'orch_1', NOW);
+    expect(won).toBe(true);
+    const cmd = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(cmd).toBeInstanceOf(UpdateCommand);
+    expect(cmd.input.ConditionExpression).toContain('attribute_not_exists(rollup_posted_at)');
+    expect(cmd.input.Key).toMatchObject({ sub_issue_id: '#meta' });
+  });
+
+  test('second claim loses (ConditionalCheckFailed) → false, no throw', async () => {
+    const ddb = makeDdb();
+    const e = Object.assign(new Error('c'), { name: 'ConditionalCheckFailedException' });
+    ddb.send.mockRejectedValueOnce(e);
+    const won = await claimRollup(ddb as never, TABLE, 'orch_1', NOW);
+    expect(won).toBe(false);
+  });
+
+  test('non-conditional error propagates', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockRejectedValueOnce(new Error('throttle'));
+    await expect(claimRollup(ddb as never, TABLE, 'orch_1', NOW)).rejects.toThrow('throttle');
   });
 });

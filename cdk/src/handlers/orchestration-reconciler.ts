@@ -54,6 +54,7 @@ import {
 import { releaseReadyChildren } from './shared/orchestration-release';
 import { postRollup, rollupKindFromChildren } from './shared/orchestration-rollup';
 import {
+  claimRollup,
   loadOrchestration,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
@@ -259,14 +260,28 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     });
     // A5: post the aggregate rollup comment on the PARENT issue (the
     // fan-out plane only comments per-child sub-issue). Best-effort.
+    //
+    // Idempotency: the orchestration can reach "all terminal" on more
+    // than one stream event (the last child's record often gets two
+    // MODIFYs), which posted the rollup twice. claimRollup conditionally
+    // stamps the meta row — only the first caller posts.
     if (WORKSPACE_REGISTRY_TABLE) {
-      await postRollup({
-        ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
-        orchestrationId,
-        parentLinearIssueId: meta.parent_linear_issue_id,
-        kind: rollupKindFromChildren(freshChildren),
-        children: freshChildren,
-      });
+      const won = await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+      if (won) {
+        await postRollup({
+          ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
+          orchestrationId,
+          parentLinearIssueId: meta.parent_linear_issue_id,
+          kind: rollupKindFromChildren(freshChildren),
+          children: freshChildren,
+        });
+      } else {
+        logger.info('Rollup already claimed — skipping duplicate', {
+          event: ORCH_LOG.orchestrationComplete,
+          orchestration_id: orchestrationId,
+          duplicate_suppressed: true,
+        });
+      }
     }
   }
 }
