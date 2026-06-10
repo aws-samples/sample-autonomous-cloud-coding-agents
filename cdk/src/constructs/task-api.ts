@@ -295,6 +295,21 @@ export class TaskApi extends Construct {
                         textTransformations: [{ priority: 0, type: 'NONE' }],
                       },
                     },
+                    {
+                      // GitHub deployment_status webhook (preview-deploy
+                      // screenshot pipeline). The full payload (workflow run
+                      // history + deploy URLs + deployment metadata) exceeds
+                      // 8 KB and trips SizeRestrictions_BODY. HMAC-verified
+                      // in Lambda. (CloudWatch BlockedRequests metric
+                      // confirmed: SizeRestrictions_BODY fired, not RFI —
+                      // GenericRFI_BODY has never blocked on this WebACL.)
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/github/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
                   ],
                 },
               },
@@ -337,6 +352,18 @@ export class TaskApi extends Construct {
                             fieldToMatch: { uriPath: {} },
                             positionalConstraint: 'EXACTLY',
                             searchString: '/v1/linear/webhook',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/github/webhook',
                             textTransformations: [{ priority: 0, type: 'NONE' }],
                           },
                         },

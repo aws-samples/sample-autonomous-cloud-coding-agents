@@ -78,6 +78,7 @@ What's shipped and what's coming next.
 - [x] **GitHub edit-in-place** - Single status comment per task on the target PR, edited in place as progress events fire (phase, milestone, cost, link)
 - [x] **Routable agent milestones** - Named checkpoints (`pr_created`, `nudge_acknowledged`) unwrapped against allowlist for channel filter matching
 - [x] **Slack notification dispatcher** - FanOut Block Kit messages for Slack-origin tasks (lifecycle events, threaded replies, terminal dedup, in-thread cancel). Generic fallback text for unmapped event types (e.g. some milestones); richer milestone and approval-gate rendering is follow-up work
+- [x] **Deploy-preview screenshots** - Listens for GitHub `deployment_status: success` events from any provider (Vercel, Amplify Hosting, Netlify, GitHub Actions); captures the preview URL via AgentCore Browser; posts a markdown image comment on the open PR (and on the linked Linear issue if Linear is configured). Lambda-only, deterministic, ~10–15 s post-deploy. See [Deploy preview screenshots guide](./DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 - [ ] **Email dispatcher** - Log-only stub; pending SES integration
 
 ### Channels
