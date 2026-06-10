@@ -90,12 +90,24 @@ Creates a new task. The orchestrator runs admission control, context hydration, 
 |---|---|---|---|
 | `repo` | String | Yes | GitHub repository (`owner/repo`) |
 | `issue_number` | Number | No | GitHub issue number. Title, body, and comments are fetched during hydration. |
-| `task_description` | String | No | Free-text description (max 10,000 chars). At least one of `issue_number`, `task_description`, or `pr_number` required. |
-| `task_type` | String | No | `new_task` (default), `pr_iteration`, or `pr_review` |
-| `pr_number` | Number | No | PR to iterate on or review. Required when `task_type` is `pr_iteration` or `pr_review`. |
+| `task_description` | String | No | Free-text description (max 10,000 chars). At least one of `issue_number`, `task_description`, or `pr_number` required (per the resolved workflow's `required_inputs`). |
+| `workflow_ref` | String | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces `task_type` (#248). Omitted ⇒ the platform default workflow (`default/agent-v1`) is resolved. |
+| `pr_number` | Number | No | PR to iterate on or review. Required when the resolved workflow is a pull-request workflow (`coding/pr-iteration-v1`, `coding/pr-review-v1`). |
 | `max_turns` | Number | No | Max agent turns (1-500, default 100) |
 | `max_budget_usd` | Number | No | Cost ceiling in USD (0.01-100). If omitted, no budget limit. |
 | `attachments` | Array | No | Multi-modal attachments (see below) |
+
+**Migration from `task_type` (#248):** `task_type` was removed (no alias). Map
+callers one-to-one to `workflow_ref`:
+
+| Old `task_type` | New `workflow_ref` |
+|---|---|
+| `new_task` | `coding/new-task-v1` |
+| `pr_iteration` | `coding/pr-iteration-v1` |
+| `pr_review` | `coding/pr-review-v1` |
+
+Responses now carry `resolved_workflow: { id, version }` (the pinned workflow)
+in place of `task_type`.
 
 **Attachments:**
 
@@ -141,7 +153,7 @@ Creates a new task. The orchestrator runs admission control, context hydration, 
     "task_id": "01HYX...",
     "status": "SUBMITTED",
     "repo": "org/myapp",
-    "task_type": "new_task",
+    "resolved_workflow": { "id": "coding/new-task-v1", "version": "1.0.0" },
     "issue_number": 42,
     "branch_name": "bgagent/01HYX.../fix-auth-bug",
     "created_at": "2025-03-15T10:30:00Z"
@@ -194,7 +206,7 @@ Triggers security screening for presigned-upload attachments and transitions the
     "task_id": "01HYX...",
     "status": "SUBMITTED",
     "repo": "org/myapp",
-    "task_type": "new_task",
+    "resolved_workflow": { "id": "coding/new-task-v1", "version": "1.0.0" },
     "issue_number": 42,
     "branch_name": "bgagent/01HYX.../fix-auth-bug",
     "created_at": "2025-03-15T10:30:00Z",
@@ -223,7 +235,7 @@ Returns full details of a task. Users can only access their own tasks.
     "task_id": "01HYX...",
     "status": "RUNNING",
     "repo": "org/myapp",
-    "task_type": "new_task",
+    "resolved_workflow": { "id": "coding/new-task-v1", "version": "1.0.0" },
     "issue_number": 42,
     "task_description": "Fix the authentication bug in the login flow",
     "branch_name": "bgagent/01HYX.../fix-auth-bug",

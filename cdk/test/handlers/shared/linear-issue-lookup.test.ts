@@ -17,80 +17,69 @@
  *  SOFTWARE.
  */
 
-const ddbSend = jest.fn();
-jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
-jest.mock('@aws-sdk/lib-dynamodb', () => ({
-  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
-  ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
-}));
-
-const resolveLinearOauthTokenMock = jest.fn();
-jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
-  resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
-}));
+// `findLinearIssueByIdentifier` is covered by PR #275's broader test
+// suite (mocks the registry scan + GraphQL); this file only locks in
+// `extractLinearIdentifier` since it's a pure function and the g-flag
+// regex's `lastIndex` reset behavior is exactly the kind of thing that
+// breaks silently between releases. (theagenticguy PR-241 review.)
 
 import {
   extractLinearIdentifier,
   extractLinearIdentifierFromBranch,
-  findLinearIssueByIdentifier,
 } from '../../../src/handlers/shared/linear-issue-lookup';
 
-const REGISTRY = 'LinearWorkspaceRegistry';
-
-interface RegistryRow {
-  linear_workspace_id: string;
-  workspace_slug: string;
-  team_keys?: string[];
-}
-
-function scanResultRows(rows: RegistryRow[]): { Items: Record<string, unknown>[] } {
-  return { Items: rows.map((r) => ({ ...r, status: 'active' })) };
-}
-
-function mockGraphqlOnce(found: { id: string; identifier: string } | null, status = 200): jest.SpyInstance {
-  const fetchMock = jest.spyOn(global, 'fetch') as unknown as jest.SpyInstance;
-  fetchMock.mockResolvedValueOnce({
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => (found
-      ? { data: { issueVcsBranchSearch: found } }
-      : { data: { issueVcsBranchSearch: null } }),
-  } as unknown as Response);
-  return fetchMock;
-}
-
 describe('extractLinearIdentifier', () => {
-  test('matches an identifier in plain text', () => {
-    expect(extractLinearIdentifier('Fix bug ABCA-42 today')).toBe('ABCA-42');
-  });
-
-  test('returns the FIRST identifier when multiple are present', () => {
-    expect(extractLinearIdentifier('See ABCA-1 and PLAT-99')).toBe('ABCA-1');
-  });
-
-  test('handles identifiers with single-letter team keys', () => {
-    expect(extractLinearIdentifier('Closes A-7')).toBe('A-7');
-  });
-
-  test('returns null on null/undefined input', () => {
+  test('returns null for null / undefined / empty input', () => {
     expect(extractLinearIdentifier(null)).toBeNull();
     expect(extractLinearIdentifier(undefined)).toBeNull();
     expect(extractLinearIdentifier('')).toBeNull();
   });
 
-  test('rejects lowercase team keys (Linear keys are upper-case)', () => {
-    expect(extractLinearIdentifier('abca-42')).toBeNull();
+  test('extracts a Linear identifier from PR title shape', () => {
+    expect(extractLinearIdentifier('feat(linear): ABCA-42 do the thing'))
+      .toBe('ABCA-42');
   });
 
-  test('rejects identifiers with too many digits (regex bound)', () => {
-    expect(extractLinearIdentifier('ABCA-123456789')).toBeNull();
+  test('extracts a Linear identifier from PR body shape', () => {
+    expect(extractLinearIdentifier('Closes ABCA-42\n\nSummary…')).toBe('ABCA-42');
   });
 
-  test('subsequent calls are independent (g-flag lastIndex reset)', () => {
-    const first = extractLinearIdentifier('first ABCA-1');
-    const second = extractLinearIdentifier('second PLAT-2');
-    expect(first).toBe('ABCA-1');
-    expect(second).toBe('PLAT-2');
+  test('returns the FIRST identifier when multiple are present', () => {
+    expect(extractLinearIdentifier('ABCA-42 supersedes PLAT-9')).toBe('ABCA-42');
+  });
+
+  test('does not match lowercase team key prefixes', () => {
+    expect(extractLinearIdentifier('see issue abca-42 for details')).toBeNull();
+  });
+
+  test('does not match identifiers without a dash', () => {
+    expect(extractLinearIdentifier('ABCA42')).toBeNull();
+  });
+
+  test('does not match identifiers with too long a number tail', () => {
+    // Bound is 1-8 digits in the regex; 9+ shouldn't be admitted.
+    expect(extractLinearIdentifier('ABCA-1234567890')).toBeNull();
+  });
+
+  // theagenticguy PR-241 review: the regex is g-flagged at module
+  // scope, which means `RegExp.prototype.exec` carries `lastIndex`
+  // across calls. The implementation explicitly resets it; this test
+  // pins the behavior so nobody removes the reset thinking it's dead.
+  test('back-to-back calls do not skip due to leftover g-flag lastIndex', () => {
+    // Run the same call twice — without the explicit reset, the second
+    // call would start scanning from where the first call left off and
+    // miss the leading identifier.
+    expect(extractLinearIdentifier('ABCA-1 then ABCA-2')).toBe('ABCA-1');
+    expect(extractLinearIdentifier('ABCA-1 then ABCA-2')).toBe('ABCA-1');
+    expect(extractLinearIdentifier('ABCA-1 then ABCA-2')).toBe('ABCA-1');
+  });
+
+  test('back-to-back calls with different inputs each return their own first match', () => {
+    expect(extractLinearIdentifier('first ABCA-1')).toBe('ABCA-1');
+    expect(extractLinearIdentifier('second PLAT-9')).toBe('PLAT-9');
+    expect(extractLinearIdentifier('third PLAT-9 ABCA-1')).toBe('PLAT-9');
+    expect(extractLinearIdentifier(null)).toBeNull();
+    expect(extractLinearIdentifier('fourth ABCA-1')).toBe('ABCA-1');
   });
 });
 
@@ -119,151 +108,5 @@ describe('extractLinearIdentifierFromBranch', () => {
     expect(extractLinearIdentifierFromBranch(null)).toBeNull();
     expect(extractLinearIdentifierFromBranch(undefined)).toBeNull();
     expect(extractLinearIdentifierFromBranch('')).toBeNull();
-  });
-});
-
-describe('findLinearIssueByIdentifier', () => {
-  beforeEach(() => {
-    ddbSend.mockReset();
-    resolveLinearOauthTokenMock.mockReset();
-    jest.restoreAllMocks();
-  });
-
-  test('returns null when registry scan fails', async () => {
-    ddbSend.mockRejectedValueOnce(new Error('throttled'));
-    const result = await findLinearIssueByIdentifier('ABCA-1', REGISTRY);
-    expect(result).toBeNull();
-    expect(resolveLinearOauthTokenMock).not.toHaveBeenCalled();
-  });
-
-  test('returns null when no active workspaces are registered', async () => {
-    ddbSend.mockResolvedValueOnce({ Items: [] });
-    expect(await findLinearIssueByIdentifier('ABCA-1', REGISTRY)).toBeNull();
-  });
-
-  test('prefix-matches the workspace whose team_keys contain the identifier prefix', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-other', workspace_slug: 'other', team_keys: ['PLAT'] },
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['ABCA'] },
-    ]));
-    resolveLinearOauthTokenMock.mockResolvedValueOnce({ accessToken: 'tok-abca' });
-    mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-42' });
-
-    const result = await findLinearIssueByIdentifier('ABCA-42', REGISTRY);
-
-    expect(result).toEqual({
-      issueId: 'issue-uuid',
-      linearWorkspaceId: 'ws-abca',
-      workspaceSlug: 'abca',
-    });
-    // Only the matching workspace's token was resolved — no scan-all.
-    expect(resolveLinearOauthTokenMock).toHaveBeenCalledTimes(1);
-    expect(resolveLinearOauthTokenMock).toHaveBeenCalledWith('ws-abca', REGISTRY);
-  });
-
-  test('prefix-match comparison is case-insensitive on identifier and team_keys', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['abca'] },
-    ]));
-    resolveLinearOauthTokenMock.mockResolvedValueOnce({ accessToken: 'tok-abca' });
-    mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-42' });
-
-    const result = await findLinearIssueByIdentifier('ABCA-42', REGISTRY);
-    expect(result?.issueId).toBe('issue-uuid');
-  });
-
-  test('falls through to scan-all when no workspace prefix-matches (legacy rows)', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-legacy-a', workspace_slug: 'legacy-a' }, // no team_keys
-      { linear_workspace_id: 'ws-legacy-b', workspace_slug: 'legacy-b' }, // no team_keys
-    ]));
-    resolveLinearOauthTokenMock
-      .mockResolvedValueOnce({ accessToken: 'tok-a' })
-      .mockResolvedValueOnce({ accessToken: 'tok-b' });
-    mockGraphqlOnce(null); // first workspace doesn't have the issue
-    mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-42' });
-
-    const result = await findLinearIssueByIdentifier('ABCA-42', REGISTRY);
-
-    expect(result?.linearWorkspaceId).toBe('ws-legacy-b');
-    expect(resolveLinearOauthTokenMock).toHaveBeenCalledTimes(2);
-  });
-
-  test('falls back to scanning others when prefix-matched workspace returns no hit', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['ABCA'] },
-      { linear_workspace_id: 'ws-other', workspace_slug: 'other', team_keys: ['PLAT'] },
-    ]));
-    resolveLinearOauthTokenMock
-      .mockResolvedValueOnce({ accessToken: 'tok-abca' }) // prefix match
-      .mockResolvedValueOnce({ accessToken: 'tok-other' }); // fallback iter
-    mockGraphqlOnce(null); // ABCA workspace doesn't actually have it
-    mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-42' });
-
-    const result = await findLinearIssueByIdentifier('ABCA-42', REGISTRY);
-    expect(result?.linearWorkspaceId).toBe('ws-other');
-    // Two resolves: prefix-match attempt + one fallback.
-    expect(resolveLinearOauthTokenMock).toHaveBeenCalledTimes(2);
-  });
-
-  test('skips workspaces whose token resolver returns null', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-revoked', workspace_slug: 'rev', team_keys: ['ABCA'] },
-      { linear_workspace_id: 'ws-good', workspace_slug: 'good', team_keys: ['PLAT'] },
-    ]));
-    resolveLinearOauthTokenMock
-      .mockResolvedValueOnce(null) // prefix match has no usable token
-      .mockResolvedValueOnce({ accessToken: 'tok-good' });
-    // Only ONE GraphQL call — the prefix-matched workspace was skipped.
-    mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-42' });
-
-    const result = await findLinearIssueByIdentifier('ABCA-42', REGISTRY);
-    expect(result?.linearWorkspaceId).toBe('ws-good');
-  });
-
-  test('returns null when GraphQL returns a different identifier (fuzzy match guard)', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['ABCA'] },
-    ]));
-    resolveLinearOauthTokenMock.mockResolvedValueOnce({ accessToken: 'tok-abca' });
-    // Linear's branch search is fuzzy — we asked for ABCA-42 but it
-    // returned ABCA-43. Reject the near-neighbor.
-    mockGraphqlOnce({ id: 'issue-uuid', identifier: 'ABCA-43' });
-
-    expect(await findLinearIssueByIdentifier('ABCA-42', REGISTRY)).toBeNull();
-  });
-
-  test('returns null when GraphQL responds non-2xx', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['ABCA'] },
-    ]));
-    resolveLinearOauthTokenMock.mockResolvedValueOnce({ accessToken: 'tok-abca' });
-    mockGraphqlOnce(null, 500);
-
-    expect(await findLinearIssueByIdentifier('ABCA-42', REGISTRY)).toBeNull();
-  });
-
-  test('returns null when GraphQL fetch throws (network failure)', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['ABCA'] },
-    ]));
-    resolveLinearOauthTokenMock.mockResolvedValueOnce({ accessToken: 'tok-abca' });
-    jest.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('socket hang up'));
-
-    expect(await findLinearIssueByIdentifier('ABCA-42', REGISTRY)).toBeNull();
-  });
-
-  test('returns null when GraphQL response carries errors[]', async () => {
-    ddbSend.mockResolvedValueOnce(scanResultRows([
-      { linear_workspace_id: 'ws-abca', workspace_slug: 'abca', team_keys: ['ABCA'] },
-    ]));
-    resolveLinearOauthTokenMock.mockResolvedValueOnce({ accessToken: 'tok-abca' });
-    jest.spyOn(global, 'fetch').mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({ errors: [{ message: 'unauthorized' }] }),
-    } as unknown as Response);
-
-    expect(await findLinearIssueByIdentifier('ABCA-42', REGISTRY)).toBeNull();
   });
 });
