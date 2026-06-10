@@ -26,6 +26,7 @@ import { makeCancelCommand } from '../commands/cancel';
 import { makeConfigureCommand } from '../commands/configure';
 import { makeDenyCommand } from '../commands/deny';
 import { makeEventsCommand } from '../commands/events';
+import { makeGithubCommand } from '../commands/github';
 import { makeLinearCommand } from '../commands/linear';
 import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
@@ -70,6 +71,7 @@ program.addCommand(makePoliciesCommand());
 program.addCommand(makeEventsCommand());
 program.addCommand(makeSlackCommand());
 program.addCommand(makeLinearCommand());
+program.addCommand(makeGithubCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
 program.addCommand(makeWebhookCommand());
@@ -109,8 +111,9 @@ if (require.main === module) {
       // keep-alive timeout. Observed in Scenarios 6 and 7-extended
       // deploy validation where ``bgagent watch`` had to be ``pkill``-ed
       // after the task reached COMPLETED.
+      const EXIT_FLUSH_DELAY_MS = 50;
       setTimeout(() => {
         process.exit(process.exitCode ?? 0);
-      }, 50).unref();
+      }, EXIT_FLUSH_DELAY_MS).unref();
     });
 }

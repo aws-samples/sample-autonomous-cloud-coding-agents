@@ -21,7 +21,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { debug, isVerbose } from '../debug';
 import { ApiError } from '../errors';
-import { formatJson } from '../format';
+import { COST_USD_DECIMALS, formatJson } from '../format';
 import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
 
 /**
@@ -34,7 +34,11 @@ import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
  * stretches without hammering DDB.
  */
 const POLL_FAST_INTERVAL_MS = 500;
+// eslint-disable-next-line @typescript-eslint/no-magic-numbers -- the ladder IS the named constant
 const BACKOFF_INTERVALS_MS: readonly number[] = [1_000, 2_000, 5_000];
+
+/** Adaptive poll ceiling — the top of the backoff ladder. */
+const POLL_CEILING_MS = BACKOFF_INTERVALS_MS[BACKOFF_INTERVALS_MS.length - 1];
 
 /** Adaptive polling state, threaded through the poll loop. */
 interface PollCadenceState {
@@ -102,7 +106,7 @@ export function _resetSessionRetries(): void {
  *  service with no wait between attempts. Bounded at the ladder cap so
  *  a retry storm never walks longer than the adaptive poll ceiling. */
 export function transientRetryDelayMs(attempt: number): number {
-  const base = Math.min(5_000, POLL_FAST_INTERVAL_MS * 2 ** attempt);
+  const base = Math.min(POLL_CEILING_MS, POLL_FAST_INTERVAL_MS * 2 ** attempt);
   const half = Math.floor(base / 2);
   return half + Math.floor(Math.random() * (base - half));
 }
@@ -205,7 +209,7 @@ export function renderEvent(event: TaskEvent): string {
       return `[${time}] ★ ${milestone}${details ? ': ' + details : ''}`;
     }
     case 'agent_cost_update': {
-      const cost = meta.cost_usd != null ? `$${Number(meta.cost_usd).toFixed(4)}` : '$?';
+      const cost = meta.cost_usd != null ? `$${Number(meta.cost_usd).toFixed(COST_USD_DECIMALS)}` : '$?';
       const input = meta.input_tokens ?? 0;
       const output = meta.output_tokens ?? 0;
       return `[${time}] Cost: ${cost} (${input} in / ${output} out tokens)`;

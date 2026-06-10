@@ -24,6 +24,8 @@ import {
   type InlineAttachment,
   type PresignedAttachment,
   type UrlAttachment,
+  MAX_BUDGET_USD_MIN,
+  MAX_BUDGET_USD_MAX,
 } from './types';
 import { type WorkflowRequiredInputs } from './workflows';
 import { TaskStatus } from '../../constructs/task-status';
@@ -36,10 +38,6 @@ export const MIN_MAX_TURNS = 1;
 export const MAX_MAX_TURNS = 500;
 /** Maximum allowed length for task_description. */
 export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
-/** Minimum allowed value for max_budget_usd (1 cent). */
-export const MIN_MAX_BUDGET_USD = 0.01;
-/** Maximum allowed value for max_budget_usd ($100). */
-export const MAX_MAX_BUDGET_USD = 100;
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -223,7 +221,7 @@ export function validateMaxTurns(value: unknown): number | null | undefined {
 export function validateMaxBudgetUsd(value: unknown): number | null | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number') return null;
-  if (value < MIN_MAX_BUDGET_USD || value > MAX_MAX_BUDGET_USD) return null;
+  if (value < MAX_BUDGET_USD_MIN || value > MAX_BUDGET_USD_MAX) return null;
   return value;
 }
 

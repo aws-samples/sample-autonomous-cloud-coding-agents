@@ -1078,3 +1078,12 @@ export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.def
 export const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 export const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 export const APPROVAL_GATE_CAP_DEFAULT = sharedConstants.approval_gate_cap.default;
+
+/** Minimum allowed `max_budget_usd` (1 cent). The CLI pre-validates with the
+ *  same bound (`bgagent submit --max-budget`), so it lives in
+ *  ``contracts/constants.json`` rather than as a local literal (#258). */
+export const MAX_BUDGET_USD_MIN = sharedConstants.max_budget_usd.min;
+
+/** Maximum allowed `max_budget_usd` ($100).
+ *  Sourced from ``contracts/constants.json`` (#258). */
+export const MAX_BUDGET_USD_MAX = sharedConstants.max_budget_usd.max;
