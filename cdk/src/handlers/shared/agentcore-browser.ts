@@ -262,6 +262,14 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     });
   }
 
+  // Track the main-document HTTP response so we can fail fast on 4xx/5xx
+  // (404 / 503 / auth wall pages) instead of capturing what looks like the
+  // app but isn't. Captured in a Network.responseReceived listener below;
+  // checked after Page.loadEventFired but before Page.captureScreenshot.
+  // (Auth walls that return 200 are out of scope — see issue #287.)
+  let mainDocumentStatus: number | null = null;
+  let mainDocumentFrameId: string | null = null;
+
   try {
     // 1. List existing targets, find the default about:blank page.
     const targetsResp = await cdpSend('Target.getTargets');
@@ -281,9 +289,37 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       throw new Error('Target.attachToTarget did not return a sessionId');
     }
 
-    // 3. Enable Page domain so we get the `Page.loadEventFired` event
-    //    we wait on below.
+    // 3. Enable Page + Network so we get the `Page.loadEventFired` event
+    //    we wait on below AND the main-document response status. Network
+    //    has to be enabled BEFORE Page.navigate, or the response event
+    //    fires before our listener is wired and we miss the status.
     await cdpSend('Page.enable', {}, pageSessionId);
+    await cdpSend('Network.enable', {}, pageSessionId);
+
+    // Tap the raw message stream for Network.responseReceived events —
+    // we want a multi-fire listener (Document responses can appear for
+    // redirect chains), not the one-shot waiter pattern that
+    // eventWaiters / waitForEvent use. Records the latest matching
+    // status; the post-load check below acts on whatever was captured.
+    ws.on('message', (raw: RawData) => {
+      let msg: CdpMessage;
+      try {
+        msg = JSON.parse(raw.toString()) as CdpMessage;
+      } catch {
+        return;
+      }
+      if (msg.method !== 'Network.responseReceived') return;
+      const params = msg.params as
+        | { type?: string; frameId?: string; response?: { status?: number } }
+        | undefined;
+      // CDP's `Network.responseReceived` fires for every resource (HTML,
+      // JS, CSS, images, XHR, …). Only the type==='Document' event for
+      // the navigated frame is the main-document response we care about.
+      if (!params || params.type !== 'Document') return;
+      if (mainDocumentFrameId && params.frameId !== mainDocumentFrameId) return;
+      const status = params.response?.status;
+      if (typeof status === 'number') mainDocumentStatus = status;
+    });
 
     // 4. Navigate. The response includes a `frameId`; we wait on the
     //    `Page.loadEventFired` event below (more reliable than
@@ -294,6 +330,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     if (navError) {
       throw new Error(`Page.navigate failed: ${navError}`);
     }
+    mainDocumentFrameId = (navResp.result?.frameId as string | undefined) ?? null;
 
     // 5. Wait for the page load event. SPA-style apps may continue
     //    fetching after this fires, so add a 2s settle wait. For
@@ -302,7 +339,20 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     await waitForEvent('Page.loadEventFired');
     await new Promise((r) => setTimeout(r, 2000));
 
-    // 6. Take the screenshot.
+    // 6. Reject non-2xx main-document statuses before screenshotting.
+    //    A 404 / 503 / auth wall renders a "successful" page from CDP's
+    //    perspective; the user sees a confidently-wrong screenshot of an
+    //    error page posted as the deploy preview. Throw → processor's
+    //    catch logs and skips the PR/Linear comment cleanly.
+    //    If we never captured a status (Network.responseReceived was
+    //    queued but predicate didn't match — e.g. a redirect chain that
+    //    doesn't expose the final frame), fall through and capture
+    //    optimistically; that's the pre-#287 behaviour.
+    if (mainDocumentStatus !== null && (mainDocumentStatus < 200 || mainDocumentStatus >= 300)) {
+      throw new Error(`Preview URL returned HTTP ${mainDocumentStatus}; skipping screenshot`);
+    }
+
+    // 7. Take the screenshot.
     const shotResp = await cdpSend('Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: true,

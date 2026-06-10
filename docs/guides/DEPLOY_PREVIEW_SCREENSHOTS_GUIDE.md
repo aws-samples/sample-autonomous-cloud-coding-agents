@@ -62,6 +62,7 @@ Architecture notes:
 - **AWS-managed default browser.** AgentCore Browser ships an `aws.browser.v1` session you can attach to without provisioning your own browser resource.
 - **Private S3 + CloudFront with OAC.** Screenshot bucket is fully private; CloudFront serves images anonymously over HTTPS so GitHub markdown image embeds (and Linear's, when configured) can render them without auth.
 - **WAF exemption.** The `/v1/github/webhook` path is exempted from the `SizeRestrictions_BODY` rule in `AWSManagedRulesCommonRuleSet` because the full `deployment_status` payload (workflow run history + deploy URLs + deployment metadata) exceeds the 8 KB body-size limit. All other CRS rules (LFI, RFI, XSS, SQLi, …) still evaluate against the path; HMAC verification in Lambda authenticates the body.
+- **Skips non-2xx pages.** The processor enables CDP's `Network` domain and captures the main-document HTTP status. If the preview URL returns 4xx/5xx (404 / 503 / a 3xx that doesn't redirect cleanly), the processor logs `Preview URL returned HTTP <status>; skipping screenshot` and posts no PR/Linear comment. This avoids posting a confidently-wrong screenshot of a 404 page as if it were the deploy. Auth walls that return HTTP 200 (e.g. Vercel deployment protection) are out of scope — disable deployment protection or use a public preview, see the Vercel setup section below.
 
 ## Prerequisites
 
