@@ -46,6 +46,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { createTaskCore as CreateTaskCoreFn } from './create-task-core';
+import { selectBaseBranch } from './orchestration-base-branch';
 import { logger } from './logger';
 import type {
   OrchestrationChildRow,
@@ -63,8 +64,13 @@ export interface ReleaseChildParams {
   readonly linearOauthSecretArn?: string;
   readonly linearWorkspaceSlug?: string;
   readonly linearProjectId?: string;
-  /** The base branch this child stacks on (ADR-001). Defaults to main (root). */
+  /** The base branch this child stacks on (#247 A4). Absent → root (off main). */
   readonly baseBranch?: string;
+  /**
+   * Predecessor branches to merge into the child's branch before work
+   * (#247 A4 diamond case). Absent/empty for root + linear children.
+   */
+  readonly mergeBranches?: readonly string[];
   /** Injected createTaskCore (real handler in prod, mock in tests). */
   readonly createTaskCore: typeof CreateTaskCoreFn;
   /** ISO timestamp (injected for testability). */
@@ -109,6 +115,13 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
   if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
   if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
+  // #247 A4: stacked base branch + (diamond) predecessor merge-list. The
+  // orchestrator reads these to set the agent payload's base_branch +
+  // merge_branches. Absent for roots (agent branches off main as today).
+  if (params.baseBranch) channelMetadata.orchestration_base_branch = params.baseBranch;
+  if (params.mergeBranches && params.mergeBranches.length > 0) {
+    channelMetadata.orchestration_merge_branches = JSON.stringify(params.mergeBranches);
+  }
 
   // Deterministic idempotency key: same child never creates two tasks.
   // Separator is '_' (NOT '#') because createTaskCore validates the key
@@ -161,21 +174,27 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     return { kind: 'create_failed', statusCode: result.statusCode, body: result.body };
   }
 
-  const taskId = extractTaskId(result.body);
+  const { taskId, branchName } = extractTaskIdAndBranch(result.body);
 
   // Flip the row to released, conditionally — only from a not-yet-started
   // state. A racing release loses here (ConditionalCheckFailed) and
   // returns already_released; createTaskCore's idempotency key means the
   // loser created no second task.
+  //
+  // #247 A4: also persist the child's branch_name so a DEPENDENT child's
+  // release can stack on / merge it (selectBaseBranch reads predecessor
+  // branch names off these rows).
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
-      UpdateExpression: 'SET child_status = :released, child_task_id = :tid, updated_at = :now',
+      UpdateExpression:
+        'SET child_status = :released, child_task_id = :tid, child_branch_name = :bn, updated_at = :now',
       ConditionExpression: 'child_status IN (:blocked, :ready)',
       ExpressionAttributeValues: {
         ':released': 'released',
         ':tid': taskId,
+        ':bn': branchName,
         ':now': now,
         ':blocked': 'blocked',
         ':ready': 'ready',
@@ -223,10 +242,32 @@ export async function releaseReadyChildren(
   releaseContext: OrchestrationReleaseContext,
   createTaskCore: typeof CreateTaskCoreFn,
   now: string,
+  /**
+   * #247 A4: the FULL child set (not just the releasable subset), so a
+   * child's base branch can be derived from its predecessors' persisted
+   * ``child_branch_name``. Defaults to ``rows`` for back-compat with
+   * callers that pass the full set as ``rows`` and release roots (roots
+   * have no predecessors, so selection degrades to off-main).
+   */
+  allChildren?: readonly OrchestrationChildRow[],
+  /** Repo default branch for roots + diamond bases. Defaults to 'main'. */
+  defaultBranch = 'main',
 ): Promise<readonly ReleaseChildResult[]> {
+  const all = allChildren ?? rows;
+  const branchOf = new Map(
+    all.filter((c) => c.child_branch_name).map((c) => [c.sub_issue_id, c.child_branch_name as string]),
+  );
   const releasable = rows.filter((r) => r.child_status === 'ready');
   const results: ReleaseChildResult[] = [];
   for (const row of releasable) {
+    // Derive the base from this child's predecessors' persisted branches.
+    const selection = selectBaseBranch({
+      predecessors: row.depends_on.map((sub) => ({
+        sub_issue_id: sub,
+        branch_name: branchOf.get(sub) ?? '',
+      })),
+      defaultBranch,
+    });
     results.push(await releaseChild({
       ddb,
       tableName,
@@ -241,6 +282,10 @@ export async function releaseReadyChildren(
       ...(releaseContext.linear_project_id !== undefined && {
         linearProjectId: releaseContext.linear_project_id,
       }),
+      // Root → 'main' base, no merges (omit so today's off-main behavior
+      // is unchanged). Linear → predecessor branch. Diamond → main + merges.
+      ...(selection.shape !== 'root' && { baseBranch: selection.base_branch }),
+      ...(selection.merge_branches.length > 0 && { mergeBranches: selection.merge_branches }),
       createTaskCore,
       now,
     }));
@@ -248,13 +293,20 @@ export async function releaseReadyChildren(
   return results;
 }
 
-/** Pull the task_id out of a createTaskCore success body (best-effort). */
-function extractTaskId(body: string): string {
+/** Pull task_id + branch_name out of a createTaskCore success body (best-effort). */
+function extractTaskIdAndBranch(body: string): { taskId: string; branchName: string } {
   try {
-    const parsed = JSON.parse(body) as { data?: { task_id?: string }; task_id?: string };
-    return parsed.data?.task_id ?? parsed.task_id ?? '';
+    const parsed = JSON.parse(body) as {
+      data?: { task_id?: string; branch_name?: string };
+      task_id?: string;
+      branch_name?: string;
+    };
+    return {
+      taskId: parsed.data?.task_id ?? parsed.task_id ?? '',
+      branchName: parsed.data?.branch_name ?? parsed.branch_name ?? '',
+    };
   } catch {
-    return '';
+    return { taskId: '', branchName: '' };
   }
 }
 

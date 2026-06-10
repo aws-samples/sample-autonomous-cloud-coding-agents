@@ -70,6 +70,12 @@ export interface OrchestrationChildRow {
    * orchestration row.
    */
   readonly child_task_id?: string;
+  /**
+   * The released child task's head branch (#247 A4). Persisted on the
+   * release flip so a DEPENDENT child can stack on / merge it. Absent
+   * until released.
+   */
+  readonly child_branch_name?: string;
   /** Linear human identifier, when known (e.g. ``ENG-42``). */
   readonly linear_identifier?: string;
   /** Sub-issue title, used to build the child task description. */

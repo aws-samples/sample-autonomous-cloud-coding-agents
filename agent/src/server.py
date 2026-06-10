@@ -459,6 +459,8 @@ def _run_task_background(
             task_type=task_type,
             branch_name=branch_name,
             pr_number=pr_number,
+            base_branch=base_branch,
+            merge_branches=merge_branches,
             cedar_policies=cedar_policies,
             approval_timeout_s=approval_timeout_s,
             initial_approvals=initial_approvals,
@@ -513,6 +515,12 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     task_type = inp.get("task_type", "new_task")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
+    # #247 A4: stacked-child base branch + (diamond) predecessor branches
+    # to merge in. The orchestrator sets these from the orchestration row;
+    # absent for ordinary tasks (agent branches off main as today).
+    base_branch = inp.get("base_branch") or None
+    merge_branches_raw = inp.get("merge_branches") or []
+    merge_branches = [b for b in merge_branches_raw if isinstance(b, str)]
     cedar_policies = inp.get("cedar_policies") or []
     # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
     # Both are forwarded verbatim to the pipeline; the engine
