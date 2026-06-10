@@ -12,4 +12,4 @@ There are five ways to interact with the platform. You can use them independentl
 4. **Slack** - Submit tasks by @mentioning the bot and receive threaded progress notifications with reaction-based status. See the [Slack setup guide](/using/slack-setup-guide).
 5. **Linear** - Apply a label to a Linear issue to trigger a task; the agent posts progress comments back on the issue via Linear's MCP server. See the [Linear setup guide](/using/linear-setup-guide).
 
-For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `pr_review` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
+For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.

@@ -6,7 +6,7 @@ The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack outp
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/tasks` | Create a new task (new_task, pr_iteration, or pr_review) |
+| `POST` | `/tasks` | Create a new task (selects a workflow via `workflow_ref`, or resolves a default) |
 | `GET` | `/tasks` | List your tasks with optional filters (status, repo, pagination) |
 | `GET` | `/tasks/{task_id}` | Get full detail for a specific task |
 | `DELETE` | `/tasks/{task_id}` | Cancel a running or queued task |
@@ -52,16 +52,16 @@ To iterate on an existing pull request (address review feedback):
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-iteration-v1", "pr_number": 42}'
 ```
 
-You can optionally include `task_description` with `pr_iteration` to provide additional instructions alongside the review feedback:
+You can optionally include `task_description` with `coding/pr-iteration-v1` to provide additional instructions alongside the review feedback:
 
 ```bash
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_iteration", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-iteration-v1", "pr_number": 42, "task_description": "Focus on the null check Alice flagged in the auth module"}'
 ```
 
 To request a read-only review of an existing pull request:
@@ -70,17 +70,19 @@ To request a read-only review of an existing pull request:
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55}'
 ```
 
-You can optionally include `task_description` with `pr_review` to focus the review on specific areas:
+You can optionally include `task_description` with `coding/pr-review-v1` to focus the review on specific areas:
 
 ```bash
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "task_type": "pr_review", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
 ```
+
+> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](/architecture/workflows)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
 
 **Request body fields:**
 
@@ -89,12 +91,12 @@ curl -X POST "$API_URL/tasks" \
 | `repo` | string | Yes | GitHub repository in `owner/repo` format |
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
-| `pr_number` | number | | PR number to iterate on or review (required for `pr_iteration` and `pr_review`) |
-| `task_type` | string | No | `new_task` (default), `pr_iteration`, or `pr_review`. |
+| `pr_number` | number | | PR number to iterate on or review (required for `coding/pr-iteration-v1` and `coding/pr-review-v1`) |
+| `workflow_ref` | string | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces the retired `task_type`. Omitted ⇒ the platform resolves a default (`default/agent-v1`). |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
-**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR tasks (`pr_iteration`, `pr_review`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
+**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR workflows (`coding/pr-iteration-v1`, `coding/pr-review-v1`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
 
 **Idempotency:** Include an `Idempotency-Key` header (alphanumeric, dashes, underscores, max 128 chars) to prevent duplicate task creation on retries:
 

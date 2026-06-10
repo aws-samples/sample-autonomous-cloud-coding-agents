@@ -55,24 +55,30 @@ export const BUILTIN_HARD_DENY_POLICIES = `// Built-in hard-deny policy set for 
 @rule_id("base_permit")
 permit (principal, action, resource);
 
-// pr_review tasks may never invoke Write. Absolute; cannot be overridden
-// by per-blueprint customization or --pre-approve.
+// Read-only workflows may never invoke Write. Absolute; cannot be overridden
+// by per-blueprint customization or --pre-approve. Keyed on the read_only
+// context attribute (not a principal literal) so the deny attaches to the
+// *property* and fires for every read-only workflow uniformly — not just
+// coding/pr-review. (#248 Phase 2a — replaces the literal
+// Agent::TaskAgent::"pr_review" match; see ADR-014 addendum 2026-06-08.)
 @tier("hard")
-@rule_id("pr_review_forbid_write")
+@rule_id("read_only_forbid_write")
 forbid (
-    principal == Agent::TaskAgent::"pr_review",
+    principal,
     action == Agent::Action::"invoke_tool",
     resource == Agent::Tool::"Write"
-);
+)
+when { context.read_only == true };
 
-// pr_review tasks may never invoke Edit.
+// Read-only workflows may never invoke Edit.
 @tier("hard")
-@rule_id("pr_review_forbid_edit")
+@rule_id("read_only_forbid_edit")
 forbid (
-    principal == Agent::TaskAgent::"pr_review",
+    principal,
     action == Agent::Action::"invoke_tool",
     resource == Agent::Tool::"Edit"
-);
+)
+when { context.read_only == true };
 
 // Reject \`rm -rf /\` and similar absolute-root destructive commands.
 @tier("hard")

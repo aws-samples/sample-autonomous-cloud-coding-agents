@@ -19,13 +19,13 @@
 
 import {
   type CreateTaskRequest,
-  type TaskType,
   type AttachmentType,
   type ValidatedAttachment,
   type InlineAttachment,
   type PresignedAttachment,
   type UrlAttachment,
 } from './types';
+import { type WorkflowRequiredInputs } from './workflows';
 import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
@@ -73,17 +73,44 @@ export function isValidRepo(repo: string): boolean {
 }
 
 /**
- * Validate that a create task request has at least one task specification.
- * @param req - the parsed create task request.
- * @returns true if the request has a sufficient task specification:
- *   issue_number or task_description for new_task; pr_number for pr_iteration or pr_review.
+ * Whether a single workflow input is satisfied by the request body.
  */
-export function hasTaskSpec(req: CreateTaskRequest): boolean {
-  if ((req.task_type === 'pr_iteration' || req.task_type === 'pr_review') && req.pr_number !== undefined && req.pr_number !== null) {
-    return true;
+function inputSatisfied(req: CreateTaskRequest, input: string): boolean {
+  switch (input) {
+    case 'issue_number':
+      return req.issue_number !== undefined && req.issue_number !== null;
+    case 'pr_number':
+      return req.pr_number !== undefined && req.pr_number !== null;
+    case 'task_description':
+      return req.task_description !== undefined
+        && req.task_description !== null
+        && req.task_description.trim().length > 0;
+    default:
+      // Unknown inputs are not CDK-validatable; treat as satisfied so the
+      // agent-side validator remains the authority for novel inputs.
+      return true;
   }
-  return (req.issue_number !== undefined && req.issue_number !== null) ||
-    (req.task_description !== undefined && req.task_description !== null && req.task_description.trim().length > 0);
+}
+
+/**
+ * Validate that a create task request satisfies the resolved workflow's
+ * required-input contract (replaces the former ``task_type``-keyed check).
+ * @param req - the parsed create task request.
+ * @param requiredInputs - the resolved workflow's ``required_inputs`` (CDK mirror).
+ * @returns true if the request supplies the inputs the workflow needs.
+ */
+export function hasTaskSpec(req: CreateTaskRequest, requiredInputs: WorkflowRequiredInputs): boolean {
+  const allOf = requiredInputs.allOf ?? [];
+  if (!allOf.every((input) => inputSatisfied(req, input))) {
+    return false;
+  }
+  const oneOf = requiredInputs.oneOf ?? [];
+  if (oneOf.length > 0 && !oneOf.some((input) => inputSatisfied(req, input))) {
+    return false;
+  }
+  // A workflow that declares neither all_of nor one_of has no input contract
+  // CDK must enforce (the agent-side validator still governs); accept.
+  return true;
 }
 
 /**
@@ -216,23 +243,6 @@ export function isValidTaskDescriptionLength(description: string): boolean {
  */
 export function computeTtlEpoch(retentionDays: number): number {
   return Math.floor(Date.now() / 1000) + retentionDays * 86400;
-}
-
-/** Valid task type values. Compile-time check ensures this stays in sync with TaskType. */
-const TASK_TYPE_LIST = ['new_task', 'pr_iteration', 'pr_review'] as const satisfies readonly TaskType[];
-type _AssertExhaustive = Exclude<TaskType, (typeof TASK_TYPE_LIST)[number]> extends never ? true : never;
-const _exhaustiveCheck: _AssertExhaustive = true;
-export const VALID_TASK_TYPES = new Set<string>(TASK_TYPE_LIST);
-
-/**
- * Validate a task_type value from a request body.
- * @param value - the raw value from the request.
- * @returns true if the value is a valid task type or undefined/null (defaults to 'new_task').
- */
-export function isValidTaskType(value: unknown): boolean {
-  if (value === undefined || value === null) return true;
-  if (typeof value !== 'string') return false;
-  return VALID_TASK_TYPES.has(value);
 }
 
 /**

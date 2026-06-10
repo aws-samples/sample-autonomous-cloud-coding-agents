@@ -44,6 +44,9 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 # Review a PR with a specific focus area
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
+# Select an explicit workflow (overrides the one --pr/--review-pr would imply)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Research the tradeoffs" --workflow knowledge/web-research-v1
+
 # Submit with attachments (local files)
 node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
   --attachment screenshot.png \
@@ -79,8 +82,9 @@ Created:     2026-04-01T00:39:51.271Z
 | `--repo` | GitHub repository (`owner/repo`). Required. |
 | `--issue` | GitHub issue number. |
 | `--task` | Task description text. |
-| `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
-| `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
+| `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; omit to let the server resolve a default. |
 | `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
