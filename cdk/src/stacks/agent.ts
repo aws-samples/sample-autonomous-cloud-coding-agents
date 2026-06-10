@@ -321,6 +321,9 @@ export class AgentStack extends Stack {
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
       // terminal state when the submit payload enabled ``trace``.
       TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
+      // Repo-less deliverable artifacts (#248 Phase 3): a deliver_artifact step
+      // uploads its product to ``artifacts/<task_id>/`` in the same bucket.
+      ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
       MAX_TURNS: '100',

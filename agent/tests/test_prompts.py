@@ -9,14 +9,14 @@ from sanitization import sanitize_external_content
 
 class TestGetSystemPrompt:
     def test_new_task_returns_prompt_with_create_pr(self):
-        prompt = get_system_prompt("new_task")
+        prompt = get_system_prompt("coding/new-task-v1")
         assert "Create a Pull Request" in prompt
         assert "{repo_url}" in prompt
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
     def test_pr_iteration_returns_prompt_with_update_pr(self):
-        prompt = get_system_prompt("pr_iteration")
+        prompt = get_system_prompt("coding/pr-iteration-v1")
         assert "Post a summary comment on the PR" in prompt
         assert "Reply to each review comment thread" in prompt
         assert "gh api" in prompt
@@ -27,7 +27,7 @@ class TestGetSystemPrompt:
         assert "{workflow}" not in prompt
 
     def test_pr_review_returns_prompt_with_review_workflow(self):
-        prompt = get_system_prompt("pr_review")
+        prompt = get_system_prompt("coding/pr-review-v1")
         assert "READ-ONLY" in prompt
         assert "must NOT modify" in prompt
         assert "gh api" in prompt
@@ -36,16 +36,52 @@ class TestGetSystemPrompt:
         assert "Write and Edit are not available" in prompt
         assert "{workflow}" not in prompt
 
-    def test_all_types_contain_shared_base_sections(self):
-        for task_type in ("new_task", "pr_iteration", "pr_review"):
-            prompt = get_system_prompt(task_type)
-            assert "## Environment" in prompt, f"Missing Environment in {task_type}"
+    def test_all_workflows_contain_shared_base_sections(self):
+        for workflow_id in ("coding/new-task-v1", "coding/pr-iteration-v1", "coding/pr-review-v1"):
+            prompt = get_system_prompt(workflow_id)
+            assert "## Environment" in prompt, f"Missing Environment in {workflow_id}"
             has_rules = "## Rules" in prompt or "## Rules override" in prompt
-            assert has_rules, f"Missing Rules in {task_type}"
+            assert has_rules, f"Missing Rules in {workflow_id}"
 
-    def test_unknown_task_type_raises(self):
-        with pytest.raises(ValueError, match="Unknown task_type"):
-            get_system_prompt("invalid_type")
+    def test_unknown_workflow_falls_back_to_default_prompt(self):
+        # No built-in template for an id (e.g. registry-only in Phase 4) falls
+        # back to the default coding prompt rather than raising.
+        assert get_system_prompt("registry://something/unknown-v1") == get_system_prompt(
+            "coding/new-task-v1"
+        )
+
+    def test_repoless_default_agent_prompt_has_no_repo_placeholders(self):
+        # #248 Phase 3: the repo-less workflow's prompt must not carry git/branch/
+        # PR placeholders — there is no repo for build_repoless_system_prompt to
+        # substitute, so a leftover {repo_url}/{branch_name} would render literally.
+        prompt = get_system_prompt("default/agent-v1")
+        assert prompt is not get_system_prompt("coding/new-task-v1")
+        for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
+            assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+        assert "repo-less" in prompt.lower()
+
+    def test_web_research_has_its_own_registered_prompt(self):
+        # PR review #296 finding #8: knowledge/web-research-v1 now has a
+        # research-specialized prompt rather than silently degrading to the
+        # generic default-agent prompt. It must be distinct from default/agent-v1,
+        # be research-flavored, and carry no repo placeholders (it is repo-less).
+        prompt = get_system_prompt("knowledge/web-research-v1", repo_less=True)
+        assert prompt != get_system_prompt("default/agent-v1")
+        assert "research" in prompt.lower()
+        for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
+            assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+
+    def test_repo_less_fallback_uses_repoless_default_not_coding(self):
+        # An UNREGISTERED repo-less id (e.g. a future registry-only knowledge
+        # workflow) must still fall back to the repo-less default, NOT the coding
+        # prompt — else it would inherit unsubstitutable {repo_url}.
+        repoless = get_system_prompt("knowledge/not-registered-yet-v1", repo_less=True)
+        assert repoless == get_system_prompt("default/agent-v1")
+        assert "{repo_url}" not in repoless
+        # Without the flag, the same unknown id falls back to the coding default.
+        assert get_system_prompt("knowledge/not-registered-yet-v1") == get_system_prompt(
+            "coding/new-task-v1"
+        )
 
 
 class TestSanitizeMemoryContent:
