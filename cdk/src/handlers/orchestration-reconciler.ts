@@ -45,12 +45,14 @@ import {
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
+import { ORCH_LOG } from './shared/orchestration-log-events';
 import {
   computeReconcilePlan,
   type ReconcileChild,
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
 import { releaseReadyChildren } from './shared/orchestration-release';
+import { postRollup, rollupKindFromChildren } from './shared/orchestration-rollup';
 import {
   loadOrchestration,
   type OrchestrationChildRow,
@@ -60,6 +62,9 @@ import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
+// A5: registry table for the parent rollup comment's per-workspace OAuth
+// token. Unset → rollup is skipped (gating still works).
+const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
 /** Terminal task statuses that the reconciler reacts to. */
 const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>([
@@ -240,12 +245,29 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
   );
   if (allTerminal) {
+    const meta = (fresh ?? snapshot).meta;
+    const counts = {
+      succeeded: freshChildren.filter((c) => c.child_status === 'succeeded').length,
+      failed: freshChildren.filter((c) => c.child_status === 'failed').length,
+      skipped: freshChildren.filter((c) => c.child_status === 'skipped').length,
+    };
     logger.info('Orchestration complete', {
+      event: ORCH_LOG.orchestrationComplete,
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: (fresh ?? snapshot).meta.parent_linear_issue_id,
+      parent_linear_issue_id: meta.parent_linear_issue_id,
+      ...counts,
     });
-    // Parent rollup / terminal comment is emitted by the fan-out plane
-    // (#243) in PR A5; nothing to do here beyond the log breadcrumb.
+    // A5: post the aggregate rollup comment on the PARENT issue (the
+    // fan-out plane only comments per-child sub-issue). Best-effort.
+    if (WORKSPACE_REGISTRY_TABLE) {
+      await postRollup({
+        ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
+        orchestrationId,
+        parentLinearIssueId: meta.parent_linear_issue_id,
+        kind: rollupKindFromChildren(freshChildren),
+        children: freshChildren,
+      });
+    }
   }
 }
 
