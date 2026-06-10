@@ -1,0 +1,42 @@
+name: auto-approve
+# Approves PRs carrying the 'auto-approve' label (e.g. the scheduled
+# upgrade-main dependency PRs). pull_request_target is intentional and safe
+# here: the job never checks out or executes PR code — it only calls the
+# review API. Branch protection still requires the build workflow to pass.
+on:
+  pull_request_target:
+    types:
+      - labeled
+      - unlabeled
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - review_requested
+permissions:
+  actions: none
+  attestations: none
+  checks: none
+  contents: none
+  deployments: none
+  discussions: none
+  id-token: none
+  issues: none
+  models: none
+  packages: none
+  pages: none
+  pull-requests: none
+  repository-projects: none
+  security-events: none
+  statuses: none
+jobs:
+  auto-approve:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    if: contains(github.event.pull_request.labels.*.name, 'auto-approve')
+    steps:
+      - uses: hmarr/auto-approve-action@f0939ea97e9205ef24d872e76833fa908a770363 # v4.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          review-message: Auto approved automated PR

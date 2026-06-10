@@ -41,6 +41,24 @@ run = [
   "bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; prek install --prepare-hooks'",
 ]
 
+# Dependency upgrades for the scheduled upgrade-main workflow (and local use).
+# Upgrades stay WITHIN the ranges/pins declared in each manifest — no
+# range-widening flags (e.g. `yarn upgrade --latest`) — so exact pins are never
+# rewritten. This is what keeps the Cedar engine parity contract intact:
+# cedarpy (agent/pyproject.toml) and @cedar-policy/cedar-wasm (cdk/package.json)
+# are exact pins that must only ever move together, by hand, with refreshed
+# contracts/cedar-parity/ fixtures (CEDAR_HITL_GATES.md §15.6, decision #23).
+[tasks.upgrade]
+description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
+run = [
+  # Regenerate the lockfile rather than `yarn upgrade`: Yarn 1 has a known bug
+  # where `yarn upgrade` copies `resolutions` entries into `dependencies` in
+  # package.json. A fresh resolve upgrades within declared ranges (and honors
+  # resolutions) without mutating any manifest.
+  "rm -f yarn.lock && yarn install",
+  "cd agent && mise run upgrade",
+]
+
 ##################
 ###### QUALITY ###
 ##################
