@@ -251,6 +251,8 @@ mirrorMarkdownFile(
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'JIRA_SETUP_GUIDE.md'),
   path.join('src', 'content', 'docs', 'using', 'Jira-setup-guide.md'),
+);
+
 // --- Deploy preview screenshots guide: mirror to using/ ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md'),
