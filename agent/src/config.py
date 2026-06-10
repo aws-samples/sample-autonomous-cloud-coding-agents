@@ -331,22 +331,34 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task
     record's ``channel_metadata`` at task-creation time. We fetch the
-    per-tenant secret, parse the token JSON, refresh if expiring, and
-    cache the access_token in ``JIRA_API_TOKEN`` so the Atlassian Remote
-    MCP's ``${JIRA_API_TOKEN}`` placeholder in ``.mcp.json`` resolves.
+    per-tenant secret, parse the token JSON, and cache the access_token in
+    ``JIRA_API_TOKEN`` so the agent-side Jira REST calls
+    (``jira_reactions``) can authorize.
+
+    **The agent never refreshes the token.** Unlike Linear, Atlassian
+    *rotates the refresh_token on every use* — a successful refresh
+    invalidates the stored refresh_token and returns a new one. The agent
+    runtime has ``secretsmanager:GetSecretValue`` ONLY (no ``PutSecretValue``;
+    a compromised agent must not be able to overwrite any tenant's OAuth
+    bundle), so it cannot persist the rotated token. If the agent refreshed,
+    it would consume the stored refresh_token, keep the replacement only in
+    memory for this one task, and leave Secrets Manager holding a dead
+    refresh_token — the next Lambda/agent resolve would get ``invalid_grant``
+    and the tenant would require re-onboarding. So we deliberately do NOT
+    refresh here: the trusted Lambda path (``jira-oauth-resolver.ts``, which
+    has ``PutSecretValue``) owns all refreshes, and the agent uses whatever
+    access_token the Lambdas have most-recently written.
+
+    If the stored token is already expiring/expired, we fail closed — return
+    an empty string and let the advisory Jira comments no-op. The
+    orchestrator resolves (and refreshes) the token just before starting the
+    session, so in practice the agent reads a freshly-written token with a
+    full lifetime ahead of it.
 
     For local development, a pre-set ``JIRA_API_TOKEN`` env var
     short-circuits the lookup so the agent can run outside the runtime.
 
-    Returns an empty string when the credential is absent — the agent-side
-    MCP config then renders with an unresolved ``${JIRA_API_TOKEN}``
-    placeholder and the Jira MCP fails closed. This function is only
-    called when ``channel_source == 'jira'``.
-
-    Mirrors :func:`resolve_linear_api_token` in shape; differences are
-    only the secret key names, env var names, and OAuth endpoint
-    (``https://auth.atlassian.com/oauth/token``, JSON body — Linear's is
-    ``api.linear.app/oauth/token`` with form-encoded body).
+    This function is only called when ``channel_source == 'jira'``.
     """
     cached = os.environ.get("JIRA_API_TOKEN", "")
     if cached:
@@ -367,7 +379,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
 
     try:
         import json
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
@@ -400,126 +412,6 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
             return True
         return (expiry - datetime.now(UTC)).total_seconds() < threshold_seconds
 
-    def _try_refresh_once(current: dict) -> tuple[str, dict | None]:
-        """Single Atlassian /oauth/token POST. Same outcome shape as the
-        Linear refresh helper.
-        """
-        try:
-            import urllib.error
-            import urllib.request
-        except ImportError:
-            return ("failure", None)
-
-        # Atlassian's OAuth token endpoint expects a JSON body, NOT
-        # x-www-form-urlencoded — that's the one shape difference from
-        # Linear. Same params: grant_type, refresh_token, client_id,
-        # client_secret.
-        body = json.dumps(
-            {
-                "grant_type": "refresh_token",
-                "client_id": current["client_id"],
-                "client_secret": current["client_secret"],
-                "refresh_token": current["refresh_token"],
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            "https://auth.atlassian.com/oauth/token",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is hardcoded to https://auth.atlassian.com/oauth/token above; no user-controlled input
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            err_code = None
-            try:
-                err_payload = json.loads(e.read().decode("utf-8"))
-                err_code = err_payload.get("error")
-            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-                pass
-            log(
-                "WARN",
-                f"resolve_jira_oauth_token refresh rejected: status={e.code} error={err_code}",
-            )
-            if err_code == "invalid_grant":
-                return ("invalid_grant", None)
-            return ("failure", None)
-        except (urllib.error.URLError, OSError) as e:
-            log("WARN", f"resolve_jira_oauth_token refresh failed: {type(e).__name__}: {e}")
-            return ("failure", None)
-
-        if "access_token" not in payload:
-            return ("failure", None)
-
-        now = datetime.now(UTC)
-        if "expires_in" in payload:
-            future = now + timedelta(seconds=int(payload["expires_in"]))
-            expires_at_iso = future.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        else:
-            expires_at_iso = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        next_token = {
-            **current,
-            "access_token": payload["access_token"],
-            "refresh_token": payload.get("refresh_token", current["refresh_token"]),
-            "expires_at": expires_at_iso,
-            "scope": payload.get("scope", current["scope"]),
-            "updated_at": now.isoformat().replace("+00:00", "Z"),
-        }
-
-        # Same trust model as the Linear resolver: agent runtime has
-        # GetSecretValue ONLY (no Put). Refreshed token is in-memory only
-        # for THIS task; Lambdas (trusted code) own persistence.
-
-        cloud_id = next_token.get("cloud_id", "?")
-        site_url = next_token.get("site_url", "?")
-        log(
-            "INFO",
-            f"jira_oauth_refresh_ok cloud_id={cloud_id} "
-            f"site_url={site_url} new_expires_at={expires_at_iso}",
-        )
-        return ("success", next_token)
-
-    def _refresh(current: dict) -> dict | None:
-        """Refresh with one retry on invalid_grant after re-reading the secret."""
-        kind, refreshed = _try_refresh_once(current)
-        if kind == "success":
-            return refreshed
-        if kind == "failure":
-            return None
-
-        log(
-            "WARN",
-            "resolve_jira_oauth_token: invalid_grant — re-reading secret to check "
-            "for concurrent refresh",
-        )
-        try:
-            fresh = _fetch_token()
-        except (ClientError, BotoCoreError) as e:
-            log("WARN", f"resolve_jira_oauth_token: re-read after invalid_grant failed: {e}")
-            return None
-        if fresh is None:
-            return None
-
-        if fresh.get("refresh_token") == current.get("refresh_token"):
-            log(
-                "ERROR",
-                "resolve_jira_oauth_token: refresh_token permanently rejected; re-onboard required",
-            )
-            return None
-
-        if not _is_expiring(fresh.get("expires_at", "")):
-            log(
-                "INFO",
-                "resolve_jira_oauth_token: concurrent refresh detected; using freshly-read token",
-            )
-            return fresh
-
-        kind2, refreshed2 = _try_refresh_once(fresh)
-        if kind2 == "success":
-            return refreshed2
-        return None
-
     try:
         token_obj = _fetch_token()
     except (ClientError, BotoCoreError) as e:
@@ -533,10 +425,17 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     if token_obj is None:
         return ""
 
+    # Fail closed if the stored token is expiring — the agent cannot refresh
+    # without burning Atlassian's rotating refresh_token (see docstring). The
+    # Lambda path owns refresh; advisory Jira comments simply no-op here.
     if _is_expiring(token_obj.get("expires_at", "")):
-        refreshed = _refresh(token_obj)
-        if refreshed:
-            token_obj = refreshed
+        log(
+            "WARN",
+            "resolve_jira_oauth_token: stored token is expiring and the agent does not "
+            "refresh (Atlassian rotates refresh_tokens; agent lacks PutSecretValue). "
+            "Failing closed — Jira comments will be skipped for this task.",
+        )
+        return ""
 
     access = token_obj.get("access_token", "")
     if access:

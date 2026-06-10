@@ -13,7 +13,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. The agent clones the repo, opens a PR, and comments on the Jira issue via the Atlassian Remote MCP server.
+A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. The agent clones the repo, opens a PR, and comments on the Jira issue via the Jira REST v3 API (using the same stored OAuth token).
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
@@ -28,16 +28,29 @@ Jira Cloud webhook
   → existing orchestrator pipeline (unchanged)
 ```
 
-Outbound (Agent → Jira) — MCP only:
+Outbound (Agent → Jira) — REST v3:
 
 ```
 runner picks task with channel_source="jira"
-  → channel_mcp writes a `jira-server` entry into .mcp.json
-    (Atlassian Remote MCP at https://mcp.atlassian.com/v1/sse,
-     OAuth token resolved from bgagent-jira-oauth-<cloudId>)
-  → Claude Agent SDK exposes Jira tools (mcp__jira-server__*)
-  → agent posts comments / transitions / links the PR via MCP tools
+  → jira_reactions resolves the OAuth access token from
+    bgagent-jira-oauth-<cloudId> (JIRA_API_TOKEN)
+  → agent posts a "started" comment, then a terminal "succeeded /
+    failed (+ PR link)" comment, via
+    POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/comment
 ```
+
+Comments are advisory and best-effort: network/auth failures are logged and
+swallowed (with an auth circuit-breaker), never gating the pipeline.
+
+> **Why REST, not the Atlassian Remote MCP?** The hosted MCP
+> (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
+> with dynamic client registration and won't accept the stored REST OAuth
+> token as a Bearer header, so it can't connect from a headless agent. The
+> REST v3 API accepts the same token (it carries `write:jira-work`). See
+> [ADR-015](../decisions/ADR-015-jira-integration.md). A `jira-server` MCP
+> entry is still written to `.mcp.json` as a forward-looking placeholder, but
+> it is expected to fail to connect today and the outbound path does not
+> depend on it.
 
 There is no DynamoDB Streams consumer and no outbound-notify Lambda — this is an inbound-only adapter, matching Linear.
 
@@ -164,12 +177,12 @@ aws secretsmanager get-secret-value \
 
 - Verify the per-tenant OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-jira-oauth-<cloudId>`.
 - Verify the registry row's `oauth_secret_arn` matches and `status = 'active'`.
-- Check the agent container logs for the `jira-server` MCP entry being written. Absence means `channel_source` wasn't `jira` on the task, or the tenant OAuth lookup failed.
-- A `401` from Atlassian usually means the refresh token was revoked tenant-side — re-run `bgagent jira setup`.
+- Check the agent container logs for `jira_reactions` lines (`comment_task_started` / `comment_task_finished`). Absence means `channel_source` wasn't `jira` on the task, or the tenant OAuth token didn't resolve. (The `jira-server` MCP entry is also written to `.mcp.json`, but it is a non-functional placeholder — its connection failure is expected and is not the cause.)
+- A `401`/`403` from Atlassian usually means the token was revoked tenant-side, or the stored access token expired and the agent (which never refreshes) failed closed — re-run `bgagent jira setup` to re-mint, then re-apply the label.
 
 ## Limits and quotas
 
-Atlassian access tokens are short-lived; the processor and orchestrator auto-refresh via the stored `refresh_token` (which is why `offline_access` is required) and write the rotated bundle back to Secrets Manager. Jira Cloud REST rate limits are generous relative to a typical task's handful of API calls.
+Atlassian access tokens are short-lived. The **trusted Lambda paths** (`jira-oauth-resolver.ts` — the webhook processor and orchestrator) auto-refresh via the stored `refresh_token` (which is why `offline_access` is required) and write the rotated bundle back to Secrets Manager. The **agent never refreshes**: Atlassian rotates the `refresh_token` on every use and the agent role has `GetSecretValue` only, so an agent-side refresh would burn the stored token without being able to persist its replacement. The agent uses whatever token the Lambdas most-recently wrote (resolved just before the session starts) and fails closed on an already-expiring token. Jira Cloud REST rate limits are generous relative to a typical task's handful of API calls.
 
 ## Removing the integration
 

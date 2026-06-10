@@ -89,6 +89,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Request body is required' });
     }
 
+    // HMAC is computed over the raw `event.body` string. If API Gateway is
+    // ever configured with binary media types it can deliver the body
+    // base64-encoded (`isBase64Encoded: true`), in which case both the JSON
+    // parse and the signature comparison would be over the wrong bytes. We
+    // assume a UTF-8 JSON body (Atlassian sends `application/json`); reject
+    // loudly rather than silently failing verification on the encoded form.
+    if (event.isBase64Encoded) {
+      logger.error('Jira webhook delivered base64-encoded; expected raw JSON body');
+      return jsonResponse(400, { error: 'Unexpected body encoding' });
+    }
+
     const signature = event.headers['X-Hub-Signature'] ?? event.headers['x-hub-signature'] ?? '';
     if (!signature) {
       logger.warn('Jira webhook missing X-Hub-Signature header');
@@ -109,7 +120,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // table not configured, (b) no cloudId in body, (c) tenant not in registry,
     // or (d) tenant's stored secret lacks `webhook_signing_secret`.
     // Per-tenant MISMATCH and REVOKED are fatal — no fallback.
+    //
+    // `verifiedViaStackWide` is propagated to the processor: a per-tenant
+    // signature proves the sender knows *that* tenant's secret (so the
+    // body-supplied `cloudId` is trustworthy for routing), whereas the
+    // stack-wide secret is not bound to any tenant. The processor refuses
+    // to route a stack-wide-verified delivery to a body-chosen `cloudId`,
+    // binding it to the sole active tenant instead.
     let verified = false;
+    let verifiedViaStackWide = false;
     if (WORKSPACE_REGISTRY_TABLE && payload.cloudId) {
       const result = await verifyJiraRequestForTenant(
         WORKSPACE_REGISTRY_TABLE,
@@ -140,15 +159,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         return jsonResponse(401, { error: 'Invalid signature' });
       }
+      verifiedViaStackWide = true;
       logger.info('Jira webhook verified via stack-wide fallback secret', {
         jira_cloud_id: payload.cloudId,
         per_tenant_registry_configured: Boolean(WORKSPACE_REGISTRY_TABLE),
       });
     }
 
-    // Optional advisory replay window (24h). The dedup table catches the
-    // common retry case; this guards against very old replays.
-    if (payload.timestamp !== undefined && !isWebhookTimestampFresh(payload.timestamp)) {
+    // Advisory replay window. The dedup table catches the common retry case;
+    // this guards against very old replays. Atlassian's `timestamp` is only
+    // advisory (it isn't part of the signed material), so a missing value
+    // can't be rejected — but we log it so the skipped check is observable
+    // rather than a silent fail-open.
+    if (payload.timestamp === undefined) {
+      logger.warn('Jira webhook has no timestamp — replay-window check skipped', {
+        jira_cloud_id: payload.cloudId,
+      });
+    } else if (!isWebhookTimestampFresh(payload.timestamp)) {
       logger.warn('Jira webhook timestamp outside replay window', {
         timestamp: payload.timestamp,
       });
@@ -201,7 +228,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify({ raw_body: event.body })),
+        Payload: new TextEncoder().encode(
+          JSON.stringify({ raw_body: event.body, verified_via_stack_wide: verifiedViaStackWide }),
+        ),
       }));
     } catch (invokeErr) {
       logger.error('Failed to invoke Jira webhook processor', {

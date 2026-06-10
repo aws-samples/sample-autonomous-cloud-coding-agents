@@ -500,10 +500,13 @@ class TestResolveJiraOauthToken:
 
     The orchestrator stamps `jira_oauth_secret_arn` into the task's
     channel_metadata at creation time. resolve_jira_oauth_token reads the
-    secret JSON via boto3, refreshes it if expiring, and caches the
-    access_token in `JIRA_API_TOKEN` for the Atlassian Remote MCP
-    placeholder. Mirrors resolve_linear_api_token; the differences are the
-    secret/env var names and the Atlassian OAuth endpoint (JSON body).
+    secret JSON via boto3 and caches the access_token in `JIRA_API_TOKEN`
+    for the agent-side Jira REST calls (jira_reactions).
+
+    Unlike the Linear resolver, the agent NEVER refreshes the Jira token:
+    Atlassian rotates the refresh_token on every use and the agent role has
+    GetSecretValue only (no Put), so a refresh would burn the stored
+    refresh_token and brick the tenant. See TestResolveJiraOauthTokenNoRefresh.
     """
 
     def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
@@ -610,22 +613,25 @@ class TestResolveJiraOauthToken:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
 
-class TestResolveJiraOauthTokenRefreshPaths:
-    """Tests for the refresh sub-flow inside resolve_jira_oauth_token.
+class TestResolveJiraOauthTokenNoRefresh:
+    """The agent NEVER refreshes the Jira OAuth token.
 
-    The agent's `_refresh` is a non-trivial state machine: try Atlassian
-    /oauth/token, on `invalid_grant` re-read SM (a concurrent caller may
-    have rotated), retry once with the freshly-read refresh_token. Each
-    branch needs explicit coverage because they're hot-path during the
-    Jira access-token TTL window.
+    Atlassian rotates the refresh_token on every use, and the agent role has
+    `secretsmanager:GetSecretValue` only (no Put). If the agent refreshed it
+    would consume the stored refresh_token, keep the rotated replacement only
+    in memory for this task, and leave Secrets Manager holding a dead
+    refresh_token — bricking the tenant on the next resolve. So the resolver
+    uses a still-valid stored token verbatim and fails CLOSED (empty string,
+    advisory comments no-op) when the stored token is expiring. The trusted
+    Lambda path (jira-oauth-resolver.ts, which has PutSecretValue) owns all
+    refreshes.
     """
 
     @staticmethod
     def _stored(**overrides):
         from datetime import datetime, timedelta
 
-        # Default: token expires in 30s so _is_expiring returns True
-        # and the refresh path runs.
+        # Default: token expires in 30s so _is_expiring returns True.
         soon = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
         base = {
             "access_token": "jira_old",
@@ -643,8 +649,12 @@ class TestResolveJiraOauthTokenRefreshPaths:
         base.update(overrides)
         return base
 
-    def test_expiring_token_triggers_refresh_and_returns_new_access_token(self, monkeypatch):
-        """Happy refresh: expiring stored token → POST /oauth/token → new access_token."""
+    def test_expiring_token_fails_closed_without_network_call(self, monkeypatch):
+        """Expiring stored token → empty string, and NO /oauth/token POST.
+
+        This is the regression guard for the rotating-refresh-token bug: the
+        agent must not consume the stored refresh_token.
+        """
         import json
         from unittest.mock import patch as upatch
 
@@ -654,105 +664,42 @@ class TestResolveJiraOauthTokenRefreshPaths:
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(self._stored())}
 
-        # urlopen returns access_token=jira_new, expires_in=3600.
-        fake_resp = MagicMock()
-        fake_resp.read.return_value = json.dumps(
-            {
-                "access_token": "jira_new",
-                "refresh_token": "rt-new",
-                "expires_in": 3600,
-                "scope": "read:jira-work write:jira-work",
-            }
-        ).encode("utf-8")
-        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
-        fake_resp.__exit__ = MagicMock(return_value=False)
-
         with (
             patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", return_value=fake_resp),
+            upatch("urllib.request.urlopen") as urlopen_mock,
         ):
-            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == "jira_new"
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
+            urlopen_mock.assert_not_called()
+        # Nothing cached on the fail-closed path.
+        import os as _os
+
+        assert _os.environ.get("JIRA_API_TOKEN") in (None, "")
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
-    def test_invalid_grant_with_concurrent_refresh_uses_freshly_read_token(self, monkeypatch):
-        """Race-recovery: refresh returns invalid_grant; re-read SM finds rotated token; use it."""
-        import io
+    def test_valid_token_used_verbatim_without_network_call(self, monkeypatch):
+        """A still-valid stored token is returned as-is, with no refresh POST."""
         import json
-        import urllib.error
         from datetime import datetime, timedelta
-        from email.message import Message
         from unittest.mock import patch as upatch
 
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
         future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
-        old = self._stored(refresh_token="rt-old")
-        rotated = self._stored(
-            access_token="jira_concurrent",
-            refresh_token="rt-rotated",
-            expires_at=future,
-        )
+        valid = self._stored(access_token="jira_valid", expires_at=future)
         mock_sm = MagicMock()
-        mock_sm.get_secret_value.side_effect = [
-            {"SecretString": json.dumps(old)},  # initial read
-            {"SecretString": json.dumps(rotated)},  # re-read after invalid_grant
-        ]
-
-        # First /oauth/token POST returns 400 invalid_grant.
-        http_err = urllib.error.HTTPError(
-            "https://auth.atlassian.com/oauth/token",
-            400,
-            "Bad Request",
-            Message(),
-            io.BytesIO(json.dumps({"error": "invalid_grant"}).encode("utf-8")),
-        )
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(valid)}
 
         with (
             patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", side_effect=http_err),
+            upatch("urllib.request.urlopen") as urlopen_mock,
         ):
-            # Should return the access_token from the freshly-read
-            # rotated secret WITHOUT a second /oauth/token POST.
-            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == "jira_concurrent"
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == "jira_valid"
+            urlopen_mock.assert_not_called()
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
-    def test_invalid_grant_with_no_concurrent_refresh_returns_empty(self, monkeypatch):
-        """No race: invalid_grant + re-read finds same refresh_token → permanent failure."""
-        import io
-        import json
-        import urllib.error
-        from email.message import Message
-        from unittest.mock import patch as upatch
-
-        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        same = self._stored(refresh_token="rt-shared")
-        mock_sm = MagicMock()
-        # Both reads return the same secret (no concurrent rotation).
-        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(same)}
-
-        http_err = urllib.error.HTTPError(
-            "https://auth.atlassian.com/oauth/token",
-            400,
-            "Bad Request",
-            Message(),
-            io.BytesIO(json.dumps({"error": "invalid_grant"}).encode("utf-8")),
-        )
-
-        with (
-            patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", side_effect=http_err),
-        ):
-            # Permanent rejection; resolver falls through to the original
-            # (stale) token rather than empty so callers don't crash.
-            result = resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"})
-            assert isinstance(result, str)
-        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
-
-    def test_malformed_expires_at_treated_as_expiring_with_warn_log(self, monkeypatch):
-        """Bad expires_at format triggers the refresh path."""
+    def test_malformed_expires_at_fails_closed(self, monkeypatch):
+        """Unparseable expires_at is treated as expiring → fail closed, no network call."""
         import json
         from unittest.mock import patch as upatch
 
@@ -763,41 +710,12 @@ class TestResolveJiraOauthTokenRefreshPaths:
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(bad)}
 
-        fake_resp = MagicMock()
-        fake_resp.read.return_value = json.dumps(
-            {"access_token": "jira_refreshed", "expires_in": 3600}
-        ).encode("utf-8")
-        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
-        fake_resp.__exit__ = MagicMock(return_value=False)
-
         with (
             patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", return_value=fake_resp) as urlopen_mock,
+            upatch("urllib.request.urlopen") as urlopen_mock,
         ):
-            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == "jira_refreshed"
-            # Refresh path was actually invoked.
-            assert urlopen_mock.called
-        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
-
-    def test_network_failure_during_refresh_returns_stale_token(self, monkeypatch):
-        """URLError during refresh: surface stale token instead of crashing."""
-        import json
-        import urllib.error
-        from unittest.mock import patch as upatch
-
-        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        mock_sm = MagicMock()
-        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(self._stored())}
-
-        with (
-            patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", side_effect=urllib.error.URLError("DNS down")),
-        ):
-            # Doesn't crash; returns the stale (expiring) access_token.
-            result = resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"})
-            assert result == "jira_old"
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
+            urlopen_mock.assert_not_called()
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):

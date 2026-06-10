@@ -42,8 +42,18 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
  * advisory check after signature verification has already passed. We still
  * enforce it to bound replay windows for delivery jobs that get stuck and
  * surface much later — the dedup table handles the more likely retry case.
+ *
+ * 1h comfortably covers Atlassian's actual delivery-retry behavior while
+ * keeping the replay window tight.
  */
-export const MAX_WEBHOOK_EVENT_AGE_MS = 24 * 60 * 60 * 1000;
+export const MAX_WEBHOOK_EVENT_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Tolerance for a webhook timestamp that sits slightly in the future
+ * relative to this Lambda's clock (sender/receiver skew). Beyond this, a
+ * future-dated timestamp is rejected rather than accepted.
+ */
+export const CLOCK_SKEW_ALLOWANCE_MS = 5 * 60 * 1000;
 
 /**
  * Fetch a secret from Secrets Manager with in-memory caching.
@@ -124,8 +134,12 @@ export function isWebhookTimestampFresh(timestamp: number | undefined): boolean 
   if (typeof timestamp !== 'number' || !isFinite(timestamp)) {
     return false;
   }
-  const age = Math.abs(Date.now() - timestamp);
-  return age <= MAX_WEBHOOK_EVENT_AGE_MS;
+  // One-sided check: reject events older than the window. A small allowance
+  // for clock skew lets a slightly-future timestamp through, but a far-future
+  // value (crafted or badly skewed) is rejected rather than silently accepted
+  // — `Math.abs` would have let any future timestamp pass.
+  const age = Date.now() - timestamp;
+  return age <= MAX_WEBHOOK_EVENT_AGE_MS && age >= -CLOCK_SKEW_ALLOWANCE_MS;
 }
 
 /**

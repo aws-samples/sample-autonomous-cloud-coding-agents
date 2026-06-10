@@ -838,7 +838,7 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
     });
 
-    // --- Jira Cloud integration (inbound webhook + agent-side MCP outbound) ---
+    // --- Jira Cloud integration (inbound webhook + agent-side REST outbound) ---
     const jiraIntegration = new JiraIntegration(this, 'JiraIntegration', {
       api: taskApi.api,
       userPool: taskApi.userPool,
@@ -877,9 +877,12 @@ export class AgentStack extends Stack {
 
     // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
     // grant into the orchestrator so the concurrency-cap rejection path
-    // can post a Jira comment. The orchestrator only resolves a token
-    // when `task.channel_source === 'jira'`, but the IAM grant is
-    // unconditional (per-tenant secrets are created lazily by setup).
+    // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
+    // comment. The orchestrator only resolves a token when
+    // `task.channel_source === 'jira'`, but the IAM grant is unconditional
+    // (per-tenant secrets are created lazily by setup). Put is needed because
+    // resolving an expiring token refreshes it in place (the orchestrator is
+    // a trusted Lambda; unlike the agent it owns the rotated-token write-back).
     jiraIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
     orchestrator.fn.addEnvironment(
       'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',

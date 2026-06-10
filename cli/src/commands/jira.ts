@@ -495,55 +495,54 @@ export function makeJiraCommand(): Command {
         }));
         console.log('  ✓ Recorded tenant in registry');
 
-        // ─── Step 6: Webhook signing secret (per-tenant + stack-wide) ─────
+        // ─── Step 6: Webhook signing secret (per-tenant primary) ─────────
         //
         // Atlassian doesn't auto-generate webhook signing secrets — they're
-        // operator-chosen at webhook-create time in the Jira admin UI.
-        // We treat the secret like Linear's: store it on the per-tenant
-        // OAuth bundle (primary verification path) AND mirror to stack-wide
-        // (back-compat fallback).
-        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
-        let webhookSigningSecret: string | undefined;
-
-        if (stackWideAlreadyConfigured) {
-          console.log('  ✓ Webhook signing secret already configured stack-wide (mirroring to per-tenant)');
-          try {
-            const value = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn! }));
-            if (value.SecretString && !value.SecretString.trim().startsWith('{')) {
-              webhookSigningSecret = value.SecretString;
-            }
-          } catch (err) {
-            console.log(`  ⚠ Could not read stack-wide secret to mirror: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        } else {
-          const apiBaseUrl = config.api_url.replace(/\/+$/, '');
-          console.log();
-          console.log('  Webhook signing secret needed.');
-          console.log('  In Jira → Settings → System → Webhooks → Create a Webhook:');
-          console.log(`    URL:           ${apiBaseUrl}/jira/webhook`);
-          console.log('    Events:        Issue: created, updated');
-          console.log('    Secret:        choose a strong random value (e.g. `openssl rand -hex 32`)');
-          console.log();
-          const webhookSecret = await promptSecret('Webhook signing secret: ');
-          if (!webhookSecret) {
-            throw new CliError('Webhook signing secret is required.');
-          }
-          await sm.send(new PutSecretValueCommand({
-            SecretId: webhookSecretArn!,
-            SecretString: webhookSecret,
-          }));
-          console.log('  ✓ Stored webhook signing secret (stack-wide back-compat)');
-          webhookSigningSecret = webhookSecret;
+        // operator-chosen at webhook-create time in the Jira admin UI, and
+        // each tenant's webhook is configured independently with its OWN
+        // secret. So we always prompt for THIS tenant's secret and store it
+        // on the per-tenant OAuth bundle — the primary verification path.
+        //
+        // We deliberately do NOT copy an existing stack-wide secret into a
+        // new tenant's bundle (the old behavior): that would make tenant A's
+        // secret verify per-tenant for tenant B, and a holder of the
+        // stack-wide secret could then forge per-tenant-signed events for any
+        // tenant. The stack-wide secret is only seeded once, from the FIRST
+        // tenant's secret, as the single-tenant back-compat fallback.
+        const apiBaseUrl = config.api_url.replace(/\/+$/, '');
+        console.log();
+        console.log('  Webhook signing secret needed for THIS tenant.');
+        console.log('  In Jira → Settings → System → Webhooks → Create a Webhook:');
+        console.log(`    URL:           ${apiBaseUrl}/jira/webhook`);
+        console.log('    Events:        Issue: created, updated');
+        console.log('    Secret:        choose a strong random value (e.g. `openssl rand -hex 32`)');
+        console.log();
+        const webhookSigningSecret = await promptSecret('Webhook signing secret: ');
+        if (!webhookSigningSecret) {
+          throw new CliError('Webhook signing secret is required.');
         }
 
-        if (webhookSigningSecret) {
-          const merged: StoredJiraOauthToken = {
-            ...stored,
-            webhook_signing_secret: webhookSigningSecret,
-            updated_at: new Date().toISOString(),
-          };
-          await upsertOauthSecret(sm, secretName, merged, cloudId);
-          console.log('  ✓ Mirrored signing secret to per-tenant OAuth bundle');
+        const merged: StoredJiraOauthToken = {
+          ...stored,
+          webhook_signing_secret: webhookSigningSecret,
+          updated_at: new Date().toISOString(),
+        };
+        await upsertOauthSecret(sm, secretName, merged, cloudId);
+        console.log('  ✓ Stored signing secret on the per-tenant OAuth bundle');
+
+        // Seed the stack-wide fallback only if it has never been set, so a
+        // single-tenant install (no per-tenant routing) still verifies. Once
+        // a second tenant onboards, its secret is per-tenant only — the
+        // stack-wide secret stays pinned to the first tenant.
+        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
+        if (stackWideAlreadyConfigured) {
+          console.log('  ✓ Stack-wide fallback already configured (leaving as-is)');
+        } else {
+          await sm.send(new PutSecretValueCommand({
+            SecretId: webhookSecretArn!,
+            SecretString: webhookSigningSecret,
+          }));
+          console.log('  ✓ Seeded stack-wide fallback for single-tenant back-compat');
         }
 
         // ─── Done ─────────────────────────────────────────────────────────
@@ -552,7 +551,7 @@ export function makeJiraCommand(): Command {
         console.log();
         console.log('Next steps:');
         console.log('  1. Map a Jira project to a GitHub repo:');
-        console.log('       bgagent jira map <PROJECT-KEY> --repo owner/repo');
+        console.log(`       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo`);
         console.log('  2. Link your Jira account so triggered tasks attribute to your platform user:');
         console.log('       (an admin runs `bgagent jira invite-user` to issue you a code; this command');
         console.log('        is not yet implemented — populate the user-mapping row manually for now.)');

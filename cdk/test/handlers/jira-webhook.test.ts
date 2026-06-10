@@ -204,6 +204,50 @@ describe('jira-webhook handler', () => {
     expect(lambdaSend).toHaveBeenCalledTimes(2);
   });
 
+  test('400s a base64-encoded body before verifying (HMAC is over the raw string)', async () => {
+    const body = issueCreatePayload();
+    const event = makeEvent(body, sign(body));
+    (event as { isBase64Encoded: boolean }).isBase64Encoded = true;
+
+    const result = await handler(event);
+
+    expect(result.statusCode).toBe(400);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('accepts a verified Issue event with no timestamp (replay check skipped, not fail-open-rejected)', async () => {
+    // Atlassian timestamps are advisory (not signed), so a missing one can't
+    // be treated as fatal. The delivery still dispatches; the dedup key
+    // collapses to `…#unknown`.
+    const body = JSON.stringify({
+      webhookEvent: 'jira:issue_created',
+      issue: { id: '10001', key: 'ENG-42', fields: { labels: ['bgagent'], project: { id: 'p1', key: 'ENG' } } },
+    });
+    ddbSend.mockResolvedValueOnce({});
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent(body, sign(body)));
+
+    expect(result.statusCode).toBe(200);
+    const putCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Put');
+    expect(putCall![0].input.Item.dedup_key).toBe('ENG-42#jira:issue_created#unknown');
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('flags stack-wide verification to the processor (verified_via_stack_wide:true)', async () => {
+    // No per-tenant registry configured here → verification rides the
+    // stack-wide secret, which the processor must not trust for cloudId.
+    const body = issueCreatePayload();
+    ddbSend.mockResolvedValueOnce({});
+    lambdaSend.mockResolvedValueOnce({});
+
+    await handler(makeEvent(body, sign(body)));
+
+    const invokeCall = lambdaSend.mock.calls[0][0];
+    const decoded = JSON.parse(new TextDecoder().decode(invokeCall.input.Payload));
+    expect(decoded.verified_via_stack_wide).toBe(true);
+  });
+
   test('dedup hit returns 200 with deduped:true', async () => {
     const body = issueCreatePayload();
     ddbSend.mockRejectedValueOnce(new ConditionalCheckFailedException({

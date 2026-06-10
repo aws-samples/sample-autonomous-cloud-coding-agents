@@ -166,6 +166,56 @@ describe('jira-webhook-processor handler', () => {
     expect(createTaskCoreMock).toHaveBeenCalled();
   });
 
+  // ─── Stack-wide-verified deliveries: cloudId is not trusted from the body ──
+  //
+  // A delivery verified against the stack-wide fallback secret proves nothing
+  // about which tenant sent it (the secret is not bound to a cloudId). The
+  // processor must ignore the body `cloudId` and bind to the sole active
+  // tenant, dropping when that's ambiguous — otherwise a holder of the
+  // stack-wide secret could steer a webhook at any tenant's mappings.
+  describe('stack-wide-verified delivery does not trust body cloudId', () => {
+    function stackWideEvent(payload: Record<string, unknown>): {
+      raw_body: string;
+      verified_via_stack_wide: boolean;
+    } {
+      return { raw_body: JSON.stringify(payload), verified_via_stack_wide: true };
+    }
+
+    test('binds to the sole active tenant, ignoring a different body cloudId', async () => {
+      // Body claims `cloud-evil`, but the sole active tenant is `cloud-1`.
+      // Routing must use `cloud-1` (the project mapping is keyed on it).
+      const payload = issue({ cloudId: 'cloud-evil' });
+      ddbSend
+        .mockResolvedValueOnce({ Items: [{ jira_cloud_id: 'cloud-1', status: 'active' }] }) // Scan
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } }) // project mapping
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'user-1', status: 'active' } }); // user mapping
+      createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
+
+      await handler(stackWideEvent(payload));
+
+      // Project mapping was looked up with the SOLE-TENANT cloudId, not the
+      // attacker-supplied one.
+      const projectGet = ddbSend.mock.calls[1][0];
+      expect(projectGet.input.Key.jira_project_identity).toBe('cloud-1#ENG');
+      const [, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(ctx.channelMetadata.jira_cloud_id).toBe('cloud-1');
+    });
+
+    test('drops when multiple active tenants make the binding ambiguous', async () => {
+      const payload = issue({ cloudId: 'cloud-evil' });
+      ddbSend.mockResolvedValueOnce({
+        Items: [
+          { jira_cloud_id: 'cloud-1', status: 'active' },
+          { jira_cloud_id: 'cloud-2', status: 'active' },
+        ],
+      });
+
+      await handler(stackWideEvent(payload));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+  });
+
   test('skips when project is not onboarded', async () => {
     ddbSend.mockResolvedValueOnce({ Item: undefined });
     await handler(eventWith(issue()));
@@ -370,7 +420,11 @@ describe('jira-webhook-processor handler', () => {
       const [, issueKey, message] = reportIssueFailureMock.mock.calls[0];
       expect(issueKey).toBe('ENG-42');
       expect(message).toContain("isn't onboarded");
-      expect(message).toContain('bgagent jira onboard-project');
+      // The suggested command must be the real one (`map`) with the required
+      // cloud-id + project-key positionals, not the non-existent
+      // `onboard-project`.
+      expect(message).toContain('bgagent jira map cloud-1 ENG --repo');
+      expect(message).not.toContain('onboard-project');
     });
 
     test('posts feedback when project mapping is removed', async () => {
@@ -589,6 +643,43 @@ describe('jira-webhook-processor handler', () => {
 
       const [reqBody] = createTaskCoreMock.mock.calls[0];
       expect(reqBody.attachments).toHaveLength(10);
+    });
+
+    test('extracts an external ADF media node embedded in the description', async () => {
+      // Real Jira issues embed images as `media` nodes, not markdown image
+      // text. The walker must render an `external` media node to markdown so
+      // it surfaces as an attachment. (`file`-type media reference an
+      // attachment id that needs a Jira API round-trip, so they're skipped.)
+      const payload = issue();
+      (payload.issue as { fields: Record<string, unknown> }).fields.description = {
+        type: 'doc',
+        version: 1,
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'See the mockup:' }] },
+          {
+            type: 'mediaSingle',
+            content: [
+              {
+                type: 'media',
+                attrs: { type: 'external', url: 'https://cdn.example.com/mockup.png', alt: 'mockup' },
+              },
+            ],
+          },
+          {
+            type: 'mediaSingle',
+            content: [
+              // file-type media: attachment id, no direct URL — must be skipped.
+              { type: 'media', attrs: { type: 'file', id: 'att-123' } },
+            ],
+          },
+        ],
+      };
+
+      await handler(eventWith(payload));
+
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(1);
+      expect(reqBody.attachments[0]).toEqual({ type: 'url', url: 'https://cdn.example.com/mockup.png' });
     });
   });
 });

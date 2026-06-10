@@ -6,8 +6,11 @@ with ``setting_sources=["project"]`` — picks up the channel MCP at session
 start and exposes the server's tools.
 
 Currently wired channels:
-- ``linear``  → Linear hosted MCP (``mcp__linear-server__*`` tools)
-- ``jira``    → Atlassian Remote MCP (``mcp__jira-server__*`` tools)
+- ``linear``  → Linear hosted MCP (``mcp__linear-server__*`` tools) — functional.
+- ``jira``    → Atlassian Remote MCP entry — a NON-FUNCTIONAL placeholder. It
+  is written for forward-compatibility but cannot connect from a headless
+  agent (interactive OAuth 2.1 only); live outbound Jira comments go through
+  the REST shim in ``jira_reactions.py``. See ``JIRA_MCP_URL`` below + ADR-015.
 
 For all other channel sources this is a no-op: no MCP is written, and the
 SDK sees no channel-specific tools.
@@ -52,14 +55,21 @@ def _linear_server_entry() -> dict[str, Any]:
     }
 
 
-# ─── Jira (Atlassian Remote MCP) ─────────────────────────────────────────────
+# ─── Jira (Atlassian Remote MCP — NON-FUNCTIONAL PLACEHOLDER) ────────────────
 
 #: Atlassian Remote MCP endpoint — Streamable HTTP transport.
 #:
-#: NOTE: Atlassian's Remote MCP rolled out in mid-2025 and may still be in
-#: preview / gated rollout when this code first deploys. Confirm the public
-#: URL + auth contract before relying on this in production. If gated, fall
-#: back to a REST shim in a future ``jira_reactions.py`` module (Plan B).
+#: IMPORTANT: this entry does NOT work from a headless agent and is retained
+#: only as a forward-looking placeholder. The hosted Atlassian MCP requires an
+#: interactive, browser-based OAuth 2.1 flow with dynamic client registration
+#: and will NOT accept the stored REST OAuth token as a Bearer header, so it
+#: fails to connect in the runtime (``claude mcp list`` → "Failed to connect").
+#:
+#: The LIVE outbound path is the REST shim in ``agent/src/jira_reactions.py``
+#: (the "Plan B" that became Plan A), which posts comments via the Jira REST
+#: v3 API using the same stored OAuth token. See ADR-015 and
+#: ``agent/src/prompt_builder.py``. If Atlassian ever ships a token-compatible
+#: MCP, this entry can be promoted and the REST shim retired.
 JIRA_MCP_URL = "https://mcp.atlassian.com/v1/sse"
 
 #: Key name inside ``mcpServers``. Tools surface as ``mcp__jira-server__*``
@@ -164,4 +174,14 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
         "TASK",
         f"{channel_source} MCP configured at {mcp_path} (server key: {server_key})",
     )
+    if channel_source == "jira":
+        # The Jira MCP entry is a non-functional placeholder (see JIRA_MCP_URL
+        # docstring + ADR-015). Log it in-band so a "Failed to connect" line in
+        # the agent logs isn't mistaken for the cause of a missing comment —
+        # the live outbound path is the REST shim in jira_reactions.py.
+        log(
+            "TASK",
+            "jira MCP entry is a placeholder and is EXPECTED to fail to connect; "
+            "outbound Jira comments use the REST shim (jira_reactions.py), not MCP",
+        )
     return True

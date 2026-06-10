@@ -88,6 +88,10 @@ async function safeReportIssueFailure(
  */
 async function resolveSoleTenantCloudId(): Promise<string | undefined> {
   if (!WORKSPACE_REGISTRY_TABLE) return undefined;
+  // Full-table Scan: the workspace registry holds one row per OAuth-installed
+  // tenant and is expected to stay small (tens of rows at most), so a Scan is
+  // cheap. The >1-active-tenant short-circuit below caps the work regardless.
+  // If this table ever grows large, add a GSI on `status` and Query it.
   let activeCloudIds: string[] = [];
   let lastKey: Record<string, unknown> | undefined;
   do {
@@ -155,6 +159,16 @@ interface JiraIssueEvent {
 
 interface ProcessorEvent {
   readonly raw_body: string;
+  /**
+   * True when the receiver verified this delivery against the stack-wide
+   * fallback secret rather than a per-tenant signing secret. The stack-wide
+   * secret is not bound to any `cloudId`, so a body-supplied `cloudId` on
+   * such a delivery is untrusted — the processor ignores it and binds the
+   * event to the sole active tenant instead (dropping when that's ambiguous).
+   * Absent/false means the signature was per-tenant, so `payload.cloudId`
+   * is trustworthy for routing.
+   */
+  readonly verified_via_stack_wide?: boolean;
 }
 
 /**
@@ -169,7 +183,8 @@ interface ProcessorEvent {
  * - Resolve `(cloudId, projectKey)` → repo mapping.
  * - Resolve `(cloudId, accountId)` → platform user mapping.
  * - Call `createTaskCore` with `channelSource: 'jira'` and metadata the
- *   agent uses to address the originating issue via the Jira MCP.
+ *   agent uses to address the originating issue via the Jira REST v3 API
+ *   (`jira_reactions.py`; see ADR-015 for why outbound is REST, not MCP).
  */
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
@@ -201,11 +216,30 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // `cloudId` is absent from Settings-UI webhook payloads. For a
-  // single-tenant install we recover it from the registry (see
-  // resolveSoleTenantCloudId); multi-tenant installs must send a webhook
-  // that carries its own cloudId.
-  const cloudId = payload.cloudId ?? (await resolveSoleTenantCloudId());
+  // Resolve the tenant `cloudId`, honoring the signature's trust boundary:
+  //
+  // - Per-tenant signature (`verified_via_stack_wide` false/absent): the
+  //   sender proved knowledge of *this* tenant's secret, so the body-supplied
+  //   `payload.cloudId` is trustworthy. Fall back to the sole-active-tenant
+  //   lookup only when the body omits it (Settings-UI webhooks).
+  // - Stack-wide fallback signature: the secret is not bound to any tenant,
+  //   so a body-supplied `cloudId` is attacker-controllable. We IGNORE it and
+  //   bind the delivery to the sole active tenant; `resolveSoleTenantCloudId`
+  //   returns undefined (→ drop) when zero or multiple tenants are active, so
+  //   a stack-wide secret can never steer an event at a chosen tenant.
+  let cloudId: string | undefined;
+  if (event.verified_via_stack_wide) {
+    cloudId = await resolveSoleTenantCloudId();
+    if (payload.cloudId && payload.cloudId !== cloudId) {
+      logger.warn('Ignoring body cloudId on stack-wide-verified webhook; binding to sole active tenant', {
+        body_cloud_id: payload.cloudId,
+        bound_cloud_id: cloudId,
+        issue_key: issue.key,
+      });
+    }
+  } else {
+    cloudId = payload.cloudId ?? (await resolveSoleTenantCloudId());
+  }
   const projectKey = issue.fields?.project?.key;
   if (!projectKey) {
     logger.info('Jira issue has no project.key — skipping (cannot route to a repo)', {
@@ -244,7 +278,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     await safeReportIssueFailure(
       issue.key,
       cloudId,
-      "❌ This Jira project isn't onboarded to ABCA. An admin can onboard it with `bgagent jira onboard-project <projectKey> --repo <owner>/<repo> --label <trigger>`.",
+      `❌ This Jira project isn't onboarded to ABCA. An admin can onboard it with \`bgagent jira map ${cloudId} ${projectKey} --repo <owner>/<repo>\` (add \`--label <trigger>\` to change the trigger label).`,
     );
     return;
   }
@@ -293,7 +327,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const taskDescription = buildTaskDescription(issue);
+  // Convert the ADF description to markdown once and reuse it for both the
+  // task body and image-attachment extraction.
+  const descriptionMarkdown = extractDescriptionMarkdown(issue.fields?.description);
+  const taskDescription = buildTaskDescription(issue, descriptionMarkdown);
 
   const channelMetadata: Record<string, string> = {
     jira_cloud_id: cloudId,
@@ -319,7 +356,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     channelMetadata.jira_site_url = resolved.siteUrl;
   }
 
-  const attachments = extractImageUrlAttachments(extractDescriptionMarkdown(issue.fields?.description));
+  const attachments = extractImageUrlAttachments(descriptionMarkdown);
 
   const requestId = crypto.randomUUID();
   const result = await createTaskCore(
@@ -438,7 +475,10 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
   return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
 }
 
-function buildTaskDescription(issue: NonNullable<JiraIssueEvent['issue']>): string {
+function buildTaskDescription(
+  issue: NonNullable<JiraIssueEvent['issue']>,
+  descriptionMarkdown: string,
+): string {
   const parts: string[] = [];
   const summary = issue.fields?.summary?.trim();
   if (summary) {
@@ -446,10 +486,9 @@ function buildTaskDescription(issue: NonNullable<JiraIssueEvent['issue']>): stri
   } else {
     parts.push(issue.key);
   }
-  const description = extractDescriptionMarkdown(issue.fields?.description);
-  if (description.trim()) {
+  if (descriptionMarkdown.trim()) {
     parts.push('');
-    parts.push(description.trim());
+    parts.push(descriptionMarkdown.trim());
   }
   return parts.join('\n');
 }
@@ -479,7 +518,14 @@ function extractDescriptionMarkdown(description: unknown): string {
 interface AdfNode {
   readonly type?: string;
   readonly text?: string;
-  readonly attrs?: { readonly level?: number };
+  readonly attrs?: {
+    readonly level?: number;
+    /** `media` node: `"external"` carries a direct `url`; `"file"`/`"link"`
+     *  carry an attachment `id` that needs a Jira API call to resolve. */
+    readonly type?: string;
+    readonly url?: string;
+    readonly alt?: string;
+  };
   readonly content?: AdfNode[];
 }
 
@@ -527,6 +573,24 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
       out.push(text);
       out.push('```');
       out.push('');
+      return;
+    }
+    case 'mediaSingle':
+    case 'mediaGroup':
+      // Container nodes — descend to the `media` children below.
+      (node.content ?? []).forEach((c) => walkAdf(c, out, depth));
+      return;
+    case 'media': {
+      // Jira embeds images as `media` nodes (not markdown image text). Only
+      // `external` media carry a directly-usable URL; `file`/`link` media
+      // reference an attachment `id` that needs a Jira API round-trip to
+      // resolve — out of scope for this minimal converter, so we skip those.
+      const url = node.attrs?.url;
+      if (node.attrs?.type === 'external' && typeof url === 'string' && url.startsWith('https://')) {
+        const alt = node.attrs?.alt ?? '';
+        out.push(`![${alt}](${url})`);
+        out.push('');
+      }
       return;
     }
     case 'text':
