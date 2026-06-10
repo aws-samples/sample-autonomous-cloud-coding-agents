@@ -153,7 +153,8 @@ export function isAccessTokenExpiring(
  * (`code_challenge`). Atlassian supports `S256`; always use that.
  */
 export function generatePkce(): { codeVerifier: string; codeChallenge: string } {
-  const verifierBytes = crypto.randomBytes(32);
+  const VERIFIER_BYTES = 32;
+  const verifierBytes = crypto.randomBytes(VERIFIER_BYTES);
   const codeVerifier = verifierBytes.toString('base64url');
   const challengeBytes = crypto.createHash('sha256').update(codeVerifier).digest();
   const codeChallenge = challengeBytes.toString('base64url');

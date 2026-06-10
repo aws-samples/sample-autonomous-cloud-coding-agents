@@ -53,6 +53,9 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
  *  accepts at creation time. */
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{1,99}$/;
 
+/** Width of the ═ rule used to frame the setup banner. */
+const BANNER_WIDTH = 72;
+
 /**
  * Render the printable Atlassian developer-console app config. Standalone
  * export so `bgagent jira setup` can call it inline.
@@ -71,7 +74,7 @@ export function renderJiraAppTemplate(opts: JiraAppTemplateOptions = {}): string
   // configured here.
   const callbackUrl = opts.callbackUrl ?? CALLBACK_URL;
 
-  const bar = '═'.repeat(72);
+  const bar = '═'.repeat(BANNER_WIDTH);
   return [
     bar,
     'Atlassian OAuth (3LO) app template',
@@ -133,9 +136,10 @@ export function openBrowser(url: string): Promise<boolean> {
  * Generate an opaque, URL-safe `state` value for OAuth CSRF protection.
  */
 function randomState(): string {
+  const STATE_BYTES = 32;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { randomBytes } = require('crypto') as typeof import('crypto');
-  return randomBytes(32).toString('base64url');
+  return randomBytes(STATE_BYTES).toString('base64url');
 }
 
 /**
@@ -251,8 +255,9 @@ function extractCognitoSub(): string {
   if (!creds?.id_token) {
     throw new Error('not authenticated — run `bgagent login`');
   }
+  const JWT_SEGMENTS = 3; // header.payload.signature
   const parts = creds.id_token.split('.');
-  if (parts.length !== 3) {
+  if (parts.length !== JWT_SEGMENTS) {
     throw new Error('malformed id_token in ~/.bgagent/credentials.json');
   }
   const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as { sub?: string };
