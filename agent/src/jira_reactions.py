@@ -128,8 +128,7 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
         with _auth_state_lock:
             _consecutive_auth_failures += 1
             opened = (
-                _consecutive_auth_failures >= _AUTH_FAILURE_THRESHOLD
-                and not _auth_circuit_open
+                _consecutive_auth_failures >= _AUTH_FAILURE_THRESHOLD and not _auth_circuit_open
             )
             if opened:
                 _auth_circuit_open = True

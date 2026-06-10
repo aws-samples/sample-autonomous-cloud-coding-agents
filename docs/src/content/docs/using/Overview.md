@@ -14,4 +14,3 @@ There are five ways to interact with the platform. You can use them independentl
 6. **Jira** - Add a label to a Jira Cloud issue to trigger a task; the agent posts progress comments back on the issue via Atlassian's Remote MCP server. See the [Jira setup guide](/using/jira-setup-guide).
 
 For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** or **Jira** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
-

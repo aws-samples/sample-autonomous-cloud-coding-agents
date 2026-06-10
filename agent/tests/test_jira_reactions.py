@@ -60,9 +60,7 @@ class TestStartComment:
             comment_task_started("jira", JIRA_META)
         assert post.call_count == 1
         url = post.call_args[0][0]
-        assert url == (
-            "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue/KAN-1/comment"
-        )
+        assert url == ("https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue/KAN-1/comment")
         body = post.call_args[1]["json"]["body"]
         assert body["type"] == "doc"
         assert body["content"][0]["content"][0]["text"].startswith("🤖")
