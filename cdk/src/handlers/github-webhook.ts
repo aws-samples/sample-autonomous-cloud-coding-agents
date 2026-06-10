@@ -131,12 +131,20 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
+    // GitHub sometimes fires `success` deployment_status events without
+    // an `environment_url` (e.g. when the provider hasn't published the
+    // URL yet but the build itself succeeded). 200-skip these so GitHub
+    // doesn't retry — the next status update will carry the URL.
+    if (!raw.deployment_status?.environment_url) {
+      return jsonResponse(200, { ok: true, skipped_no_url: true });
+    }
+
     // Single validate call shared with the processor — guarantees the
     // processor doesn't reject a payload the receiver admitted (closes
     // the "missing deployment.sha" gap where the processor would drop
-    // events the receiver had dispatched). Validation runs after the
-    // state + environment filters so common skip-paths never log a
-    // "missing fields" warn.
+    // events the receiver had dispatched). Runs after the state /
+    // environment / env-url skip-paths so 200s don't log a "missing
+    // fields" warn.
     const payload = validateDeploymentStatusPayload(raw);
     if (!payload) {
       logger.warn('GitHub deployment_status webhook missing required fields', {
@@ -144,7 +152,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         deployment_id: raw.deployment?.id,
         status_id: raw.deployment_status?.id,
         sha_present: Boolean(raw.deployment?.sha),
-        env_url_present: Boolean(raw.deployment_status?.environment_url),
       });
       return jsonResponse(400, { error: 'Missing required deployment_status fields' });
     }
