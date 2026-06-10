@@ -741,3 +741,75 @@ class TestExtractApprovalGateCap:
             self._fake_req(),
         )
         assert params["approval_gate_cap"] is None
+
+
+class TestInvocationParamContract:
+    """The invocation boundary is wired as:
+
+        params = _extract_invocation_params(inp, request)   # a dict
+        _run_task_background(**params)                       # kwargs unpack
+
+    The ONLY thing keeping these in sync is that every dict key is a valid
+    parameter name of ``_run_task_background`` (and vice-versa for required
+    fields). A mismatch is invisible until runtime and crashes EVERY task
+    with a ``NameError`` / ``TypeError`` — exactly the #247 A4 regression
+    where ``base_branch`` was passed to ``run_task`` but never extracted
+    into the params dict. These tests lock that contract structurally so
+    the next field added on one side but not the other fails in CI.
+    """
+
+    def _fake_req(self) -> Any:
+        return _FakeRequest()
+
+    def _payload(self, **extra):
+        return {"repo_url": "org/repo", "task_description": "x", "task_id": "t-1", **extra}
+
+    def test_every_extracted_key_is_a_valid_background_param(self):
+        import inspect
+
+        params = server._extract_invocation_params(self._payload(), self._fake_req())
+        sig = inspect.signature(server._run_task_background)
+        bg_param_names = set(sig.parameters)
+
+        unknown = set(params) - bg_param_names
+        assert not unknown, (
+            f"_extract_invocation_params returns keys that _run_task_background "
+            f"does not accept (would crash on **kwargs unpack): {sorted(unknown)}"
+        )
+
+    def test_extracted_params_unpack_into_background_signature(self):
+        # Binding the extracted dict against the real signature is exactly
+        # what `_run_task_background(**params)` does — this raises TypeError
+        # if a key is unknown OR a required (no-default) param is missing.
+        import inspect
+
+        params = server._extract_invocation_params(self._payload(), self._fake_req())
+        sig = inspect.signature(server._run_task_background)
+        # Should not raise.
+        sig.bind(**params)
+
+    def test_a4_base_branch_and_merge_branches_extracted_and_accepted(self):
+        # The specific A4 fields whose omission caused the regression.
+        import inspect
+
+        params = server._extract_invocation_params(
+            self._payload(base_branch="bgagent/taskA/a", merge_branches=["b1", "b2"]),
+            self._fake_req(),
+        )
+        assert params["base_branch"] == "bgagent/taskA/a"
+        assert params["merge_branches"] == ["b1", "b2"]
+        # And they are real parameters of the background runner.
+        bg = set(inspect.signature(server._run_task_background).parameters)
+        assert {"base_branch", "merge_branches"} <= bg
+
+    def test_a4_fields_default_safely_when_absent(self):
+        params = server._extract_invocation_params(self._payload(), self._fake_req())
+        assert params["base_branch"] is None
+        assert params["merge_branches"] == []
+
+    def test_merge_branches_non_string_entries_filtered(self):
+        params = server._extract_invocation_params(
+            self._payload(merge_branches=["ok", 123, None, "ok2"]),
+            self._fake_req(),
+        )
+        assert params["merge_branches"] == ["ok", "ok2"]
