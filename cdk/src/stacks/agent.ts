@@ -773,6 +773,13 @@ export class AgentStack extends Stack {
       'ORCHESTRATOR_FUNCTION_ARN',
       orchestrator.alias.functionArn,
     );
+    // A5: the reconciler posts the parent rollup comment on completion —
+    // needs the workspace registry to resolve the per-workspace OAuth token.
+    linearIntegration.workspaceRegistryTable.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
+    );
     orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'],
       resources: [orchestrator.alias.functionArn],
