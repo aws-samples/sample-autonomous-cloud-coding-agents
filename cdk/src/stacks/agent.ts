@@ -651,28 +651,8 @@ export class AgentStack extends Stack {
       attachmentsBucket: attachmentsBucket.bucket,
     });
 
-    // --- Fan-out plane consumer ---
-    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher edits a single issue comment in place; Slack
-    // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
-    new FanOutConsumer(this, 'FanOutConsumer', {
-      taskEventsTable: taskEventsTable.table,
-      taskTable: taskTable.table,
-      repoTable: repoTable.table,
-      githubTokenSecret,
-      // Slack bot-token grant is guarded on this prop — pass the
-      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
-      // workspace tokens. Same scope SlackIntegration uses for its
-      // own writers (PR #79 review #2).
-      slackSecretArnPattern: Stack.of(this).formatArn({
-        service: 'secretsmanager',
-        resource: 'secret',
-        resourceName: 'bgagent/slack/*',
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      }),
-    });
+    // FanOutConsumer is constructed below LinearIntegration so the
+    // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
     // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
@@ -836,6 +816,42 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
       value: linearIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    // --- Fan-out plane consumer ---
+    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
+    // Slack / GitHub / Linear / email per per-channel default filters.
+    // GitHub dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
+    // deterministic final-status comment with cost/turns/duration.
+    // Email remains a log-only stub until SES wires.
+    new FanOutConsumer(this, 'FanOutConsumer', {
+      taskEventsTable: taskEventsTable.table,
+      taskTable: taskTable.table,
+      repoTable: repoTable.table,
+      githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Linear dispatcher reads workspace registry rows + per-workspace
+      // OAuth-secret JSON. Same scope `bgagent-linear-oauth-*` as the
+      // orchestrator and webhook processor — Lambdas in this stack share
+      // the rotated-token write path; the agent runtime gets read-only.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      linearOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
     });
 
     // --- GitHub deployment-status → screenshot pipeline ---
