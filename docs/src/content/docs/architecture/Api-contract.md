@@ -7,7 +7,7 @@ title: Api contract
 The REST API is the single entry point for all platform interactions. The CLI, webhook integrations, and any future clients use this API to submit tasks, check status, and manage integrations. This is a design-level specification; the source of truth for types is `cdk/src/handlers/shared/types.ts`.
 
 - **Use this doc for:** endpoint paths, payload shapes, auth requirements, and error codes.
-- **Related docs:** [INPUT_GATEWAY.md](/architecture/input-gateway) for the gateway's role, [ORCHESTRATOR.md](/architecture/orchestrator) for the task state machine, [SECURITY.md](/architecture/security) for the authentication model.
+- **Related docs:** [INPUT_GATEWAY.md](/sample-autonomous-cloud-coding-agents/architecture/input-gateway) for the gateway's role, [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for the task state machine, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for the authentication model.
 
 ## Base URL
 
@@ -310,7 +310,7 @@ Returns a summary subset of fields. Use `GET /v1/tasks/{task_id}` for full detai
 DELETE /v1/tasks/{task_id}
 ```
 
-Cancels a task. See [ORCHESTRATOR.md](/architecture/orchestrator) for cancellation behavior by state.
+Cancels a task. See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for cancellation behavior by state.
 
 **Response: `200 OK`** — a compact confirmation body (not a full `TaskDetail`):
 

@@ -9,7 +9,7 @@ The orchestrator drives the task lifecycle from submission to completion. It run
 The orchestrator is implemented as a Lambda Durable Function. Durable execution provides checkpoint/replay across process restarts, suspension without compute charges during long waits, and condition-based polling for session completion. See the Implementation section for details.
 
 - **Use this doc for:** task state machine, admission/finalization flow, cancellation behavior, failure recovery, and concurrency management.
-- **Related docs:** [ARCHITECTURE.md](/architecture/architecture) for the high-level blueprint model, [COMPUTE.md](/architecture/compute) for the session runtime, [MEMORY.md](/architecture/memory) for context sources, [REPO_ONBOARDING.md](/architecture/repo-onboarding) for per-repo customization.
+- **Related docs:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) for the high-level blueprint model, [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for the session runtime, [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for context sources, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for per-repo customization.
 
 ## API and agent contracts
 
@@ -42,11 +42,11 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 
 | Component | Owner | Reference |
 |---|---|---|
-| Request authentication | Input gateway | [INPUT_GATEWAY.md](/architecture/input-gateway) |
-| Agent logic (clone, code, test, PR) | Agent runtime | [COMPUTE.md](/architecture/compute) |
-| Compute session lifecycle (VM, image pull) | AgentCore Runtime | [COMPUTE.md](/architecture/compute) |
-| Memory storage and retrieval | AgentCore Memory | [MEMORY.md](/architecture/memory) |
-| Repository onboarding | Blueprint construct | [REPO_ONBOARDING.md](/architecture/repo-onboarding) |
+| Request authentication | Input gateway | [INPUT_GATEWAY.md](/sample-autonomous-cloud-coding-agents/architecture/input-gateway) |
+| Agent logic (clone, code, test, PR) | Agent runtime | [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) |
+| Compute session lifecycle (VM, image pull) | AgentCore Runtime | [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) |
+| Memory storage and retrieval | AgentCore Memory | [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) |
+| Repository onboarding | Blueprint construct | [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) |
 
 ## Task state machine
 
@@ -151,7 +151,7 @@ Multiple timeout mechanisms work together to prevent runaway tasks. Time-based l
 
 ## Blueprint execution
 
-Every task follows a blueprint: a sequence of deterministic steps wrapping one agentic step. The default blueprint is the sequence described in [ARCHITECTURE.md](/architecture/architecture). Per-repo customization (see [REPO_ONBOARDING.md](/architecture/repo-onboarding)) changes which steps run without affecting the framework guarantees.
+Every task follows a blueprint: a sequence of deterministic steps wrapping one agentic step. The default blueprint is the sequence described in [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture). Per-repo customization (see [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding)) changes which steps run without affecting the framework guarantees.
 
 ```mermaid
 flowchart LR
@@ -243,7 +243,7 @@ Every step in the pipeline satisfies these properties:
 
 ### Extension points
 
-Per [REPO_ONBOARDING.md](/architecture/repo-onboarding), blueprints customize execution through three layers:
+Per [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding), blueprints customize execution through three layers:
 
 1. **Parameterized strategies** - Select built-in implementations without code. Example: `compute.type: 'agentcore'` vs `compute.type: 'ecs'`.
 2. **Lambda-backed custom steps** - Inject custom logic at `pre-agent` or `post-agent` phases. Example: SAST scan before the agent, custom lint after.
@@ -413,7 +413,7 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 
 ### TaskEvents table
 
-Append-only audit log. See [OBSERVABILITY.md](/architecture/observability).
+Append-only audit log. See [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability).
 
 | Field | Type | Description |
 |---|---|---|

@@ -4,7 +4,7 @@ title: Quick start
 
 # Quick start
 
-Go from zero to your first agent-created pull request in about 30 minutes. This guide covers only the minimum path - see the [Developer guide](/developer-guide/introduction) and [User guide](/using/overview) for the full details.
+Go from zero to your first agent-created pull request in about 30 minutes. This guide covers only the minimum path - see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) and [User guide](/sample-autonomous-cloud-coding-agents/using/overview) for the full details.
 
 ## Prerequisites
 
@@ -61,7 +61,7 @@ The agent authenticates to GitHub using a **fine-grained personal access token (
 
 Keep the token value - you will store it in AWS Secrets Manager after deploying.
 
-> **Collaborator or cross-org repos?** Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/architecture/readme#github-pat--minimal-permissions) for details.
+> **Collaborator or cross-org repos?** Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for details.
 
 ### Register the repo in CDK
 
@@ -266,7 +266,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve write_path:tests/**
 ```
 
-Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/using/overview#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/customizing/cedar-policies).
+Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
 
 ## What happened behind the scenes
 
@@ -312,7 +312,7 @@ new Blueprint(this, 'MyServiceBlueprint', {
 
 ### Per-repo configuration
 
-Blueprints accept optional overrides to customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See the [User guide - Per-repo overrides](/using/overview) for the full list.
+Blueprints accept optional overrides to customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See the [User guide - Per-repo overrides](/sample-autonomous-cloud-coding-agents/using/overview) for the full list.
 
 ```typescript
 new Blueprint(this, 'CustomBlueprint', {
@@ -328,20 +328,20 @@ new Blueprint(this, 'CustomBlueprint', {
 
 ### Add a CLAUDE.md to your repository
 
-The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). This is the most effective way to improve agent output for a specific repo - tell it your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](/customizing/prompt-engineering) for examples and best practices.
+The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). This is the most effective way to improve agent output for a specific repo - tell it your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering) for examples and best practices.
 
 ### Set up webhook integrations
 
-Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials, using HMAC-SHA256 authentication. This is useful for automating PR review on every PR, or triggering code changes from CI events. See the [User guide - Webhooks](/using/overview) for setup instructions.
+Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials, using HMAC-SHA256 authentication. This is useful for automating PR review on every PR, or triggering code changes from CI events. See the [User guide - Webhooks](/sample-autonomous-cloud-coding-agents/using/overview) for setup instructions.
 
 ## Next steps
 
 - **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
 - **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
 - **Review a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --review-pr 1`
-- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](/using/workflows)
+- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](/sample-autonomous-cloud-coding-agents/using/workflows)
 - **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` — stream progress events
 - **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` — mid-run guidance
 - **Enable tracing**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace` then `node lib/bin/bgagent.js trace download <TASK_ID>`
 - **Manage webhooks**: `node lib/bin/bgagent.js webhook create --name "My CI"` — automate task submission from external systems
-- **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](/developer-guide/introduction)
+- **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)

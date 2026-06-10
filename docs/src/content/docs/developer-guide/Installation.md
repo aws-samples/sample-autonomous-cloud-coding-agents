@@ -2,7 +2,7 @@
 title: Installation
 ---
 
-Follow the [Quick Start](/getting-started/quick-start) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
+Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
 This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
 
@@ -152,7 +152,7 @@ For the full list, see `agent/README.md`.
 
 ### Deployment
 
-Follow the [Quick Start](/getting-started/quick-start) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
+Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
 
 ```bash
 mise run build

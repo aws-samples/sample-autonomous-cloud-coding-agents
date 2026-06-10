@@ -4,7 +4,7 @@ title: Linear pak migration runbook
 
 # Linear PAK → OAuth migration runbook (Phase 2.0a → 2.0b)
 
-> **Who needs this.** Operators who deployed Phase 2.0a (single Linear personal API key shared across all teammates) and need to upgrade to 2.0b (per-workspace OAuth). If you're starting fresh on 2.0b, read [LINEAR_SETUP_GUIDE.md](/using/linear-setup-guide) instead.
+> **Who needs this.** Operators who deployed Phase 2.0a (single Linear personal API key shared across all teammates) and need to upgrade to 2.0b (per-workspace OAuth). If you're starting fresh on 2.0b, read [LINEAR_SETUP_GUIDE.md](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide) instead.
 
 2.0b is a **hard cutover** — no `--use-pak` fallback. Plan for a short maintenance window (~30 min for a single workspace).
 
@@ -31,7 +31,7 @@ Run these BEFORE deploying 2.0b so the maintenance window is short:
 
 2. **Deploy 2.0b**: `mise //cdk:deploy`. Adds `LinearWorkspaceRegistryTable`, removes `LinearApiTokenSecret` + IAM grants, adds the `bgagent-linear-oauth-*` prefix grant on the agent runtime, webhook processor, and orchestrator.
 
-3. **For each Linear workspace**, follow the [setup walkthrough](/using/linear-setup-guide#setup-walkthrough) starting at step 2. Each workspace needs:
+3. **For each Linear workspace**, follow the [setup walkthrough](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide#setup-walkthrough) starting at step 2. Each workspace needs:
    - A new Linear OAuth app (scopes: `read,write,app:assignable,app:mentionable`)
    - `bgagent linear setup <slug>` to run the OAuth dance and write the per-workspace secret
    - Webhook signing secret pasted into ABCA via `update-webhook-secret`

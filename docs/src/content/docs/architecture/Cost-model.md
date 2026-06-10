@@ -4,7 +4,7 @@ title: Cost model
 
 # Cost model
 
-This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](/architecture/architecture)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
+This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
 
 Detailed cost management (per-user budgets, cost attribution dashboards, token budget enforcement) builds on this baseline analysis and focuses on the dominant cost drivers.
 
@@ -14,7 +14,7 @@ These costs are incurred regardless of task volume:
 
 | Component | Estimated cost | Notes |
 |---|---|---|
-| NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/architecture/compute)). |
+| NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/sample-autonomous-cloud-coding-agents/architecture/compute)). |
 | VPC Interface Endpoints (7×, 2 AZs) | ~$102/month | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
 | DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 7 core tables (Tasks, Events, Nudges, Approvals, UserConcurrency, Webhooks, Repo). Integration tables add more when enabled (Slack: installation, user-mapping; Linear: project-mapping, user-mapping, workspace-registry, webhook-dedup). No cost when idle. |
@@ -27,7 +27,7 @@ These costs are incurred regardless of task volume:
 
 ### Scale-to-zero characteristics
 
-Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 7 core tables plus integration tables when Slack/Linear are enabled), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 7 core tables plus integration tables when Slack/Linear are enabled), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -53,7 +53,7 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 
 ### Optional: deploy-preview screenshots
 
-The screenshot pipeline (see [Deploy preview screenshots guide](/using/deploy-preview-screenshots-guide)) is opt-in per repo and deterministic — no LLM, no agent runtime. Only fires when a connected deploy provider posts `deployment_status: success`.
+The screenshot pipeline (see [Deploy preview screenshots guide](/sample-autonomous-cloud-coding-agents/using/deploy-preview-screenshots-guide)) is opt-in per repo and deterministic — no LLM, no agent runtime. Only fires when a connected deploy provider posts `deployment_status: success`.
 
 | Component | Estimated cost per screenshot | Notes |
 |---|---|---|
@@ -92,7 +92,7 @@ These estimates assume Claude Sonnet with prompt caching enabled and average tas
 
 For multi-user deployments, cost should be attributable to individual users and repositories:
 
-- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](/architecture/observability)).
+- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability)).
 - **Per-user:** Aggregate task costs by `user_id`.
 - **Per-repo:** Aggregate task costs by `repo`.
 - **Dashboard:** Cost attribution dashboards should be built from the same task-level metrics.
@@ -116,8 +116,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [COMPUTE.md](/architecture/compute) -- Compute option billing models and network architecture.
-- [ORCHESTRATOR.md](/architecture/orchestrator) -- Polling cost analysis.
-- [OBSERVABILITY.md](/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
-- [Deployment guide](/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
-- [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.
+- [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute option billing models and network architecture.
+- [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) -- Polling cost analysis.
+- [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
+- [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.
