@@ -99,30 +99,41 @@ function mockOrchestration(opts: {
   subIssueId: string;
   children: Array<{ sub_issue_id: string; depends_on?: string[]; child_status: string }>;
 }): void {
-  // 1: ChildTaskIndex GSI query → row with sub_issue_id
-  ddbSend.mockResolvedValueOnce({ Items: [{ sub_issue_id: opts.subIssueId }] });
-  // 2: loadOrchestration Query → meta + child rows
-  ddbSend.mockResolvedValueOnce({
-    Items: [
-      {
-        sub_issue_id: '#meta',
-        orchestration_id: 'orch_1',
-        parent_linear_issue_id: 'PARENT',
-        linear_workspace_id: 'WS',
-        repo: 'o/r',
-        child_count: opts.children.length,
-        platform_user_id: 'user-1',
-      },
-      ...opts.children.map((c) => ({
-        orchestration_id: 'orch_1',
-        sub_issue_id: c.sub_issue_id,
-        depends_on: c.depends_on ?? [],
-        child_status: c.child_status,
-        repo: 'o/r',
-        parent_linear_issue_id: 'PARENT',
-        linear_workspace_id: 'WS',
-      })),
-    ],
+  // Stateful, query-type-aware mock (robust to the reconciler's read
+  // pattern: GSI lookup + possibly-repeated loadOrchestration + status
+  // Updates). Status Updates mutate the in-memory rows so a subsequent
+  // fresh loadOrchestration reflects them — which is exactly what the
+  // concurrency-safe re-read relies on.
+  const meta = {
+    sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS', repo: 'o/r', child_count: opts.children.length, platform_user_id: 'user-1',
+  };
+  const rows: Record<string, Record<string, unknown>> = {};
+  for (const c of opts.children) {
+    rows[c.sub_issue_id] = {
+      orchestration_id: 'orch_1', sub_issue_id: c.sub_issue_id, depends_on: c.depends_on ?? [],
+      child_status: c.child_status, repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS',
+    };
+  }
+  ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+    const { _type, input } = cmd;
+    if (_type === 'Query' && input.IndexName === 'ChildTaskIndex') {
+      return { Items: [{ ...rows[opts.subIssueId], sub_issue_id: opts.subIssueId }] };
+    }
+    if (_type === 'Query') { // loadOrchestration
+      return { Items: [meta, ...Object.values(rows)] };
+    }
+    if (_type === 'Update') {
+      const sk = (input.Key as { sub_issue_id: string }).sub_issue_id;
+      const vals = input.ExpressionAttributeValues as Record<string, unknown>;
+      const row = rows[sk];
+      if (row) {
+        if (vals[':s'] !== undefined) row.child_status = vals[':s'];
+        if (vals[':released'] !== undefined) { row.child_status = 'released'; row.child_task_id = vals[':tid']; }
+      }
+      return {};
+    }
+    return {};
   });
 }
 
@@ -141,10 +152,6 @@ describe('orchestration-reconciler handler', () => {
         { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
       ],
     });
-    // remaining ddb.send calls: status update for A (succeeded), then
-    // releaseChild's conditional update for B. Resolve all.
-    ddbSend.mockResolvedValue({});
-
     await handler({ Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })] } as never);
 
     // B released via createTaskCore.
@@ -161,7 +168,6 @@ describe('orchestration-reconciler handler', () => {
         { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
       ],
     });
-    ddbSend.mockResolvedValue({});
 
     await handler({ Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })] } as never);
 
@@ -176,7 +182,6 @@ describe('orchestration-reconciler handler', () => {
         { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
       ],
     });
-    ddbSend.mockResolvedValue({});
 
     await handler({
       Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', build_passed: false, orchestration_id: 'orch_1' })],
