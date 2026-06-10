@@ -28,14 +28,6 @@ import { Construct } from 'constructs';
 export const SCREENSHOT_TTL_DAYS = 30;
 
 /**
- * Object-key prefix for all screenshots. Key layout:
- * ``screenshots/<repo>/<sha>.png``. The CloudFront distribution serves
- * the entire bucket, but the processor only ever writes under this
- * prefix.
- */
-export const SCREENSHOT_KEY_PREFIX = 'screenshots/';
-
-/**
  * Properties for ScreenshotBucket construct.
  */
 export interface ScreenshotBucketProps {
@@ -64,9 +56,11 @@ export interface ScreenshotBucketProps {
  * HTTPS." Bucket stays fully private; only the distribution principal
  * has GetObject.
  *
- * Layout:
- *   s3://<bucket>/screenshots/<repo>/<sha>.png   (private)
- *   https://<dist>.cloudfront.net/screenshots/<repo>/<sha>.png   (anon)
+ * Layout (see `buildScreenshotKey` in shared/screenshot-url.ts — the
+ * 16-hex suffix is 64 bits of entropy so the anon URL isn't guessable
+ * from the public PR's owner/repo/sha):
+ *   s3://<bucket>/screenshots/<owner>_<repo>/<sha>-<deploymentId>-<16hex>.png   (private)
+ *   https://<dist>.cloudfront.net/screenshots/<owner>_<repo>/<sha>-<deploymentId>-<16hex>.png   (anon)
  *
  * The 30-day lifecycle on the bucket is the source of truth for
  * expiry — CloudFront's edge caches will see 403s after the TTL

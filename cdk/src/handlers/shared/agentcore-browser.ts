@@ -46,9 +46,6 @@ const AWS_BROWSER_IDENTIFIER = 'aws.browser.v1';
  */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** CDP message id allocator. */
-let nextCdpId = 1;
-
 interface CdpMessage {
   readonly id?: number;
   readonly method?: string;
@@ -77,7 +74,7 @@ interface CdpMessage {
  *      3. CDP `Target.attachToBrowserTarget` to get a flat session
  *      4. CDP `Target.getTargets`, find the about:blank page
  *      5. `Target.attachToTarget` (flatten=true) on that page → sessionId
- *      6. `Page.navigate` + wait for `Page.frameStoppedLoading`
+ *      6. `Page.navigate` + wait for `Page.loadEventFired`
  *      7. `Page.captureScreenshot` (returns base64 PNG)
  *      8. StopBrowserSession (best-effort; sessions auto-expire)
  *
@@ -144,6 +141,10 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(0, deadline - Date.now());
 
+  // CDP message id allocator. Scoped to the function so concurrent
+  // captures (unusual but possible in tests) don't share counter state.
+  let nextCdpId = 1;
+
   // Promise machinery for tracking in-flight CDP requests by `id`.
   const pending = new Map<number, { resolve: (msg: CdpMessage) => void; reject: (err: Error) => void }>();
   const eventQueue: CdpMessage[] = [];
@@ -188,6 +189,10 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   // `unexpected-response` event surfaces HTTP-level handshake failures
   // (e.g. 403 from misaligned SigV4) so we can log a meaningful error
   // instead of an empty `error` event.
+  //
+  // Failure paths must close the socket — without `terminate()` on the
+  // open-timeout path, a hung handshake leaks the underlying TCP
+  // connection per failed attempt (review nit, PR #241).
   await new Promise<void>((resolve, reject) => {
     const onOpen = (): void => {
       cleanup();
@@ -195,10 +200,12 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     };
     const onError = (err: Error): void => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket error: ${err.message || '(no message)'}`));
     };
     const onUnexpectedResponse = (_req: unknown, res: { statusCode?: number }): void => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket handshake failed: HTTP ${res.statusCode ?? '?'}`));
     };
     const cleanup = (): void => {
@@ -211,6 +218,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     ws.on('unexpected-response', onUnexpectedResponse);
     setTimeout(() => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket open timeout after ${timeoutMs}ms`));
     }, remaining());
   });
@@ -257,8 +265,8 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   try {
     // 1. List existing targets, find the default about:blank page.
     const targetsResp = await cdpSend('Target.getTargets');
-    const targets = (targetsResp.result?.targetInfos as Array<{ targetId: string; type: string; url: string }> | undefined) ?? [];
-    const pageTarget = targets.find((t) => t.type === 'page');
+    const targetInfos = narrowTargetInfos(targetsResp.result);
+    const pageTarget = targetInfos.find((t) => t.type === 'page');
     if (!pageTarget) {
       throw new Error('No page target found in AgentCore Browser session');
     }
@@ -268,12 +276,13 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       targetId: pageTarget.targetId,
       flatten: true,
     });
-    const pageSessionId = attachResp.result?.sessionId as string | undefined;
+    const pageSessionId = narrowSessionId(attachResp.result);
     if (!pageSessionId) {
       throw new Error('Target.attachToTarget did not return a sessionId');
     }
 
-    // 3. Enable Page domain so we get frameStoppedLoading events.
+    // 3. Enable Page domain so we get the `Page.loadEventFired` event
+    //    we wait on below.
     await cdpSend('Page.enable', {}, pageSessionId);
 
     // 4. Navigate. The response includes a `frameId`; we wait on the
@@ -281,7 +290,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     //    `frameStoppedLoading` which can fire before navigation
     //    actually starts on `about:blank` → real-URL transitions).
     const navResp = await cdpSend('Page.navigate', { url }, pageSessionId);
-    const navError = navResp.result?.errorText as string | undefined;
+    const navError = narrowNavigateError(navResp.result);
     if (navError) {
       throw new Error(`Page.navigate failed: ${navError}`);
     }
@@ -298,7 +307,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       format: 'png',
       captureBeyondViewport: true,
     }, pageSessionId);
-    const base64 = shotResp.result?.data as string | undefined;
+    const base64 = narrowScreenshotData(shotResp.result);
     if (!base64) {
       throw new Error('Page.captureScreenshot returned no data');
     }
@@ -351,4 +360,42 @@ async function sigV4PresignWss(wssUrl: string): Promise<string> {
     out.searchParams.set(k, Array.isArray(v) ? v[0] : (v as string));
   }
   return out.toString();
+}
+
+/**
+ * Type-narrow helpers for CDP response shapes. Replaces inline `as`
+ * casts with checked accessors so a malformed response is logged as
+ * `null`/`undefined` rather than silently miscoerced. (theagenticguy
+ * PR-241 review: reduce unchecked casts in CDP plumbing.)
+ */
+interface TargetInfo {
+  readonly targetId: string;
+  readonly type: string;
+  readonly url: string;
+}
+
+function narrowTargetInfos(result: Record<string, unknown> | undefined): TargetInfo[] {
+  const infos = result?.targetInfos;
+  if (!Array.isArray(infos)) return [];
+  return infos.filter((t): t is TargetInfo =>
+    typeof t === 'object' && t !== null
+    && typeof (t as Record<string, unknown>).targetId === 'string'
+    && typeof (t as Record<string, unknown>).type === 'string'
+    && typeof (t as Record<string, unknown>).url === 'string',
+  );
+}
+
+function narrowSessionId(result: Record<string, unknown> | undefined): string | undefined {
+  const id = result?.sessionId;
+  return typeof id === 'string' ? id : undefined;
+}
+
+function narrowNavigateError(result: Record<string, unknown> | undefined): string | undefined {
+  const err = result?.errorText;
+  return typeof err === 'string' ? err : undefined;
+}
+
+function narrowScreenshotData(result: Record<string, unknown> | undefined): string | undefined {
+  const data = result?.data;
+  return typeof data === 'string' ? data : undefined;
 }
