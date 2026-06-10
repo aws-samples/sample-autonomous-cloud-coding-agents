@@ -21,6 +21,10 @@ import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
+import {
+  type GitHubDeploymentStatusPayload,
+  validateDeploymentStatusPayload,
+} from './shared/github-deployment-status';
 import { postIssueComment } from './shared/linear-feedback';
 import {
   extractLinearIdentifier,
@@ -28,6 +32,7 @@ import {
   findLinearIssueByIdentifier,
 } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
+import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from './shared/screenshot-url';
 
 const s3 = new S3Client({});
 
@@ -44,24 +49,29 @@ const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN!;
 // then looked up across all active workspaces in the registry.
 const LINEAR_WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
-interface GitHubDeploymentStatusPayload {
-  readonly action?: string;
-  readonly deployment_status?: {
-    readonly id?: number;
-    readonly state?: string;
-    readonly target_url?: string;
-    /** The deployed URL — lives on the *status* object, not the deployment. */
-    readonly environment_url?: string;
-  };
-  readonly deployment?: {
-    readonly id?: number;
-    readonly sha?: string;
-    readonly environment?: string;
-  };
-  readonly repository?: {
-    readonly full_name?: string;
-  };
-}
+/**
+ * Total wall-clock budget for the processor run. The Lambda timeout is
+ * 120s; we leave 10s of headroom for SDK retries + the runtime's
+ * shutdown grace so a hard timeout never severs a comment-post mid-flight.
+ * Threaded as a single deadline through PR-lookup retry + screenshot
+ * capture + S3 PUT + comment POST so the worst case never exceeds it.
+ */
+const TOTAL_BUDGET_MS = 110_000;
+
+/**
+ * Reserve carved out of the remaining budget AFTER PR lookup, BEFORE
+ * starting the screenshot capture. Covers S3 PUT (typically <2s) +
+ * GitHub PR comment POST (typically <2s) + the 2s Page settle inside
+ * the browser. Anything left over is the screenshot's actual budget.
+ */
+const POST_CAPTURE_RESERVE_MS = 8_000;
+
+/**
+ * Minimum budget we'll allow `captureScreenshot` to start with. If less
+ * than this remains after PR lookup, fail fast rather than start a
+ * session that's already doomed.
+ */
+const MIN_CAPTURE_BUDGET_MS = 15_000;
 
 interface ProcessorEvent {
   readonly raw_body: string;
@@ -84,14 +94,22 @@ interface ProcessorEvent {
  * receiver layer.
  */
 export async function handler(event: ProcessorEvent): Promise<void> {
+  // One wall-clock deadline shared across PR lookup + screenshot capture
+  // + S3 PUT + comment POST. Without this, findPullRequestForShaWithRetry
+  // could spend ~35s before captureScreenshot starts its independent 60s
+  // budget — totaling ~95s + S3 + comment, which exceeds the 120s Lambda
+  // timeout on slow-GitHub days. (theagenticguy PR-241 review item B1.)
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
+  const remaining = (): number => Math.max(0, deadline - Date.now());
+
   if (!event.raw_body) {
     logger.error('GitHub webhook processor invoked without raw_body');
     return;
   }
 
-  let payload: GitHubDeploymentStatusPayload;
+  let raw: GitHubDeploymentStatusPayload;
   try {
-    payload = JSON.parse(event.raw_body) as GitHubDeploymentStatusPayload;
+    raw = JSON.parse(event.raw_body) as GitHubDeploymentStatusPayload;
   } catch (err) {
     logger.error('GitHub webhook processor could not parse raw_body', {
       error: err instanceof Error ? err.message : String(err),
@@ -99,19 +117,28 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const repo = payload.repository?.full_name;
-  const sha = payload.deployment?.sha;
-  // The URL lives on `deployment_status` (it changes per status update —
-  // `pending` has no URL, `success` fills it in), not on `deployment`.
-  const previewUrl = payload.deployment_status?.environment_url;
-  const deploymentId = payload.deployment?.id;
+  const payload = validateDeploymentStatusPayload(raw);
+  if (!payload) {
+    // The receiver runs the same validation, so this branch should be
+    // unreachable on the default dispatch path. Logging at warn (not
+    // error) so the metric stays clean if someone replays an old event.
+    logger.warn('Processor received invalid deployment_status payload — skipping', {
+      repo: raw.repository?.full_name,
+      deployment_id: raw.deployment?.id,
+    });
+    return;
+  }
+  const { repoFullName: repo, sha, environmentUrl: previewUrl, deploymentId } = payload;
 
-  if (!repo || !sha || !previewUrl) {
-    logger.warn('GitHub deployment_status payload missing required fields', {
+  // SSRF defense-in-depth: the path is HMAC-gated and AgentCore Browser
+  // sits outside the customer VPC, but whatever renders ends up on a
+  // public CloudFront URL. Reject obviously-wrong shapes (non-https,
+  // literal-IP, link-local, loopback) at the boundary. (theagenticguy
+  // PR-241 review.)
+  if (!isAllowedScreenshotUrl(previewUrl)) {
+    logger.warn('Rejected deployment_status preview URL on allowlist', {
       repo,
-      sha_present: Boolean(sha),
-      preview_url_present: Boolean(previewUrl),
-      deployment_id: deploymentId,
+      preview_url: previewUrl,
     });
     return;
   }
@@ -121,6 +148,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     sha,
     preview_url: previewUrl,
     deployment_id: deploymentId,
+    budget_ms: TOTAL_BUDGET_MS,
   });
 
   let token: string;
@@ -136,19 +164,48 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Race: managed providers (Vercel, Netlify, Amplify) post
   // `deployment_status` the moment their build finishes, which can
   // be ~5-15s before the agent calls `gh pr create` for the same SHA.
-  // Retry the PR lookup with a small backoff so the screenshot doesn't
-  // get silently dropped on what is the common path.
-  const pr = await findPullRequestForShaWithRetry(repo, sha, token);
+  // Retry the PR lookup, but cap by remaining budget so the screenshot
+  // half always gets at least MIN_CAPTURE_BUDGET_MS.
+  const prLookupBudget = Math.max(0, remaining() - POST_CAPTURE_RESERVE_MS - MIN_CAPTURE_BUDGET_MS);
+  const pr = await findPullRequestForShaWithRetry(repo, sha, token, prLookupBudget);
   if (!pr) {
-    logger.info('No open PR found for SHA after retries — skipping screenshot post', { repo, sha });
+    // Promote to error: "no PR after the retry budget" is the shape of
+    // a systematic break (deploy-without-PR, token regression, GitHub
+    // outage). theagenticguy review: warn-level was invisible. Add a
+    // tagged event_id for the CloudWatch metric filter / alarm.
+    logger.error('No open PR found for SHA after retries — skipping screenshot post', {
+      event: 'screenshot.pr_lookup_exhausted',
+      error_id: 'SCREENSHOT_PR_LOOKUP_EXHAUSTED',
+      repo,
+      sha,
+      budget_ms: prLookupBudget,
+    });
+    return;
+  }
+
+  // Confirm we have enough wall-clock left to even try a capture; if
+  // PR lookup ate the budget on a slow GitHub day, fail fast rather
+  // than start an AgentCore session that's already doomed.
+  const captureBudget = Math.max(0, remaining() - POST_CAPTURE_RESERVE_MS);
+  if (captureBudget < MIN_CAPTURE_BUDGET_MS) {
+    logger.error('Insufficient budget remaining for screenshot capture — skipping', {
+      event: 'screenshot.budget_exhausted',
+      error_id: 'SCREENSHOT_BUDGET_EXHAUSTED',
+      repo,
+      pr_number: pr.number,
+      remaining_ms: remaining(),
+      capture_budget_ms: captureBudget,
+    });
     return;
   }
 
   let png: Uint8Array;
   try {
-    png = await captureScreenshot(previewUrl);
+    png = await captureScreenshot(previewUrl, { timeoutMs: captureBudget });
   } catch (err) {
     logger.error('Screenshot capture failed', {
+      event: 'screenshot.capture_failed',
+      error_id: 'SCREENSHOT_CAPTURE_FAILED',
       preview_url: previewUrl,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -167,11 +224,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         sha,
         // S3 metadata values must be ASCII; coerce numeric to string and
         // skip the URL itself (URL encoding into x-amz-meta-* is brittle).
-        deployment_id: String(deploymentId ?? ''),
+        deployment_id: String(deploymentId),
       },
     }));
   } catch (err) {
     logger.error('Failed to upload screenshot to S3', {
+      event: 'screenshot.s3_put_failed',
+      error_id: 'SCREENSHOT_S3_PUT_FAILED',
       bucket: SCREENSHOT_BUCKET,
       key,
       error: err instanceof Error ? err.message : String(err),
@@ -200,9 +259,17 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       public_url: publicUrl,
     });
   } catch (err) {
-    logger.warn('Failed to post screenshot PR comment (non-fatal)', {
+    // Promoted from warn → error: by this point we've already paid for
+    // the AgentCore session + S3 PUT, so a comment-post failure is the
+    // ONLY signal the operator gets that the screenshot wasn't
+    // delivered. tagged event_id for the CloudWatch metric filter.
+    // (theagenticguy PR-241 review.)
+    logger.error('Failed to post screenshot PR comment', {
+      event: 'screenshot.pr_comment_post_failed',
+      error_id: 'SCREENSHOT_PR_COMMENT_POST_FAILED',
       repo,
       pr_number: pr.number,
+      public_url: publicUrl,
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -210,7 +277,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Best-effort Linear comment. The GitHub PR comment above is the
   // load-bearing artifact; the Linear comment is bonus surface for
   // reviewers who live in Linear. Only fires when the registry table
-  // is configured AND the PR title/body carries a Linear identifier.
+  // is configured AND the PR carries a Linear identifier.
   if (LINEAR_WORKSPACE_REGISTRY_TABLE) {
     // Branch-name first — it deterministically encodes this PR's own
     // issue (`bgagent/{taskId}/abca-151-...`). Title/body are ambiguous
@@ -241,6 +308,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           });
         } else {
           logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
+            event: 'screenshot.linear_comment_post_failed',
             identifier,
             linear_issue_id: linearIssue.issueId,
           });
@@ -281,22 +349,37 @@ interface OpenPr {
  * would silently miss the common case.
  *
  * Schedule: 0s, 5s, 10s, 20s — covers the observed gap with one
- * generous bonus retry. Total max wait ~35s.
+ * generous bonus retry. Capped by `budgetMs` so the caller can hand
+ * over only what it can afford to spend (B1: shared deadline). Returns
+ * null on exhaustion (no PR yet) or budget timeout.
  */
 async function findPullRequestForShaWithRetry(
   repo: string,
   sha: string,
   token: string,
+  budgetMs: number,
 ): Promise<OpenPr | null> {
+  const deadline = Date.now() + budgetMs;
   const delays = [0, 5_000, 10_000, 20_000];
-  for (const delay of delays) {
+  for (let i = 0; i < delays.length; i++) {
+    const delay = delays[i];
     if (delay > 0) {
-      await new Promise((r) => setTimeout(r, delay));
+      // Skip the wait if the deadline would land mid-sleep.
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      await new Promise((r) => setTimeout(r, Math.min(delay, remaining)));
     }
+    if (Date.now() >= deadline) return null;
     const pr = await findPullRequestForSha(repo, sha, token);
     if (pr) return pr;
-    if (delay !== delays[delays.length - 1]) {
-      logger.info('Open PR not found yet for SHA — will retry', { repo, sha, next_delay_ms: delays[delays.indexOf(delay) + 1] });
+    const next = delays[i + 1];
+    if (next !== undefined) {
+      logger.info('Open PR not found yet for SHA — will retry', {
+        repo,
+        sha,
+        next_delay_ms: next,
+        attempt: i + 1,
+      });
     }
   }
   return null;
@@ -307,17 +390,9 @@ async function findPullRequestForShaWithRetry(
  * "List pull requests associated with a commit" GitHub API
  * (https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit).
  *
- * Returns the OPEN PR that the deploy is *for*, or null if none.
- *
- * Selection (issue #247): for a stacked PR chain the commit-pulls API
- * returns every open PR whose history contains `sha` — i.e. the PR that
- * introduced the commit AND all PRs stacked on top of it. We must pick
- * the PR whose own head is `sha` (the one that introduced it), because
- * the screenshot is of that PR's deploy and the downstream router reads
- * its branch name. Fall back to the first open PR only when no head
- * matches (e.g. `sha` is a merge/base commit), preserving prior
- * behaviour. Closed/merged PRs are filtered out — v1 only screenshots
- * active reviews.
+ * Returns the OPEN PR that the deploy is *for* (head SHA == `sha`), or
+ * the first open PR as a fallback, or null if none. Closed/merged PRs
+ * are filtered out — v1 only screenshots active reviews.
  */
 async function findPullRequestForSha(
   repo: string,
@@ -326,6 +401,13 @@ async function findPullRequestForSha(
 ): Promise<OpenPr | null> {
   const url = `https://api.github.com/repos/${repo}/commits/${sha}/pulls`;
   let res: Response;
+  // 5s per-request timeout via AbortController. Mirrors the Linear
+  // path, where unbounded fetches were previously blamed for budget
+  // overruns. Note: this is the per-attempt cap, not the total retry
+  // budget — the caller threads the wall-clock deadline.
+  const ac = new AbortController();
+  const fetchTimeoutMs = 5_000;
+  const timer = setTimeout(() => ac.abort(), fetchTimeoutMs);
   try {
     res = await fetch(url, {
       method: 'GET',
@@ -334,14 +416,18 @@ async function findPullRequestForSha(
         'Authorization': `Bearer ${token}`,
         'X-GitHub-Api-Version': '2022-11-28',
       },
+      signal: ac.signal,
     });
   } catch (err) {
     logger.warn('GitHub commit-pulls fetch failed', {
       repo,
       sha,
+      timed_out: ac.signal.aborted,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!res.ok) {
@@ -380,8 +466,11 @@ async function findPullRequestForSha(
   }>;
   const openPulls = pulls.filter((p) => p.state === 'open' && typeof p.number === 'number');
   if (openPulls.length === 0) return null;
-  // Prefer the PR whose own head is this SHA (the PR that introduced the
-  // commit); fall back to the first open PR for non-head SHAs.
+  // Prefer the PR whose own head is this SHA — the PR that introduced the
+  // commit. For a stacked #247 chain the commit-pulls API also lists every
+  // PR stacked on top (their history contains the commit); routing reads
+  // the selected PR's branch, so we must pick its true owner. Fall back to
+  // the first open PR for non-head SHAs (e.g. a merge/base commit).
   const owner = openPulls.find((p) => p.head?.sha === sha) ?? openPulls[0];
   return {
     number: owner.number!,
@@ -391,21 +480,19 @@ async function findPullRequestForSha(
   };
 }
 
-/** Build the S3 key for a screenshot. */
-function buildScreenshotKey(repo: string, sha: string, deploymentId: number | undefined): string {
-  const repoSlug = repo.replace('/', '_');
-  const id = deploymentId !== undefined ? `-${deploymentId}` : '';
-  return `screenshots/${repoSlug}/${sha}${id}.png`;
-}
-
 /** Render the PR comment body. */
 function renderCommentBody(publicUrl: string, previewUrl: string): string {
+  // previewUrl is payload-derived; percent-encode its parens so a crafted
+  // path can't break out of the markdown link and inject content into a
+  // comment posted under ABCA's token. publicUrl is our own CloudFront key
+  // (no parens by construction) so it's interpolated as-is.
+  const safePreview = encodeMarkdownUrl(previewUrl);
   return [
     '🖼️ **Preview screenshot**',
     '',
-    `[![preview](${publicUrl})](${previewUrl})`,
+    `[![preview](${publicUrl})](${safePreview})`,
     '',
-    `_From [preview link](${previewUrl}) — captured automatically by ABCA after the deploy finished._`,
+    `_From [preview link](${safePreview}) — captured automatically by ABCA after the deploy finished._`,
   ].join('\n');
 }
 
@@ -416,12 +503,15 @@ function renderCommentBody(publicUrl: string, previewUrl: string): string {
  * as a clickable link with a tiny preview.
  */
 function renderLinearCommentBody(publicUrl: string, previewUrl: string): string {
+  // previewUrl is payload-derived — see renderCommentBody for the
+  // markdown-breakout rationale.
+  const safePreview = encodeMarkdownUrl(previewUrl);
   return [
     '🖼️ **Preview screenshot**',
     '',
     `![preview](${publicUrl})`,
     '',
-    `[Preview link](${previewUrl})`,
+    `[Preview link](${safePreview})`,
     '',
     '_Captured automatically by ABCA after the deploy finished._',
   ].join('\n');

@@ -49,12 +49,22 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    if (!result.SecretString) {
+    // Treat empty / whitespace-only SecretString as null. If an operator
+    // ever wrote `""` out of band, `crypto.createHmac('sha256', '')` would
+    // happily run and an attacker who computes `HMAC('', body)` would pass.
+    // The default CDK Secret resource generates a random value so this
+    // isn't reachable on the default config — but matching the
+    // fail-closed-on-risk tenet is cheap. (theagenticguy PR-241 review B2.)
+    const value = result.SecretString;
+    if (!value || value.trim() === '') {
+      logger.error('GitHub webhook secret is empty — refusing to use for HMAC', {
+        secret_id: secretId,
+      });
       secretCache.delete(secretId);
       return null;
     }
-    secretCache.set(secretId, { secret: result.SecretString, expiresAt: now + CACHE_TTL_MS });
-    return result.SecretString;
+    secretCache.set(secretId, { secret: value, expiresAt: now + CACHE_TTL_MS });
+    return value;
   } catch (err) {
     const errorName = (err as Error)?.name;
     if (errorName === 'ResourceNotFoundException') {
@@ -91,6 +101,12 @@ export function invalidateGitHubWebhookSecretCache(secretId: string): void {
  * @returns true if the signature matches.
  */
 export function verifyGitHubSignature(webhookSecret: string, header: string, body: string): boolean {
+  // Defense-in-depth: getGitHubWebhookSecret already filters empty
+  // secrets, but if a future caller wires a different secret source we
+  // still want HMAC('') rejected. (theagenticguy PR-241 review B2.)
+  if (!webhookSecret || webhookSecret.trim() === '') {
+    return false;
+  }
   if (!header.startsWith('sha256=')) {
     return false;
   }

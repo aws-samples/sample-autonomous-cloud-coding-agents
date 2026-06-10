@@ -1,0 +1,15 @@
+{
+  "name": "read-only-missing-attribute",
+  "description": "#248: when context OMITS read_only, the `when { context.read_only == true }` forbid rules error at evaluation and are SKIPPED, so the base permit wins and BOTH engines return Allow. This fixture pins that the two bindings fail OPEN identically on the missing attribute — it deliberately documents that Cedar's native semantics do NOT deny here. Production safety on this path does not rest on Cedar: it rests on (1) policy.py::_eval_tier re-raising on diagnostics.errors → the outer handler maps to Outcome.DENY (see test_policy.py::test_eval_tier_reraises_on_missing_read_only_attribute), and (2) the discipline of ALWAYS injecting context.read_only. If a future Cedar/binding version changes this to deny natively, this fixture failing is the intended early-warning signal.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"read_only_forbid_write\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource == Agent::Tool::\"Write\") when { context.read_only == true };\n@tier(\"hard\") @rule_id(\"read_only_forbid_edit\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource == Agent::Tool::\"Edit\") when { context.read_only == true };",
+  "input": {
+    "principal": { "type": "Agent::TaskAgent", "id": "new_task" },
+    "action":    { "type": "Agent::Action",    "id": "invoke_tool" },
+    "resource":  { "type": "Agent::Tool",      "id": "Write" },
+    "context":   {}
+  },
+  "expected": {
+    "decision": "allow",
+    "matching_rule_ids": ["base_permit"]
+  }
+}

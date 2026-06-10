@@ -28,7 +28,6 @@ import {
   isValidIdempotencyKey,
   isValidRepo,
   isValidTaskDescriptionLength,
-  isValidTaskType,
   isValidUlid,
   isValidWebhookName,
   MAX_ATTACHMENTS_PER_TASK,
@@ -38,10 +37,10 @@ import {
   parseStatusFilter,
   validateAttachments,
   validateMagicBytes,
-  VALID_TASK_TYPES,
   validateMaxTurns,
   validatePrNumber,
 } from '../../../src/handlers/shared/validation';
+import { isValidWorkflowRef } from '../../../src/handlers/shared/workflows';
 
 describe('parseBody', () => {
   test('parses valid JSON', () => {
@@ -80,40 +79,41 @@ describe('isValidRepo', () => {
 });
 
 describe('hasTaskSpec', () => {
-  test('returns true when issue_number is provided', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', issue_number: 42 })).toBe(true);
+  // The coding/new-task-v1 contract: one_of issue_number / task_description.
+  const CODING = { oneOf: ['issue_number', 'task_description'] } as const;
+  // The pr_* contract: all_of pr_number.
+  const PR = { allOf: ['pr_number'] } as const;
+
+  test('returns true when issue_number satisfies one_of', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', issue_number: 42 }, CODING)).toBe(true);
   });
 
-  test('returns true when task_description is provided', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', task_description: 'Fix the bug' })).toBe(true);
+  test('returns true when task_description satisfies one_of', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', task_description: 'Fix the bug' }, CODING)).toBe(true);
   });
 
   test('returns true when both are provided', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', issue_number: 1, task_description: 'Fix it' })).toBe(true);
+    expect(hasTaskSpec({ repo: 'org/repo', issue_number: 1, task_description: 'Fix it' }, CODING)).toBe(true);
   });
 
-  test('returns false when neither is provided', () => {
-    expect(hasTaskSpec({ repo: 'org/repo' })).toBe(false);
+  test('returns false when neither one_of input is provided', () => {
+    expect(hasTaskSpec({ repo: 'org/repo' }, CODING)).toBe(false);
   });
 
   test('returns false when task_description is empty/whitespace', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', task_description: '  ' })).toBe(false);
+    expect(hasTaskSpec({ repo: 'org/repo', task_description: '  ' }, CODING)).toBe(false);
   });
 
-  test('returns true when task_type is pr_iteration and pr_number is provided', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_iteration', pr_number: 42 })).toBe(true);
+  test('returns true for a pr workflow when pr_number satisfies all_of', () => {
+    expect(hasTaskSpec({ repo: 'org/repo', pr_number: 42 }, PR)).toBe(true);
   });
 
-  test('returns false for pr_iteration without pr_number', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_iteration' })).toBe(false);
+  test('returns false for a pr workflow without pr_number', () => {
+    expect(hasTaskSpec({ repo: 'org/repo' }, PR)).toBe(false);
   });
 
-  test('returns true when task_type is pr_review and pr_number is provided', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_review', pr_number: 42 })).toBe(true);
-  });
-
-  test('returns false for pr_review without pr_number', () => {
-    expect(hasTaskSpec({ repo: 'org/repo', task_type: 'pr_review' })).toBe(false);
+  test('returns true when the workflow declares no input contract', () => {
+    expect(hasTaskSpec({ repo: 'org/repo' }, {})).toBe(true);
   });
 });
 
@@ -327,26 +327,28 @@ describe('pagination token encode/decode', () => {
   });
 });
 
-describe('isValidTaskType', () => {
-  test('returns true for valid task types', () => {
-    expect(isValidTaskType('new_task')).toBe(true);
-    expect(isValidTaskType('pr_iteration')).toBe(true);
+describe('isValidWorkflowRef', () => {
+  test('returns true for valid workflow refs', () => {
+    expect(isValidWorkflowRef('coding/new-task-v1')).toBe(true);
+    expect(isValidWorkflowRef('coding/pr-iteration-v1')).toBe(true);
+    expect(isValidWorkflowRef('default/agent-v1')).toBe(true);
   });
 
-  test('returns true for undefined/null (defaults to new_task)', () => {
-    expect(isValidTaskType(undefined)).toBe(true);
-    expect(isValidTaskType(null)).toBe(true);
+  test('returns true for a ref with a version constraint', () => {
+    expect(isValidWorkflowRef('coding/new-task-v1@1.2.0')).toBe(true);
   });
 
-  test('returns true for pr_review', () => {
-    expect(isValidTaskType('pr_review')).toBe(true);
+  test('returns true for undefined/null (resolution fallback)', () => {
+    expect(isValidWorkflowRef(undefined)).toBe(true);
+    expect(isValidWorkflowRef(null)).toBe(true);
   });
 
-  test('returns false for invalid values', () => {
-    expect(isValidTaskType('invalid')).toBe(false);
-    expect(isValidTaskType('')).toBe(false);
-    expect(isValidTaskType(42)).toBe(false);
-    expect(isValidTaskType(true)).toBe(false);
+  test('returns false for syntactically invalid refs', () => {
+    expect(isValidWorkflowRef('new_task')).toBe(false); // no domain/name-vN shape
+    expect(isValidWorkflowRef('coding/new-task')).toBe(false); // missing -vN
+    expect(isValidWorkflowRef('')).toBe(false);
+    expect(isValidWorkflowRef(42)).toBe(false);
+    expect(isValidWorkflowRef(true)).toBe(false);
   });
 });
 

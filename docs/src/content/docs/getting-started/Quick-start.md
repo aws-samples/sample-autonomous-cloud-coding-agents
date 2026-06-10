@@ -339,6 +339,7 @@ Webhooks let external systems (GitHub Actions, CI pipelines) create tasks withou
 - **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
 - **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
 - **Review a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --review-pr 1`
+- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](/using/workflows)
 - **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` — stream progress events
 - **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` — mid-run guidance
 - **Enable tracing**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace` then `node lib/bin/bgagent.js trace download <TASK_ID>`

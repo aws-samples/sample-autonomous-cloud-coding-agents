@@ -49,7 +49,7 @@ export default defineConfig({
           label: 'Using the Platform',
           items: [
             { slug: 'using/overview' },
-            { slug: 'using/task-types' },
+            { slug: 'using/workflows' },
             { slug: 'using/authentication' },
             { slug: 'using/using-the-rest-api' },
             { slug: 'using/using-the-cli' },

@@ -83,14 +83,14 @@ export interface GitHubScreenshotIntegrationProps {
  *     window with slack)
  *   - Webhook signing-secret (Secrets Manager placeholder; populated
  *     manually when the operator pastes GitHub's value into the secret)
- *   - Public-read screenshot S3 bucket
+ *   - Private screenshot S3 bucket; served anonymously via CloudFront OAC
  *   - API Gateway route `POST /v1/github/webhook`
  *
  * Inbound-only adapter — there's no outbound polling or stream
  * consumer, just the webhook → screenshot → comment fan-out.
  */
 export class GitHubScreenshotIntegration extends Construct {
-  /** Public-read bucket hosting the screenshot PNGs. */
+  /** Private bucket; served via CloudFront OAC. Hosts the screenshot PNGs. */
   public readonly screenshotBucket: ScreenshotBucket;
 
   /**
@@ -114,7 +114,7 @@ export class GitHubScreenshotIntegration extends Construct {
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
-    // --- Screenshot bucket (public-read on `screenshots/*`) ---
+    // --- Screenshot bucket (private; served via CloudFront with OAC) ---
     this.screenshotBucket = new ScreenshotBucket(this, 'ScreenshotBucket', {
       removalPolicy,
     });
@@ -140,9 +140,15 @@ export class GitHubScreenshotIntegration extends Construct {
     };
 
     // --- Async processor (browser + S3 + comment) ---
-    // Timeout budget: 60s screenshot + 5s navigate slack + 30s slack for
-    // the GitHub PR-lookup + comment + S3 PUT + JSON encode = 95s. Round
-    // to 120 for headroom on cold-start CDP handshake.
+    // Lambda timeout: 120s. The handler enforces a single wall-clock
+    // deadline of 110s (TOTAL_BUDGET_MS in github-webhook-processor.ts)
+    // shared across PR-lookup retry + screenshot capture + S3 PUT +
+    // comment POST, so no individual sub-step can run past the Lambda
+    // timeout even on the worst-case path. The 10s headroom covers
+    // SDK auto-retries + the runtime's shutdown grace so a hard timeout
+    // never severs an in-flight comment-post. (theagenticguy PR-241
+    // review item B1: previous comment under-counted the 35s retry
+    // ladder that runs before captureScreenshot's 60s budget.)
     this.webhookProcessorFn = new lambda.NodejsFunction(this, 'WebhookProcessorFn', {
       entry: path.join(handlersDir, 'github-webhook-processor.ts'),
       handler: 'handler',
@@ -169,6 +175,11 @@ export class GitHubScreenshotIntegration extends Construct {
     // workspaces, then per-workspace looks up the OAuth token from
     // Secrets Manager (`bgagent-linear-oauth-*` prefix, written by
     // `bgagent linear setup`).
+    //
+    // PutSecretValue is intentional, not a typo: resolveLinearOauthToken
+    // rotates Linear's refresh token in place when it expires (the same
+    // pattern as the orchestrator role). This is a write grant by
+    // design — see linear-oauth-resolver.ts.
     if (props.linearWorkspaceRegistryTable) {
       props.linearWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
@@ -185,24 +196,19 @@ export class GitHubScreenshotIntegration extends Construct {
     }
 
     // AgentCore Browser session lifecycle + automation-stream connect.
-    // The data-plane API doesn't support per-resource ARNs (sessions
-    // are ephemeral), so the resource wildcard is required — annotated
-    // with a cdk-nag suppression below.
+    // Action set scoped to the three calls the handler actually makes;
+    // resource is `*` because Browser sessions are ephemeral and the
+    // two `Connect*Stream` data-plane actions in the AWS Service
+    // Authorization Reference for `bedrock-agentcore` declare no
+    // resource types or condition keys (they require Resource:"*"
+    // anyway). cdk-nag IAM5 suppression annotates the resource
+    // wildcard.
     //
-    // Actions are scoped to the three calls the handler actually makes:
-    // - StartBrowserSession + StopBrowserSession (REST control plane,
-    //   in the public CLI command list)
-    // - ConnectBrowserAutomationStream (the SigV4-presigned WSS dial;
-    //   not in the public CLI command list, but verified live against
-    //   the deployed dev stack — IAM accepts the action name even
-    //   though aws cli help doesn't surface it)
-    //
-    // Previously this used `bedrock-agentcore:*` which granted the
-    // entire AgentCore action surface (memory, runtime, gateway,
-    // identity, code-interpreter). Per krokoko's PR #241 review item
-    // #1: scope down to least privilege. If a future API change adds a
-    // call we need, IAM will deny with the specific action name in
-    // CloudTrail and we can add it explicitly.
+    // Source: AWS Service Authorization Reference for bedrock-agentcore,
+    //   https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
+    //   - bedrock-agentcore:StartBrowserSession (Write)
+    //   - bedrock-agentcore:StopBrowserSession (Write)
+    //   - bedrock-agentcore:ConnectBrowserAutomationStream (Read; no resource scoping)
     this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:StartBrowserSession',

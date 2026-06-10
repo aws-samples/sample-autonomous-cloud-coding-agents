@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import PR_TASK_TYPES, build_config, resolve_linear_api_token
+from config import PR_WORKFLOW_IDS, build_config, resolve_linear_api_token
 from models import TaskConfig
 
 
@@ -20,41 +20,113 @@ class TestAgentWorkspaceConstant:
         assert config.AGENT_WORKSPACE == "/workspace"
 
 
-class TestPRTaskTypes:
-    def test_contains_pr_iteration(self):
-        assert "pr_iteration" in PR_TASK_TYPES
+class TestPRWorkflowIds:
+    def test_contains_pr_iteration_workflow(self):
+        assert "coding/pr-iteration-v1" in PR_WORKFLOW_IDS
 
-    def test_contains_pr_review(self):
-        assert "pr_review" in PR_TASK_TYPES
+    def test_contains_pr_review_workflow(self):
+        assert "coding/pr-review-v1" in PR_WORKFLOW_IDS
 
-    def test_does_not_contain_new_task(self):
-        assert "new_task" not in PR_TASK_TYPES
+    def test_does_not_contain_new_task_workflow(self):
+        assert "coding/new-task-v1" not in PR_WORKFLOW_IDS
 
 
-class TestTaskTypeValidation:
-    def test_invalid_task_type_raises(self):
-        with pytest.raises(ValueError, match="Invalid task_type"):
+class TestWorkflowResolution:
+    def test_default_workflow_when_omitted(self):
+        # No resolved_workflow ⇒ defaults to the coding workflow + new_task principal.
+        config = build_config(
+            repo_url="owner/repo",
+            task_description="fix bug",
+            github_token="ghp_test123",
+            aws_region="us-east-1",
+        )
+        assert config.resolved_workflow == {"id": "coding/new-task-v1", "version": "1.0.0"}
+        assert config.policy_principal == "new_task"
+        assert config.is_pr_workflow is False
+
+    def test_pr_iteration_workflow_requires_pr_number(self):
+        with pytest.raises(ValueError, match="pr_number is required"):
             build_config(
                 repo_url="owner/repo",
-                task_description="fix bug",
                 github_token="ghp_test123",
                 aws_region="us-east-1",
-                task_type="unknown_type",
+                resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             )
 
-    def test_valid_task_types_accepted(self):
-        for tt in ("new_task", "pr_iteration", "pr_review"):
-            desc = "" if tt in ("pr_iteration", "pr_review") else "fix bug"
-            pr = "42" if tt in ("pr_iteration", "pr_review") else ""
-            config = build_config(
-                repo_url="owner/repo",
-                task_description=desc,
-                github_token="ghp_test123",
-                aws_region="us-east-1",
-                task_type=tt,
-                pr_number=pr,
-            )
-            assert config.task_type == tt
+    def test_pr_review_workflow_is_read_only_with_pr_review_principal(self):
+        # #248 Phase 2a: pr-review keeps its "pr_review" identity principal, but
+        # read-only enforcement now rides config.read_only (→ context.read_only),
+        # not the principal literal.
+        config = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test123",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
+            pr_number="42",
+        )
+        assert config.is_pr_workflow is True
+        assert config.policy_principal == "pr_review"
+        assert config.read_only is True
+
+    def test_pr_iteration_workflow_maps_to_pr_iteration_principal(self):
+        config = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test123",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
+            pr_number="42",
+        )
+        assert config.policy_principal == "pr_iteration"
+        # pr_iteration is a writeable workflow — must NOT be read-only (else the
+        # context.read_only hard-deny would wrongly block its Write/Edit).
+        assert config.read_only is False
+
+    def test_repoless_default_workflow_does_not_require_repo(self):
+        # #248 Phase 3: default/agent-v1 is the repo-less platform default.
+        config = build_config(
+            task_description="Summarise these papers",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+        )
+        assert config.requires_repo is False
+        assert config.repo_url == ""
+
+    def test_workflow_load_failure_fails_closed(self, monkeypatch):
+        # When the pinned workflow file can't load, the fallback must fail CLOSED:
+        # an unrecognised id is treated as read-only (deny writes) and repo-bound,
+        # rather than fail-open to writeable. Coding ids that ARE known-writeable
+        # keep their writeable posture.
+        import workflow as workflow_mod
+        from workflow import WorkflowValidationError
+
+        def boom(_workflow_id):
+            raise WorkflowValidationError("simulated load failure")
+
+        # build_config does `from workflow import load_workflow` at call time, so
+        # patch the name on the workflow package the import resolves against.
+        monkeypatch.setattr(workflow_mod, "load_workflow", boom)
+
+        # Unknown id → read-only + requires repo (fail closed on both axes).
+        cfg = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test123",
+            task_description="x",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "knowledge/mystery-v1", "version": "1.0.0"},
+        )
+        assert cfg.read_only is True
+        assert cfg.requires_repo is True
+
+        # Known-writeable coding id keeps writeable even on load failure.
+        cfg2 = build_config(
+            repo_url="owner/repo",
+            github_token="ghp_test123",
+            task_description="x",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "coding/new-task-v1", "version": "1.0.0"},
+        )
+        assert cfg2.read_only is False
+        assert cfg2.requires_repo is True
 
 
 class TestBuildConfig:

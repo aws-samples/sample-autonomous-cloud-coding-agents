@@ -154,12 +154,18 @@ def ensure_pr(
     build_passed: bool,
     lint_passed: bool,
     agent_result: AgentResult | None = None,
+    strategy: str = "create",
 ) -> str | None:
-    """Check if a PR exists for the branch; if not, create one.
+    """Realize the PR per the workflow's ``ensure_pr`` strategy.
 
-    For ``new_task``: creates a new PR if needed.
-    For ``pr_iteration``: pushes commits, then resolves the existing PR URL.
-    For ``pr_review``: resolves the existing PR URL without pushing (read-only).
+    Strategy (provider-neutral, from the workflow step — replaces the former
+    ``task_type`` self-inspection, #248):
+
+    - ``create``: create a new PR if one doesn't exist (the new_task path).
+    - ``push_resolve``: push follow-up commits, then resolve the existing PR URL
+      (the pr_iteration path).
+    - ``resolve``: resolve the existing PR URL without pushing (read-only;
+      the pr_review path).
 
     Returns the PR URL, or None if there are no commits beyond the default
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
@@ -169,16 +175,14 @@ def ensure_pr(
     branch = setup.branch
     default_branch = setup.default_branch
 
-    # PR iteration/review: skip PR creation — just resolve existing PR URL
-    from config import PR_TASK_TYPES
-
-    if config.task_type in PR_TASK_TYPES:
-        if config.task_type == "pr_iteration":
+    # push_resolve / resolve: skip PR creation — just resolve the existing URL.
+    if strategy in ("push_resolve", "resolve"):
+        if strategy == "push_resolve":
             if not ensure_pushed(repo_dir, branch):
                 log("WARN", "Failed to push commits before resolving PR URL")
         else:
-            log("POST", "pr_review task — skipping push (read-only)")
-        log("POST", f"{config.task_type} — returning existing PR URL")
+            log("POST", "resolve strategy — skipping push (read-only)")
+        log("POST", f"ensure_pr strategy={strategy} — returning existing PR URL")
         result = subprocess.run(
             [
                 "gh",

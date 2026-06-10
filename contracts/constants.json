@@ -8,5 +8,9 @@
     "min": 30,
     "max": 3600,
     "default": 300
+  },
+  "max_budget_usd": {
+    "min": 0.01,
+    "max": 100
   }
 }

@@ -27,6 +27,9 @@ import { Command } from 'commander';
 import { loadConfig } from '../config';
 import { CliError } from '../errors';
 
+/** Width of the `═` banner rules printed around webhook-info output. */
+const BANNER_WIDTH = 72;
+
 export function makeGithubCommand(): Command {
   const github = new Command('github')
     .description('Manage GitHub integration (deployment-status webhook for preview-deploy screenshots)');
@@ -57,7 +60,7 @@ export function makeGithubCommand(): Command {
           );
         }
 
-        const bar = '═'.repeat(72);
+        const bar = '═'.repeat(BANNER_WIDTH);
         console.log(bar);
         console.log('GitHub webhook configuration (preview-deploy screenshot pipeline)');
         console.log(bar);

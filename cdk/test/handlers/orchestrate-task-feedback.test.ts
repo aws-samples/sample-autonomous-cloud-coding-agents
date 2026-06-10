@@ -61,7 +61,7 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     user_id: 'user-123',
     status: 'SUBMITTED',
     repo: 'org/repo',
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     branch_name: 'bgagent/TASK001/foo',
     channel_source: 'api',
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',

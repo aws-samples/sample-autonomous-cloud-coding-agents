@@ -32,7 +32,9 @@ class TestPreToolUseHook:
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
     def test_denies_restricted_tool(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        # #248 Phase 2a: a read-only engine hard-denies Write (keyed on
+        # context.read_only, not the principal literal).
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         hook_input = {
             "hook_event_name": "PreToolUse",
             "tool_name": "Write",
@@ -44,7 +46,7 @@ class TestPreToolUseHook:
         }
         result = _run(pre_tool_use_hook(hook_input, "test-456", {}, engine=engine))
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "pr_review" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "read_only_forbid_write" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_denies_git_internals_path(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")

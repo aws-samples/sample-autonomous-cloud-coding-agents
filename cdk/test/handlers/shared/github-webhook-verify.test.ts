@@ -65,6 +65,21 @@ describe('verifyGitHubSignature', () => {
     const sig = signed('{"hello":"world"}');
     expect(verifyGitHubSignature(SECRET_VALUE, sig, '{"hello":"WORLD"}')).toBe(false);
   });
+
+  // theagenticguy PR-241 review B2: the headline empty-secret fail-open guard.
+  // HMAC('', body) was previously accepted by `crypto.createHmac` and would
+  // pass `timingSafeEqual` if the attacker computed the same HMAC.
+  test('rejects empty webhookSecret even with a syntactically-valid signature', () => {
+    const body = '{"hello":"world"}';
+    const empty = 'sha256=' + crypto.createHmac('sha256', '').update(body).digest('hex');
+    expect(verifyGitHubSignature('', empty, body)).toBe(false);
+  });
+
+  test('rejects whitespace-only webhookSecret', () => {
+    const body = '{"hello":"world"}';
+    const ws = 'sha256=' + crypto.createHmac('sha256', '   ').update(body).digest('hex');
+    expect(verifyGitHubSignature('   ', ws, body)).toBe(false);
+  });
 });
 
 describe('getGitHubWebhookSecret', () => {
@@ -79,7 +94,6 @@ describe('getGitHubWebhookSecret', () => {
     const v2 = await getGitHubWebhookSecret(SECRET_ID);
     expect(v1).toBe(SECRET_VALUE);
     expect(v2).toBe(SECRET_VALUE);
-    // Cache hit on second call — only one SM round-trip.
     expect(smSend).toHaveBeenCalledTimes(1);
   });
 
@@ -96,10 +110,22 @@ describe('getGitHubWebhookSecret', () => {
   test('returns null and drops cache entry when SecretString is missing', async () => {
     smSend.mockResolvedValueOnce({});
     expect(await getGitHubWebhookSecret(SECRET_ID)).toBeNull();
-    // Next call should re-fetch (cache should be dropped).
     smSend.mockResolvedValueOnce({ SecretString: SECRET_VALUE });
     expect(await getGitHubWebhookSecret(SECRET_ID)).toBe(SECRET_VALUE);
     expect(smSend).toHaveBeenCalledTimes(2);
+  });
+
+  // theagenticguy PR-241 review B2: empty-secret fails closed at the
+  // fetch layer, not just the verify layer. An operator who wrote `""`
+  // out of band must not have it cached and used.
+  test('returns null when SecretString is the empty string', async () => {
+    smSend.mockResolvedValueOnce({ SecretString: '' });
+    expect(await getGitHubWebhookSecret(SECRET_ID)).toBeNull();
+  });
+
+  test('returns null when SecretString is whitespace-only', async () => {
+    smSend.mockResolvedValueOnce({ SecretString: '   \n\t  ' });
+    expect(await getGitHubWebhookSecret(SECRET_ID)).toBeNull();
   });
 
   test('returns null on ResourceNotFoundException', async () => {
@@ -128,8 +154,6 @@ describe('verifyGitHubRequest (cache + transparent re-fetch)', () => {
   });
 
   test('re-fetches and retries on signature mismatch (post-rotation path)', async () => {
-    // First fetch returns the OLD secret; refresh returns the NEW one.
-    // GitHub now signs with NEW; we should accept after the re-fetch.
     smSend
       .mockResolvedValueOnce({ SecretString: 'old-secret' })
       .mockResolvedValueOnce({ SecretString: 'new-secret' });
@@ -148,11 +172,13 @@ describe('verifyGitHubRequest (cache + transparent re-fetch)', () => {
     expect(await verifyGitHubRequest(SECRET_ID, sig, body)).toBe(false);
   });
 
-  test('returns false when refresh fetch returns null', async () => {
+  test('returns false when the stored secret is empty (B2 end-to-end)', async () => {
     smSend
-      .mockResolvedValueOnce({ SecretString: 'old-secret' })
-      .mockResolvedValueOnce({}); // no SecretString
+      .mockResolvedValueOnce({ SecretString: '' })
+      .mockResolvedValueOnce({ SecretString: '' });
     const body = '{"event":"deployment_status"}';
-    expect(await verifyGitHubRequest(SECRET_ID, signed(body, 'wrong'), body)).toBe(false);
+    // An attacker who knows the secret is empty would compute HMAC('', body).
+    const forged = 'sha256=' + crypto.createHmac('sha256', '').update(body).digest('hex');
+    expect(await verifyGitHubRequest(SECRET_ID, forged, body)).toBe(false);
   });
 });

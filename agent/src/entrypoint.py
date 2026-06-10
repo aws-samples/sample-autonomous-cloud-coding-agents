@@ -14,7 +14,7 @@ _importlib.reload(_config)
 
 from config import (  # noqa: F401
     AGENT_WORKSPACE,
-    PR_TASK_TYPES,
+    PR_WORKFLOW_IDS,
     build_config,
     get_config,
     resolve_github_token,
@@ -29,7 +29,6 @@ from models import (  # noqa: F401
     RepoSetup,
     TaskConfig,
     TaskResult,
-    TaskType,
     TokenUsage,
 )
 from pipeline import main, run_task  # noqa: F401

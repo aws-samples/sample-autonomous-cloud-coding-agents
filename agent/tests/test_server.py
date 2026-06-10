@@ -205,7 +205,12 @@ def test_invocations_rejects_missing_required_params_with_400(client, monkeypatc
 
     response = client.post(
         "/invocations",
-        json={"input": {"task_id": "t-missing", "task_type": "pr_review"}},
+        json={
+            "input": {
+                "task_id": "t-missing",
+                "resolved_workflow": {"id": "coding/pr-review-v1", "version": "1.0.0"},
+            }
+        },
     )
 
     assert response.status_code == 400
@@ -283,12 +288,12 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
     assert heartbeat_calls[0] == "t-heartbeat"
 
 
-def test_validate_required_params_pr_types_require_pr_number():
-    """PR-iteration and PR-review task_types need a pr_number regardless."""
+def test_validate_required_params_pr_workflows_require_pr_number():
+    """PR-iteration and PR-review workflows need a pr_number regardless."""
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "pr_iteration",
+            "resolved_workflow": {"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             "pr_number": "",
         }
     )
@@ -297,17 +302,17 @@ def test_validate_required_params_pr_types_require_pr_number():
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "pr_review",
+            "resolved_workflow": {"id": "coding/pr-review-v1", "version": "1.0.0"},
             "pr_number": "42",
         }
     )
     assert missing == []
 
-    # new_task needs issue OR description.
+    # A non-PR workflow needs issue OR description.
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "new_task",
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
         }
     )
     assert missing == ["issue_number_or_task_description"]
@@ -315,11 +320,36 @@ def test_validate_required_params_pr_types_require_pr_number():
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "new_task",
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
             "task_description": "do the thing",
         }
     )
     assert missing == []
+
+
+def test_validate_required_params_repoless_workflow_does_not_require_repo():
+    """#248 Phase 3: a repo-less workflow is accepted at the /invocations boundary
+    with no repo_url (the AgentCore-backend admission path).
+
+    Regression guard: repo_url was previously required unconditionally here, which
+    rejected every repo-less task on the AgentCore backend before the pipeline ran.
+    """
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "default/agent-v1", "version": "1.0.0"},
+            "task_description": "Summarise these papers",
+        }
+    )
+    assert missing == []
+
+    # A repo-bound workflow still requires repo_url.
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
+            "task_description": "do the thing",
+        }
+    )
+    assert missing == ["repo_url"]
 
 
 def test_drain_threads_joins_active_threads():

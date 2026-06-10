@@ -23,7 +23,6 @@
 import { resolveGitHubToken } from './context-hydration';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
-import type { TaskType } from './types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,10 +68,6 @@ const CONTENTS_WRITE_LEVELS = new Set(['WRITE', 'MAINTAIN', 'ADMIN']);
  * See GitHub collaborator roles; TRIAGE can manage PRs without push.
  */
 const PR_REVIEW_INTERACTION_LEVELS = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']);
-
-function taskRequiresContentsWrite(taskType: TaskType): boolean {
-  return taskType === 'new_task' || taskType === 'pr_iteration';
-}
 
 function splitRepo(repo: string): { owner: string; name: string } | undefined {
   const idx = repo.indexOf('/');
@@ -153,7 +148,7 @@ async function checkGitHubReachability(token: string): Promise<PreflightCheckRes
   }
 }
 
-async function checkRepoAccess(repo: string, token: string, taskType: TaskType): Promise<PreflightCheckResult> {
+async function checkRepoAccess(repo: string, token: string, readOnly: boolean): Promise<PreflightCheckResult> {
   const start = Date.now();
   try {
     const resp = await fetch(`https://api.github.com/repos/${repo}`, {
@@ -209,7 +204,7 @@ async function checkRepoAccess(repo: string, token: string, taskType: TaskType):
     const contentsWriteOk = restPush || (viewerPermission !== undefined && CONTENTS_WRITE_LEVELS.has(viewerPermission));
     const prReviewOk = restPush || (viewerPermission !== undefined && PR_REVIEW_INTERACTION_LEVELS.has(viewerPermission));
 
-    const needsWrite = taskRequiresContentsWrite(taskType);
+    const needsWrite = !readOnly;
     const sufficient = needsWrite ? contentsWriteOk : prReviewOk;
 
     if (!sufficient) {
@@ -319,12 +314,32 @@ function pickPrimaryPreflightFailure(failedChecks: PreflightCheckResult[]): Pref
 // ---------------------------------------------------------------------------
 
 export async function runPreflightChecks(
-  repo: string,
+  repo: string | undefined,
   blueprintConfig: BlueprintConfig,
   prNumber?: number,
-  taskType: TaskType = 'new_task',
+  readOnly = false,
+  requiresRepo = true,
 ): Promise<PreflightResult> {
   const checks: PreflightCheckResult[] = [];
+
+  // Repo-less workflows (requires_repo:false) have no repo to pre-flight —
+  // short-circuit to passed. The seam exists from Phase 1 so the Phase-3
+  // repo-optional refactor flips behavior, not structure.
+  if (!requiresRepo) {
+    return { passed: true, checks };
+  }
+
+  // Past this point requiresRepo is true, so a repo-bound task always carries
+  // a repo (enforced at admission in create-task-core). Narrow for the checks
+  // below, which are repo-specific.
+  if (!repo) {
+    return {
+      passed: false,
+      checks,
+      failureReason: PreflightFailureReason.GITHUB_UNREACHABLE,
+      failureDetail: 'repo-bound workflow has no repo (internal invariant violation)',
+    };
+  }
 
   if (blueprintConfig.github_token_secret_arn) {
     // Resolve token — fail immediately if token resolution fails
@@ -354,7 +369,7 @@ export async function runPreflightChecks(
 
     const results = await Promise.allSettled([
       checkGitHubReachability(token),
-      checkRepoAccess(repo, token, taskType),
+      checkRepoAccess(repo, token, readOnly),
       ...(prNumber !== undefined ? [checkPrAccessible(repo, prNumber, token)] : []),
     ]);
 

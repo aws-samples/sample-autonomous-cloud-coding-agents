@@ -153,6 +153,28 @@ export default [
       }],
 
       // TypeScript rules
+      // AI007 guard (#258): inline numeric literals should be named constants.
+      // Values shared across Python/TypeScript belong in contracts/constants.json
+      // (see contracts/constants.md).
+      '@typescript-eslint/no-magic-numbers': ['error', {
+        ignore: [
+          // Identity / trivial arithmetic
+          -1, 0, 1, 2,
+          // Radix, percentages, and well-known unit conversions
+          10, 24, 60, 100, 1000, 1024, 3600, 86400,
+          // HTTP status codes (600 = exclusive upper bound for 5xx checks)
+          200, 201, 202, 204, 301, 302, 304,
+          400, 401, 403, 404, 409, 422, 429,
+          500, 502, 503, 504, 600,
+        ],
+        ignoreEnums: true,
+        ignoreNumericLiteralTypes: true,
+        ignoreReadonlyClassProperties: true,
+        ignoreTypeIndexes: true,
+        ignoreDefaultValues: true,
+        ignoreClassFieldInitialValues: true,
+        ignoreArrayIndexes: true,
+      }],
       '@typescript-eslint/no-require-imports': 'error',
       '@typescript-eslint/no-shadow': 'error',
       '@typescript-eslint/no-floating-promises': ['error'],
@@ -212,6 +234,14 @@ export default [
     files: ['src/**/*.ts'],
     rules: {
       'no-console': 'off',
+    },
+  },
+
+  // Override: tests and build tooling legitimately use inline literals
+  {
+    files: ['test/**/*.ts', 'build-tools/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-magic-numbers': 'off',
     },
   },
 

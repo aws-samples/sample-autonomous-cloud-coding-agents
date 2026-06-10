@@ -21,6 +21,10 @@ import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import {
+  type GitHubDeploymentStatusPayload,
+  validateDeploymentStatusPayload,
+} from './shared/github-deployment-status';
 import { verifyGitHubRequest } from './shared/github-webhook-verify';
 import { logger } from './shared/logger';
 
@@ -37,45 +41,6 @@ const PROCESSOR_FUNCTION_NAME = process.env.GITHUB_WEBHOOK_PROCESSOR_FUNCTION_NA
  * apart). 1h is generous coverage with slack for clock skew.
  */
 const DEDUP_TTL_SECONDS = 60 * 60;
-
-/**
- * Subset of GitHub's `deployment_status` payload we route on. Any deploy
- * backend that calls the GitHub Deployments API posts this when a deploy
- * finishes — Vercel, AWS Amplify Hosting, Netlify, Cloud Run, or your
- * own GitHub Actions workflow that calls `POST /repos/.../deployments`.
- * The interesting fields:
- *  - `deployment_status.state`: `success` | `failure` | `error` | `pending` | `in_progress`
- *  - `deployment_status.environment_url`: the deployed URL — lives on the
- *    *status* object, not the deployment itself. (The deployment object
- *    only has the immutable SHA + environment name; URL changes per
- *    status update — first `pending` has no URL, then `success` fills
- *    it in.)
- *  - `deployment.environment`: provider-defined string (Vercel uses
- *    `Preview`/`Production`, Amplify uses the branch name, GitHub
- *    Actions uses whatever the workflow passes). Filtered against
- *    `SCREENSHOT_TARGET_ENVIRONMENT` env var.
- *  - `deployment.sha`: the commit SHA the deploy is for (used to map
- *    back to a PR via the GitHub commit-pulls API)
- *
- * Full payload is forwarded to the processor without re-serialization
- * risk — the processor parses its own copy from the raw body.
- */
-interface GitHubDeploymentStatusEnvelope {
-  readonly action?: string;
-  readonly deployment_status?: {
-    readonly id?: number;
-    readonly state?: string;
-    readonly environment_url?: string;
-  };
-  readonly deployment?: {
-    readonly id?: number;
-    readonly sha?: string;
-    readonly environment?: string;
-  };
-  readonly repository?: {
-    readonly full_name?: string;
-  };
-}
 
 /**
  * POST /v1/github/webhook — GitHub webhook receiver.
@@ -132,9 +97,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true });
     }
 
-    let payload: GitHubDeploymentStatusEnvelope;
+    let raw: GitHubDeploymentStatusPayload;
     try {
-      payload = JSON.parse(event.body) as GitHubDeploymentStatusEnvelope;
+      raw = JSON.parse(event.body) as GitHubDeploymentStatusPayload;
     } catch (err) {
       logger.warn('GitHub webhook body is not valid JSON', {
         error: err instanceof Error ? err.message : String(err),
@@ -142,13 +107,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
 
-    // GitHub deployment_status events have multiple intermediate states
-    // (`pending`, `in_progress`) before the terminal `success` /
-    // `failure` / `error`. Only `success` deploys are worth
-    // screenshotting; everything else gets a clean 200 so GitHub
-    // doesn't retry.
-    if (payload.deployment_status?.state !== 'success') {
-      return jsonResponse(200, { ok: true, skipped_state: payload.deployment_status?.state });
+    // Filter pre-validate so common skip-paths return early without
+    // logging a "missing fields" warn for an in-progress event.
+    if (raw.deployment_status?.state !== 'success') {
+      return jsonResponse(200, { ok: true, skipped_state: raw.deployment_status?.state });
     }
 
     // Filter to a configured environment name. Defaults to `Preview`
@@ -162,38 +124,43 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Operators on non-Vercel backends override via
     // `SCREENSHOT_TARGET_ENVIRONMENT` (Lambda env var, redeploy required).
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
-    if (payload.deployment?.environment !== targetEnv) {
+    if (raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
         ok: true,
-        skipped_environment: payload.deployment?.environment,
+        skipped_environment: raw.deployment?.environment,
       });
     }
 
-    const repo = payload.repository?.full_name;
-    const deploymentId = payload.deployment?.id;
-    const statusId = payload.deployment_status?.id;
-    if (!repo || !deploymentId || !statusId) {
-      logger.warn('GitHub deployment_status webhook missing repo, deployment id, or status id', {
-        repo,
-        deployment_id: deploymentId,
-        status_id: statusId,
-      });
-      return jsonResponse(400, { error: 'Missing repo, deployment id, or status id' });
-    }
-
-    if (!payload.deployment_status?.environment_url) {
-      logger.warn('GitHub deployment_status webhook missing environment_url; cannot screenshot', {
-        repo,
-        deployment_id: deploymentId,
-      });
+    // GitHub sometimes fires `success` deployment_status events without
+    // an `environment_url` (e.g. when the provider hasn't published the
+    // URL yet but the build itself succeeded). 200-skip these so GitHub
+    // doesn't retry — the next status update will carry the URL.
+    if (!raw.deployment_status?.environment_url) {
       return jsonResponse(200, { ok: true, skipped_no_url: true });
+    }
+
+    // Single validate call shared with the processor — guarantees the
+    // processor doesn't reject a payload the receiver admitted (closes
+    // the "missing deployment.sha" gap where the processor would drop
+    // events the receiver had dispatched). Runs after the state /
+    // environment / env-url skip-paths so 200s don't log a "missing
+    // fields" warn.
+    const payload = validateDeploymentStatusPayload(raw);
+    if (!payload) {
+      logger.warn('GitHub deployment_status webhook missing required fields', {
+        repo: raw.repository?.full_name,
+        deployment_id: raw.deployment?.id,
+        status_id: raw.deployment_status?.id,
+        sha_present: Boolean(raw.deployment?.sha),
+      });
+      return jsonResponse(400, { error: 'Missing required deployment_status fields' });
     }
 
     // Dedup on (repo, deployment_id, status_id). A single deploy lifecycle
     // can emit multiple statuses; using the status id as the third leg
     // keeps reruns of the same status (GitHub retries on 5xx) collapsed
     // while distinct status transitions stay distinct.
-    const dedupKey = `${repo}#${deploymentId}#${statusId}`;
+    const dedupKey = `${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
       await ddb.send(new PutCommand({
@@ -224,9 +191,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (invokeErr) {
       logger.error('Failed to invoke GitHub webhook processor', {
         error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
-        repo,
-        deployment_id: deploymentId,
-        status_id: statusId,
+        repo: payload.repoFullName,
+        deployment_id: payload.deploymentId,
+        status_id: payload.statusId,
       });
       // Roll the dedup row back so GitHub's retry can try dispatch again.
       try {

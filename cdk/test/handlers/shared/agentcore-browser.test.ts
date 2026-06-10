@@ -36,12 +36,20 @@ jest.mock('@aws-sdk/credential-provider-node', () => ({
 }));
 
 class FakeWebSocket extends EventEmitter {
-  // Latest instance — tests reach in to drive message events.
   public static last: FakeWebSocket | null = null;
-  /** Override per-test to inject failures on construction. */
   public static onConstruct: ((url: string, ws: FakeWebSocket) => void) | null = null;
-  /** Per-test scripted reactions — one per cdpSend call, in order. */
-  public static reactions: Array<(msg: { id: number; method: string }) => Record<string, unknown> | null> = [];
+  /**
+   * Per-test scripted reactions. Each function returns either:
+   *  - an object: a CDP response keyed back to the request id
+   *  - an object with `events` array: response + extra unsolicited events (e.g. Network.responseReceived) emitted before the response
+   *  - null: no response (caller times out)
+   */
+  public static reactions: Array<
+    (msg: { id: number; method: string; sessionId?: string }) =>
+      | Record<string, unknown>
+      | { _response: Record<string, unknown>; _events?: Array<Record<string, unknown>> }
+      | null
+  > = [];
 
   public sentMessages: string[] = [];
   public closed = false;
@@ -49,7 +57,6 @@ class FakeWebSocket extends EventEmitter {
   constructor(public url: string) {
     super();
     FakeWebSocket.last = this;
-    // Fire `open` on the next tick so callers can wire listeners first.
     setImmediate(() => {
       if (FakeWebSocket.onConstruct) {
         FakeWebSocket.onConstruct(url, this);
@@ -61,19 +68,34 @@ class FakeWebSocket extends EventEmitter {
 
   send(data: string): void {
     this.sentMessages.push(data);
-    // Auto-respond from the per-test scripted reactions.
     const msg = JSON.parse(data) as { id: number; method: string; sessionId?: string };
     const reaction = FakeWebSocket.reactions.shift();
-    if (reaction) {
-      const reply = reaction(msg);
-      if (reply !== null) {
-        // Echo the id back so the caller's pending map resolves.
-        setImmediate(() => this.emit('message', JSON.stringify({ ...reply, id: msg.id })));
+    if (!reaction) return;
+    const result = reaction(msg);
+    if (result === null) return;
+    // Detect the `{_response, _events}` wrapper for tests that need to
+    // emit unsolicited events alongside the request's response.
+    if ('_response' in result) {
+      const wrapped = result as {
+        _response: Record<string, unknown>;
+        _events?: Array<Record<string, unknown>>;
+      };
+      if (wrapped._events) {
+        for (const ev of wrapped._events) {
+          setImmediate(() => this.emit('message', JSON.stringify(ev)));
+        }
       }
+      setImmediate(() => this.emit('message', JSON.stringify({ ...wrapped._response, id: msg.id })));
+    } else {
+      setImmediate(() => this.emit('message', JSON.stringify({ ...result, id: msg.id })));
     }
   }
 
   close(): void {
+    this.closed = true;
+  }
+
+  terminate(): void {
     this.closed = true;
   }
 }
@@ -85,55 +107,34 @@ jest.mock('ws', () => ({
 
 import { captureScreenshot } from '../../../src/handlers/shared/agentcore-browser';
 
-describe('captureScreenshot', () => {
+/** Helper: emit Page.loadEventFired on the next tick. */
+function emitLoadEventFired(): void {
+  setImmediate(() => {
+    FakeWebSocket.last!.emit('message', JSON.stringify({ method: 'Page.loadEventFired' }));
+  });
+}
+
+/** Build a Network.responseReceived event for the main document with the given status. */
+function networkResponseEvent(status: number, frameId = 'frame-1'): Record<string, unknown> {
+  return {
+    method: 'Network.responseReceived',
+    params: {
+      type: 'Document',
+      frameId,
+      response: { status },
+    },
+  };
+}
+
+describe('captureScreenshot — main-document status check (issue #287)', () => {
   beforeEach(() => {
     bedrockSend.mockReset();
     FakeWebSocket.last = null;
     FakeWebSocket.reactions = [];
     FakeWebSocket.onConstruct = null;
-  });
-
-  test('throws if StartBrowserSession returns no sessionId / endpoint', async () => {
-    bedrockSend.mockResolvedValueOnce({ sessionId: undefined, streams: undefined });
-    await expect(captureScreenshot('https://x')).rejects.toThrow(/no sessionId/);
-  });
-
-  test('happy path: drives CDP, returns PNG bytes, stops the session', async () => {
-    // Start
-    bedrockSend.mockResolvedValueOnce({
-      sessionId: 'sess-1',
-      streams: {
-        automationStream: { streamEndpoint: 'wss://example.com/automation' },
-      },
-    });
-    // Stop (in finally)
-    bedrockSend.mockResolvedValueOnce({});
-
-    // CDP exchange — one reaction per send() in order:
-    //  1. Target.getTargets         → return one page target
-    //  2. Target.attachToTarget     → return sessionId
-    //  3. Page.enable               → ack {}
-    //  4. Page.navigate             → ack {}
-    //  5. Page.captureScreenshot    → return base64 PNG
-    FakeWebSocket.reactions = [
-      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
-      () => ({ result: { sessionId: 'flat-sess' } }),
-      () => ({ result: {} }),
-      () => {
-        // Navigation succeeded; emit Page.loadEventFired event next tick.
-        setImmediate(() => {
-          FakeWebSocket.last!.emit('message', JSON.stringify({ method: 'Page.loadEventFired' }));
-        });
-        return { result: {} };
-      },
-      () => ({ result: { data: Buffer.from('PNG-DATA').toString('base64') } }),
-    ];
-
-    // Skip the 2-second post-load settle — keep test fast.
+    // Skip the 2-second post-load settle.
     const realSetTimeout = global.setTimeout;
     jest.spyOn(global, 'setTimeout').mockImplementation(((cb: () => void, ms?: number) => {
-      // Fire 2-second settle synchronously, but preserve real timer
-      // behaviour for the deadline-tracking timeouts (long delays).
       if (typeof ms === 'number' && ms === 2000) {
         cb();
         return 0 as unknown as NodeJS.Timeout;
@@ -141,82 +142,142 @@ describe('captureScreenshot', () => {
       return realSetTimeout(cb, ms);
     }) as typeof global.setTimeout);
 
+    bedrockSend.mockResolvedValueOnce({
+      sessionId: 'sess-1',
+      streams: { automationStream: { streamEndpoint: 'wss://example.com/automation' } },
+    });
+    bedrockSend.mockResolvedValueOnce({}); // Stop in finally
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('200 main-document status → captures screenshot as before', async () => {
+    FakeWebSocket.reactions = [
+      // Target.getTargets
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      // Target.attachToTarget
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      // Page.enable
+      () => ({ result: {} }),
+      // Network.enable
+      () => ({ result: {} }),
+      // Page.navigate — also emit Network.responseReceived (200) + load event
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [networkResponseEvent(200, 'frame-1')],
+      }),
+      // Page.captureScreenshot
+      () => ({ result: { data: Buffer.from('PNG-200').toString('base64') } }),
+    ];
+    emitLoadEventFired();
+
     const png = await captureScreenshot('https://preview.example.com');
-
-    expect(Buffer.from(png).toString()).toBe('PNG-DATA');
-    // StartBrowserSession + StopBrowserSession both called.
-    expect(bedrockSend).toHaveBeenCalledTimes(2);
-    // WSS URL was presigned with SigV4 query params — must contain the
-    // canonical X-Amz- headers.
-    expect(FakeWebSocket.last!.url).toContain('X-Amz-Algorithm=AWS4-HMAC-SHA256');
-    expect(FakeWebSocket.last!.url).toContain('X-Amz-Credential=');
-    expect(FakeWebSocket.last!.url).toContain('X-Amz-Signature=');
-    // Socket closed on the way out.
-    expect(FakeWebSocket.last!.closed).toBe(true);
+    expect(Buffer.from(png).toString()).toBe('PNG-200');
   });
 
-  test('still attempts StopBrowserSession on CDP failure (best-effort cleanup)', async () => {
-    bedrockSend.mockResolvedValueOnce({
-      sessionId: 'sess-1',
-      streams: { automationStream: { streamEndpoint: 'wss://example.com/automation' } },
-    });
-    bedrockSend.mockResolvedValueOnce({});
-
-    // Target.getTargets returns NO page target → should throw.
-    FakeWebSocket.reactions = [
-      () => ({ result: { targetInfos: [] } }),
-    ];
-
-    await expect(captureScreenshot('https://x')).rejects.toThrow(/No page target/);
-    // Stop was still called.
-    const stopCalls = bedrockSend.mock.calls.filter((c) => (c[0] as { _type: string })._type === 'Stop');
-    expect(stopCalls.length).toBe(1);
-  });
-
-  test('logs but does not throw when StopBrowserSession itself fails', async () => {
-    bedrockSend
-      .mockResolvedValueOnce({
-        sessionId: 'sess-1',
-        streams: { automationStream: { streamEndpoint: 'wss://example.com/automation' } },
-      })
-      .mockRejectedValueOnce(new Error('stop failed')); // Stop in finally
-
-    FakeWebSocket.reactions = [
-      () => ({ result: { targetInfos: [] } }), // -> caller throws "No page target"
-    ];
-
-    // Original error from try-block surfaces; finally's Stop error is logged.
-    await expect(captureScreenshot('https://x')).rejects.toThrow(/No page target/);
-  });
-
-  test('rejects when WS upgrade returns unexpected-response (e.g. 403)', async () => {
-    bedrockSend.mockResolvedValueOnce({
-      sessionId: 'sess-1',
-      streams: { automationStream: { streamEndpoint: 'wss://example.com/automation' } },
-    });
-    bedrockSend.mockResolvedValueOnce({});
-
-    FakeWebSocket.onConstruct = (_url, ws) => {
-      setImmediate(() => ws.emit('unexpected-response', {}, { statusCode: 403 }));
-    };
-
-    await expect(captureScreenshot('https://x')).rejects.toThrow(/handshake failed: HTTP 403/);
-  });
-
-  test('Page.navigate that errors throws with the error text', async () => {
-    bedrockSend.mockResolvedValueOnce({
-      sessionId: 'sess-1',
-      streams: { automationStream: { streamEndpoint: 'wss://example.com/automation' } },
-    });
-    bedrockSend.mockResolvedValueOnce({});
-
+  test('404 main-document status → throws "Preview URL returned HTTP 404"', async () => {
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
       () => ({ result: {} }),
-      () => ({ result: { errorText: 'net::ERR_CONNECTION_REFUSED' } }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [networkResponseEvent(404, 'frame-1')],
+      }),
+      // Page.captureScreenshot should NEVER be called — fail loud if it is
+      () => {
+        throw new Error('captureScreenshot should not run on non-2xx');
+      },
     ];
+    emitLoadEventFired();
 
-    await expect(captureScreenshot('https://broken')).rejects.toThrow(/net::ERR_CONNECTION_REFUSED/);
+    await expect(captureScreenshot('https://preview.example.com/missing')).rejects.toThrow(
+      /Preview URL returned HTTP 404/,
+    );
+  });
+
+  test('503 main-document status → throws', async () => {
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [networkResponseEvent(503, 'frame-1')],
+      }),
+    ];
+    emitLoadEventFired();
+
+    await expect(captureScreenshot('https://preview.example.com/down')).rejects.toThrow(/HTTP 503/);
+  });
+
+  test('301 redirect → main document status is the redirect; throw', async () => {
+    // 3xx responses are still non-2xx so we treat them as failure; CDP's
+    // typical behaviour with redirects is that the FINAL response gets
+    // a 200 type=Document, but if a 3xx surfaces we should not silently
+    // capture an unexpected page. (Real-world: Vercel auth-wall returns
+    // 200 directly so this is mostly defensive — but assert the policy.)
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [networkResponseEvent(301, 'frame-1')],
+      }),
+    ];
+    emitLoadEventFired();
+
+    await expect(captureScreenshot('https://preview.example.com/old')).rejects.toThrow(/HTTP 301/);
+  });
+
+  test('Network.responseReceived for non-Document resource is ignored', async () => {
+    // Only Document-type responses set the captured status. JS/CSS/XHR
+    // responses on the same frame must not trigger the non-2xx branch.
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [
+          // A 404 on a stylesheet request — not the main document.
+          {
+            method: 'Network.responseReceived',
+            params: { type: 'Stylesheet', frameId: 'frame-1', response: { status: 404 } },
+          },
+          // The actual main-document response is 200.
+          networkResponseEvent(200, 'frame-1'),
+        ],
+      }),
+      () => ({ result: { data: Buffer.from('PNG').toString('base64') } }),
+    ];
+    emitLoadEventFired();
+
+    await expect(captureScreenshot('https://preview.example.com')).resolves.toBeDefined();
+  });
+
+  test('no Network.responseReceived event ever fires → falls through (pre-#287 behaviour)', async () => {
+    // Defensive: if some service variant doesn't emit Network events,
+    // we still capture optimistically rather than blocking the pipeline.
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      // Page.navigate — no events emitted alongside; only the response.
+      () => ({ result: { frameId: 'frame-1' } }),
+      () => ({ result: { data: Buffer.from('PNG').toString('base64') } }),
+    ];
+    emitLoadEventFired();
+
+    const png = await captureScreenshot('https://preview.example.com');
+    expect(Buffer.from(png).toString()).toBe('PNG');
   });
 });

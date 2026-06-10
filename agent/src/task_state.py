@@ -301,6 +301,12 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("trace_s3_uri"):
                 update_parts.append("trace_s3_uri = :ts3")
                 expr_values[":ts3"] = result["trace_s3_uri"]
+            # Repo-less delivered artifact URI (#248 Phase 3). Persisted with the
+            # terminal write so TaskDetail.artifact_uri surfaces the deliverable
+            # — otherwise the S3 object exists but its URI is undiscoverable.
+            if result.get("artifact_uri"):
+                update_parts.append("artifact_uri = :au")
+                expr_values[":au"] = result["artifact_uri"]
 
         table.update_item(
             Key={"task_id": task_id},
