@@ -31,6 +31,7 @@ jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
 
 import {
   extractLinearIdentifier,
+  extractLinearIdentifierFromBranch,
   findLinearIssueByIdentifier,
 } from '../../../src/handlers/shared/linear-issue-lookup';
 
@@ -90,6 +91,34 @@ describe('extractLinearIdentifier', () => {
     const second = extractLinearIdentifier('second PLAT-2');
     expect(first).toBe('ABCA-1');
     expect(second).toBe('PLAT-2');
+  });
+});
+
+describe('extractLinearIdentifierFromBranch', () => {
+  test('pulls the canonical identifier from an ABCA task branch (lowercased slug)', () => {
+    // bgagent/{taskId}/{slug} where slug = slugify("ABCA-151: Add lisbon-guide.html")
+    expect(
+      extractLinearIdentifierFromBranch('bgagent/01KTSK8XGXHRMT0JX44GYRPJG7/abca-151-add-lisbon-guidehtml'),
+    ).toBe('ABCA-151');
+  });
+
+  test('the ULID task-id segment does not false-match before the identifier', () => {
+    // The ULID has no dash, so it cannot produce a <KEY>-<n> match; the
+    // first real match is the issue identifier in the slug.
+    expect(
+      extractLinearIdentifierFromBranch('bgagent/01KTSKET9040HDJP3P2QE15DXC/abca-152-link-lisbon-from-destinationsht'),
+    ).toBe('ABCA-152');
+  });
+
+  test('returns null for a branch with no identifier', () => {
+    expect(extractLinearIdentifierFromBranch('bgagent/01TASK/task')).toBeNull();
+    expect(extractLinearIdentifierFromBranch('feature/some-thing')).toBeNull();
+  });
+
+  test('returns null on null/undefined/empty', () => {
+    expect(extractLinearIdentifierFromBranch(null)).toBeNull();
+    expect(extractLinearIdentifierFromBranch(undefined)).toBeNull();
+    expect(extractLinearIdentifierFromBranch('')).toBeNull();
   });
 });
 
