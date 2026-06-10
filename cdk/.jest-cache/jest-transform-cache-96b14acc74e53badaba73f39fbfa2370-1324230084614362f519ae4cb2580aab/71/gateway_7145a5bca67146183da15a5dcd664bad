@@ -1,0 +1,106 @@
+8b07f4ce3a839737f60e3932f694d926
+"use strict";
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.extractUserId = extractUserId;
+exports.generateBranchName = generateBranchName;
+exports.buildChannelMetadata = buildChannelMetadata;
+exports.extractWebhookContext = extractWebhookContext;
+exports.buildWebhookChannelMetadata = buildWebhookChannelMetadata;
+/**
+ * Extract the authenticated user_id from the API Gateway event.
+ * The Cognito authorizer places claims in event.requestContext.authorizer.claims.
+ * @param event - the API Gateway proxy event.
+ * @returns the Cognito `sub` claim (platform user ID), or null if missing.
+ */
+function extractUserId(event) {
+    const claims = event.requestContext.authorizer?.claims;
+    if (!claims || typeof claims.sub !== 'string')
+        return null;
+    return claims.sub;
+}
+/**
+ * Generate a branch name from task ID and description.
+ * Pattern: `bgagent/{taskId}/{slug}`
+ * @param taskId - the ULID task identifier.
+ * @param description - optional task description or issue title used to generate slug.
+ * @returns the branch name string.
+ */
+function generateBranchName(taskId, description) {
+    const slug = slugify(description);
+    if (slug) {
+        return `bgagent/${taskId}/${slug}`;
+    }
+    return `bgagent/${taskId}/task`;
+}
+/**
+ * Build channel metadata from the API Gateway event context.
+ * @param event - the API Gateway proxy event.
+ * @returns channel metadata record with source IP, user agent, and request ID.
+ */
+function buildChannelMetadata(event) {
+    return {
+        source_ip: event.requestContext.identity?.sourceIp ?? 'unknown',
+        user_agent: event.requestContext.identity?.userAgent ?? 'unknown',
+        api_request_id: event.requestContext.requestId ?? 'unknown',
+    };
+}
+/**
+ * Extract user ID and webhook ID from a REQUEST authorizer context.
+ * The webhook authorizer injects these as top-level keys in event.requestContext.authorizer.
+ * @param event - the API Gateway proxy event.
+ * @returns object with userId and webhookId, or null if context is missing.
+ */
+function extractWebhookContext(event) {
+    const authCtx = event.requestContext.authorizer;
+    if (!authCtx || typeof authCtx.userId !== 'string' || typeof authCtx.webhookId !== 'string')
+        return null;
+    return { userId: authCtx.userId, webhookId: authCtx.webhookId };
+}
+/**
+ * Build channel metadata for a webhook-sourced request.
+ * @param event - the API Gateway proxy event.
+ * @param webhookId - the webhook integration ID.
+ * @returns channel metadata record.
+ */
+function buildWebhookChannelMetadata(event, webhookId) {
+    return {
+        webhook_id: webhookId,
+        source_ip: event.requestContext.identity?.sourceIp ?? 'unknown',
+        user_agent: event.requestContext.identity?.userAgent ?? 'unknown',
+        api_request_id: event.requestContext.requestId ?? 'unknown',
+    };
+}
+/**
+ * Convert a description string to a URL-safe slug.
+ * Lowercases, replaces non-alphanumeric with hyphens, collapses consecutive hyphens,
+ * trims leading/trailing hyphens, and truncates to 50 characters.
+ */
+function slugify(text) {
+    if (!text)
+        return '';
+    return text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 50);
+}
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJmaWxlIjoiL1VzZXJzL3NwaGlhcy9Eb2N1bWVudHMvQUktRW5naW5lZXJpbmcvZnJvbnRpZXIvYWJjYS9hYmNhLTI0Ny1vcmNoZXN0cmF0aW9uL2Nkay9zcmMvaGFuZGxlcnMvc2hhcmVkL2dhdGV3YXkudHMiLCJtYXBwaW5ncyI6IjtBQUFBOzs7Ozs7Ozs7Ozs7Ozs7OztHQWlCRzs7QUFVSCxzQ0FJQztBQVNELGdEQU1DO0FBT0Qsb0RBTUM7QUFRRCxzREFJQztBQVFELGtFQVVDO0FBcEVEOzs7OztHQUtHO0FBQ0gsU0FBZ0IsYUFBYSxDQUFDLEtBQTJCO0lBQ3ZELE1BQU0sTUFBTSxHQUFHLEtBQUssQ0FBQyxjQUFjLENBQUMsVUFBVSxFQUFFLE1BQU0sQ0FBQztJQUN2RCxJQUFJLENBQUMsTUFBTSxJQUFJLE9BQU8sTUFBTSxDQUFDLEdBQUcsS0FBSyxRQUFRO1FBQUUsT0FBTyxJQUFJLENBQUM7SUFDM0QsT0FBTyxNQUFNLENBQUMsR0FBRyxDQUFDO0FBQ3BCLENBQUM7QUFFRDs7Ozs7O0dBTUc7QUFDSCxTQUFnQixrQkFBa0IsQ0FBQyxNQUFjLEVBQUUsV0FBb0I7SUFDckUsTUFBTSxJQUFJLEdBQUcsT0FBTyxDQUFDLFdBQVcsQ0FBQyxDQUFDO0lBQ2xDLElBQUksSUFBSSxFQUFFLENBQUM7UUFDVCxPQUFPLFdBQVcsTUFBTSxJQUFJLElBQUksRUFBRSxDQUFDO0lBQ3JDLENBQUM7SUFDRCxPQUFPLFdBQVcsTUFBTSxPQUFPLENBQUM7QUFDbEMsQ0FBQztBQUVEOzs7O0dBSUc7QUFDSCxTQUFnQixvQkFBb0IsQ0FBQyxLQUEyQjtJQUM5RCxPQUFPO1FBQ0wsU0FBUyxFQUFFLEtBQUssQ0FBQyxjQUFjLENBQUMsUUFBUSxFQUFFLFFBQVEsSUFBSSxTQUFTO1FBQy9ELFVBQVUsRUFBRSxLQUFLLENBQUMsY0FBYyxDQUFDLFFBQVEsRUFBRSxTQUFTLElBQUksU0FBUztRQUNqRSxjQUFjLEVBQUUsS0FBSyxDQUFDLGNBQWMsQ0FBQyxTQUFTLElBQUksU0FBUztLQUM1RCxDQUFDO0FBQ0osQ0FBQztBQUVEOzs7OztHQUtHO0FBQ0gsU0FBZ0IscUJBQXFCLENBQUMsS0FBMkI7SUFDL0QsTUFBTSxPQUFPLEdBQUcsS0FBSyxDQUFDLGNBQWMsQ0FBQyxVQUFVLENBQUM7SUFDaEQsSUFBSSxDQUFDLE9BQU8sSUFBSSxPQUFPLE9BQU8sQ0FBQyxNQUFNLEtBQUssUUFBUSxJQUFJLE9BQU8sT0FBTyxDQUFDLFNBQVMsS0FBSyxRQUFRO1FBQUUsT0FBTyxJQUFJLENBQUM7SUFDekcsT0FBTyxFQUFFLE1BQU0sRUFBRSxPQUFPLENBQUMsTUFBTSxFQUFFLFNBQVMsRUFBRSxPQUFPLENBQUMsU0FBUyxFQUFFLENBQUM7QUFDbEUsQ0FBQztBQUVEOzs7OztHQUtHO0FBQ0gsU0FBZ0IsMkJBQTJCLENBQ3pDLEtBQTJCLEVBQzNCLFNBQWlCO0lBRWpCLE9BQU87UUFDTCxVQUFVLEVBQUUsU0FBUztRQUNyQixTQUFTLEVBQUUsS0FBSyxDQUFDLGNBQWMsQ0FBQyxRQUFRLEVBQUUsUUFBUSxJQUFJLFNBQVM7UUFDL0QsVUFBVSxFQUFFLEtBQUssQ0FBQyxjQUFjLENBQUMsUUFBUSxFQUFFLFNBQVMsSUFBSSxTQUFTO1FBQ2pFLGNBQWMsRUFBRSxLQUFLLENBQUMsY0FBYyxDQUFDLFNBQVMsSUFBSSxTQUFTO0tBQzVELENBQUM7QUFDSixDQUFDO0FBRUQ7Ozs7R0FJRztBQUNILFNBQVMsT0FBTyxDQUFDLElBQWE7SUFDNUIsSUFBSSxDQUFDLElBQUk7UUFBRSxPQUFPLEVBQUUsQ0FBQztJQUNyQixPQUFPLElBQUk7U0FDUixXQUFXLEVBQUU7U0FDYixPQUFPLENBQUMsYUFBYSxFQUFFLEdBQUcsQ0FBQztTQUMzQixPQUFPLENBQUMsS0FBSyxFQUFFLEdBQUcsQ0FBQztTQUNuQixPQUFPLENBQUMsUUFBUSxFQUFFLEVBQUUsQ0FBQztTQUNyQixLQUFLLENBQUMsQ0FBQyxFQUFFLEVBQUUsQ0FBQyxDQUFDO0FBQ2xCLENBQUMiLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL1VzZXJzL3NwaGlhcy9Eb2N1bWVudHMvQUktRW5naW5lZXJpbmcvZnJvbnRpZXIvYWJjYS9hYmNhLTI0Ny1vcmNoZXN0cmF0aW9uL2Nkay9zcmMvaGFuZGxlcnMvc2hhcmVkL2dhdGV3YXkudHMiXSwic291cmNlc0NvbnRlbnQiOlsiLyoqXG4gKiAgTUlUIE5vIEF0dHJpYnV0aW9uXG4gKlxuICogIENvcHlyaWdodCBBbWF6b24uY29tLCBJbmMuIG9yIGl0cyBhZmZpbGlhdGVzLiBBbGwgUmlnaHRzIFJlc2VydmVkLlxuICpcbiAqICBQZXJtaXNzaW9uIGlzIGhlcmVieSBncmFudGVkLCBmcmVlIG9mIGNoYXJnZSwgdG8gYW55IHBlcnNvbiBvYnRhaW5pbmcgYSBjb3B5IG9mXG4gKiAgdGhlIFNvZnR3YXJlIHdpdGhvdXQgcmVzdHJpY3Rpb24sIGluY2x1ZGluZyB3aXRob3V0IGxpbWl0YXRpb24gdGhlIHJpZ2h0cyB0b1xuICogIHVzZSwgY29weSwgbW9kaWZ5LCBtZXJnZSwgcHVibGlzaCwgZGlzdHJpYnV0ZSwgc3VibGljZW5zZSwgYW5kL29yIHNlbGwgY29waWVzIG9mXG4gKiAgdGhlIFNvZnR3YXJlLCBhbmQgdG8gcGVybWl0IHBlcnNvbnMgdG8gd2hvbSB0aGUgU29mdHdhcmUgaXMgZnVybmlzaGVkIHRvIGRvIHNvLlxuICpcbiAqICBUSEUgU09GVFdBUkUgSVMgUFJPVklERUQgXCJBUyBJU1wiLCBXSVRIT1VUIFdBUlJBTlRZIE9GIEFOWSBLSU5ELCBFWFBSRVNTIE9SXG4gKiAgSU1QTElFRCwgSU5DTFVESU5HIEJVVCBOT1QgTElNSVRFRCBUTyBUSEUgV0FSUkFOVElFUyBPRiBNRVJDSEFOVEFCSUxJVFksXG4gKiAgRklUTkVTUyBGT1IgQSBQQVJUSUNVTEFSIFBVUlBPU0UgQU5EIE5PTklORlJJTkdFTUVOVC4gSU4gTk8gRVZFTlQgU0hBTEwgVEhFXG4gKiAgQVVUSE9SUyBPUiBDT1BZUklHSFQgSE9MREVSUyBCRSBMSUFCTEUgRk9SIEFOWSBDTEFJTSwgREFNQUdFUyBPUiBPVEhFUlxuICogIExJQUJJTElUWSwgV0hFVEhFUiBJTiBBTiBBQ1RJT04gT0YgQ09OVFJBQ1QsIFRPUlQgT1IgT1RIRVJXSVNFLCBBUklTSU5HIEZST00sXG4gKiAgT1VUIE9GIE9SIElOIENPTk5FQ1RJT04gV0lUSCBUSEUgU09GVFdBUkUgT1IgVEhFIFVTRSBPUiBPVEhFUiBERUFMSU5HUyBJTiBUSEVcbiAqICBTT0ZUV0FSRS5cbiAqL1xuXG5pbXBvcnQgdHlwZSB7IEFQSUdhdGV3YXlQcm94eUV2ZW50IH0gZnJvbSAnYXdzLWxhbWJkYSc7XG5cbi8qKlxuICogRXh0cmFjdCB0aGUgYXV0aGVudGljYXRlZCB1c2VyX2lkIGZyb20gdGhlIEFQSSBHYXRld2F5IGV2ZW50LlxuICogVGhlIENvZ25pdG8gYXV0aG9yaXplciBwbGFjZXMgY2xhaW1zIGluIGV2ZW50LnJlcXVlc3RDb250ZXh0LmF1dGhvcml6ZXIuY2xhaW1zLlxuICogQHBhcmFtIGV2ZW50IC0gdGhlIEFQSSBHYXRld2F5IHByb3h5IGV2ZW50LlxuICogQHJldHVybnMgdGhlIENvZ25pdG8gYHN1YmAgY2xhaW0gKHBsYXRmb3JtIHVzZXIgSUQpLCBvciBudWxsIGlmIG1pc3NpbmcuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiBleHRyYWN0VXNlcklkKGV2ZW50OiBBUElHYXRld2F5UHJveHlFdmVudCk6IHN0cmluZyB8IG51bGwge1xuICBjb25zdCBjbGFpbXMgPSBldmVudC5yZXF1ZXN0Q29udGV4dC5hdXRob3JpemVyPy5jbGFpbXM7XG4gIGlmICghY2xhaW1zIHx8IHR5cGVvZiBjbGFpbXMuc3ViICE9PSAnc3RyaW5nJykgcmV0dXJuIG51bGw7XG4gIHJldHVybiBjbGFpbXMuc3ViO1xufVxuXG4vKipcbiAqIEdlbmVyYXRlIGEgYnJhbmNoIG5hbWUgZnJvbSB0YXNrIElEIGFuZCBkZXNjcmlwdGlvbi5cbiAqIFBhdHRlcm46IGBiZ2FnZW50L3t0YXNrSWR9L3tzbHVnfWBcbiAqIEBwYXJhbSB0YXNrSWQgLSB0aGUgVUxJRCB0YXNrIGlkZW50aWZpZXIuXG4gKiBAcGFyYW0gZGVzY3JpcHRpb24gLSBvcHRpb25hbCB0YXNrIGRlc2NyaXB0aW9uIG9yIGlzc3VlIHRpdGxlIHVzZWQgdG8gZ2VuZXJhdGUgc2x1Zy5cbiAqIEByZXR1cm5zIHRoZSBicmFuY2ggbmFtZSBzdHJpbmcuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiBnZW5lcmF0ZUJyYW5jaE5hbWUodGFza0lkOiBzdHJpbmcsIGRlc2NyaXB0aW9uPzogc3RyaW5nKTogc3RyaW5nIHtcbiAgY29uc3Qgc2x1ZyA9IHNsdWdpZnkoZGVzY3JpcHRpb24pO1xuICBpZiAoc2x1Zykge1xuICAgIHJldHVybiBgYmdhZ2VudC8ke3Rhc2tJZH0vJHtzbHVnfWA7XG4gIH1cbiAgcmV0dXJuIGBiZ2FnZW50LyR7dGFza0lkfS90YXNrYDtcbn1cblxuLyoqXG4gKiBCdWlsZCBjaGFubmVsIG1ldGFkYXRhIGZyb20gdGhlIEFQSSBHYXRld2F5IGV2ZW50IGNvbnRleHQuXG4gKiBAcGFyYW0gZXZlbnQgLSB0aGUgQVBJIEdhdGV3YXkgcHJveHkgZXZlbnQuXG4gKiBAcmV0dXJucyBjaGFubmVsIG1ldGFkYXRhIHJlY29yZCB3aXRoIHNvdXJjZSBJUCwgdXNlciBhZ2VudCwgYW5kIHJlcXVlc3QgSUQuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiBidWlsZENoYW5uZWxNZXRhZGF0YShldmVudDogQVBJR2F0ZXdheVByb3h5RXZlbnQpOiBSZWNvcmQ8c3RyaW5nLCBzdHJpbmc+IHtcbiAgcmV0dXJuIHtcbiAgICBzb3VyY2VfaXA6IGV2ZW50LnJlcXVlc3RDb250ZXh0LmlkZW50aXR5Py5zb3VyY2VJcCA/PyAndW5rbm93bicsXG4gICAgdXNlcl9hZ2VudDogZXZlbnQucmVxdWVzdENvbnRleHQuaWRlbnRpdHk/LnVzZXJBZ2VudCA/PyAndW5rbm93bicsXG4gICAgYXBpX3JlcXVlc3RfaWQ6IGV2ZW50LnJlcXVlc3RDb250ZXh0LnJlcXVlc3RJZCA/PyAndW5rbm93bicsXG4gIH07XG59XG5cbi8qKlxuICogRXh0cmFjdCB1c2VyIElEIGFuZCB3ZWJob29rIElEIGZyb20gYSBSRVFVRVNUIGF1dGhvcml6ZXIgY29udGV4dC5cbiAqIFRoZSB3ZWJob29rIGF1dGhvcml6ZXIgaW5qZWN0cyB0aGVzZSBhcyB0b3AtbGV2ZWwga2V5cyBpbiBldmVudC5yZXF1ZXN0Q29udGV4dC5hdXRob3JpemVyLlxuICogQHBhcmFtIGV2ZW50IC0gdGhlIEFQSSBHYXRld2F5IHByb3h5IGV2ZW50LlxuICogQHJldHVybnMgb2JqZWN0IHdpdGggdXNlcklkIGFuZCB3ZWJob29rSWQsIG9yIG51bGwgaWYgY29udGV4dCBpcyBtaXNzaW5nLlxuICovXG5leHBvcnQgZnVuY3Rpb24gZXh0cmFjdFdlYmhvb2tDb250ZXh0KGV2ZW50OiBBUElHYXRld2F5UHJveHlFdmVudCk6IHsgdXNlcklkOiBzdHJpbmc7IHdlYmhvb2tJZDogc3RyaW5nIH0gfCBudWxsIHtcbiAgY29uc3QgYXV0aEN0eCA9IGV2ZW50LnJlcXVlc3RDb250ZXh0LmF1dGhvcml6ZXI7XG4gIGlmICghYXV0aEN0eCB8fCB0eXBlb2YgYXV0aEN0eC51c2VySWQgIT09ICdzdHJpbmcnIHx8IHR5cGVvZiBhdXRoQ3R4LndlYmhvb2tJZCAhPT0gJ3N0cmluZycpIHJldHVybiBudWxsO1xuICByZXR1cm4geyB1c2VySWQ6IGF1dGhDdHgudXNlcklkLCB3ZWJob29rSWQ6IGF1dGhDdHgud2ViaG9va0lkIH07XG59XG5cbi8qKlxuICogQnVpbGQgY2hhbm5lbCBtZXRhZGF0YSBmb3IgYSB3ZWJob29rLXNvdXJjZWQgcmVxdWVzdC5cbiAqIEBwYXJhbSBldmVudCAtIHRoZSBBUEkgR2F0ZXdheSBwcm94eSBldmVudC5cbiAqIEBwYXJhbSB3ZWJob29rSWQgLSB0aGUgd2ViaG9vayBpbnRlZ3JhdGlvbiBJRC5cbiAqIEByZXR1cm5zIGNoYW5uZWwgbWV0YWRhdGEgcmVjb3JkLlxuICovXG5leHBvcnQgZnVuY3Rpb24gYnVpbGRXZWJob29rQ2hhbm5lbE1ldGFkYXRhKFxuICBldmVudDogQVBJR2F0ZXdheVByb3h5RXZlbnQsXG4gIHdlYmhvb2tJZDogc3RyaW5nLFxuKTogUmVjb3JkPHN0cmluZywgc3RyaW5nPiB7XG4gIHJldHVybiB7XG4gICAgd2ViaG9va19pZDogd2ViaG9va0lkLFxuICAgIHNvdXJjZV9pcDogZXZlbnQucmVxdWVzdENvbnRleHQuaWRlbnRpdHk/LnNvdXJjZUlwID8/ICd1bmtub3duJyxcbiAgICB1c2VyX2FnZW50OiBldmVudC5yZXF1ZXN0Q29udGV4dC5pZGVudGl0eT8udXNlckFnZW50ID8/ICd1bmtub3duJyxcbiAgICBhcGlfcmVxdWVzdF9pZDogZXZlbnQucmVxdWVzdENvbnRleHQucmVxdWVzdElkID8/ICd1bmtub3duJyxcbiAgfTtcbn1cblxuLyoqXG4gKiBDb252ZXJ0IGEgZGVzY3JpcHRpb24gc3RyaW5nIHRvIGEgVVJMLXNhZmUgc2x1Zy5cbiAqIExvd2VyY2FzZXMsIHJlcGxhY2VzIG5vbi1hbHBoYW51bWVyaWMgd2l0aCBoeXBoZW5zLCBjb2xsYXBzZXMgY29uc2VjdXRpdmUgaHlwaGVucyxcbiAqIHRyaW1zIGxlYWRpbmcvdHJhaWxpbmcgaHlwaGVucywgYW5kIHRydW5jYXRlcyB0byA1MCBjaGFyYWN0ZXJzLlxuICovXG5mdW5jdGlvbiBzbHVnaWZ5KHRleHQ/OiBzdHJpbmcpOiBzdHJpbmcge1xuICBpZiAoIXRleHQpIHJldHVybiAnJztcbiAgcmV0dXJuIHRleHRcbiAgICAudG9Mb3dlckNhc2UoKVxuICAgIC5yZXBsYWNlKC9bXmEtejAtOV0rL2csICctJylcbiAgICAucmVwbGFjZSgvLSsvZywgJy0nKVxuICAgIC5yZXBsYWNlKC9eLXwtJC9nLCAnJylcbiAgICAuc2xpY2UoMCwgNTApO1xufVxuIl0sInZlcnNpb24iOjN9
