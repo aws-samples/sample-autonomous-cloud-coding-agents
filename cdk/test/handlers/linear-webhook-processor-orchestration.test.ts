@@ -38,6 +38,9 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({}
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  BatchWriteCommand: jest.fn((input: unknown) => ({ _type: 'BatchWrite', input })),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -124,6 +127,11 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
       rootSubIssueIds: ['A'],
       alreadyExisted: false,
     });
+    // After seeding, the handler loads the orchestration (Query) to
+    // release root children. Return an empty snapshot so the load is a
+    // no-op (this test only asserts the parent spawns no task; root
+    // release is covered by the reconciler/release tests).
+    ddbSend.mockResolvedValueOnce({ Items: [] });
 
     await handler(eventWith(issue()));
 
@@ -174,17 +182,20 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
   });
 
-  test('no workspace token → orchestration skipped, normal single-task path', async () => {
+  test('no workspace token → event dropped (no orchestration, no task)', async () => {
     ddbSend
       .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } })
       .mockResolvedValueOnce({ Item: { platform_user_id: 'platform-user-1' } });
-    // No token resolves → orchestration branch is skipped entirely.
+    // When the registry table is configured but the workspace token does
+    // not resolve, the handler drops the event (added in #200) rather than
+    // creating a task against a workspace ABCA can't recognize — outbound
+    // Linear comments would silently skip and we'd burn agent quota for no
+    // observable result. So neither orchestration NOR a single task fires.
     resolveLinearOauthTokenMock.mockResolvedValue(null);
-    createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
 
     await handler(eventWith(issue()));
 
     expect(discoverOrchestrationMock).not.toHaveBeenCalled();
-    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 });
