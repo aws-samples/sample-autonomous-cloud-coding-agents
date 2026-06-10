@@ -30,12 +30,15 @@ def get_disk_usage(path: str = AGENT_WORKSPACE) -> float:
         return 0
 
 
+_BYTES_PER_UNIT = 1024
+
+
 def format_bytes(size: float) -> str:
     """Human-readable byte size."""
     for unit in ("B", "KB", "MB", "GB"):
-        if abs(size) < 1024:
+        if abs(size) < _BYTES_PER_UNIT:
             return f"{size:.1f} {unit}"
-        size /= 1024
+        size /= _BYTES_PER_UNIT
     return f"{size:.1f} TB"
 
 

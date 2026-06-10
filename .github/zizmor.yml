@@ -5,3 +5,13 @@ rules:
   dangerous-triggers:
     ignore:
       - pull-request-lint.yml
+      # Approve-only job: never checks out or runs PR code, only calls the
+      # review API; gated on the 'auto-approve' label.
+      - auto-approve.yml
+  # These secrets are intentionally repo-level, not environment-scoped:
+  # CODECOV_TOKEN is an upload-only token; AUTOMATION_GITHUB_TOKEN is the PAT
+  # the upgrade-main PR job needs so its PRs trigger the build workflow.
+  secrets-outside-env:
+    ignore:
+      - build.yml
+      - upgrade-main.yml

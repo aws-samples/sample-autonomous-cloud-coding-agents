@@ -972,6 +972,11 @@ BetweenTurnsHook = Callable[[dict], list[str]]
 # leak across tasks in the same runtime.
 _INJECTED_NUDGES: dict[str, set[str]] = {}
 
+# Preview length for the first nudge message in the milestone details
+# string.  Kept short so the whole details line stays under ~120 chars
+# (single terminal line in ``bgagent watch``).
+_NUDGE_PREVIEW_LEN = 60
+
 
 def _reset_injected_nudges_for_tests() -> None:
     """Test-only helper to clear the in-process injected-nudge dedup set."""
@@ -1098,10 +1103,10 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     # Short details string for the stream — preview the first nudge, total
     # count, and the nudge IDs for traceability.  Kept under ~120 chars so
     # it fits on a single terminal line.
-    first_msg = (pending[0].get("message") or "")[:60]
+    first_msg = (pending[0].get("message") or "")[:_NUDGE_PREVIEW_LEN]
     ids = ",".join(str(n.get("nudge_id", ""))[-8:] for n in pending)
     details = f"{count} nudge(s) acknowledged (ids=…{ids}): {first_msg}" + (
-        "…" if count > 1 or len(first_msg) == 60 else ""
+        "…" if count > 1 or len(first_msg) == _NUDGE_PREVIEW_LEN else ""
     )
     # AD-5: emit the ack BEFORE returning the injection list.
     _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
