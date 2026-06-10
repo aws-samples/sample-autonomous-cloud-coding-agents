@@ -33,6 +33,8 @@ import {
   CreateTaskRequest,
   INITIAL_APPROVALS_MAX_ENTRIES,
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
+  MAX_BUDGET_USD_MAX,
+  MAX_BUDGET_USD_MIN,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -130,8 +132,8 @@ export function makeSubmitCommand(): Command {
         }
       }
       if (opts.maxBudget !== undefined) {
-        if (isNaN(opts.maxBudget) || opts.maxBudget < 0.01 || opts.maxBudget > 100) {
-          throw new CliError('--max-budget must be a number between 0.01 and 100.');
+        if (isNaN(opts.maxBudget) || opts.maxBudget < MAX_BUDGET_USD_MIN || opts.maxBudget > MAX_BUDGET_USD_MAX) {
+          throw new CliError(`--max-budget must be a number between ${MAX_BUDGET_USD_MIN} and ${MAX_BUDGET_USD_MAX}.`);
         }
       }
       if (opts.approvalTimeout !== undefined) {

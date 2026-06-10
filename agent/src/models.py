@@ -47,6 +47,9 @@ SUPPORTED_HYDRATED_CONTEXT_VERSION = 1
 # Attachment types — mirrors AttachmentType in cdk/src/handlers/shared/types.ts.
 AttachmentType = Literal["image", "file", "url"]
 
+# A SHA-256 digest rendered as lowercase hex is always 64 characters.
+SHA256_HEX_LEN = 64
+
 
 class AttachmentConfig(BaseModel):
     """Attachment descriptor from the orchestrator — mirrors AgentAttachmentPayload in types.ts."""
@@ -71,7 +74,7 @@ class AttachmentConfig(BaseModel):
         if not self.checksum_sha256:
             raise ValueError("checksum_sha256 is required for integrity verification")
         # checksum must be lowercase hex (SHA-256 = 64 hex chars)
-        if len(self.checksum_sha256) != 64 or not all(
+        if len(self.checksum_sha256) != SHA256_HEX_LEN or not all(
             c in "0123456789abcdef" for c in self.checksum_sha256
         ):
             raise ValueError("checksum_sha256 must be a 64-character lowercase hex string")

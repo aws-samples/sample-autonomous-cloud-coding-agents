@@ -41,6 +41,10 @@ JSON at TypeScript compile time via `resolveJsonModule`.
     "min": 30,
     "max": 3600,
     "default": 300
+  },
+  "max_budget_usd": {
+    "min": 0.01,
+    "max": 100
   }
 }
 ```
@@ -62,6 +66,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   (1 hour).
 - **`approval_timeout_s.default`** — value applied when the submit payload
   omits `approval_timeout_s`. 300 seconds (5 minutes) per §6 decision #6.
+- **`max_budget_usd.min`** — floor for a task's `max_budget_usd` (1 cent).
+  Validated server-side (`validation.ts`) and pre-validated by
+  `bgagent submit --max-budget` (#258).
+- **`max_budget_usd.max`** — ceiling for `max_budget_usd` ($100). Same
+  two consumers as `min`.
 
 ## Adding new constants
 
@@ -73,3 +82,19 @@ JSON at TypeScript compile time via `resolveJsonModule`.
 
 Do not introduce new top-level literal declarations of the same
 constant in code; the drift check exists to catch that.
+
+## Lint enforcement (AI007, #258)
+
+Inline magic numbers are caught by linters in all three packages:
+
+- **TypeScript** — `@typescript-eslint/no-magic-numbers` in
+  `cdk/eslint.config.mjs` (advisory `warn` until the baseline is clean)
+  and `cli/eslint.config.mjs` (blocking `error`).
+- **Python** — ruff `PLR2004` (magic-value-comparison) in
+  `agent/pyproject.toml` (blocking).
+
+When one of these rules fires, name the value as a constant in the
+owning module — or, if the value must agree across Python and
+TypeScript, add it to `constants.json` and wire the consumers as
+described above. The allowlists (0/1/-1, HTTP status codes, radix and
+unit-conversion factors) live next to each rule's config.

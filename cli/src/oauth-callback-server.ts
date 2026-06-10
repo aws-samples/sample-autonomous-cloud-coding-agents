@@ -114,7 +114,10 @@ export interface CallbackServerOptions {
 export async function awaitOauthCallback(
   options: CallbackServerOptions = {},
 ): Promise<CallbackResult> {
-  const timeoutMs = options.timeoutMs ?? 700_000;
+  // 700 s — above the OAuth dance's 600 s server-side ceiling (see
+  // `CallbackServerOptions.timeoutMs` doc).
+  const DEFAULT_CALLBACK_TIMEOUT_MS = 700_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
 
   return new Promise<CallbackResult>((resolve, reject) => {
     let settled = false;

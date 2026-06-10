@@ -27,7 +27,8 @@ import { debug } from './debug';
 import { CliError } from './errors';
 import { Credentials } from './types';
 
-const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
+const TOKEN_REFRESH_BUFFER_MINUTES = 5;
+const TOKEN_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MINUTES * 60 * 1000;
 
 /** Authenticate with username/password and cache tokens. */
 export async function login(username: string, password: string): Promise<void> {

@@ -42,13 +42,17 @@ _debug_cw_failures = 0
 _debug_cw_failures_lock = threading.Lock()
 _DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
+# Only redact secrets at least this long — replacing very short strings
+# would mangle unrelated text that happens to contain them.
+_MIN_REDACTABLE_SECRET_LEN = 12
+
 
 def _redact_cached_credentials(text: str) -> str:
     """Remove cached env secrets from debug text before stdout / CloudWatch."""
     out = text
     for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN"):
         secret = os.environ.get(env_key) or ""
-        if len(secret) >= 12:
+        if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
             out = out.replace(secret, f"<{env_key}_REDACTED>")
     return out
 
