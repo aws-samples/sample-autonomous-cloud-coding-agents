@@ -31,10 +31,14 @@ import * as crypto from 'crypto';
  *
  * Rejects:
  *   - Non-https schemes (http, file, data, javascript, ftp, …)
- *   - Literal-IP hosts (IPv4 and IPv6) — preview URLs use DNS names
  *   - localhost / *.localhost
- *   - link-local (169.254.x.x, fe80::/10)
- *   - private RFC1918 / loopback (10.x, 192.168.x, 172.16-31.x, 127.x)
+ *   - ANY IPv6 literal (bracketed host or a `:` in the host) — covers
+ *     loopback `::1`, link-local `fe80::/10`, unique-local `fc00::/7`,
+ *     NAT64, and IPv4-mapped forms in one rule, since preview URLs are
+ *     always DNS names
+ *   - Any IPv4 dotted-quad literal (the WHATWG parser normalizes
+ *     decimal/octal/hex integer forms to dotted-quad first, so those are
+ *     caught too) — covers RFC1918, loopback, and link-local 169.254.x.x
  */
 export function isAllowedScreenshotUrl(rawUrl: string): boolean {
   let parsed: URL;
@@ -47,7 +51,7 @@ export function isAllowedScreenshotUrl(rawUrl: string): boolean {
   if (parsed.protocol !== 'https:') return false;
 
   // Node's URL keeps IPv6 literals wrapped in `[…]` on .hostname;
-  // strip them so the IPv6 checks below match against the bare address.
+  // strip them so the checks below match against the bare address.
   const rawHost = parsed.hostname.toLowerCase();
   const hostname = rawHost.startsWith('[') && rawHost.endsWith(']')
     ? rawHost.slice(1, -1)
@@ -56,16 +60,21 @@ export function isAllowedScreenshotUrl(rawUrl: string): boolean {
     return false;
   }
 
-  // IPv6 loopback (::1) and link-local (fe80::/10).
-  if (hostname === '::1' || hostname.startsWith('fe80:') || hostname.startsWith('fe80::')) {
-    return false;
-  }
+  // Reject ANY IPv6 literal rather than enumerate ranges. Preview URLs
+  // always use DNS names, so a bracketed host (or any host containing a
+  // `:`) is never a legitimate target — and enumerating ranges missed
+  // unique-local `fc00::/7` (e.g. `[fc00::1]`), NAT64, and IPv4-mapped
+  // forms. A colon is the unambiguous IPv6 signal: DNS hostnames can't
+  // contain one, and the port has already been split off onto
+  // `parsed.port`. (krokoko PR-241 round-3 finding 2.)
+  if (rawHost.startsWith('[') || hostname.includes(':')) return false;
 
   // IPv4 literals: reject any dotted-quad (preview URLs come from DNS).
-  // Also reject IPv4-mapped IPv6 addresses (::ffff:10.0.0.1).
+  // Decimal/octal/hex integer forms (e.g. `2130706433`) are already
+  // normalized to dotted-quad by the WHATWG URL parser, so this catches
+  // them too.
   const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (ipv4Match) return false;
-  if (hostname.includes('::ffff:') || hostname.includes('::ffff.')) return false;
 
   return true;
 }

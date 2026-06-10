@@ -103,12 +103,26 @@ describe('isAllowedScreenshotUrl', () => {
     expect(isAllowedScreenshotUrl(url)).toBe(false);
   });
 
-  test('rejects IPv6 loopback ::1', () => {
-    expect(isAllowedScreenshotUrl('https://[::1]/')).toBe(false);
+  test.each([
+    ['https://[::1]/', 'IPv6 loopback ::1'],
+    ['https://[fe80::1]/', 'IPv6 link-local fe80::/10'],
+    ['https://[fc00::1]/', 'IPv6 unique-local fc00::/7'],
+    ['https://[fd12:3456:789a::1]/', 'IPv6 unique-local fd00::/8'],
+    ['https://[64:ff9b::1.2.3.4]/', 'NAT64 well-known prefix'],
+    ['https://[::ffff:10.0.0.1]/', 'IPv4-mapped IPv6'],
+    ['https://[2001:db8::1]:8443/path', 'global IPv6 with port + path'],
+  ])('rejects every IPv6 literal %s (%s)', (url) => {
+    // krokoko PR-241 round-3 finding 2: enumerating ranges missed
+    // fc00::/7 and NAT64. Preview URLs are always DNS names, so any
+    // IPv6 literal is rejected wholesale.
+    expect(isAllowedScreenshotUrl(url)).toBe(false);
   });
 
-  test('rejects IPv6 link-local fe80::', () => {
-    expect(isAllowedScreenshotUrl('https://[fe80::1]/')).toBe(false);
+  test.each([
+    ['https://2130706433', 'decimal integer form of 127.0.0.1'],
+    ['https://0x7f000001', 'hex integer form of 127.0.0.1'],
+  ])('rejects integer-encoded IPv4 %s (%s) — WHATWG normalizes to dotted-quad', (url) => {
+    expect(isAllowedScreenshotUrl(url)).toBe(false);
   });
 });
 
