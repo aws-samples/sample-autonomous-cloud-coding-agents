@@ -483,22 +483,24 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
     )
 
 
-def _gate_status(
+def gate_status(
     *, passed: bool, gate: str | None, read_only: bool, was_passing_before: bool
 ) -> StepStatus:
     """Map a verify result + the step's ``gate`` to a step status.
 
     Single place the verify-gate semantics live, shared by ``verify_build`` and
     ``verify_lint`` (the two were near-identical twins that drifted on the
-    ``read_only`` rule — see the code-review finding). Mirrors ``pipeline.py``'s
-    terminal-status logic so the workflow path and the legacy path agree:
+    ``read_only`` rule — see the code-review finding). Since #301 it is also the
+    implementation behind the coding lane's inline post-hook gating
+    (``pipeline._apply_post_hook_gates``), so both lanes honor a step's
+    declared ``gate`` through this one function:
 
     - ``informational`` (or a ``read_only`` workflow) — never gates.
     - ``strict`` — any failure gates.
     - ``regression_only`` **and the unset default** — fail only on a *regression*
       (was passing before, fails now); a check that was already red before the
-      agent ran is not a regression and does not gate. This matches pipeline.py's
-      unconditional ``build_ok = passed or not build_before`` — which is
+      agent ran is not a regression and does not gate. This matches the legacy
+      pipeline behavior of ``build_ok = passed or not build_before`` — which was
       regression-only for *every* task — so an unset gate agrees with the legacy
       path rather than defaulting to the stricter ``strict``.
     """
@@ -521,7 +523,7 @@ def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
     # was_passing_before defaults True (assume green-before, so a post-agent
     # failure IS a regression) — the same conservative default pipeline.py uses.
     was_passing_before = ctx.setup.build_before if ctx.setup else True
-    status = _gate_status(
+    status = gate_status(
         passed=passed,
         gate=step.gate,
         read_only=ctx.workflow.read_only,
@@ -543,7 +545,7 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
     passed = verify_lint(repo_dir)
     was_passing_before = ctx.setup.lint_before if ctx.setup else True
-    status = _gate_status(
+    status = gate_status(
         passed=passed,
         gate=step.gate,
         read_only=ctx.workflow.read_only,

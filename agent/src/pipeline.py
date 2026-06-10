@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -37,6 +38,9 @@ from telemetry import (
     print_metrics,
     upload_trace_to_s3,
 )
+
+if TYPE_CHECKING:
+    from workflow import Workflow
 
 _SDK_NO_RESULT_MESSAGE = (
     "Agent SDK stream ended without a ResultMessage (agent_status=unknown). "
@@ -364,6 +368,84 @@ def _run_repoless_task(
     terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
     task_state.write_terminal(config.task_id, terminal_status, result_dict)
     return result_dict
+
+
+def _apply_post_hook_gates(
+    workflow: Workflow | None,
+    *,
+    read_only: bool,
+    build_passed: bool,
+    lint_passed: bool,
+    build_before: bool,
+    lint_before: bool,
+) -> bool:
+    """Resolve the coding lane's post-hook verify gates against the workflow (#301).
+
+    Decision (issue #301 acceptance criteria): the inline post-hook path
+    CONSULTS each declared ``verify_build`` / ``verify_lint`` step's ``gate``
+    through the runner's ``gate_status`` — the single place gate semantics live —
+    rather than routing the post-hooks through the runner's step handlers.
+    Routing through the runner would also change failure-path side effects (a
+    gating ``verify_build`` with ``on_failure: fail`` stops the runner *before*
+    ``ensure_pr``, stranding committed work with no PR), which is the broader
+    half-migrated-runner unification the issue defers. Here the inline ordering
+    (verify → ensure_pr always runs) is preserved; only the task verdict honors
+    the declared gate.
+
+    Per-step semantics:
+
+    - A declared step gates per its ``gate`` (``strict`` | ``regression_only`` |
+      ``informational``; unset = ``regression_only``), but only when its
+      ``on_failure`` is ``fail`` — ``continue``/``skip_remaining`` steps are
+      advisory for the task verdict, matching the runner.
+    - An undeclared ``verify_build`` keeps the legacy regression-only gating
+      (identical to ``gate_status`` with ``gate=None``).
+    - An undeclared ``verify_lint`` never gates (legacy: lint is not used for
+      terminal status unless a workflow opts in by declaring the step).
+    - ``workflow is None`` (post-hook reload failed) falls back to the legacy
+      gating for both, so a corrupt file cannot strand the agent's work.
+    """
+    from workflow import gate_status
+
+    steps = list(workflow.steps) if workflow is not None else []
+    gates_ok = True
+    for kind, passed, was_passing_before in (
+        ("verify_build", build_passed, build_before),
+        ("verify_lint", lint_passed, lint_before),
+    ):
+        step = next((s for s in steps if s.kind == kind), None)
+        if step is None:
+            if kind == "verify_lint":
+                continue
+            gate, gating, on_failure = None, True, "fail"
+        else:
+            gate, gating, on_failure = step.gate, step.on_failure == "fail", step.on_failure
+        status = gate_status(
+            passed=passed,
+            gate=gate,
+            read_only=read_only,
+            was_passing_before=was_passing_before,
+        )
+        if passed:
+            continue
+        label = gate or "regression_only"
+        if status == "succeeded":
+            if read_only:
+                log("INFO", f"read-only workflow: {kind} failed — informational only, not gating")
+            elif gate == "informational":
+                log("INFO", f"{kind} failed — gate=informational, not gating")
+            else:
+                log(
+                    "WARN",
+                    f"Post-agent {kind} failed, but it was already failing before "
+                    "agent changes — not counting as regression",
+                )
+        elif gating:
+            log("WARN", f"{kind} failed — gate={label} gates the task")
+            gates_ok = False
+        else:
+            log("INFO", f"{kind} failed — gate={label} but on_failure={on_failure}, not gating")
+    return gates_ok
 
 
 def _resolve_overall_task_status(
@@ -870,22 +952,25 @@ def run_task(
                     "turns_attempted": agent_result.num_turns or agent_result.turns,
                 }
 
-            # Resolve the post-hook gating inputs: read_only and the ensure_pr
-            # strategy (create / push_resolve / resolve) the workflow declares.
+            # Resolve the post-hook gating inputs: read_only, the ensure_pr
+            # strategy (create / push_resolve / resolve), and the verify steps'
+            # declared gates (#301) the workflow declares.
             #
             # ``read_only`` comes from ``config`` — build_config already computed
             # it (with its own fail-soft fallback) and it drove Cedar during the
             # run, so reusing it keeps the post-hook on the SAME verdict rather
-            # than re-deriving a possibly-divergent one. The workflow file is only
-            # reloaded for the ensure_pr STRATEGY, and that reload is wrapped in
-            # the same WorkflowValidationError fallback build_config uses
-            # (config.py): this code path runs AFTER run_agent has already mutated
-            # / committed the tree, so a load failure here must NOT strand the work
-            # as FAILED with no PR — it falls back to the default "create" strategy
-            # and still opens the PR (PR review #296 finding #5).
+            # than re-deriving a possibly-divergent one. The workflow file is
+            # reloaded for the ensure_pr STRATEGY and the verify-step GATES, and
+            # that reload is wrapped in the same WorkflowValidationError fallback
+            # build_config uses (config.py): this code path runs AFTER run_agent
+            # has already mutated / committed the tree, so a load failure here
+            # must NOT strand the work as FAILED with no PR — it falls back to
+            # the default "create" strategy + legacy regression-only gating and
+            # still opens the PR (PR review #296 finding #5).
             from workflow import WorkflowValidationError, load_workflow
 
             workflow_read_only = config.read_only
+            _workflow = None
             try:
                 _workflow = load_workflow(
                     (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
@@ -944,23 +1029,19 @@ def run_task(
 
             # Overall status: do not infer success from PR/build when the SDK never
             # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
-            # NOTE: lint_passed is intentionally NOT used for terminal status.
+            # Gating honors each verify step's declared ``gate`` via the runner's
+            # gate_status (#301); an undeclared verify_lint never gates (legacy).
             agent_status = agent_result.status
-            # Default True = assume build was green before, so a post-agent
-            # failure IS counted as a regression (conservative).
-            build_before = setup.build_before
-            if workflow_read_only:
-                build_ok = True  # Read-only review — build status is informational only
-                if not build_passed:
-                    log("INFO", "read-only workflow: build failed — informational only, not gating")
-            else:
-                build_ok = build_passed or not build_before
-            if not build_passed and not build_before and not workflow_read_only:
-                log(
-                    "WARN",
-                    "Post-agent build failed, but build was already failing before "
-                    "agent changes — not counting as regression",
-                )
+            build_ok = _apply_post_hook_gates(
+                _workflow,
+                read_only=workflow_read_only,
+                build_passed=build_passed,
+                lint_passed=lint_passed,
+                # setup defaults assume green-before, so a post-agent failure IS
+                # counted as a regression (conservative).
+                build_before=setup.build_before,
+                lint_before=setup.lint_before,
+            )
             overall_status, result_error = _resolve_overall_task_status(
                 agent_result,
                 build_ok=build_ok,

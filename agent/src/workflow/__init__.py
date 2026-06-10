@@ -39,6 +39,7 @@ from .runner import (
     StepOutcome,
     WorkflowCheckpoint,
     WorkflowResult,
+    gate_status,
     run_workflow,
 )
 from .validator import assert_valid, validate_workflow
@@ -60,6 +61,7 @@ __all__ = [
     "WorkflowResult",
     "WorkflowValidationError",
     "assert_valid",
+    "gate_status",
     "load_workflow",
     "load_workflow_file",
     "policy_principal_for",

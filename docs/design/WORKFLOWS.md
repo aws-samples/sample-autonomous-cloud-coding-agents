@@ -116,13 +116,15 @@ Steps are the unit the runner interprets. Each has a `kind`, an optional `name`,
 | `clone_repo` | deterministic | Clone + `mise trust`/`install` + initial build/lint; select branch | Forbidden when `requires_repo:false`. Replaces `setup_repo`. |
 | `hydrate_context` | deterministic | Assemble prompt from declared `hydration` sources | Mostly done orchestrator-side; this step consumes the `HydratedContext` payload. |
 | `run_agent` | agentic | The Claude Agent SDK loop with the workflow's prompt + `agent_config` | Exactly one per workflow. Today only one `run_agent` is ever called (`pipeline.py`), so this is an emergent property the schema now *promotes to an enforced constraint*; multi-agent loops are out of scope (#99). |
-| `verify_build` | deterministic | Run `mise run build`; gate or inform | `read_only` workflows treat result as informational. Forbidden when `requires_repo:false`. |
-| `verify_lint` | deterministic | Run `mise run lint` | Optional gate. |
+| `verify_build` | deterministic | Run `mise run build`; gate or inform | Gating declared per step via `gate` (see below). `read_only` workflows treat result as informational. Forbidden when `requires_repo:false`. |
+| `verify_lint` | deterministic | Run `mise run lint` | Optional gate (`gate` field, see below); advisory unless declared. |
 | `ensure_pr` | deterministic | Create / push+resolve / resolve-only a PR | Strategy chosen by step config (`create` \| `push_resolve` \| `resolve`), replacing the `post_hooks.ensure_pr` task_type branch. |
 | `post_review` | deterministic | Post a GitHub review (Reviews API) | For review workflows (e.g. `coding/pr-review-v1`). |
 | `deliver_artifact` | deterministic | Upload a produced artifact (S3) / post a comment | Repo-less terminal delivery for knowledge work. |
 
 Each step declares `on_failure: fail | continue | skip_remaining` (default `fail`) so the runner's error behavior is explicit and matches today's fail-closed default.
+
+**The `gate` field (`verify_build` / `verify_lint`).** A verify step declares how its result affects the task verdict: `strict` (any failure gates), `regression_only` (gates only when the check was passing before the agent ran and fails after — the default when unset, matching the legacy pipeline behavior), or `informational` (never gates). A `read_only` workflow never gates regardless of `gate`. The semantics live in exactly one place — `gate_status` in `agent/src/workflow/runner.py` — used by both lanes (#301): the repo-less lane through the runner's `verify_*` step handlers, and the coding lane through the inline post-hook resolution (`pipeline._apply_post_hook_gates`), which consults each declared step's `gate` and `on_failure` (`continue`/`skip_remaining` steps are advisory for the verdict, matching the runner). On the coding lane an *undeclared* `verify_lint` never gates (the legacy behavior — lint is advisory unless a workflow opts in by declaring the step), and the inline ordering is preserved: `ensure_pr` still runs after a gating verify failure so the agent's work surfaces as a reviewable PR even when the task is marked failed. Routing the coding post-hooks bodily through the runner's step handlers (which would stop *before* `ensure_pr` on a gating failure) is the broader runner unification deferred out of #301's scope.
 
 ### Example: shipped coding workflow (`new_task`)
 
