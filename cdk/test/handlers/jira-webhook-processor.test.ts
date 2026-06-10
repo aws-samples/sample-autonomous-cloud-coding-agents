@@ -22,6 +22,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({}
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -123,13 +124,46 @@ describe('jira-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('drops event when cloudId is missing — cannot resolve tenant', async () => {
+  test('drops event when cloudId is missing and registry has no active tenant', async () => {
     const payload = issue();
     delete payload.cloudId;
+    // Sole-tenant fallback scans the registry; an empty registry can't
+    // resolve a tenant, so the event is dropped.
+    ddbSend.mockResolvedValueOnce({ Items: [] });
     await handler(eventWith(payload));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
     // No feedback either — without cloudId we can't resolve tokens to post.
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
+  });
+
+  test('drops event when cloudId is missing and registry has multiple active tenants (ambiguous)', async () => {
+    const payload = issue();
+    delete payload.cloudId;
+    // Two active tenants → fallback refuses to guess (would risk mis-routing).
+    ddbSend.mockResolvedValueOnce({
+      Items: [
+        { jira_cloud_id: 'cloud-1', status: 'active' },
+        { jira_cloud_id: 'cloud-2', status: 'active' },
+      ],
+    });
+    await handler(eventWith(payload));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+  });
+
+  test('recovers cloudId from sole active tenant when payload omits it (Settings-UI webhook)', async () => {
+    const payload = issue();
+    delete payload.cloudId;
+    // Registry scan returns exactly one active tenant → use it. Then the
+    // normal flow proceeds: project mapping (active) + user mapping resolve,
+    // and a task is created.
+    ddbSend
+      .mockResolvedValueOnce({ Items: [{ jira_cloud_id: 'cloud-1', status: 'active' }] }) // Scan
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } }) // project mapping
+      .mockResolvedValueOnce({ Item: { platform_user_id: 'user-1', status: 'active' } }); // user mapping
+    createTaskCoreMock.mockResolvedValue({ task_id: 'T1' });
+    await handler(eventWith(payload));
+    expect(createTaskCoreMock).toHaveBeenCalled();
   });
 
   test('skips when project is not onboarded', async () => {

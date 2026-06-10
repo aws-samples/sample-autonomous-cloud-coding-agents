@@ -19,7 +19,7 @@
 
 import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
@@ -68,6 +68,51 @@ async function safeReportIssueFailure(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * Safe single-tenant fallback for `cloudId`.
+ *
+ * Webhooks created through the Jira **Settings → System → Webhooks** UI do
+ * not include a top-level `cloudId` in their payload (only app/OAuth-
+ * registered dynamic webhooks do). Without `cloudId` the processor can't
+ * resolve the tenant. For the common single-tenant install we recover by
+ * reading the workspace registry: if **exactly one** `active` tenant is
+ * registered, that must be the sender, so we use it.
+ *
+ * This deliberately does NOT guess when multiple active tenants exist —
+ * doing so could mis-route an event from site B to site A's repo/user.
+ * In that case we return `undefined` and the caller drops the event, so
+ * the multi-tenant design is preserved: a multi-tenant operator must use a
+ * webhook that carries its own `cloudId`.
+ */
+async function resolveSoleTenantCloudId(): Promise<string | undefined> {
+  if (!WORKSPACE_REGISTRY_TABLE) return undefined;
+  let activeCloudIds: string[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddb.send(new ScanCommand({
+      TableName: WORKSPACE_REGISTRY_TABLE,
+      ProjectionExpression: 'jira_cloud_id, #s',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExclusiveStartKey: lastKey,
+    }));
+    for (const item of page.Items ?? []) {
+      if (item.status === 'active' && typeof item.jira_cloud_id === 'string') {
+        activeCloudIds.push(item.jira_cloud_id);
+      }
+    }
+    lastKey = page.LastEvaluatedKey;
+    // Short-circuit: once we've seen more than one active tenant the
+    // fallback is ambiguous, so stop scanning.
+    if (activeCloudIds.length > 1) break;
+  } while (lastKey);
+
+  if (activeCloudIds.length === 1) return activeCloudIds[0];
+  logger.warn('Cannot infer cloudId: registry does not have exactly one active tenant', {
+    active_tenant_count: activeCloudIds.length,
+  });
+  return undefined;
 }
 
 /**
@@ -156,7 +201,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const cloudId = payload.cloudId;
+  // `cloudId` is absent from Settings-UI webhook payloads. For a
+  // single-tenant install we recover it from the registry (see
+  // resolveSoleTenantCloudId); multi-tenant installs must send a webhook
+  // that carries its own cloudId.
+  const cloudId = payload.cloudId ?? (await resolveSoleTenantCloudId());
   const projectKey = issue.fields?.project?.key;
   if (!projectKey) {
     logger.info('Jira issue has no project.key — skipping (cannot route to a repo)', {
@@ -171,10 +220,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   }
 
   if (!cloudId) {
-    // Without cloudId we can't resolve which tenant this issue belongs to,
-    // which means we can't look up the project mapping (composite PK is
-    // `{cloudId}#{projectKey}`) or post feedback. Log and drop.
-    logger.warn('Jira webhook missing cloudId — cannot resolve tenant', {
+    // No cloudId in the payload AND the single-tenant fallback couldn't
+    // resolve one (zero or multiple active tenants). Without it we can't
+    // look up the project mapping (composite PK is `{cloudId}#{projectKey}`)
+    // or post feedback. Log and drop.
+    logger.warn('Jira webhook missing cloudId and no sole active tenant — cannot resolve tenant', {
       issue_key: issue.key,
       project_key: projectKey,
     });
