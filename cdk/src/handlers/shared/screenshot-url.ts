@@ -91,3 +91,24 @@ export function buildScreenshotKey(repo: string, sha: string, deploymentId?: num
   const suffix = crypto.randomBytes(8).toString('hex');
   return `screenshots/${repoSlug}/${sha}${id}-${suffix}.png`;
 }
+
+/**
+ * Percent-encode the parens in a URL before it's interpolated into a
+ * markdown link/image target.
+ *
+ * `environment_url` comes from the webhook payload. Its hostname passes
+ * `isAllowedScreenshotUrl`, but the WHATWG URL parser preserves `(` and
+ * `)` in the path/query — so a value like
+ * `https://preview.vercel.app/x)](https://evil/a.png)` stays "allowed"
+ * yet closes the `](…)` of the comment markdown early, injecting
+ * attacker-chosen content into a comment posted under ABCA's token. In
+ * fork-PR configs the preview path can be author-influenced without the
+ * webhook secret, so this is reachable.
+ *
+ * `(` → `%28`, `)` → `%29` are valid percent-escapes the browser decodes
+ * back, so the rendered link still resolves to the real preview URL —
+ * it just can't break out of the markdown delimiters.
+ */
+export function encodeMarkdownUrl(rawUrl: string): string {
+  return rawUrl.replaceAll('(', '%28').replaceAll(')', '%29');
+}

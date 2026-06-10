@@ -28,7 +28,7 @@ import {
 import { postIssueComment } from './shared/linear-feedback';
 import { extractLinearIdentifier, findLinearIssueByIdentifier } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
-import { buildScreenshotKey, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from './shared/screenshot-url';
 
 const s3 = new S3Client({});
 
@@ -455,12 +455,17 @@ async function findPullRequestForSha(
 
 /** Render the PR comment body. */
 function renderCommentBody(publicUrl: string, previewUrl: string): string {
+  // previewUrl is payload-derived; percent-encode its parens so a crafted
+  // path can't break out of the markdown link and inject content into a
+  // comment posted under ABCA's token. publicUrl is our own CloudFront key
+  // (no parens by construction) so it's interpolated as-is.
+  const safePreview = encodeMarkdownUrl(previewUrl);
   return [
     '🖼️ **Preview screenshot**',
     '',
-    `[![preview](${publicUrl})](${previewUrl})`,
+    `[![preview](${publicUrl})](${safePreview})`,
     '',
-    `_From [preview link](${previewUrl}) — captured automatically by ABCA after the deploy finished._`,
+    `_From [preview link](${safePreview}) — captured automatically by ABCA after the deploy finished._`,
   ].join('\n');
 }
 
@@ -471,12 +476,15 @@ function renderCommentBody(publicUrl: string, previewUrl: string): string {
  * as a clickable link with a tiny preview.
  */
 function renderLinearCommentBody(publicUrl: string, previewUrl: string): string {
+  // previewUrl is payload-derived — see renderCommentBody for the
+  // markdown-breakout rationale.
+  const safePreview = encodeMarkdownUrl(previewUrl);
   return [
     '🖼️ **Preview screenshot**',
     '',
     `![preview](${publicUrl})`,
     '',
-    `[Preview link](${previewUrl})`,
+    `[Preview link](${safePreview})`,
     '',
     '_Captured automatically by ABCA after the deploy finished._',
   ].join('\n');

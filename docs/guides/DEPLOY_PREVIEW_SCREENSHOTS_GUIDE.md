@@ -186,8 +186,10 @@ The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skip
 Visit the public URL directly:
 
 ```
-https://<ScreenshotCloudFrontDomain>/screenshots/<repo>/<sha>.png
+https://<ScreenshotCloudFrontDomain>/screenshots/<owner>_<repo>/<sha>-<deploymentId>-<16hex>.png
 ```
+
+(Copy the exact URL from the PR comment — the `<16hex>` suffix is random per capture, so you can't hand-construct it.)
 
 If it 403s, check that the bucket policy includes the OAC service principal (CDK should generate this automatically — re-deploy if it doesn't).
 

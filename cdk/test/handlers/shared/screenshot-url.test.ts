@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { buildScreenshotKey, isAllowedScreenshotUrl } from '../../../src/handlers/shared/screenshot-url';
+import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from '../../../src/handlers/shared/screenshot-url';
 
 describe('buildScreenshotKey', () => {
   test('produces a screenshots/<owner>_<repo>/<sha>-<id>-<suffix>.png shape', () => {
@@ -109,5 +109,31 @@ describe('isAllowedScreenshotUrl', () => {
 
   test('rejects IPv6 link-local fe80::', () => {
     expect(isAllowedScreenshotUrl('https://[fe80::1]/')).toBe(false);
+  });
+});
+
+describe('encodeMarkdownUrl', () => {
+  test('percent-encodes parens so a crafted path cannot break out of a markdown link', () => {
+    // krokoko PR-241 round-3 finding 1: the WHATWG URL parser keeps `)`
+    // in the path, so a clean-hostname URL can still close the `](…)`
+    // early and inject content into a comment posted under ABCA's token.
+    const attack = 'https://preview.vercel.app/x)](https://evil/a.png)';
+    const encoded = encodeMarkdownUrl(attack);
+    expect(encoded).not.toContain('(');
+    expect(encoded).not.toContain(')');
+    // No `](` delimiter survives → cannot break out of `[text](url)`.
+    expect(encoded).not.toContain('](');
+    // Interpolated into the link, the body stays a single link.
+    const body = `[![preview](https://cdn/x.png)](${encoded})`;
+    expect(body.match(/\]\(/g)).toHaveLength(2); // image + link, nothing extra
+  });
+
+  test('leaves a normal preview URL functionally unchanged (browser decodes %28/%29)', () => {
+    const url = 'https://deploy-preview-12.netlify.app/path?x=1';
+    expect(encodeMarkdownUrl(url)).toBe(url);
+  });
+
+  test('encodes every paren, not just the first', () => {
+    expect(encodeMarkdownUrl('https://h/a(b)c(d)')).toBe('https://h/a%28b%29c%28d%29');
   });
 });
