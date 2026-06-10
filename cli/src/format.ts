@@ -19,6 +19,9 @@
 
 import { CreateWebhookResponse, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
+/** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
+export const COST_USD_DECIMALS = 4;
+
 /** Format a TaskDetail as a key-value detail view. */
 export function formatTaskDetail(task: TaskDetail): string {
   const lines: string[] = [
@@ -71,7 +74,7 @@ export function formatTaskDetail(task: TaskDetail): string {
     lines.push(`Duration:    ${task.duration_s}s`);
   }
   if (task.cost_usd != null) {
-    lines.push(`Cost:        $${Number(task.cost_usd).toFixed(4)}`);
+    lines.push(`Cost:        $${Number(task.cost_usd).toFixed(COST_USD_DECIMALS)}`);
   }
   if (task.build_passed !== null) {
     lines.push(`Build:       ${task.build_passed ? 'PASSED' : 'FAILED'}`);
@@ -97,7 +100,7 @@ export function formatTaskList(tasks: TaskSummary[]): string {
       // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
       t.repo ?? '—',
       t.created_at,
-      truncate(desc, 40),
+      truncate(desc, DESCRIPTION_COLUMN_WIDTH),
     ];
   });
 
@@ -380,9 +383,14 @@ function formatTable(headers: string[], rows: string[][]): string {
   return [headerLine, separator, ...dataLines].join('\n');
 }
 
+/** Max width of the DESCRIPTION column in `bgagent list` table output. */
+const DESCRIPTION_COLUMN_WIDTH = 40;
+
+const ELLIPSIS = '...';
+
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen - 3) + '...';
+  return text.slice(0, maxLen - ELLIPSIS.length) + ELLIPSIS;
 }
 
 // -- status-snapshot helpers --------------------------------------------------

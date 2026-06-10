@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from http import HTTPStatus
 from typing import Any
 
 import requests
@@ -177,7 +178,7 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
             log("WARN", f"linear_reactions: HTTP {resp.status_code} from Linear (auth)")
         return None
 
-    if resp.status_code != 200:
+    if resp.status_code != HTTPStatus.OK:
         log("WARN", f"linear_reactions: HTTP {resp.status_code} from Linear")
         return None
 

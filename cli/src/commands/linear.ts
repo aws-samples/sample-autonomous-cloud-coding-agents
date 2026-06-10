@@ -52,6 +52,9 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
 /** Standard RFC 4122 UUID — Linear's `projects.nodes[].id` matches this shape. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Width of the `═` banner bars in printed setup output. */
+const BANNER_WIDTH = 72;
+
 /**
  * Render the printable Linear OAuth app config. Standalone export so
  * `bgagent linear setup` can call it inline (Phase 2.0b setup wizard
@@ -81,7 +84,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   // setup interactively from their machine.
   const callbackUrl = opts.awsCallbackUrl ?? 'http://localhost:8080/oauth/callback';
 
-  const bar = '═'.repeat(72);
+  const bar = '═'.repeat(BANNER_WIDTH);
   return [
     bar,
     'Linear OAuth app template',
@@ -197,7 +200,8 @@ function randomState(): string {
   // uses of this command file.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { randomBytes } = require('crypto') as typeof import('crypto');
-  return randomBytes(32).toString('base64url');
+  const STATE_BYTES = 32;
+  return randomBytes(STATE_BYTES).toString('base64url');
 }
 
 /**
@@ -357,7 +361,7 @@ export function makeLinearCommand(): Command {
           );
         }
         const webhookUrl = `${config.api_url.replace(/\/+$/, '')}/linear/webhook`;
-        const bar = '═'.repeat(72);
+        const bar = '═'.repeat(BANNER_WIDTH);
         console.log(bar);
         console.log('Linear webhook configuration');
         console.log(bar);
@@ -1752,7 +1756,8 @@ async function runSelfLinkPicker(args: {
 export const INVITE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
 export function generateInviteCode(): string {
-  const bytes = new Uint8Array(8);
+  const INVITE_CODE_RANDOM_BYTES = 8;
+  const bytes = new Uint8Array(INVITE_CODE_RANDOM_BYTES);
   crypto.getRandomValues(bytes);
   let out = 'link-';
   for (const b of bytes) {
@@ -1876,8 +1881,9 @@ function extractCognitoSub(): string {
   if (!creds?.id_token) {
     throw new Error('not authenticated — run `bgagent login`');
   }
+  const JWT_SEGMENTS = 3; // header.payload.signature
   const parts = creds.id_token.split('.');
-  if (parts.length !== 3) {
+  if (parts.length !== JWT_SEGMENTS) {
     throw new Error('malformed id_token in ~/.bgagent/credentials.json');
   }
   const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as { sub?: string };
