@@ -58,6 +58,7 @@ export default defineConfig({
             { slug: 'using/linear-setup-guide' },
             { slug: 'using/linear-pak-migration-runbook' },
             { slug: 'using/jira-setup-guide' },
+            { slug: 'using/deploy-preview-screenshots-guide' },
             { slug: 'using/task-lifecycle' },
             { slug: 'using/what-the-agent-does' },
             { slug: 'using/tips-for-being-a-good-citizen' },

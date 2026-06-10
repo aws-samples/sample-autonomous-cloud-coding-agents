@@ -63,6 +63,13 @@ cdk.out/
 cdk.context.json
 /assets/
 
+# integ-runner snapshots: these bundle every Lambda handler asset (~100 MB) and
+# are regenerated on each run. CI always deploys-then-verifies (integ-runner
+# --force) rather than diffing a committed snapshot, so the snapshot is a build
+# artifact, not source. Also catch integ-runner's temp synth dir.
+/cdk/test/integ/*.snapshot/
+/cdk/test/integ/cdk-integ.out.*/
+
 # ──────────────────────────────────────────────
 # CI artifacts (generated during build)
 # ──────────────────────────────────────────────
