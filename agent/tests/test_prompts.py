@@ -1,5 +1,7 @@
 """Unit tests for the prompts module and sanitization."""
 
+from typing import Any
+
 import pytest
 
 from models import TaskConfig
@@ -9,7 +11,11 @@ from sanitization import sanitize_external_content
 
 
 def _config(**overrides) -> TaskConfig:
-    base = {
+    # Use an explicitly typed dict so ty can see the heterogenous field
+    # types across the TaskConfig signature (``bool`` for ``dry_run``,
+    # ``int`` for ``max_turns``, etc.) rather than inferring ``dict[str, str]``
+    # from the homogeneous base literal.
+    base: dict[str, Any] = {
         "repo_url": "owner/repo",
         "github_token": "ghp_test",
         "aws_region": "us-west-2",
