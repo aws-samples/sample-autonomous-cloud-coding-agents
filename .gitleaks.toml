@@ -18,3 +18,44 @@ stopwords = ["wat-opaque-123"]
 [[allowlists]]
 description = "Test fixture signing secret in Slack verification unit test (not a real credential)."
 stopwords = ["test-signing-secret-abc123"]
+
+# Catch bare 12-digit AWS account IDs. The default ruleset does not flag these,
+# which is how a real account ID reached a committed comment in the #236 integ
+# work. RE2 (Go) has no lookarounds, so the non-digit neighbours are captured in
+# non-capturing groups; the account ID itself is group 1.
+[[rules]]
+id = "aws-account-id"
+description = "AWS account ID (12-digit, bare or in ARN/role context)"
+regex = '''(?:^|[^0-9])([0-9]{12})(?:[^0-9]|$)'''
+# Report/redact capture group 1 (the bare 12-digit ID) rather than the whole
+# match, which would include the non-digit delimiter neighbours.
+secretGroup = 1
+keywords = [
+    "account",
+    "aws",
+    "arn:aws",
+    "iam::",
+    "role/",
+    "assumed-role",
+    "AWS_ACCOUNT",
+    "AccountId",
+    "account_id",
+]
+
+[[rules.allowlists]]
+description = "AWS-published placeholder IDs, localstack default, and lockfiles/snapshots."
+regexes = [
+    '''123456789012''',
+    '''000000000000''',
+    '''111122223333''',
+    '''444455556666''',
+]
+paths = [
+    '''(.*/)?test/.*\.snapshot/.*''',
+    '''(.*/)?CHANGELOG\.md$''',
+    '''(.*/)?yarn\.lock$''',
+    '''(.*/)?package-lock\.json$''',
+    '''(.*/)?uv\.lock$''',
+]
+# Per-line opt-out: append `# gitleaks:allow account-id` on a legitimate line.
+stopwords = ["gitleaks:allow account-id"]

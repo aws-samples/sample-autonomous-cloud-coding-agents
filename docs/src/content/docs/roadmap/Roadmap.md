@@ -227,6 +227,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
+| **Deployed runtime E2E verification** | **Phase 0 landed:** `@aws-cdk/integ-tests-alpha` + `integ-runner` deploy a trimmed Task API stack to a real account, assert the create-and-persist happy path (task persists at `SUBMITTED`), then tear it down (`mise //cdk:integ`). In CI it runs per-PR via `workflow_run` when the diff touches `cdk/**` or `agent/**`, behind the `integ` environment's admin-approval gate, and posts a required `integ-smoke` status that blocks merge (`workflow_dispatch` retained for manual runs). Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) follow. See [ADR-013](/architecture/adr-013-tiered-validation-pyramid). |
 | **Admission backlog observability** | Metric and alarm when `SUBMITTED` task depth exceeds an operator threshold (capacity and admission health). |
 | **Admission queue with deferred pickup** | When admission is at capacity, persist tasks in a durable queue instead of failing them. Automatically re-attempt admission and continue processing in FIFO order (with optional priority lanes) as concurrency becomes available. Preserve cancel/idempotency semantics and expose queue position/ETA in task status. |
 | **Safe orchestrator deploys** | Pre-deploy checks for active tasks (drain or warn); blue-green or canary Lambda deploy for the durable orchestrator with rollback on error regressions (`OBSERVABILITY.md`). |
