@@ -627,6 +627,10 @@ export function makeLinearCommand(): Command {
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
+        // Best-effort: fetch team keys so the screenshot processor can
+        // prefix-route Linear issue lookups (e.g. ABCA-42 → workspace
+        // owning ABCA) instead of scanning every active workspace.
+        const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -637,9 +641,14 @@ export function makeLinearCommand(): Command {
             installed_at: now,
             updated_at: now,
             status: 'active',
+            ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
           },
         }));
-        console.log('  ✓ Recorded workspace in registry');
+        console.log(
+          teamKeys.length > 0
+            ? `  ✓ Recorded workspace in registry (team keys: ${teamKeys.join(', ')})`
+            : '  ✓ Recorded workspace in registry',
+        );
 
         // We deliberately do NOT auto-link a user-mapping row here.
         // With actor=app, Linear's `viewer` query returns the OAuth
@@ -979,6 +988,8 @@ export function makeLinearCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Persist registry + user-mapping rows ──────────────────────
+        // Fetch team keys for prefix-routing (see same call in `setup`).
+        const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -989,9 +1000,14 @@ export function makeLinearCommand(): Command {
             installed_at: now,
             updated_at: now,
             status: 'active',
+            ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
           },
         }));
-        console.log('  ✓ Recorded workspace in registry');
+        console.log(
+          teamKeys.length > 0
+            ? `  ✓ Recorded workspace in registry (team keys: ${teamKeys.join(', ')})`
+            : '  ✓ Recorded workspace in registry',
+        );
 
         // No auto-link — see the same comment in `setup` above. With
         // actor=app, Linear's `viewer` returns the bot user; auto-
@@ -1636,6 +1652,40 @@ interface LinearWorkspaceMember {
   readonly id: string;
   readonly name?: string;
   readonly email?: string;
+}
+
+/**
+ * Query the workspace's team keys (e.g. `["ABCA", "PLAT"]`). Persisted on
+ * the registry row so the screenshot processor can prefix-route Linear
+ * issue lookups to the owning workspace instead of scanning every
+ * workspace's tokens. Returns an empty array on failure — callers persist
+ * what they got and the lookup falls back to scanning if `team_keys` is
+ * absent or stale.
+ */
+export async function queryLinearTeamKeys(authorizationHeader: string): Promise<string[]> {
+  try {
+    const res = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authorizationHeader,
+      },
+      // first:100 caps at 100 teams. Workspaces with more are rare for
+      // ABCA's target use case; pagination is a v1.x followup.
+      body: JSON.stringify({
+        query: '{ teams(first: 100) { nodes { key } } }',
+      }),
+    });
+    if (!res.ok) return [];
+    const body = await res.json() as { data?: { teams?: { nodes?: Array<{ key?: string }> } } };
+    const keys = (body.data?.teams?.nodes ?? [])
+      .map((t) => t.key)
+      .filter((k): k is string => typeof k === 'string' && k.length > 0)
+      .map((k) => k.toUpperCase());
+    return Array.from(new Set(keys)).sort();
+  } catch {
+    return [];
+  }
 }
 
 /**
