@@ -6,8 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from config import (
-    PR_TASK_TYPES,
-    PR_WORKFLOW_IDS
+    PR_WORKFLOW_IDS,
     build_config,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
