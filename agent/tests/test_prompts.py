@@ -2,9 +2,51 @@
 
 import pytest
 
-from prompt_builder import sanitize_memory_content
+from models import TaskConfig
+from prompt_builder import _channel_prompt_addendum, sanitize_memory_content
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content
+
+
+def _config(**overrides) -> TaskConfig:
+    base = {
+        "repo_url": "owner/repo",
+        "github_token": "ghp_test",
+        "aws_region": "us-west-2",
+    }
+    base.update(overrides)
+    return TaskConfig(**base)
+
+
+class TestChannelPromptAddendum:
+    def test_no_channel_returns_empty(self):
+        assert _channel_prompt_addendum(_config()) == ""
+
+    def test_api_channel_returns_empty(self):
+        assert _channel_prompt_addendum(_config(channel_source="api")) == ""
+
+    def test_linear_channel_includes_linear_tools(self):
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={"linear_issue_identifier": "ABC-42"},
+            )
+        )
+        assert "Linear issue progress updates" in addendum
+        assert "mcp__linear-server__save_comment" in addendum
+        assert "ABC-42" in addendum
+
+    def test_jira_channel_gets_no_addendum(self):
+        # Jira comments are posted out-of-band by jira_reactions (REST shim);
+        # the Atlassian MCP can't load in a headless agent, so instructing the
+        # agent to use it would just waste turns. No prompt addendum.
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="jira",
+                channel_metadata={"jira_issue_key": "KAN-1"},
+            )
+        )
+        assert addendum == ""
 
 
 class TestGetSystemPrompt:

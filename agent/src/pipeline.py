@@ -22,6 +22,7 @@ from config import (
     resolve_linear_api_token,
 )
 from context import assemble_prompt, fetch_github_issue
+from jira_reactions import comment_task_finished, comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import task_span
@@ -493,6 +494,14 @@ def run_task(
                 config.channel_metadata,
             )
 
+            # "Starting" comment on the Jira issue (REST shim — the Atlassian
+            # Remote MCP can't be used from a headless agent). No-op for
+            # non-Jira tasks. Best-effort; failures are logged, never block.
+            comment_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []
             if config.attachments:
@@ -704,6 +713,15 @@ def run_task(
                 started_reaction_id=linear_eyes_reaction_id,
             )
 
+            # Terminal status comment on the Jira issue (REST shim, with the
+            # PR link when one was opened). No-op for non-Jira tasks.
+            comment_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=(overall_status == "success"),
+                pr_url=pr_url,
+            )
+
             # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
             # ``trace_s3_uri`` can be persisted atomically with the
@@ -824,6 +842,14 @@ def run_task(
                 config.channel_metadata,
                 success=False,
                 started_reaction_id=linear_eyes_reaction_id,
+            )
+            # Best-effort failure comment on the Jira issue. No-op for
+            # non-Jira tasks; network failures are swallowed.
+            comment_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=False,
+                pr_url=None,
             )
             raise
 
