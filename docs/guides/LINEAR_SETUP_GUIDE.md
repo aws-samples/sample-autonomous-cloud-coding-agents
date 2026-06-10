@@ -171,6 +171,23 @@ Notes and current limitations:
 - A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
 - Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
 
+## Parent/sub-issue orchestration
+
+If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:
+
+1. **Discovery** — it reads the sub-issues and their `blocked by` / `blocking` relations, builds a dependency graph (DAG), and rejects cycles with a terminal comment on the parent.
+2. **Dependency-ordered execution** — root sub-issues (no blockers) start immediately; a blocked sub-issue does not start until **all** its blockers reach terminal-success (a sub-issue that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
+3. **Stacked PRs** — a sub-issue with a single predecessor branches from that predecessor's branch (so it sees its code before merge); a sub-issue with multiple predecessors branches from the default branch and merges all predecessor branches in. Review/merge the resulting stack bottom-up.
+4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
+5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
+
+Notes and current limitations:
+
+- The parent issue itself spawns **no task** — a human-authored sub-issue graph is treated as consent to execute.
+- **No "cancel the whole epic" button yet.** Cancelling an individual sub-issue's task (`bgagent cancel <task-id>`) stops it and skips its dependents, but there is no single command to cancel a whole in-flight orchestration. Tracked as a follow-up.
+- A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
+- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
+
 ## Troubleshooting
 
 ### Webhook doesn't trigger a task
