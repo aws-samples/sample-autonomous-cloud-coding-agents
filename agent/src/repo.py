@@ -17,10 +17,23 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     repo_dir = f"{AGENT_WORKSPACE}/{config.task_id}"
     notes: list[str] = []
 
-    if config.is_pr_workflow and config.branch_name:
+    # Always use the platform-provided branch name verbatim when present.
+    # The platform computes branch_name (gateway.ts generateBranchName/slugify)
+    # and persists it on the TaskRecord AND, for #247 stacked children, as the
+    # predecessor's child_branch_name that the reconciler hands to the next
+    # child as its base. If the agent re-derives the slug here it produces a
+    # DIFFERENT string (shell.py slugify strips dots vs gateway's dash, and
+    # truncates at 40 vs 50) — e.g. ``...guide.html`` → agent ``guidehtml`` vs
+    # platform ``guide-html``. That divergence means a stacked child's
+    # ``git fetch origin <predecessor-branch>`` 404s and it silently falls back
+    # to branching off main (A4 stacking broken). Use config.branch_name as-is.
+    if config.branch_name:
         branch = config.branch_name
     else:
-        # Derive branch slug from issue title or task description
+        # Fallback only when the platform supplied no branch (older callers /
+        # direct invocations). Derive a slug from the issue title or task
+        # description. NOTE: this path's slug may differ from the platform's;
+        # it exists for resilience, not for the orchestrated/standard flow.
         title = ""
         if config.issue:
             title = config.issue.title
