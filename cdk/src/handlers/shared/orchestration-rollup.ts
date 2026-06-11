@@ -38,6 +38,7 @@ import {
 import { logger } from './logger';
 import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
+import type { ChannelSource } from './types';
 
 /** Which rollup we're posting — drives the heading + emoji. */
 export type RollupKind = 'complete' | 'partial_failure' | 'cancelled';
@@ -115,6 +116,15 @@ export interface PostRollupParams {
   readonly parentLinearIssueId: string;
   readonly kind: RollupKind;
   readonly children: readonly OrchestrationChildRow[];
+  /**
+   * The orchestration's trigger channel. Defaults to ``'linear'`` — the only
+   * wired rollup plane today. #247 trigger-agnostic seam: a future
+   * GitHub/Slack/Jira trigger dispatches its own parent-rollup here (open a
+   * tracking comment / update an epic) instead of the Linear comment +
+   * state-transition + reaction below. An unrecognised channel is a logged
+   * no-op so a mis-seeded orchestration never throws out of the reconciler.
+   */
+  readonly channelSource?: ChannelSource;
 }
 
 /**
@@ -124,6 +134,21 @@ export interface PostRollupParams {
  */
 export async function postRollup(params: PostRollupParams): Promise<boolean> {
   const { ctx, orchestrationId, parentLinearIssueId, kind, children } = params;
+  const channelSource = params.channelSource ?? 'linear';
+
+  // #247 trigger-agnostic dispatch. Only the Linear plane is wired today;
+  // other channels are an explicit logged no-op (the DAG executor +
+  // gating already ran channel-agnostically — only the parent feedback is
+  // channel-specific). A new trigger adds its branch here.
+  if (channelSource !== 'linear') {
+    logger.info('Parent rollup skipped — channel has no wired rollup plane', {
+      event: ORCH_LOG.rollupFailed,
+      orchestration_id: orchestrationId,
+      channel_source: channelSource,
+      rollup_kind: kind,
+    });
+    return false;
+  }
   const body = renderRollupComment(
     kind,
     children.map((c) => ({

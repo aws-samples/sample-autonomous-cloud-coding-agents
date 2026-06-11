@@ -45,14 +45,22 @@
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
-import { fetchSubIssueGraph, type FetchSubIssueGraphOptions } from './linear-subissue-fetch';
+import {
+  linearGraphSource,
+  type OrchestrationGraphSource,
+} from './orchestration-graph-source';
+import type { FetchSubIssueGraphOptions } from './linear-subissue-fetch';
 import { validateDag } from './orchestration-dag';
 import { seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  /** Resolved per-workspace OAuth access token (from resolveLinearOauthToken). */
+  /**
+   * Resolved per-workspace OAuth access token (from resolveLinearOauthToken).
+   * Used to build the default Linear graph source when ``graphSource`` is
+   * not supplied. Ignored when ``graphSource`` is given.
+   */
   readonly accessToken: string;
   readonly parentLinearIssueId: string;
   readonly linearWorkspaceId: string;
@@ -63,8 +71,17 @@ export interface DiscoverOrchestrationParams {
   readonly ttl?: number;
   /** Release context stamped on the meta row for the reconciler. */
   readonly releaseContext: OrchestrationReleaseContext;
-  /** Test seam for the Linear fetch. */
+  /** Test seam for the (default) Linear fetch. Ignored when ``graphSource`` is set. */
   readonly fetchOptions?: FetchSubIssueGraphOptions;
+  /**
+   * #247/#299 trigger-agnostic seam. The producer of the orchestration DAG.
+   * When omitted, defaults to {@link linearGraphSource} over
+   * ``accessToken`` + ``parentLinearIssueId`` (Mode A behaviour). A
+   * declarative caller (CLI/API) or #299 Mode B planner passes its own
+   * source so the SAME validate→seed→reconcile→rollup pipeline runs over a
+   * graph produced any way.
+   */
+  readonly graphSource?: OrchestrationGraphSource;
 }
 
 export type DiscoverOrchestrationResult =
@@ -88,15 +105,19 @@ export type DiscoverOrchestrationResult =
 export async function discoverOrchestration(
   params: DiscoverOrchestrationParams,
 ): Promise<DiscoverOrchestrationResult> {
-  const { ddb, tableName, accessToken, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, releaseContext, fetchOptions } = params;
+  const { ddb, tableName, accessToken, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, releaseContext, fetchOptions, graphSource } = params;
 
-  // ── 1. Fetch the sub-issue graph from Linear ─────────────────────
-  const fetched = await fetchSubIssueGraph(accessToken, parentLinearIssueId, fetchOptions);
+  // ── 1. Produce the orchestration graph ───────────────────────────
+  // Default to the Linear native source (Mode A); a declarative / planner
+  // caller (#299) supplies its own graphSource. The downstream pipeline is
+  // identical regardless of where the graph came from.
+  const source = graphSource ?? linearGraphSource(accessToken, parentLinearIssueId, fetchOptions);
+  const fetched = await source();
   if (fetched.kind === 'error') {
     return { kind: 'error', message: fetched.message };
   }
   if (fetched.kind === 'no_children') {
-    logger.info('Parent issue has no sub-issues — falling back to single task', {
+    logger.info('No orchestration graph — falling back to single task', {
       parent_linear_issue_id: parentLinearIssueId,
     });
     return { kind: 'single_task', parentLinearIssueId };

@@ -52,6 +52,14 @@ import type {
   OrchestrationChildRow,
   OrchestrationReleaseContext,
 } from './orchestration-store';
+import type { ChannelSource } from './types';
+
+/**
+ * The trigger channel an orchestration runs under. Defaults to ``'linear'``
+ * everywhere (the only wired trigger today + back-compat for meta rows
+ * seeded before the field existed). #247 trigger-agnostic seam.
+ */
+const DEFAULT_ORCHESTRATION_CHANNEL: ChannelSource = 'linear';
 
 export interface ReleaseChildParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -75,6 +83,12 @@ export interface ReleaseChildParams {
   readonly createTaskCore: typeof CreateTaskCoreFn;
   /** ISO timestamp (injected for testability). */
   readonly now: string;
+  /**
+   * Trigger channel the child task is created under. Defaults to ``'linear'``.
+   * Threaded from the orchestration's release context so a non-Linear trigger
+   * attributes its children to the right plane. #247 trigger-agnostic seam.
+   */
+  readonly channelSource?: ChannelSource;
 }
 
 export type ReleaseChildResult =
@@ -103,6 +117,7 @@ function buildChildDescription(row: OrchestrationChildRow): string {
  */
 export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseChildResult> {
   const { ddb, tableName, row, platformUserId, baseBranch, createTaskCore, now } = params;
+  const channelSource = params.channelSource ?? DEFAULT_ORCHESTRATION_CHANNEL;
 
   const channelMetadata: Record<string, string> = {
     linear_issue_id: row.sub_issue_id,
@@ -140,7 +155,7 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       },
       {
         userId: platformUserId,
-        channelSource: 'linear',
+        channelSource,
         channelMetadata,
         idempotencyKey,
       },
@@ -281,6 +296,11 @@ export async function releaseReadyChildren(
       }),
       ...(releaseContext.linear_project_id !== undefined && {
         linearProjectId: releaseContext.linear_project_id,
+      }),
+      // #247 trigger-agnostic: carry the orchestration's channel onto the
+      // child. ``releaseChild`` defaults to 'linear' when absent.
+      ...(releaseContext.channel_source !== undefined && {
+        channelSource: releaseContext.channel_source as ChannelSource,
       }),
       // Root → 'main' base, no merges (omit so today's off-main behavior
       // is unchanged). Linear → predecessor branch. Diamond → main + merges.
