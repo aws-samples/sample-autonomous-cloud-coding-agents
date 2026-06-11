@@ -116,7 +116,11 @@ export async function createTaskCore(
   if (!isValidWorkflowRef(body.workflow_ref)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid workflow_ref. Expected "<domain>/<name>-vN[@<constraint>]".', requestId);
   }
-  const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref);
+  // Pass whether the request carries a repo: a repo-bound task with no
+  // explicit workflow_ref resolves to coding/new-task-v1 (the disciplined
+  // coding workflow), not the repo-less default/agent-v1 (#296 regression —
+  // see resolveWorkflowRef rung 3a).
+  const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref, Boolean(body.repo));
   if (resolvedWorkflow === null) {
     // Distinguish an unknown id from an unsatisfiable @version pin so the caller
     // learns which it is (#296 finding #6 — a bad pin no longer silently runs
