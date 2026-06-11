@@ -183,4 +183,53 @@ describe('discoverOrchestration', () => {
       expect(ddb.send).not.toHaveBeenCalled();
     });
   });
+
+  // #16: auto-integration node for fan-out.
+  describe('fan-out integration node (#16)', () => {
+    test('pure fan-out (A→B, A→C) → seeds a synthetic integration node over the leaves', async () => {
+      const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
+      const result = await discoverOrchestration({
+        ...base,
+        ddb: ddb as never,
+        // two leaves B, C both depending on A
+        fetchOptions: { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['A'] }]) },
+      });
+      expect(result.kind).toBe('seeded');
+      if (result.kind === 'seeded') {
+        // A, B, C + 1 synthetic integration node
+        expect(result.childCount).toBe(4);
+        expect(result.rootSubIssueIds).toEqual(['A']); // integration node is NOT a root
+      }
+      // The BatchWrite (2nd ddb call) includes the synthetic node depending on B + C.
+      const puts = ddb.send.mock.calls[1][0].input.RequestItems[Object.keys(ddb.send.mock.calls[1][0].input.RequestItems)[0]] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+      const integ = puts.map((p) => p.PutRequest.Item).find((i) => String(i.sub_issue_id).endsWith('__integration'));
+      expect(integ).toBeDefined();
+      expect([...(integ!.depends_on as string[])].sort()).toEqual(['B', 'C']);
+    });
+
+    test('linear chain → NO integration node added', async () => {
+      const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
+      const result = await discoverOrchestration({
+        ...base,
+        ddb: ddb as never,
+        fetchOptions: { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) },
+      });
+      expect(result.kind).toBe('seeded');
+      if (result.kind === 'seeded') expect(result.childCount).toBe(2); // no synthetic node
+    });
+
+    test('declarative fan-out also gets an integration node', async () => {
+      const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
+      const result = await discoverOrchestration({
+        ...base,
+        ddb: ddb as never,
+        graphSource: declarativeGraphSource([
+          { id: 'x', depends_on: [] },
+          { id: 'y', depends_on: [] },
+        ]),
+      });
+      expect(result.kind).toBe('seeded');
+      if (result.kind === 'seeded') expect(result.childCount).toBe(3); // x, y + integration
+    });
+  });
 });
