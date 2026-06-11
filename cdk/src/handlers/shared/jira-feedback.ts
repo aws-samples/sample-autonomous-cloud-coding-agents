@@ -38,6 +38,15 @@ import { logger } from './logger';
 const REQUEST_TIMEOUT_MS = 5000;
 
 /**
+ * Atlassian cross-region REST gateway base. The per-tenant OAuth token is
+ * minted with `audience=api.atlassian.com` (see `cli/src/jira-oauth.ts`), so
+ * it is only valid against this gateway host scoped by `{cloudId}` — NOT
+ * against the raw `*.atlassian.net` site host, which 401s such a token. The
+ * agent-side path (`agent/src/jira_reactions.py`) uses the same base.
+ */
+const JIRA_API_BASE = 'https://api.atlassian.com/ex/jira';
+
+/**
  * Wrap a plain message string in Atlassian Document Format. Jira REST v3
  * comments require ADF, not markdown. We keep this minimal — a single
  * paragraph with the raw text — because the messages are short, user-
@@ -59,15 +68,14 @@ function toAdfDocument(message: string): Record<string, unknown> {
 
 async function postComment(
   accessToken: string,
-  siteUrl: string,
+  cloudId: string,
   issueIdOrKey: string,
   message: string,
 ): Promise<boolean> {
-  // Strip a trailing slash from siteUrl so the URL stays well-formed
-  // whether the registry stored it as `https://x.atlassian.net` or
-  // `https://x.atlassian.net/`.
-  const base = siteUrl.replace(/\/+$/, '');
-  const url = `${base}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
+  // The 3LO token (audience=api.atlassian.com) is only valid against the
+  // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
+  // site host (`*.atlassian.net`) would 401.
+  const url = `${JIRA_API_BASE}/${cloudId}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -112,11 +120,11 @@ export interface JiraFeedbackContext {
 
 async function resolveTenantToken(
   ctx: JiraFeedbackContext,
-): Promise<{ accessToken: string; siteUrl: string } | null> {
+): Promise<{ accessToken: string } | null> {
   try {
     const resolved = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName);
     if (!resolved) return null;
-    return { accessToken: resolved.accessToken, siteUrl: resolved.siteUrl };
+    return { accessToken: resolved.accessToken };
   } catch (err) {
     logger.warn('Jira feedback could not resolve OAuth token', {
       jira_cloud_id: ctx.cloudId,
@@ -138,7 +146,7 @@ export async function postIssueComment(
 ): Promise<boolean> {
   const resolved = await resolveTenantToken(ctx);
   if (!resolved) return false;
-  return postComment(resolved.accessToken, resolved.siteUrl, issueIdOrKey, body);
+  return postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
 }
 
 /**

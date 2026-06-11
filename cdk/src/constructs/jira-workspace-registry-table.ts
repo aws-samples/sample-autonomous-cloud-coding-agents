@@ -51,7 +51,10 @@ export interface JiraWorkspaceRegistryTableProps {
  * key returned from `accessible-resources` and present on every webhook payload.
  *
  * Fields:
- * - site_url — `https://<your-domain>.atlassian.net` (display + REST base)
+ * - site_url — `https://<your-domain>.atlassian.net` (display only; NOT a
+ *   valid REST base for the 3LO token, which is minted with
+ *   `audience=api.atlassian.com` and must call the
+ *   `https://api.atlassian.com/ex/jira/<cloudId>` gateway base instead)
  * - provider_name — full AgentCore credential provider name
  *   (`bgagent-jira-oauth-<cloudId>`), the lookup key for resolving the
  *   tenant's OAuth token via AgentCore Identity
