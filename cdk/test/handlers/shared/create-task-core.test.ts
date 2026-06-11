@@ -557,7 +557,7 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  test('resolves the default workflow when workflow_ref is omitted', async () => {
+  test('resolves the coding workflow when workflow_ref is omitted AND a repo is present', async () => {
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -565,8 +565,11 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    // No workflow_ref ⇒ the resolution ladder falls to the platform default.
-    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+    // No workflow_ref BUT a repo is present ⇒ the repo-aware fallback resolves
+    // to the disciplined coding workflow, not the repo-less default/agent-v1.
+    // (Pre-#296 behaviour; #296 left this rung unwired and every repo task
+    // fell through to default/agent-v1, breaking pr_url/screenshot/stacking.)
+    expect(body.data.resolved_workflow).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
   });
 
   test('creates a pr-iteration workflow task with pr_number', async () => {
