@@ -32,6 +32,7 @@ import {
   postIssueComment,
   reportIssueFailure,
   transitionIssueState,
+  upsertStatusComment,
 } from '../../../src/handlers/shared/linear-feedback';
 
 const CTX: LinearFeedbackContext = {
@@ -169,6 +170,43 @@ describe('linear-feedback', () => {
       fetchMock.mockRejectedValue(new Error('ECONNRESET'));
 
       await expect(reportIssueFailure(CTX, ISSUE_ID, 'msg')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('upsertStatusComment (#3 live status block)', () => {
+    test('no existing id → creates a comment and returns the new id', async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'cmt-new' } } } }),
+      );
+      const id = await upsertStatusComment(CTX, ISSUE_ID, 'body');
+      expect(id).toBe('cmt-new');
+      // create mutation carries issueId + body
+      const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
+      expect(vars).toEqual({ issueId: ISSUE_ID, body: 'body' });
+    });
+
+    test('existing id → edits in place and returns the same id', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const id = await upsertStatusComment(CTX, ISSUE_ID, 'new body', 'cmt-existing');
+      expect(id).toBe('cmt-existing');
+      const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
+      expect(vars).toEqual({ id: 'cmt-existing', body: 'new body' });
+    });
+
+    test('create reporting success:false → null', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentCreate: { success: false } } }));
+      expect(await upsertStatusComment(CTX, ISSUE_ID, 'body')).toBeNull();
+    });
+
+    test('update GraphQL failure → null (does not fabricate the id)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] }));
+      expect(await upsertStatusComment(CTX, ISSUE_ID, 'body', 'cmt-x')).toBeNull();
+    });
+
+    test('no token → null, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await upsertStatusComment(CTX, ISSUE_ID, 'body')).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 

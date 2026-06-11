@@ -34,6 +34,7 @@ import {
   type LinearFeedbackContext,
   postIssueComment,
   transitionIssueState,
+  upsertStatusComment,
 } from './linear-feedback';
 import { logger } from './logger';
 import { ORCH_LOG } from './orchestration-log-events';
@@ -100,6 +101,42 @@ export function renderRollupComment(
 }
 
 /**
+ * Render the LIVE status block (pure) — the single edit-in-place comment on
+ * the parent epic that answers "where are we" during a running
+ * orchestration (#247 UX, #3). Posted at seed and re-rendered + edited on
+ * every child transition, so the parent shows current progress without a
+ * comment stream. Once all children are terminal the reconciler replaces
+ * the body with the final {@link renderRollupComment}, so this block is the
+ * in-flight view only.
+ *
+ * Per-child line shows the same icons as the rollup (running/blocked/done/
+ * failed/skipped) plus the child's PR link when known.
+ */
+export function renderStatusBlock(children: readonly RollupChildView[]): string {
+  const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
+  const done = children.filter((c) => terminal(c.child_status)).length;
+
+  const heading = `🔄 **ABCA orchestration** · ${done}/${children.length} complete`;
+
+  const lines = [...children]
+    .sort((a, b) => (a.linear_identifier ?? a.sub_issue_id).localeCompare(b.linear_identifier ?? b.sub_issue_id))
+    .map((c) => {
+      const icon = STATUS_ICON[c.child_status] ?? '•';
+      const label = c.linear_identifier
+        ? (c.title ? `${c.linear_identifier}: ${c.title}` : c.linear_identifier)
+        : (c.title ?? c.sub_issue_id);
+      // Human-friendly status words for the in-flight view.
+      const word =
+        c.child_status === 'released' || c.child_status === 'ready' ? 'running'
+          : c.child_status === 'blocked' ? 'blocked'
+            : c.child_status;
+      return `- ${icon} ${label} — ${word}`;
+    });
+
+  return [heading, '', ...lines, '', '_Updates live as sub-issues progress._'].join('\n');
+}
+
+/**
  * Decide the rollup kind from the (terminal) child statuses.
  * - any failed/skipped → partial_failure
  * - all succeeded → complete
@@ -125,6 +162,13 @@ export interface PostRollupParams {
    * no-op so a mis-seeded orchestration never throws out of the reconciler.
    */
   readonly channelSource?: ChannelSource;
+  /**
+   * #247 #3: the live status-block comment id stamped at seed. When set, the
+   * final rollup EDITS that comment in place (one comment for the whole run,
+   * no stream). When absent (seed-time create failed, or an older
+   * orchestration), the rollup posts a fresh comment.
+   */
+  readonly statusCommentId?: string;
 }
 
 /**
@@ -133,7 +177,7 @@ export interface PostRollupParams {
  * on ``orch.rollup.posted`` / ``orch.rollup.failed``.
  */
 export async function postRollup(params: PostRollupParams): Promise<boolean> {
-  const { ctx, orchestrationId, parentLinearIssueId, kind, children } = params;
+  const { ctx, orchestrationId, parentLinearIssueId, kind, children, statusCommentId } = params;
   const channelSource = params.channelSource ?? 'linear';
 
   // #247 trigger-agnostic dispatch. Only the Linear plane is wired today;
@@ -162,7 +206,13 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
 
   let ok = false;
   try {
-    ok = await postIssueComment(ctx, parentLinearIssueId, body);
+    // #247 #3: edit the live status block into the final rollup when we have
+    // its id (one comment for the whole run); else post a fresh comment.
+    if (statusCommentId) {
+      ok = (await upsertStatusComment(ctx, parentLinearIssueId, body, statusCommentId)) !== null;
+    } else {
+      ok = await postIssueComment(ctx, parentLinearIssueId, body);
+    }
   } catch (err) {
     logger.warn('Parent rollup comment threw (non-fatal)', {
       event: ORCH_LOG.rollupFailed,
