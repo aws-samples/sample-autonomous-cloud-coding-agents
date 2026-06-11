@@ -31,6 +31,7 @@ import {
   type LinearFeedbackContext,
   postIssueComment,
   reportIssueFailure,
+  transitionIssueState,
 } from '../../../src/handlers/shared/linear-feedback';
 
 const CTX: LinearFeedbackContext = {
@@ -168,6 +169,70 @@ describe('linear-feedback', () => {
       fetchMock.mockRejectedValue(new Error('ECONNRESET'));
 
       await expect(reportIssueFailure(CTX, ISSUE_ID, 'msg')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('transitionIssueState', () => {
+    // Mirrors the real ABCA team's workflow states (by type + position).
+    const TEAM_STATES = [
+      { id: 's-backlog', type: 'backlog', name: 'Backlog', position: 0 },
+      { id: 's-todo', type: 'unstarted', name: 'Todo', position: 1 },
+      { id: 's-inprogress', type: 'started', name: 'In Progress', position: 2 },
+      { id: 's-inreview', type: 'started', name: 'In Review', position: 1002 },
+      { id: 's-done', type: 'completed', name: 'Done', position: 3 },
+    ];
+    const statesResp = (current: { id: string; type: string; name: string; position: number }) =>
+      jsonResponse({ data: { issue: { state: current, team: { states: { nodes: TEAM_STATES } } } } });
+    const cur = (id: string) => TEAM_STATES.find((s) => s.id === id)!;
+
+    test('Backlog → In Progress: picks the named started state, issues issueUpdate', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-backlog'))) // team-states query
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress']);
+      expect(ok).toBe(true);
+      // second call is the mutation with the resolved stateId
+      const mutationVars = JSON.parse(fetchMock.mock.calls[1][1].body).variables;
+      expect(mutationVars).toEqual({ issueId: ISSUE_ID, stateId: 's-inprogress' });
+    });
+
+    test('In Progress → In Review: name preference wins over position among started states', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-inprogress')))
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-inreview');
+    });
+
+    test('already in target state → no mutation, returns false', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // only the query, no mutation
+    });
+
+    test('never moves backward: Done (completed) is not demoted to In Review', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('returns false when token cannot be resolved', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('returns false when the team has no state of the target type', async () => {
+      const noCompleted = TEAM_STATES.filter((s) => s.type !== 'completed');
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { issue: { state: cur('s-inprogress'), team: { states: { nodes: noCompleted } } } } }),
+      );
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'completed');
+      expect(ok).toBe(false);
     });
   });
 });

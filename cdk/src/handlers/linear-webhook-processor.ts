@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { reportIssueFailure } from './shared/linear-feedback';
+import { addIssueReaction, EMOJI_STARTED, reportIssueFailure, transitionIssueState } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
@@ -387,6 +387,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         released_roots: releasedRoots,
         already_existed: discovery.alreadyExisted,
       });
+      // Mirror the child sub-issues' status signal on the PARENT epic at
+      // start: 👀 reaction + advance to In Progress (the parent spawns no
+      // task, so Linear's GitHub automation never moves it; the reconciler
+      // advances it to In Review on completion via postRollup). Only on the
+      // first seed — a replay (alreadyExisted) already did this, and
+      // transitionIssueState is a no-op once past the target anyway. All
+      // best-effort; gated on the registry table like every other feedback.
+      if (WORKSPACE_REGISTRY_TABLE && !discovery.alreadyExisted) {
+        const parentCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+        await Promise.allSettled([
+          addIssueReaction(parentCtx, issue.id, EMOJI_STARTED),
+          transitionIssueState(parentCtx, issue.id, 'started', ['In Progress']),
+        ]);
+      }
       // The parent issue itself spawns no task; the reconciler (off the
       // TaskTable stream) releases downstream children as roots succeed.
       return;

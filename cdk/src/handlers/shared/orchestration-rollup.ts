@@ -28,7 +28,13 @@
  * never fail the reconcile — gating is the source of truth).
  */
 
-import { type LinearFeedbackContext, postIssueComment } from './linear-feedback';
+import {
+  addIssueReaction,
+  EMOJI_SUCCESS,
+  type LinearFeedbackContext,
+  postIssueComment,
+  transitionIssueState,
+} from './linear-feedback';
 import { logger } from './logger';
 import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
@@ -151,6 +157,22 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
       rollup_kind: kind,
       child_count: children.length,
     });
+
+    // Mirror the child sub-issues' status signal on the PARENT epic:
+    // - state: on a clean 'complete', advance to In Review (work done, child
+    //   PRs awaiting human merge — NOT Done, since nothing is merged). On a
+    //   partial_failure / cancelled rollup, leave the state in place (the
+    //   comment + ❌ reaction already convey the outcome).
+    // - reaction: ✅ on complete, ❌ otherwise — matching agent/src/
+    //   linear_reactions.py's child markers (👀 was set at seed time).
+    // All best-effort; runs after the load-bearing comment so a state/
+    // reaction hiccup never suppresses the rollup.
+    await Promise.allSettled([
+      kind === 'complete'
+        ? transitionIssueState(ctx, parentLinearIssueId, 'started', ['In Review'])
+        : Promise.resolve(false),
+      addIssueReaction(ctx, parentLinearIssueId, kind === 'complete' ? EMOJI_SUCCESS : undefined),
+    ]);
   } else {
     logger.warn('Parent rollup comment post returned false', {
       event: ORCH_LOG.rollupFailed,
