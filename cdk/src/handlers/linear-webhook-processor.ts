@@ -21,12 +21,13 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { addIssueReaction, EMOJI_STARTED, reportIssueFailure, transitionIssueState } from './shared/linear-feedback';
+import { addIssueReaction, EMOJI_STARTED, reportIssueFailure, transitionIssueState, upsertStatusComment } from './shared/linear-feedback';
+import { renderStatusBlock } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { releaseReadyChildren } from './shared/orchestration-release';
-import { loadOrchestration, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -404,6 +405,27 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           addIssueReaction(parentCtx, issue.id, EMOJI_STARTED),
           transitionIssueState(parentCtx, issue.id, 'started', ['In Progress']),
         ]);
+        // #247 #3: post the live status block ('where are we' at a glance) and
+        // stamp its comment id on the meta row so the reconciler edits it
+        // in place on each child transition. Re-load post-release so roots
+        // show 'running'. Best-effort: a failed create just means the
+        // reconciler posts a fresh final rollup instead of editing.
+        try {
+          const postReleaseSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+          if (postReleaseSnapshot) {
+            const body = renderStatusBlock(postReleaseSnapshot.children);
+            const commentId = await upsertStatusComment(parentCtx, issue.id, body);
+            if (commentId) {
+              await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
+            }
+          }
+        } catch (err) {
+          logger.warn('Failed to post orchestration status block (non-fatal)', {
+            issue_id: issue.id,
+            orchestration_id: discovery.orchestrationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
       // The parent issue itself spawns no task; the reconciler (off the
       // TaskTable stream) releases downstream children as roots succeed.

@@ -293,6 +293,34 @@ export interface OrchestrationMeta {
   readonly repo: string;
   readonly child_count: number;
   readonly release_context: OrchestrationReleaseContext;
+  /**
+   * Linear comment id of the live status block (#247 #3), stamped at seed.
+   * The reconciler edits this comment in place on each child transition and
+   * one last time with the final rollup. Absent if the seed-time create
+   * failed (best-effort) — the reconciler then falls back to a fresh
+   * comment for the final rollup.
+   */
+  readonly status_comment_id?: string;
+}
+
+/**
+ * Stamp the live status-block comment id on the parent-meta row (#247 #3).
+ * Called once at seed after the comment is created. Best-effort; a failure
+ * just means the reconciler can't edit-in-place and posts a fresh final
+ * rollup instead. Not conditional — the single seed path is the only writer.
+ */
+export async function setStatusCommentId(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  commentId: string,
+): Promise<void> {
+  await ddb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
+    UpdateExpression: 'SET status_comment_id = :cid',
+    ExpressionAttributeValues: { ':cid': commentId },
+  }));
 }
 
 /** All rows for one orchestration: the meta row + every child row. */
@@ -351,6 +379,9 @@ export async function loadOrchestration(
         linear_project_id: metaItem.linear_project_id as string,
       }),
     },
+    ...(metaItem.status_comment_id !== undefined && {
+      status_comment_id: metaItem.status_comment_id as string,
+    }),
   };
 
   return { meta, children };
