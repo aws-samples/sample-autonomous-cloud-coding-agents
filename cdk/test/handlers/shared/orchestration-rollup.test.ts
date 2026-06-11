@@ -172,6 +172,31 @@ describe('postRollup', () => {
     expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
   });
 
+  test('non-linear channelSource → no Linear post/transition/reaction, returns false (#247 seam)', async () => {
+    const ok = await postRollup({
+      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      kind: 'complete', children: [row('a', 'succeeded')],
+      channelSource: 'slack',
+    });
+    expect(ok).toBe(false);
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
+    expect(addIssueReactionMock).not.toHaveBeenCalled();
+  });
+
+  test('explicit linear channelSource behaves like the default', async () => {
+    postIssueCommentMock.mockResolvedValue(true);
+    const ok = await postRollup({
+      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      kind: 'complete', children: [row('a', 'succeeded')],
+      channelSource: 'linear',
+    });
+    expect(ok).toBe(true);
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+  });
+
   test('post throws → swallowed, logs orch.rollup.failed, returns false', async () => {
     postIssueCommentMock.mockRejectedValue(new Error('linear down'));
     const ok = await postRollup({

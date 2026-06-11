@@ -97,6 +97,16 @@ export interface OrchestrationChildRow {
 export interface OrchestrationReleaseContext {
   /** Platform user the children are attributed to (parent's submitter). */
   readonly platform_user_id: string;
+  /**
+   * The trigger channel that seeded this orchestration. Threaded onto child
+   * tasks (createTaskCore channelSource) and used by the reconciler to
+   * dispatch the parent rollup to the right plane. Defaults to ``'linear'``
+   * when absent (back-compat: orchestrations seeded before this field
+   * existed, and the only wired trigger today). #247 trigger-agnostic seam:
+   * a future GitHub/Slack/Jira trigger seeds with its own source and the
+   * release + rollup paths follow it without code changes here.
+   */
+  readonly channel_source?: string;
   /** Linear OAuth secret ARN for the agent's outbound Linear MCP. */
   readonly linear_oauth_secret_arn?: string;
   readonly linear_workspace_slug?: string;
@@ -192,6 +202,9 @@ export async function seedOrchestration(
     // Release context for the reconciler (downstream releases run off the
     // TaskTable stream with no Linear webhook payload to re-derive these).
     platform_user_id: releaseContext.platform_user_id,
+    ...(releaseContext.channel_source !== undefined && {
+      channel_source: releaseContext.channel_source,
+    }),
     ...(releaseContext.linear_oauth_secret_arn !== undefined && {
       linear_oauth_secret_arn: releaseContext.linear_oauth_secret_arn,
     }),
@@ -325,6 +338,9 @@ export async function loadOrchestration(
     child_count: (metaItem.child_count as number) ?? children.length,
     release_context: {
       platform_user_id: metaItem.platform_user_id as string,
+      ...(metaItem.channel_source !== undefined && {
+        channel_source: metaItem.channel_source as string,
+      }),
       ...(metaItem.linear_oauth_secret_arn !== undefined && {
         linear_oauth_secret_arn: metaItem.linear_oauth_secret_arn as string,
       }),

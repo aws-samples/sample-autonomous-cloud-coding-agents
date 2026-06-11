@@ -18,6 +18,7 @@
  */
 
 import { discoverOrchestration } from '../../../src/handlers/shared/orchestration-discovery';
+import { declarativeGraphSource } from '../../../src/handlers/shared/orchestration-graph-source';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -134,5 +135,52 @@ describe('discoverOrchestration', () => {
     });
     expect(result.kind).toBe('seeded');
     if (result.kind === 'seeded') expect(result.alreadyExisted).toBe(true);
+  });
+
+  // #247/#299 trigger-agnostic seam: a custom graphSource (declarative /
+  // planner) drives the SAME validate→seed→reconcile pipeline, bypassing the
+  // Linear fetch entirely.
+  describe('graphSource seam (non-Linear)', () => {
+    test('declarative graph → seeded; never touches the Linear fetch', async () => {
+      const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
+      // No fetchOptions/fetchImpl — if discovery hit the Linear fetch it would throw on the real network.
+      const result = await discoverOrchestration({
+        ...base,
+        ddb: ddb as never,
+        graphSource: declarativeGraphSource([
+          { id: 'phase-1', depends_on: [], title: 'Plan' },
+          { id: 'phase-2', depends_on: ['phase-1'], title: 'Build' },
+          { id: 'phase-3', depends_on: ['phase-2'], title: 'Verify' },
+        ]),
+      });
+      expect(result.kind).toBe('seeded');
+      if (result.kind === 'seeded') {
+        expect(result.childCount).toBe(3);
+        expect(result.rootSubIssueIds).toEqual(['phase-1']); // layer 0
+      }
+    });
+
+    test('declarative graph still rejects an invalid DAG (cycle)', async () => {
+      const ddb = { send: jest.fn() };
+      const result = await discoverOrchestration({
+        ...base,
+        ddb: ddb as never,
+        graphSource: declarativeGraphSource([
+          { id: 'x', depends_on: ['y'] },
+          { id: 'y', depends_on: ['x'] },
+        ]),
+      });
+      expect(result.kind).toBe('rejected');
+      expect(ddb.send).not.toHaveBeenCalled();
+    });
+
+    test('empty declarative graph → single_task', async () => {
+      const ddb = { send: jest.fn() };
+      const result = await discoverOrchestration({
+        ...base, ddb: ddb as never, graphSource: declarativeGraphSource([]),
+      });
+      expect(result.kind).toBe('single_task');
+      expect(ddb.send).not.toHaveBeenCalled();
+    });
   });
 });

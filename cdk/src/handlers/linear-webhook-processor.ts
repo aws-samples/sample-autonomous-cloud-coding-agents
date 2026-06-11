@@ -321,6 +321,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   if (ORCHESTRATION_TABLE && resolvedAccessToken) {
     const releaseContext: OrchestrationReleaseContext = {
       platform_user_id: platformUserId,
+      // This orchestration was seeded by the Linear trigger; stamp the
+      // channel on the meta row so downstream release + rollup follow it
+      // (#247 trigger-agnostic seam). Defaults to 'linear' if ever omitted.
+      channel_source: 'linear',
       ...(channelMetadata.linear_oauth_secret_arn && {
         linear_oauth_secret_arn: channelMetadata.linear_oauth_secret_arn,
       }),

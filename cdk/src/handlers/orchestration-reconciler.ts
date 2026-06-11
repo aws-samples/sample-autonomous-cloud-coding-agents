@@ -58,6 +58,7 @@ import {
   loadOrchestration,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
+import type { ChannelSource } from './shared/types';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
@@ -274,6 +275,11 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
           parentLinearIssueId: meta.parent_linear_issue_id,
           kind: rollupKindFromChildren(freshChildren),
           children: freshChildren,
+          // #247 trigger-agnostic: dispatch the rollup to the channel that
+          // seeded the orchestration (defaults to 'linear' inside postRollup).
+          ...(meta.release_context.channel_source !== undefined && {
+            channelSource: meta.release_context.channel_source as ChannelSource,
+          }),
         });
       } else {
         logger.info('Rollup already claimed — skipping duplicate', {
