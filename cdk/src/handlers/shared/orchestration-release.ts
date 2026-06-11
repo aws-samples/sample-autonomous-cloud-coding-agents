@@ -47,6 +47,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { createTaskCore as CreateTaskCoreFn } from './create-task-core';
 import { selectBaseBranch } from './orchestration-base-branch';
+import { isIntegrationNode } from './orchestration-integration-node';
 import { logger } from './logger';
 import type {
   OrchestrationChildRow,
@@ -99,6 +100,22 @@ export type ReleaseChildResult =
 
 /** Build the child task description from the sub-issue's identifier/title. */
 function buildChildDescription(row: OrchestrationChildRow): string {
+  // #16: the synthetic integration node has no real sub-issue / feature
+  // work — its job is to merge all leaf branches (already merged into its
+  // branch by repo.py's predecessor-merge) into one combined result. Give
+  // the agent a merge-focused instruction rather than a feature prompt.
+  if (isIntegrationNode(row.sub_issue_id)) {
+    return [
+      'Integrate the completed sub-issue branches into one combined result.',
+      '',
+      "All predecessor sub-issue branches have already been merged into this task's",
+      'branch before you started. Your job:',
+      '- Resolve any merge conflicts left in the working tree.',
+      '- Ensure the combined result builds and existing tests pass (run the build/tests).',
+      '- Do NOT add new features — this is an integration/merge task only.',
+      '- Open a PR with the combined result so the epic has a single reviewable artifact.',
+    ].join('\n');
+  }
   const parts: string[] = [];
   if (row.linear_identifier && row.title) {
     parts.push(`${row.linear_identifier}: ${row.title}`);
@@ -120,12 +137,19 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   const channelSource = params.channelSource ?? DEFAULT_ORCHESTRATION_CHANNEL;
 
   const channelMetadata: Record<string, string> = {
-    linear_issue_id: row.sub_issue_id,
     linear_workspace_id: row.linear_workspace_id,
     orchestration_id: row.orchestration_id,
+    // The reconciler maps the terminal task back via this (real or synthetic) id.
     orchestration_sub_issue_id: row.sub_issue_id,
     parent_linear_issue_id: row.parent_linear_issue_id,
   };
+  // #16: only set linear_issue_id (the agent's reaction/comment target) for a
+  // REAL Linear sub-issue. A synthetic integration node has no Linear issue —
+  // passing its id would make the agent's reactionCreate 4xx. Omitting it lets
+  // the agent skip reactions cleanly.
+  if (!isIntegrationNode(row.sub_issue_id)) {
+    channelMetadata.linear_issue_id = row.sub_issue_id;
+  }
   if (row.linear_identifier) channelMetadata.linear_issue_identifier = row.linear_identifier;
   if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
   if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
