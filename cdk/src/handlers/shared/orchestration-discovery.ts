@@ -51,7 +51,8 @@ import {
 } from './orchestration-graph-source';
 import type { FetchSubIssueGraphOptions } from './linear-subissue-fetch';
 import { validateDag } from './orchestration-dag';
-import { seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
+import { withIntegrationNode } from './orchestration-integration-node';
+import { deriveOrchestrationId, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -134,6 +135,37 @@ export async function discoverOrchestration(
     return { kind: 'rejected', reason: validation.reason, message: validation.message };
   }
 
+  // ── 2b. #16: auto-integration node for fan-out. If the validated DAG has
+  // >1 leaf, append a synthetic node depending on all leaves so a pure
+  // fan-out still produces ONE combined result (the node is a diamond
+  // fan-in, reusing A4's merge). No-op for linear chains / explicit
+  // diamonds (≤1 leaf). The orchestration id is derived deterministically
+  // from the parent issue, so we can name the synthetic node before seeding.
+  const orchestrationId = deriveOrchestrationId(parentLinearIssueId);
+  const augmented = withIntegrationNode(fetched.children, orchestrationId);
+  let childrenToSeed = augmented.nodes;
+  if (augmented.added) {
+    // Re-validate defensively — appending a fan-in over leaves cannot
+    // introduce a cycle/dangle/dup, but seeding an invalid graph would be
+    // worse than skipping the synthetic node, so fail-safe to the
+    // un-augmented graph if it ever does.
+    const reValidation = validateDag(childrenToSeed);
+    if (!reValidation.ok) {
+      logger.error('Integration node produced an invalid DAG — seeding without it', {
+        parent_linear_issue_id: parentLinearIssueId,
+        reason: reValidation.reason,
+      });
+      childrenToSeed = fetched.children;
+    } else {
+      logger.info('Orchestration fan-out detected — added integration node', {
+        parent_linear_issue_id: parentLinearIssueId,
+        orchestration_id: orchestrationId,
+        // the synthetic node is last; its predecessors are the leaves it merges
+        leaf_count: childrenToSeed[childrenToSeed.length - 1].depends_on.length,
+      });
+    }
+  }
+
   // ── 3. Persist (idempotent on replay) ────────────────────────────
   let seedResult;
   try {
@@ -143,7 +175,7 @@ export async function discoverOrchestration(
       parentLinearIssueId,
       linearWorkspaceId,
       repo,
-      children: fetched.children,
+      children: childrenToSeed,
       now,
       releaseContext,
       ...(ttl !== undefined && { ttl }),
@@ -163,7 +195,7 @@ export async function discoverOrchestration(
   return {
     kind: 'seeded',
     orchestrationId: seedResult.orchestrationId,
-    childCount: fetched.children.length,
+    childCount: childrenToSeed.length,
     rootSubIssueIds,
     alreadyExisted: seedResult.alreadyExisted,
   };
