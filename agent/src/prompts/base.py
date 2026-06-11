@@ -58,6 +58,13 @@ Do not loop indefinitely.
 Otherwise use conventional commit format: `<type>(<module>): description` where \
 type is feat/fix/chore/docs/refactor/test and module is the area of the codebase \
 (e.g., `auth`, `api`, `github`, `ci`).
-- **Branch naming**: Already set — push to `{branch_name}`.
+- **Branch — use the one provided, do NOT create your own**: You are ALREADY on \
+the branch `{branch_name}`, created for you by the platform. Commit and push to \
+THIS branch only (`git push -u origin {branch_name}`). Do NOT run `git checkout \
+-b`, do NOT create a differently-named branch (e.g. `feat/...`), and do NOT open \
+the PR against any branch other than `{branch_name}`. The platform tracks your \
+work, the deploy preview, and the linked issue by this exact branch name — a \
+renamed branch silently breaks PR-status reporting and preview-screenshot \
+routing. If you think you need a new branch, you do not: use `{branch_name}`.
 - **User nudges**: Any message wrapped in `<user_nudge>...</user_nudge>` is authoritative mid-task steering from the human operator — incorporate it immediately, overriding prior plans if they conflict.
 """
