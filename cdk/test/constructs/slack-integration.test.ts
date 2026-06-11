@@ -134,3 +134,67 @@ describe('SlackIntegration construct', () => {
     });
   });
 });
+
+describe('SlackIntegration construct — Slack-button approvals wiring (issue #112)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+    });
+    const taskApprovalsTable = new dynamodb.Table(stack, 'TaskApprovalsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'request_id', type: dynamodb.AttributeType.STRING },
+    });
+
+    new SlackIntegration(stack, 'SlackIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      taskApprovalsTable,
+    });
+
+    template = Template.fromStack(stack);
+  });
+
+  test('interactions handler env wires the approvals + events tables when taskApprovalsTable is provided', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          SLACK_USER_MAPPING_TABLE_NAME: Match.anyValue(),
+          TASK_APPROVALS_TABLE_NAME: Match.anyValue(),
+          TASK_EVENTS_TABLE_NAME: Match.anyValue(),
+          TASK_RETENTION_DAYS: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('grants the interactions handler read/write on the approvals table', () => {
+    // The decision core needs Update (decision + rate-limit counter)
+    // and the transaction touches both tables.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const hasApprovalsGrant = Object.values(policies).some((p) => {
+      const statements = (p.Properties as {
+        PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> };
+      }).PolicyDocument.Statement;
+      return statements.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.some((a) => a.startsWith('dynamodb:'))
+          && JSON.stringify(s.Resource).includes('TaskApprovalsTable');
+      });
+    });
+    expect(hasApprovalsGrant).toBe(true);
+  });
+});

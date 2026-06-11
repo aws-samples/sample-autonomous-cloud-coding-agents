@@ -91,15 +91,27 @@ const SLACK_DEDUP_ATTRIBUTE: Record<string, string | null> = {
   agent_error: 'slack_dispatched_agent_error',
   task_created: null,
   session_started: null,
+  // Approval gates are per-request_id, and a task can fire many gates
+  // over its lifetime — a per-task presence marker would suppress every
+  // gate after the first. A duplicate post on a partial-batch retry is
+  // self-limiting UX-wise: the buttons carry the same
+  // `{task_id}:{request_id}`, and the decision core's PENDING-only
+  // transaction makes the second click a no-op ("already decided").
+  approval_requested: null,
+  approval_stranded: null,
 };
 
 /** Event types this dispatcher renders. Must stay in sync with the
  *  Slack entries in ``CHANNEL_DEFAULTS`` (see fanout-task-events.ts) —
  *  drift means the router subscribes Slack to events that the
  *  dispatcher silently ignores, which lies in batch telemetry
- *  (issue #64 review Cat 7). Forward-compat ``approval_required`` and
- *  ``status_response`` are deliberately absent until their emitters
- *  ship; until then they fall through and are dropped at this gate.
+ *  (issue #64 review Cat 7). Forward-compat ``status_response`` is
+ *  deliberately absent until its emitter ships; until then it falls
+ *  through and is dropped at this gate.
+ *  ``approval_requested`` / ``approval_stranded`` are the Cedar HITL
+ *  gate signals (issue #112) — rendered with Approve/Deny buttons for
+ *  low/medium severity (high severity points at the CLI per §11.2
+ *  finding #4).
  *  ``pr_created`` is intentionally omitted from Slack — the
  *  ``task_completed`` block already carries the View PR button, so a
  *  separate "PR opened" message just produces visible duplication
@@ -114,6 +126,8 @@ export const NOTIFIABLE_EVENTS = new Set<string>([
   'task_timed_out',
   'task_stranded',
   'agent_error',
+  'approval_requested',
+  'approval_stranded',
 ]);
 
 /**

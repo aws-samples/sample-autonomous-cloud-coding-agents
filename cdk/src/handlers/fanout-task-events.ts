@@ -304,10 +304,19 @@ export function parseStreamRecord(record: DynamoDBRecord): FanOutEvent | null {
  * ``agent/src/hooks.py``) are: ``pr_created``, ``nudge_acknowledged``,
  * ``repo_setup_complete``, ``agent_execution_complete``,
  * ``task_cancelled_acknowledged``, ``cancel_detected``,
- * ``trajectory_uploaded``, ``trace_truncated``. Only ``pr_created``
- * is currently in any channel's default filter (§6.2 Slack + GitHub).
+ * ``trajectory_uploaded``, ``trace_truncated``, plus the Cedar HITL
+ * approval milestones (``approval_requested`` from the agent's
+ * PreToolUse hook, ``approval_stranded`` from the stranded-task
+ * reconciler). ``pr_created`` routes to Slack + GitHub (§6.2);
+ * ``approval_requested`` / ``approval_stranded`` route to Slack (and
+ * Email for ``approval_requested``) so the user sees the Cedar gate
+ * where they are (issue #112 — Slack-button approvals).
  */
-const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created']);
+const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set([
+  'pr_created',
+  'approval_requested',
+  'approval_stranded',
+]);
 
 /**
  * Unwrap ``agent_milestone`` events to their milestone name for

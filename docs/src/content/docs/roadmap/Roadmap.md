@@ -81,7 +81,8 @@ What's shipped and what's coming next.
 - [x] **DDB Stream fanout** - FanOut Consumer Lambda on TaskEventsTable streams (ParallelizationFactor: 1 for per-task ordering) routes events to channel dispatchers
 - [x] **GitHub edit-in-place** - Single status comment per task on the target PR, edited in place as progress events fire (phase, milestone, cost, link)
 - [x] **Routable agent milestones** - Named checkpoints (`pr_created`, `nudge_acknowledged`) unwrapped against allowlist for channel filter matching
-- [x] **Slack notification dispatcher** - FanOut Block Kit messages for Slack-origin tasks (lifecycle events, threaded replies, terminal dedup, in-thread cancel). Generic fallback text for unmapped event types (e.g. some milestones); richer milestone and approval-gate rendering is follow-up work
+- [x] **Slack notification dispatcher** - FanOut Block Kit messages for Slack-origin tasks (lifecycle events, threaded replies, terminal dedup, in-thread cancel). Generic fallback text for unmapped event types (e.g. some milestones); richer milestone rendering is follow-up work
+- [x] **Slack-button HITL approvals** - `approval_requested` renders with in-thread ✅ Approve / ❌ Deny buttons for low/medium-severity Cedar gates (high severity stays CLI-only); clicks map the Slack identity to the linked platform user and run the same atomic decision core as `bgagent approve`/`deny` (#112)
 - [x] **Deploy-preview screenshots** - Listens for GitHub `deployment_status: success` events from any provider (Vercel, Amplify Hosting, Netlify, GitHub Actions); captures the preview URL via AgentCore Browser; posts a markdown image comment on the open PR (and on the linked Linear issue if Linear is configured). Lambda-only, deterministic, ~10–15 s post-deploy. See [Deploy preview screenshots guide](/using/deploy-preview-screenshots-guide).
 - [ ] **Email dispatcher** - Log-only stub; pending SES integration
 
@@ -185,7 +186,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 | Capability | Description |
 |------------|-------------|
 | **Additional git providers** | GitLab (and optionally Bitbucket). Same workflow, provider-specific API adapters. |
-| **Slack notification polish** | Rich Block Kit for `agent_milestone` and `approval_requested` (today many map to generic fallback text); in-thread approve/deny buttons wired to HITL APIs. Should render **Smart progress updates** when that ships. |
+| **Slack notification polish** | Rich Block Kit for `agent_milestone` (today many map to generic fallback text). Should render **Smart progress updates** when that ships. (`approval_requested` Block Kit + in-thread approve/deny buttons shipped — see **Slack-button HITL approvals** under What's ready.) |
 | **Control panel** | Web UI: task list, task detail with logs/traces, cancel, metrics dashboards, cost attribution. Task detail should show manager-style progress alongside raw events/traces. |
 | **Email notification dispatcher** | SES-based email notifications via the existing fanout pipeline. Log-only stub ships today (see unchecked **Email dispatcher** under What's ready). |
 | **Per-user notification preferences** | DynamoDB (or equivalent) store for preferred channels, per-channel config, and event filters (`INPUT_GATEWAY.md`). |

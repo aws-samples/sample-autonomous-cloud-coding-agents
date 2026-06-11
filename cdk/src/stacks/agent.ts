@@ -677,6 +677,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,

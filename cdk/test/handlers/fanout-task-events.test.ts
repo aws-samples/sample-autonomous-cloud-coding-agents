@@ -247,22 +247,21 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
 
   test('every Slack-default event the dispatcher actually renders today is in NOTIFIABLE_EVENTS (issue #64 review Cat 7 drift guard)', () => {
     // The router subscribes Slack to events the dispatcher must
-    // render. ``approval_requested``, ``approval_stranded``, and
-    // ``status_response`` are forward-compat (no Slack-side renderer
-    // today — the CLI surfaces approval UX; Slack is only in the
-    // channel-defaults set so a future Slack-button renderer can
-    // light up without changing the router filter). They're allowed
-    // to be in CHANNEL_DEFAULTS.slack but absent from
-    // NOTIFIABLE_EVENTS — when their emitters land, this test will
-    // start failing and force the dispatcher update at the same time.
-    // Every OTHER Slack default must be renderable, otherwise
-    // telemetry lies. Use ``requireActual`` to bypass the
+    // render. ``status_response`` is forward-compat (no emitter yet);
+    // it's allowed to be in CHANNEL_DEFAULTS.slack but absent from
+    // NOTIFIABLE_EVENTS — when its emitter lands, this test will start
+    // failing and force the dispatcher update at the same time.
+    // ``approval_requested`` / ``approval_stranded`` graduated from
+    // forward-compat in issue #112 (Slack-button approvals): they now
+    // have real renderers in slack-blocks.ts and MUST be in
+    // NOTIFIABLE_EVENTS. Every other Slack default must be renderable,
+    // otherwise telemetry lies. Use ``requireActual`` to bypass the
     // slack-notify mock and read the real exported NOTIFIABLE_EVENTS
     // set.
     const real = jest.requireActual<typeof import('../../src/handlers/slack-notify')>(
       '../../src/handlers/slack-notify',
     );
-    const forwardCompat = new Set(['approval_requested', 'approval_stranded', 'status_response']);
+    const forwardCompat = new Set(['status_response']);
     const expectedRenderable = [...CHANNEL_DEFAULTS.slack].filter(
       e => !forwardCompat.has(e),
     );

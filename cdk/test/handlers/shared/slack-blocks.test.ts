@@ -202,4 +202,77 @@ describe('renderSlackBlocks', () => {
     expect(text.length).toBeLessThan(400);
     expect(text).toContain('...');
   });
+
+  describe('approval_requested (issue #112 — Slack-button approvals)', () => {
+    const gateMetadata = {
+      request_id: '01JREQ',
+      tool_name: 'Bash',
+      input_preview: 'git push --force',
+      reason: 'Force push to a protected branch',
+      severity: 'medium',
+      timeout_s: 3600,
+    };
+
+    test('renders the gate details with Approve/Deny buttons for medium severity', () => {
+      const msg = renderSlackBlocks('approval_requested', baseTask, gateMetadata);
+      expect(msg.text).toContain('Approval required');
+      const text = sectionText(msg.blocks[0]);
+      expect(text).toContain(':lock:');
+      expect(text).toContain('Bash');
+      expect(text).toContain('git push --force');
+      expect(text).toContain('Force push');
+      expect(text).toContain('medium');
+      expect(text).toContain('1h');
+
+      const actions = actionsBlock(msg.blocks[1]);
+      expect(actions.elements).toHaveLength(2);
+      const [approve, deny] = actions.elements;
+      if (!('action_id' in approve) || !('action_id' in deny)) throw new Error('expected action buttons');
+      // action_id carries {task_id}:{request_id} — the interactions
+      // handler splits on ':' to address the approval row.
+      expect(approve.action_id).toBe('approve_action:01HXYZ123:01JREQ');
+      expect(deny.action_id).toBe('deny_action:01HXYZ123:01JREQ');
+      // Both buttons require a confirm dialog (fat-finger guard).
+      expect(approve.confirm).toBeDefined();
+      expect(deny.confirm).toBeDefined();
+    });
+
+    test('renders buttons for low severity', () => {
+      const msg = renderSlackBlocks('approval_requested', baseTask, { ...gateMetadata, severity: 'low' });
+      expect(msg.blocks.some((b) => b.type === 'actions')).toBe(true);
+    });
+
+    test('high severity renders NO buttons and points at the CLI (§11.2 finding #4)', () => {
+      const msg = renderSlackBlocks('approval_requested', baseTask, { ...gateMetadata, severity: 'high' });
+      expect(msg.blocks.some((b) => b.type === 'actions')).toBe(false);
+      const cliHint = sectionText(msg.blocks[1]);
+      expect(cliHint).toContain('bgagent approve 01HXYZ123 01JREQ');
+    });
+
+    test('missing request_id renders the notification without buttons (nothing to address)', () => {
+      const { request_id: _rid, ...withoutRequestId } = gateMetadata;
+      const msg = renderSlackBlocks('approval_requested', baseTask, withoutRequestId);
+      expect(msg.blocks).toHaveLength(1);
+      expect(msg.blocks.some((b) => b.type === 'actions')).toBe(false);
+    });
+
+    test('long input_preview is truncated', () => {
+      const msg = renderSlackBlocks('approval_requested', baseTask, {
+        ...gateMetadata,
+        input_preview: 'Y'.repeat(500),
+      });
+      const text = sectionText(msg.blocks[0]);
+      expect(text).toContain('...');
+      expect(text.length).toBeLessThan(600);
+    });
+  });
+
+  test('renders approval_stranded as an informational warning without buttons', () => {
+    const msg = renderSlackBlocks('approval_stranded', baseTask, { request_id: '01JREQ' });
+    expect(msg.text).toContain('stranded');
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(':warning:');
+    expect(text).toContain('01JREQ');
+    expect(msg.blocks.some((b) => b.type === 'actions')).toBe(false);
+  });
 });

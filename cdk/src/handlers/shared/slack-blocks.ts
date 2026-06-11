@@ -118,9 +118,87 @@ export function renderSlackBlocks(
       return taskStrandedMessage(task, eventMetadata);
     case 'agent_error':
       return agentErrorMessage(task, eventMetadata);
+    case 'approval_requested':
+      return approvalRequestedMessage(task, eventMetadata);
+    case 'approval_stranded':
+      return approvalStrandedMessage(task, eventMetadata);
     default:
       return simpleStatusMessage(task, `Event: ${eventType}`);
   }
+}
+
+/**
+ * Cedar HITL severities that may be decided via Slack buttons.
+ * `high` gates require a fresh CLI Cognito flow (§11.2 finding #4) —
+ * the message renders without buttons and points at the CLI instead.
+ */
+export const SLACK_APPROVABLE_SEVERITIES: ReadonlySet<string> = new Set(['low', 'medium']);
+
+/**
+ * `approval_requested` — the Cedar HITL gate fired and the task is
+ * paused in AWAITING_APPROVAL (issue #112).
+ *
+ * The action_id carries `approve_action:{task_id}:{request_id}` (or
+ * `deny_action:…`) — the interactions handler splits on `:` to address
+ * the approval row. Both ids are ULIDs (no `:` in the alphabet), so the
+ * separator is unambiguous. The Slack-side identity → platform user
+ * mapping and the severity re-check happen in `slack-interactions.ts`;
+ * the buttons here are UX, not authorization.
+ */
+function approvalRequestedMessage(
+  task: Pick<TaskRecord, 'task_id' | 'repo'>,
+  eventMetadata?: Record<string, unknown>,
+): SlackMessage {
+  const requestId = typeof eventMetadata?.request_id === 'string' ? eventMetadata.request_id : undefined;
+  const toolName = typeof eventMetadata?.tool_name === 'string' ? eventMetadata.tool_name : 'a tool';
+  const inputPreview = typeof eventMetadata?.input_preview === 'string' ? eventMetadata.input_preview : '';
+  const reason = typeof eventMetadata?.reason === 'string' ? eventMetadata.reason : '';
+  const severity = typeof eventMetadata?.severity === 'string' ? eventMetadata.severity : 'medium';
+  const timeoutS = typeof eventMetadata?.timeout_s === 'number' ? eventMetadata.timeout_s : undefined;
+
+  const lines = [`:lock: *Approval required* for \`${task.repo}\``];
+  lines.push(`_Tool:_ \`${toolName}\`${inputPreview ? ` — \`${truncate(inputPreview, 150)}\`` : ''}`);
+  if (reason) lines.push(`_Reason:_ ${truncate(reason, 200)}`);
+  lines.push(`_Severity:_ ${severity}${timeoutS ? ` · _times out in ${formatDuration(timeoutS)}_` : ''}`);
+  const text = lines.join('\n');
+
+  const blocks: SlackBlock[] = [section(text)];
+
+  if (requestId && SLACK_APPROVABLE_SEVERITIES.has(severity)) {
+    blocks.push(actions(task.task_id, [
+      approveButton(task.task_id, requestId),
+      denyButton(task.task_id, requestId),
+    ]));
+  } else if (requestId) {
+    // High severity: CLI-only per §11.2 finding #4 — a compromised
+    // Slack identity must not be able to approve the riskiest gates.
+    blocks.push(section(
+      `:shield: High-severity gate — approve via CLI: \`bgagent approve ${task.task_id} ${requestId}\``,
+    ));
+  }
+
+  return {
+    text: `Approval required for ${task.repo}`,
+    blocks,
+  };
+}
+
+/**
+ * `approval_stranded` — the reconciler found a PENDING gate whose task
+ * stopped heartbeating. Informational; nothing left to click.
+ */
+function approvalStrandedMessage(
+  task: Pick<TaskRecord, 'task_id' | 'repo'>,
+  eventMetadata?: Record<string, unknown>,
+): SlackMessage {
+  const requestId = typeof eventMetadata?.request_id === 'string'
+    ? `\n_Request:_ \`${eventMetadata.request_id}\``
+    : '';
+  const text = `:warning: *Approval request stranded* for \`${task.repo}\` — the task stopped before a decision was recorded.${requestId}`;
+  return {
+    text: `Approval request stranded for ${task.repo}`,
+    blocks: [section(text)],
+  };
 }
 
 function taskCreatedMessage(
@@ -284,6 +362,36 @@ function dangerButton(label: string, actionId: string): ActionButtonElement {
       text: { type: 'mrkdwn', text: 'This will stop the running agent.' },
       confirm: { type: 'plain_text', text: 'Cancel' },
       deny: { type: 'plain_text', text: 'Keep running' },
+    },
+  };
+}
+
+function approveButton(taskId: string, requestId: string): ActionButtonElement {
+  return {
+    type: 'button',
+    text: { type: 'plain_text', text: '✅ Approve' },
+    action_id: `approve_action:${taskId}:${requestId}`,
+    style: 'primary',
+    confirm: {
+      title: { type: 'plain_text', text: 'Approve this tool call?' },
+      text: { type: 'mrkdwn', text: 'The agent will run the gated tool call and continue.' },
+      confirm: { type: 'plain_text', text: 'Approve' },
+      deny: { type: 'plain_text', text: 'Go back' },
+    },
+  };
+}
+
+function denyButton(taskId: string, requestId: string): ActionButtonElement {
+  return {
+    type: 'button',
+    text: { type: 'plain_text', text: '❌ Deny' },
+    action_id: `deny_action:${taskId}:${requestId}`,
+    style: 'danger',
+    confirm: {
+      title: { type: 'plain_text', text: 'Deny this tool call?' },
+      text: { type: 'mrkdwn', text: 'The agent will skip the gated tool call and adjust.' },
+      confirm: { type: 'plain_text', text: 'Deny' },
+      deny: { type: 'plain_text', text: 'Go back' },
     },
   };
 }

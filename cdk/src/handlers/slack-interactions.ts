@@ -20,7 +20,9 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { approvalDecisionConfigFromEnv, processApprovalDecision } from './shared/approval-decision';
 import { logger } from './shared/logger';
+import { SLACK_APPROVABLE_SEVERITIES } from './shared/slack-blocks';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -28,6 +30,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
+const TASK_APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME;
 
 interface SlackInteractionPayload {
   readonly type: string;
@@ -48,6 +51,14 @@ interface SlackInteractionPayload {
  * Slack sends interaction payloads as a URL-encoded `payload` field in the body.
  * Currently handles:
  * - `cancel_task:{task_id}` — Cancel a running task via the "Cancel Task" button.
+ * - `approve_action:{task_id}:{request_id}` / `deny_action:{task_id}:{request_id}`
+ *   — Cedar HITL approval decisions via Slack buttons (issue #112). The
+ *   Slack identity is mapped to a platform user via `SlackUserMappingTable`
+ *   (user-initiated linking — §11.2 finding #4), the gate's severity is
+ *   re-checked server-side (low/medium only; high is CLI-only), and the
+ *   decision goes through the same `processApprovalDecision` core as the
+ *   HTTP approve/deny handlers — including the ownership condition, so a
+ *   linked-but-wrong user's click is rejected by the transaction itself.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
@@ -83,6 +94,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       for (const action of payload.actions) {
         if (action.action_id.startsWith('cancel_task:')) {
           await handleCancelAction(payload, action.action_id);
+        } else if (
+          action.action_id.startsWith('approve_action:')
+          || action.action_id.startsWith('deny_action:')
+        ) {
+          await handleApprovalAction(payload, action.action_id);
         }
       }
     }
@@ -175,6 +191,125 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
     } else {
       throw err;
     }
+  }
+}
+
+/**
+ * Handle `approve_action:{task_id}:{request_id}` / `deny_action:…`
+ * Block Kit clicks (issue #112).
+ *
+ * Trust chain:
+ *   1. The interaction payload is Slack-signature-verified by the
+ *      handler before we get here.
+ *   2. The Slack identity (`team_id#user_id`) maps to a platform user
+ *      via `SlackUserMappingTable` — rows are user-initiated
+ *      (`bgagent slack link`), never admin-written (§11.2 finding #4).
+ *   3. Severity is re-checked SERVER-SIDE from the approvals row —
+ *      the absence of buttons on high-severity messages is UX, not
+ *      enforcement; a forged action_id must still fail here.
+ *   4. `processApprovalDecision` enforces ownership
+ *      (`user_id = :caller`) inside the transaction — a linked but
+ *      non-owning user's click fails the condition and reads as
+ *      "not found or not yours".
+ *
+ * All outcomes are reported as ephemeral `response_url` messages so
+ * only the clicker sees them.
+ */
+async function handleApprovalAction(payload: SlackInteractionPayload, actionId: string): Promise<void> {
+  const [verb, taskId, approvalRequestId] = actionId.split(':');
+  const decision = verb === 'approve_action' ? 'approve' as const : 'deny' as const;
+  if (!taskId || !approvalRequestId) {
+    logger.warn('Slack approval action_id malformed', { action_id: actionId });
+    await postToResponseUrl(payload.response_url, ':warning: Malformed approval action — please use the CLI.');
+    return;
+  }
+
+  if (!TASK_APPROVALS_TABLE) {
+    logger.error('TASK_APPROVALS_TABLE_NAME not set — Slack approvals disabled');
+    await postToResponseUrl(payload.response_url,
+      ':warning: Slack approvals are not configured on this stack. Use `bgagent approve`/`deny` from the CLI.');
+    return;
+  }
+
+  // 1. Slack identity → platform user (user-initiated mapping only).
+  const teamId = payload.user.team_id;
+  const slackUserId = payload.user.id;
+  const mappingResult = await ddb.send(new GetCommand({
+    TableName: USER_MAPPING_TABLE,
+    Key: { slack_identity: `${teamId}#${slackUserId}` },
+  }));
+  if (!mappingResult.Item || mappingResult.Item.status === 'pending') {
+    await postToResponseUrl(payload.response_url,
+      ':link: Your Slack account is not linked. Run `bgagent slack link` first, then re-click.');
+    return;
+  }
+  const platformUserId = mappingResult.Item.platform_user_id as string;
+
+  // 2. Server-side severity gate (§11.2 finding #4). The buttons only
+  // render on low/medium gates, but the message is advisory — re-read
+  // the approvals row and refuse high severity regardless of what the
+  // action_id claims. Missing row falls through to the decision core,
+  // which collapses it into the no-oracle "not found" outcome.
+  const approvalRow = await ddb.send(new GetCommand({
+    TableName: TASK_APPROVALS_TABLE,
+    Key: { task_id: taskId, request_id: approvalRequestId },
+  }));
+  const severity = approvalRow.Item?.severity as string | undefined;
+  if (severity && !SLACK_APPROVABLE_SEVERITIES.has(severity)) {
+    logger.warn('Slack approval rejected: severity not Slack-approvable', {
+      task_id: taskId,
+      request_id: approvalRequestId,
+      severity,
+      slack_identity: `${teamId}#${slackUserId}`,
+    });
+    await postToResponseUrl(payload.response_url,
+      `:shield: This is a *${severity}*-severity gate — it can only be decided from the CLI with a fresh login: `
+      + `\`bgagent ${decision} ${taskId} ${approvalRequestId}\``);
+    return;
+  }
+
+  // 3. Shared decision core — identical invariants to the HTTP path.
+  const outcome = await processApprovalDecision(ddb, approvalDecisionConfigFromEnv(), {
+    taskId,
+    requestId: approvalRequestId,
+    callerUserId: platformUserId,
+    decision,
+    ...(decision === 'approve' ? { scope: 'this_call' as const } : { sanitizedReason: 'Denied via Slack' }),
+  });
+
+  switch (outcome.kind) {
+    case 'ok': {
+      logger.info('Slack approval decision recorded', {
+        task_id: taskId,
+        request_id: approvalRequestId,
+        decision,
+        platform_user_id: platformUserId,
+        slack_identity: `${teamId}#${slackUserId}`,
+      });
+      const emoji = decision === 'approve' ? ':white_check_mark:' : ':no_entry:';
+      const label = decision === 'approve' ? 'Approved' : 'Denied';
+      await postToResponseUrl(payload.response_url,
+        `${emoji} ${label} — the agent will pick the decision up on its next poll.`);
+      return;
+    }
+    case 'rate_limited':
+      await postToResponseUrl(payload.response_url,
+        `:hourglass: Rate limit exceeded (${outcome.limit} decisions/minute). Try again shortly.`);
+      return;
+    case 'not_found':
+      // Includes "owned by someone else" — same no-oracle collapse as
+      // the HTTP handlers (§7.1 finding #6).
+      await postToResponseUrl(payload.response_url,
+        ':mag: Approval request not found, already decided, or not yours to decide.');
+      return;
+    case 'not_awaiting':
+      await postToResponseUrl(payload.response_url,
+        ':warning: The task is no longer awaiting this approval (it may have timed out).');
+      return;
+    case 'transaction_unknown':
+      await postToResponseUrl(payload.response_url,
+        ':warning: Could not record the decision — please retry or use the CLI.');
+      return;
   }
 }
 

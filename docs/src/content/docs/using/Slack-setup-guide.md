@@ -26,6 +26,7 @@ This single command handles everything: deploying the stack (if needed), generat
 - **@Shoof mentions**: `@Shoof fix the bug in org/repo#42` submits a task. Reactions on your message show progress: :eyes: (received) → :hourglass_flowing_sand: (working) → :white_check_mark: (done)
 - **DMs**: Message Shoof directly for private task submissions
 - **Notifications**: Threaded messages show task_created → completed (with PR link, duration, cost). The Cancel button lets you stop a running task.
+- **HITL approvals**: When a Cedar approval gate fires, the thread gets an `:lock: Approval required` message with ✅ Approve / ❌ Deny buttons for low/medium-severity gates. Clicking requires a linked account (`bgagent slack link`) and decides the same approval the CLI's `bgagent approve`/`deny` would — high-severity gates are CLI-only by design.
 - **Multi-workspace**: Each workspace installs via OAuth and gets its own bot token
 
 ## Step-by-step setup

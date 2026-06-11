@@ -1518,8 +1518,11 @@ Fan-out dispatch rules (extending Phase 1b stubs):
    - Lambda validates both tokens, writes `{slack_user_id, cognito_sub, created_at}` to `SlackUserMappingTable`
    - `MapSlackUserFn` IAM allows `PutItem` only — no admin bulk-write API
 3. Slack app does **not** have `chat:write.admin` scope or any workspace-wide write capability. Only the per-user OAuth flow can create mappings.
-4. When a Slack button fires: the fan-out Lambda receives the Slack `user_id` → looks up the mapping → obtains `cognito_sub` → impersonates the user for the approve/deny call. The fan-out Lambda's IAM role allows `sts:AssumeRole` into a dedicated `SlackApprovalProxyRole` that restricts approve/deny to ONLY `severity: low` or `severity: medium` approvals. `severity: high` gates **cannot** be approved via Slack — they require a CLI approve with a fresh Cognito JWT.
-5. The Slack approval button payload is cryptographically signed (Slack's signing secret) and includes the `task_id`/`request_id`; the fan-out Lambda re-verifies on receipt.
+4. When a Slack button fires: the interactions Lambda receives the Slack `user_id` → looks up the mapping → obtains the platform user id → records the decision **as that user**. `severity: high` gates **cannot** be approved via Slack — they require a CLI approve with a fresh Cognito JWT.
+
+   > **Implementation note (issue #112).** The shipped implementation enforces these constraints directly in `SlackInteractionsFn` rather than via the `sts:AssumeRole` proxy this section originally sketched: (a) the severity cap is re-checked **server-side** from the approvals row before any write (the absence of buttons on high-severity messages is UX, not enforcement); (b) the decision runs through the same `processApprovalDecision` core as `ApproveTaskFn`/`DenyTaskFn` (`cdk/src/handlers/shared/approval-decision.ts`), so the ownership condition (`user_id = :caller`) inside the `TransactWriteItems` rejects a linked-but-wrong user at the transaction layer; (c) Slack approvals always record `scope: this_call` — blanket scoped approvals require the CLI. The IAM-role indirection added no enforcement the row conditions don't already provide, at the cost of a cross-role hop.
+
+5. The Slack approval button payload is cryptographically signed (Slack's signing secret) and includes the `task_id`/`request_id` in the `action_id` (`approve_action:{task_id}:{request_id}`); the interactions Lambda re-verifies the signature on receipt.
 
 ```mermaid
 flowchart TB

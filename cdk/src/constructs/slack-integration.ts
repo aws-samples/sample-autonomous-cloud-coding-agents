@@ -47,6 +47,10 @@ export interface SlackIntegrationProps {
   /** The DynamoDB task events table (must have DynamoDB Streams enabled). */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** The Cedar HITL approvals table (optional — enables Slack-button
+   *  approve/deny on `approval_requested` messages; issue #112). */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
@@ -305,6 +309,19 @@ export class SlackIntegration extends Construct {
     slackInteractionsFn.addToRolePolicy(readSlackSecretsPolicy);
     props.taskTable.grantReadWriteData(slackInteractionsFn);
     this.userMappingTable.grantReadData(slackInteractionsFn);
+    // Slack-button HITL approvals (issue #112): the interactions handler
+    // runs the same decision core as ApproveTaskFn/DenyTaskFn, which
+    // needs the approvals table (decision row + rate-limit counter) and
+    // the events table (approval_decision_recorded audit). Without the
+    // approvals table, approval clicks degrade to an ephemeral
+    // "not configured" message.
+    if (props.taskApprovalsTable) {
+      slackInteractionsFn.addEnvironment('TASK_APPROVALS_TABLE_NAME', props.taskApprovalsTable.tableName);
+      slackInteractionsFn.addEnvironment('TASK_EVENTS_TABLE_NAME', props.taskEventsTable.tableName);
+      slackInteractionsFn.addEnvironment('TASK_RETENTION_DAYS', String(props.taskRetentionDays ?? 90));
+      props.taskApprovalsTable.grantReadWriteData(slackInteractionsFn);
+      props.taskEventsTable.grantWriteData(slackInteractionsFn);
+    }
 
     // --- Slash Command Acknowledger ---
     const slackCommandsFn = new lambda.NodejsFunction(this, 'SlackCommandsFn', {

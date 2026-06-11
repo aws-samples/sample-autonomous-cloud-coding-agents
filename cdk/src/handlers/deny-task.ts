@@ -17,28 +17,21 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { approvalDecisionConfigFromEnv, processApprovalDecision } from './shared/approval-decision';
 import { scanDenyReason } from './shared/deny-reason-scanner';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;
-const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
-const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME;
-if (!TASK_TABLE_NAME || !TASK_APPROVALS_TABLE_NAME || !EVENTS_TABLE_NAME) {
-  throw new Error(
-    'deny-task handler requires TASK_TABLE_NAME, TASK_APPROVALS_TABLE_NAME, and TASK_EVENTS_TABLE_NAME env vars',
-  );
-}
-const DENY_RATE_LIMIT_PER_MINUTE = Number(process.env.APPROVE_RATE_LIMIT_PER_MINUTE ?? '30');
-const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
+// Validates the required table env vars at module load so a broken
+// deployment fails loudly at cold start, matching the old behavior.
+const DECISION_CONFIG = approvalDecisionConfigFromEnv();
 
 /**
  * POST /v1/tasks/{task_id}/deny — User denies a pending approval.
@@ -100,117 +93,49 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ? scanDenyReason(rawReason).slice(0, DENY_REASON_MAX_LENGTH)
       : '';
 
-    const nowIso = new Date().toISOString();
-    const nowEpoch = Math.floor(Date.now() / 1000);
-
-    // 3. Per-user per-minute rate limit. Shares the counter namespace
-    // with approve — hitting APPROVE_RATE_LIMIT_PER_MINUTE total
-    // approve+deny actions trips the limit on both endpoints.
-    const minuteBucket = formatMinuteBucket(new Date());
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: TASK_APPROVALS_TABLE_NAME,
-        Key: {
-          task_id: `RATE#${callerUserId}#APPROVE`,
-          request_id: `MINUTE#${minuteBucket}`,
-        },
-        UpdateExpression: 'ADD #count :one SET #ttl = :ttl',
-        ConditionExpression: 'attribute_not_exists(#count) OR #count < :max',
-        ExpressionAttributeNames: {
-          '#count': 'count',
-          '#ttl': 'ttl',
-        },
-        ExpressionAttributeValues: {
-          ':one': 1,
-          ':max': DENY_RATE_LIMIT_PER_MINUTE,
-          ':ttl': nowEpoch + 120,
-        },
-      }));
-    } catch (err: unknown) {
-      const name = (err as { name?: string })?.name;
-      if (name === 'ConditionalCheckFailedException') {
-        return errorResponse(
-          429,
-          ErrorCode.RATE_LIMIT_EXCEEDED,
-          `Rate limit exceeded: at most ${DENY_RATE_LIMIT_PER_MINUTE} approve/deny decisions per minute.`,
-          requestId,
-        );
-      }
-      throw err;
+    // 3–5. Rate limit + atomic transition (§7.2) + audit live in the
+    // shared decision core (`shared/approval-decision.ts`), reused by
+    // the Slack-button approvals path (issue #112).
+    const outcome = await processApprovalDecision(ddb, DECISION_CONFIG, {
+      taskId,
+      requestId: request_id,
+      callerUserId,
+      decision: 'deny',
+      sanitizedReason,
+    });
+    if (outcome.kind === 'rate_limited') {
+      return errorResponse(
+        429,
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+        `Rate limit exceeded: at most ${outcome.limit} approve/deny decisions per minute.`,
+        requestId,
+      );
     }
-
-    // 4. Cross-table atomic transition (§7.2).
-    try {
-      await ddb.send(new TransactWriteCommand({
-        TransactItems: [
-          {
-            Update: {
-              TableName: TASK_APPROVALS_TABLE_NAME,
-              Key: { task_id: taskId, request_id },
-              UpdateExpression:
-                'SET #status = :denied, decided_at = :now, deny_reason = :reason',
-              ConditionExpression:
-                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller',
-              ExpressionAttributeNames: { '#status': 'status' },
-              ExpressionAttributeValues: {
-                ':denied': 'DENIED',
-                ':pending': 'PENDING',
-                ':now': nowIso,
-                ':reason': sanitizedReason,
-                ':caller': callerUserId,
-              },
-            },
-          },
-          {
-            Update: {
-              TableName: TASK_TABLE_NAME,
-              Key: { task_id: taskId },
-              UpdateExpression: 'SET last_decision_at = :now',
-              ConditionExpression:
-                '#status = :awaiting AND awaiting_approval_request_id = :rid',
-              ExpressionAttributeNames: { '#status': 'status' },
-              ExpressionAttributeValues: {
-                ':awaiting': 'AWAITING_APPROVAL',
-                ':rid': request_id,
-                ':now': nowIso,
-              },
-            },
-          },
-        ],
-      }));
-    } catch (err: unknown) {
-      if (err instanceof TransactionCanceledException) {
-        return classifyCancel(err, requestId);
-      }
-      throw err;
+    if (outcome.kind === 'not_found') {
+      return errorResponse(
+        404,
+        ErrorCode.REQUEST_NOT_FOUND,
+        'Approval request not found or not owned by caller.',
+        requestId,
+      );
     }
-
-    // 5. Audit event.
-    try {
-      await ddb.send(new PutCommand({
-        TableName: EVENTS_TABLE_NAME,
-        Item: {
-          task_id: taskId,
-          event_id: ulid(),
-          event_type: 'approval_decision_recorded',
-          timestamp: nowIso,
-          ttl: nowEpoch + AUDIT_EVENT_RETENTION_DAYS * 86400,
-          metadata: {
-            request_id,
-            status: 'DENIED',
-            reason: sanitizedReason,
-            decided_at: nowIso,
-            caller_user_id: callerUserId,
-          },
-        },
-      }));
-    } catch (auditErr) {
-      logger.warn('approval_decision_recorded audit write failed (decision already committed)', {
-        task_id: taskId,
-        request_id,
-        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-      });
+    if (outcome.kind === 'not_awaiting') {
+      return errorResponse(
+        409,
+        ErrorCode.TASK_NOT_AWAITING_APPROVAL,
+        'Task is not currently awaiting approval for this request.',
+        requestId,
+      );
     }
+    if (outcome.kind === 'transaction_unknown') {
+      return errorResponse(
+        503,
+        ErrorCode.SERVICE_UNAVAILABLE,
+        'Denial transaction cancelled for unknown reason.',
+        requestId,
+      );
+    }
+    const nowIso = outcome.decidedAt;
 
     logger.info('Denial recorded', {
       task_id: taskId,
@@ -234,36 +159,4 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
   }
-}
-
-function classifyCancel(
-  err: TransactionCanceledException,
-  requestId: string,
-): APIGatewayProxyResult {
-  const reasons = err.CancellationReasons ?? [];
-  const approvalsReason = reasons[0]?.Code;
-  const taskReason = reasons[1]?.Code;
-
-  if (approvalsReason === 'ConditionalCheckFailed') {
-    return errorResponse(
-      404,
-      ErrorCode.REQUEST_NOT_FOUND,
-      'Approval request not found or not owned by caller.',
-      requestId,
-    );
-  }
-  if (taskReason === 'ConditionalCheckFailed') {
-    return errorResponse(
-      409,
-      ErrorCode.TASK_NOT_AWAITING_APPROVAL,
-      'Task is not currently awaiting approval for this request.',
-      requestId,
-    );
-  }
-  return errorResponse(
-    503,
-    ErrorCode.SERVICE_UNAVAILABLE,
-    'Denial transaction cancelled for unknown reason.',
-    requestId,
-  );
 }
