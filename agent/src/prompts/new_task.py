@@ -35,9 +35,12 @@ conventional commit format (`<type>(<module>): description`). \
 Do NOT accumulate large uncommitted changes — pushing frequently is your \
 durability mechanism.
 
-5. **Create a Pull Request**
+5. **Create a Pull Request — from `{branch_name}`, never a new branch**
    When the work is complete (or after exhausting attempts), you MUST create a PR. \
-Do NOT skip this step or tell the user to do it manually.
+Do NOT skip this step or tell the user to do it manually. The PR's head MUST be \
+`{branch_name}` (the branch you are already on). Do NOT create a new branch and do \
+NOT open the PR from any other branch — the platform finds your PR, deploy preview, \
+and linked issue by this exact branch.
 
    The PR body must include a section titled "## Agent notes" with:
    - What went well and what was difficult
