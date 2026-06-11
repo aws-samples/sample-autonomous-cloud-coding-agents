@@ -35,7 +35,13 @@ const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 
 const REQUEST_TIMEOUT_MS = 5000;
 
-/** Reaction emoji short-code for the failure marker. Matches `EMOJI_FAILURE` in `agent/src/linear_reactions.py`. */
+/**
+ * Reaction emoji short-codes. Match the agent-side child markers in
+ * ``agent/src/linear_reactions.py`` so the PARENT epic shows the same
+ * status signal as its sub-issues: 👀 at start, ✅/❌ at completion.
+ */
+export const EMOJI_STARTED = 'eyes';
+export const EMOJI_SUCCESS = 'white_check_mark';
 const EMOJI_FAILURE = 'x';
 
 const COMMENT_CREATE_MUTATION = `
@@ -53,6 +59,71 @@ mutation ReactIssue($issueId: String!, $emoji: String!) {
   }
 }
 `.trim();
+
+/**
+ * Fetch the workflow states for the TEAM that owns ``issueId``, so we can
+ * resolve a target state by its semantic ``type`` (Linear state IDs are
+ * per-team UUIDs, not knowable a priori). ``type`` values:
+ * ``backlog`` | ``unstarted`` (Todo) | ``started`` (In Progress / In Review) |
+ * ``completed`` (Done) | ``canceled``.
+ */
+const ISSUE_TEAM_STATES_QUERY = `
+query IssueTeamStates($issueId: String!) {
+  issue(id: $issueId) {
+    state { id type name position }
+    team { states { nodes { id type name position } } }
+  }
+}
+`.trim();
+
+const ISSUE_SET_STATE_MUTATION = `
+mutation SetIssueState($issueId: String!, $stateId: String!) {
+  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+    success
+  }
+}
+`.trim();
+
+interface TeamState {
+  readonly id: string;
+  readonly type: string;
+  readonly name: string;
+  readonly position: number;
+}
+
+async function graphqlData(
+  accessToken: string,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<Record<string, unknown> | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const resp = await fetch(LINEAR_GRAPHQL_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      logger.warn('Linear feedback GraphQL non-2xx', { status: resp.status });
+      return null;
+    }
+    const body = (await resp.json()) as { data?: Record<string, unknown>; errors?: unknown };
+    if (body.errors) {
+      logger.warn('Linear feedback GraphQL errors', { errors: body.errors });
+      return null;
+    }
+    return body.data ?? null;
+  } catch (err) {
+    logger.warn('Linear feedback request failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function graphqlRequest(
   accessToken: string,
@@ -162,4 +233,104 @@ export async function reportIssueFailure(
     postIssueComment(ctx, issueId, message),
     addIssueReaction(ctx, issueId, EMOJI_FAILURE),
   ]);
+}
+
+/**
+ * Pick the target workflow state by semantic preference. ``preferredNames``
+ * (case-insensitive) is tried first so e.g. "In Review" wins over "In
+ * Progress" when both share Linear ``type: started``; falls back to the
+ * lowest-``position`` state of ``type``. Returns null if the team has no
+ * state of that type.
+ */
+function pickState(
+  states: readonly TeamState[],
+  type: string,
+  preferredNames: readonly string[],
+): TeamState | null {
+  const ofType = states.filter((s) => s.type === type);
+  if (ofType.length === 0) return null;
+  for (const name of preferredNames) {
+    const hit = ofType.find((s) => s.name.toLowerCase() === name.toLowerCase());
+    if (hit) return hit;
+  }
+  return [...ofType].sort((a, b) => a.position - b.position)[0];
+}
+
+/**
+ * Transition a Linear issue to a workflow state chosen by semantic ``type``
+ * (+ optional name preference). Used by the #247 reconciler to move the
+ * PARENT epic through its lifecycle — ``In Progress`` when the orchestration
+ * seeds, ``In Review`` when all children succeed — since the parent spawns no
+ * task and Linear's GitHub automation (which moves the children on PR-open)
+ * never touches it.
+ *
+ * Best-effort, like the rest of this module: resolves the team's states,
+ * picks the target, and issues ``issueUpdate``. Returns true only on a
+ * confirmed transition. Skips (returns false) if the issue is already in the
+ * target state or moving backward (we never demote, e.g. a human already
+ * pushed the epic to Done). Never throws.
+ */
+export async function transitionIssueState(
+  ctx: LinearFeedbackContext,
+  issueId: string,
+  targetType: 'started' | 'completed',
+  preferredNames: readonly string[] = [],
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+
+  const data = await graphqlData(token, ISSUE_TEAM_STATES_QUERY, { issueId });
+  const issue = data?.issue as
+    | { state?: TeamState; team?: { states?: { nodes?: TeamState[] } } }
+    | undefined;
+  const states = issue?.team?.states?.nodes ?? [];
+  if (states.length === 0) {
+    logger.warn('Linear state transition: no team states resolved', { issue_id: issueId });
+    return false;
+  }
+
+  const target = pickState(states, targetType, preferredNames);
+  if (!target) {
+    logger.warn('Linear state transition: no state of target type', { issue_id: issueId, target_type: targetType });
+    return false;
+  }
+
+  const current = issue?.state;
+  if (current?.id === target.id) {
+    // Already there — idempotent no-op (e.g. reconciler re-fires).
+    return false;
+  }
+  // Never move backward. Order by state TYPE first (the lifecycle:
+  // backlog → unstarted → started → completed/canceled), then by position
+  // within the same type. Raw position is NOT lifecycle order — e.g. Done
+  // (completed, position 3) sorts numerically before In Review (started,
+  // position 1002), so a position-only guard would wrongly demote a
+  // human-completed epic back to In Review. We never demote across types
+  // (a human/automation advanced it) nor backward within a type.
+  if (current) {
+    const TYPE_RANK: Record<string, number> = {
+      backlog: 0, unstarted: 1, started: 2, completed: 3, canceled: 3, triage: 0,
+    };
+    const curRank = TYPE_RANK[current.type] ?? 0;
+    const tgtRank = TYPE_RANK[target.type] ?? 0;
+    const backward = curRank > tgtRank || (curRank === tgtRank && current.position >= target.position);
+    if (backward) {
+      logger.info('Linear state transition: skipping backward move', {
+        issue_id: issueId,
+        current_state: current.name,
+        target_state: target.name,
+      });
+      return false;
+    }
+  }
+
+  const ok = await graphqlRequest(token, ISSUE_SET_STATE_MUTATION, { issueId, stateId: target.id });
+  if (ok) {
+    logger.info('Linear issue state transitioned', {
+      issue_id: issueId,
+      from: current?.name,
+      to: target.name,
+    });
+  }
+  return ok;
 }
