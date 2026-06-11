@@ -179,6 +179,46 @@ describe('seedOrchestration — first write', () => {
     const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
     expect(puts.every((p) => p.PutRequest.Item.ttl === 9999999999)).toBe(true);
   });
+
+  test('persists channel_source on the meta row when supplied (#247 trigger-agnostic)', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+
+    await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentLinearIssueId: 'PARENT',
+      linearWorkspaceId: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: { platform_user_id: 'u1', channel_source: 'linear' },
+    });
+
+    const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+    const meta = puts.find((p) => p.PutRequest.Item.sub_issue_id === '#meta')!.PutRequest.Item;
+    expect(meta.channel_source).toBe('linear');
+  });
+
+  test('omits channel_source from the meta row when not supplied (back-compat)', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+
+    await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentLinearIssueId: 'PARENT',
+      linearWorkspaceId: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC, // no channel_source
+    });
+
+    const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+    const meta = puts.find((p) => p.PutRequest.Item.sub_issue_id === '#meta')!.PutRequest.Item;
+    expect(meta.channel_source).toBeUndefined();
+  });
 });
 
 describe('seedOrchestration — idempotent replay', () => {

@@ -139,6 +139,33 @@ describe('releaseChild — happy path', () => {
     expect(update.input.ExpressionAttributeValues![':released']).toBe('released');
   });
 
+  test('defaults channelSource to linear when omitted (#247 back-compat)', async () => {
+    const createTaskCore = created('T-def');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].channelSource).toBe('linear');
+  });
+
+  test('threads an explicit channelSource onto the child task (#247 trigger-agnostic)', async () => {
+    const createTaskCore = created('T-ch');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      channelSource: 'webhook',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].channelSource).toBe('webhook');
+  });
+
   test('threads Linear OAuth metadata when provided', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-1');
