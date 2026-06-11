@@ -26,17 +26,19 @@ depends = [":sync"]
 run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"
 
 [tasks.link-check]
+# Scope: docs/guides/, docs/design/, docs/decisions/, and root *.md files.
+# Not scanned: docs/README.md, agent/, cli/, contracts/, docs/abca-plugin/.
 description = "Check for broken links in Markdown sources"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 filelist=$(mktemp)
 trap 'rm -f "$filelist"' EXIT
-{ find guides design decisions -name '*.md'; find .. -maxdepth 1 -name '*.md'; } > "$filelist"
-count=$(wc -l < "$filelist")
+{ find guides design decisions -name '*.md' -print0; find .. -maxdepth 1 -name '*.md' -print0; } > "$filelist"
+count=$(tr '\\0' '\\n' < "$filelist" | grep -c .)
 if [ "$count" -lt 10 ]; then
   echo "ERROR: expected ≥10 Markdown files but found $count — scan may be misconfigured" >&2
   exit 1
 fi
-xargs -r ./node_modules/.bin/markdown-link-check --config .markdown-link-check.json < "$filelist"
+xargs -0 -r ./node_modules/.bin/markdown-link-check --config .markdown-link-check.json < "$filelist"
 """
