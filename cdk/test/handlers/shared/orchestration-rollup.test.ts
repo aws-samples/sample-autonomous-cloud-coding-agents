@@ -18,8 +18,13 @@
  */
 
 const postIssueCommentMock = jest.fn();
+const transitionIssueStateMock = jest.fn();
+const addIssueReactionMock = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
+  transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
+  addIssueReaction: (...args: unknown[]) => addIssueReactionMock(...args),
+  EMOJI_SUCCESS: 'white_check_mark',
 }));
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
@@ -96,6 +101,8 @@ const row = (sub: string, status: string): OrchestrationChildRow => ({
 describe('postRollup', () => {
   beforeEach(() => {
     postIssueCommentMock.mockReset();
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    addIssueReactionMock.mockReset().mockResolvedValue(true);
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
   });
@@ -113,6 +120,45 @@ describe('postRollup', () => {
     const posted = loggerMock.info.mock.calls.find((c) => c[1]?.event === ORCH_LOG.rollupPosted);
     expect(posted).toBeDefined();
     expect(posted![1]).toMatchObject({ orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT', rollup_kind: 'complete' });
+  });
+
+  test('complete → advances parent to In Review + ✅ reaction (mirrors children)', async () => {
+    postIssueCommentMock.mockResolvedValue(true);
+    await postRollup({
+      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      kind: 'complete', children: [row('a', 'succeeded')],
+    });
+    expect(transitionIssueStateMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'started', ['In Review'],
+    );
+    expect(addIssueReactionMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'white_check_mark',
+    );
+  });
+
+  test('partial_failure → does NOT advance state, drops ❌ reaction (undefined = default failure)', async () => {
+    postIssueCommentMock.mockResolvedValue(true);
+    await postRollup({
+      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      kind: 'partial_failure', children: [row('a', 'failed')],
+    });
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
+    expect(addIssueReactionMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', undefined,
+    );
+  });
+
+  test('comment fails → does NOT transition state or react (state mirrors only on posted rollup)', async () => {
+    postIssueCommentMock.mockResolvedValue(false);
+    await postRollup({
+      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      kind: 'complete', children: [row('a', 'succeeded')],
+    });
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
+    expect(addIssueReactionMock).not.toHaveBeenCalled();
   });
 
   test('post returns false → logs orch.rollup.failed, returns false', async () => {

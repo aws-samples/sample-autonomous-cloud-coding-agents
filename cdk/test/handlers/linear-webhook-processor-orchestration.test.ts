@@ -49,8 +49,13 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 }));
 
 const reportIssueFailureMock = jest.fn();
+const addIssueReactionMock = jest.fn();
+const transitionIssueStateMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
+  addIssueReaction: (...args: unknown[]) => addIssueReactionMock(...args),
+  transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
+  EMOJI_STARTED: 'eyes',
 }));
 
 const resolveLinearOauthTokenMock = jest.fn();
@@ -116,6 +121,8 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     reportIssueFailureMock.mockResolvedValue(undefined);
     resolveLinearOauthTokenMock.mockReset();
     discoverOrchestrationMock.mockReset();
+    addIssueReactionMock.mockReset().mockResolvedValue(true);
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
   });
 
   test('seeded graph → no parent task created (reconciler owns children)', async () => {
@@ -139,6 +146,29 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     // Parent issue must NOT spawn a task.
     expect(createTaskCoreMock).not.toHaveBeenCalled();
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    // #10: parent epic gets the start signal — 👀 reaction + In Progress.
+    expect(addIssueReactionMock).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'eyes');
+    expect(transitionIssueStateMock).toHaveBeenCalledWith(
+      expect.anything(), expect.any(String), 'started', ['In Progress'],
+    );
+  });
+
+  test('seeded on idempotent replay → no duplicate start signal on parent', async () => {
+    happyPreamble();
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded',
+      orchestrationId: 'orch_abc',
+      childCount: 3,
+      rootSubIssueIds: ['A'],
+      alreadyExisted: true, // replay
+    });
+    ddbSend.mockResolvedValueOnce({ Items: [] });
+
+    await handler(eventWith(issue()));
+
+    // alreadyExisted ⇒ skip the start reaction/transition (already done on first seed).
+    expect(addIssueReactionMock).not.toHaveBeenCalled();
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
   });
 
   test('no sub-issues → single_task falls through to normal task creation', async () => {
