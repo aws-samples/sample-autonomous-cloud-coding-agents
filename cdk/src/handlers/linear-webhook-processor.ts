@@ -401,12 +401,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // best-effort; gated on the registry table like every other feedback.
       if (WORKSPACE_REGISTRY_TABLE && !discovery.alreadyExisted) {
         const parentCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
-        await Promise.allSettled([
-          // swap (not add) so a re-seed never leaves two markers; at seed
-          // there's nothing to clear, so this just posts 👀.
-          swapIssueReaction(parentCtx, issue.id, EMOJI_STARTED),
-          transitionIssueState(parentCtx, issue.id, 'started', ['In Progress']),
-        ]);
+        // Sequential, not concurrent: each call fans out into multiple Linear
+        // graphql reads/writes with a 5s timeout; firing them together
+        // self-throttles and can abort one (see the completion path in
+        // orchestration-rollup). Both best-effort.
+        // swap (not add) so a re-seed never leaves two markers; at seed
+        // there's nothing to clear, so this just posts 👀.
+        await swapIssueReaction(parentCtx, issue.id, EMOJI_STARTED);
+        await transitionIssueState(parentCtx, issue.id, 'started', ['In Progress']);
         // #247 #3: post the live status block ('where are we' at a glance) and
         // stamp its comment id on the meta row so the reconciler edits it
         // in place on each child transition. Re-load post-release so roots
