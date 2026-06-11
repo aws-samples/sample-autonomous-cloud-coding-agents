@@ -180,7 +180,21 @@ export type WorkflowResolutionError = 'unknown_id' | 'unsatisfiable_version';
  * resolution ladder (WORKFLOWS.md §"Replacing task types"):
  *   1. explicit ``workflow_ref`` (id + optional ``@constraint``);
  *   2. (Blueprint default — Phase 4, not yet wired);
- *   3. the platform default ``default/agent-v1``.
+ *   3a. no explicit ref BUT a repo is present ⇒ the coding default
+ *       ``coding/new-task-v1`` (a repo-bound task is a coding task);
+ *   3b. otherwise the repo-less platform default ``default/agent-v1``.
+ *
+ * Rung 3a restores the pre-#296 behaviour: before workflow-driven tasks, a
+ * task with a repo and no explicit type ran as ``new_task`` →
+ * ``coding/new-task-v1`` (edit locally, commit, push, platform opens the PR
+ * via ``ensure_pr``). #296 introduced the resolution ladder but left the
+ * repo-aware rung unwired, so every repo task fell through to
+ * ``default/agent-v1`` — the freeform repo-less agent prompt with no git/PR
+ * discipline — which broke PR-url reporting, screenshot→issue routing, and
+ * #247 stacking (the agent improvised ``gh api``/``gh pr create`` against an
+ * empty local clone). ``hasRepo`` re-wires that rung minimally until the
+ * Blueprint router (Phase 4) lands. Callers WITHOUT an explicit ref pass
+ * whether the request carries a repo.
  *
  * Returns ``null`` when an explicit ref cannot be resolved — either the id is
  * unknown OR an ``@constraint`` pins a version the platform does not ship. The
@@ -188,9 +202,10 @@ export type WorkflowResolutionError = 'unknown_id' | 'unsatisfiable_version';
  * like ``coding/new-task-v1@2.0.0`` fails admission rather than quietly running
  * ``1.0.0``. Use {@link resolveWorkflowRefError} for which case, to craft the 400.
  */
-export function resolveWorkflowRef(ref?: string | null): ResolvedWorkflow | null {
+export function resolveWorkflowRef(ref?: string | null, hasRepo = false): ResolvedWorkflow | null {
   if (ref === undefined || ref === null || ref === '') {
-    const fallback = DESCRIPTORS[DEFAULT_WORKFLOW_ID];
+    const fallbackId = hasRepo ? 'coding/new-task-v1' : DEFAULT_WORKFLOW_ID;
+    const fallback = DESCRIPTORS[fallbackId];
     return { id: fallback.id, version: fallback.version };
   }
   const { id, constraint } = parseWorkflowRef(ref);

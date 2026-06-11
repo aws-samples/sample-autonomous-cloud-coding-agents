@@ -72,10 +72,27 @@ describe('resolveWorkflowRef', () => {
     expect(resolveWorkflowRefError(undefined)).toBeNull();
   });
 
-  test('falls back to the platform default when ref is absent', () => {
+  test('falls back to the repo-less platform default when ref is absent AND no repo', () => {
     expect(resolveWorkflowRef(undefined)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
     expect(resolveWorkflowRef(null)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
     expect(resolveWorkflowRef('')).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
+    // explicit hasRepo=false is the same as omitting it
+    expect(resolveWorkflowRef(undefined, false)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
+  });
+
+  test('falls back to coding/new-task-v1 when ref is absent BUT a repo is present (#296 regression fix)', () => {
+    // A repo-bound task with no explicit workflow_ref is a coding task — it must
+    // get the disciplined coding workflow (edit/commit/push, platform ensure_pr),
+    // NOT the freeform repo-less default/agent-v1 that broke pr_url/screenshot/stacking.
+    expect(resolveWorkflowRef(undefined, true)).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
+    expect(resolveWorkflowRef(null, true)).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
+    expect(resolveWorkflowRef('', true)).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
+  });
+
+  test('an EXPLICIT ref is honored regardless of hasRepo (repo-less workflow against a repo)', () => {
+    // hasRepo only steers the absent-ref fallback; an explicit ref always wins.
+    expect(resolveWorkflowRef('default/agent-v1', true)).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+    expect(resolveWorkflowRef('knowledge/web-research-v1', true)).toEqual({ id: 'knowledge/web-research-v1', version: '1.0.0' });
   });
 
   test('returns null for an unknown but well-formed ref', () => {
