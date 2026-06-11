@@ -31,6 +31,7 @@ import {
   type LinearFeedbackContext,
   postIssueComment,
   reportIssueFailure,
+  swapIssueReaction,
   transitionIssueState,
   upsertStatusComment,
 } from '../../../src/handlers/shared/linear-feedback';
@@ -170,6 +171,68 @@ describe('linear-feedback', () => {
       fetchMock.mockRejectedValue(new Error('ECONNRESET'));
 
       await expect(reportIssueFailure(CTX, ISSUE_ID, 'msg')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('swapIssueReaction (one marker at a time, #3)', () => {
+    const reactionsResp = (rs: Array<{ id: string; emoji: string }>) =>
+      jsonResponse({ data: { issue: { reactions: rs } } });
+
+    test('👀 present → deletes it and adds the target (✅)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }])) // query
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // delete 👀
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } })); // add ✅
+      const ok = await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
+      expect(ok).toBe(true);
+      const deleteVars = JSON.parse(fetchMock.mock.calls[1][1].body).variables;
+      expect(deleteVars).toEqual({ id: 'r-eyes' });
+      const createVars = JSON.parse(fetchMock.mock.calls[2][1].body).variables;
+      expect(createVars).toEqual({ issueId: ISSUE_ID, emoji: 'white_check_mark' });
+    });
+
+    test('target already present → deletes other bgagent markers, does NOT re-create', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-check', emoji: 'white_check_mark' },
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })); // delete 👀 only
+      const ok = await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
+      expect(ok).toBe(true);
+      // 1 query + 1 delete (the 👀); no create (✅ already there).
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables).toEqual({ id: 'r-eyes' });
+    });
+
+    test('never deletes a human (non-bgagent) reaction', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-tada', emoji: 'tada' }, // human reaction — must survive
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // delete 👀
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } })); // add ✅
+      await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
+      const deletedIds = fetchMock.mock.calls
+        .filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'))
+        .map((c) => JSON.parse(c[1].body).variables.id);
+      expect(deletedIds).toEqual(['r-eyes']); // only the bgagent marker, never r-tada
+    });
+
+    test('no existing markers → just adds the target', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      const ok = await swapIssueReaction(CTX, ISSUE_ID, 'eyes');
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // query + create, no deletes
+    });
+
+    test('no token → false, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'eyes')).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 

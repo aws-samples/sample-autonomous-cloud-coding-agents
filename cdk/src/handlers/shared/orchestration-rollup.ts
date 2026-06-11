@@ -29,10 +29,11 @@
  */
 
 import {
-  addIssueReaction,
+  EMOJI_FAILURE,
   EMOJI_SUCCESS,
   type LinearFeedbackContext,
   postIssueComment,
+  swapIssueReaction,
   transitionIssueState,
   upsertStatusComment,
 } from './linear-feedback';
@@ -238,15 +239,15 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
     //   PRs awaiting human merge — NOT Done, since nothing is merged). On a
     //   partial_failure / cancelled rollup, leave the state in place (the
     //   comment + ❌ reaction already convey the outcome).
-    // - reaction: ✅ on complete, ❌ otherwise — matching agent/src/
-    //   linear_reactions.py's child markers (👀 was set at seed time).
+    // - reaction: SWAP the seed 👀 for ✅ (complete) / ❌ (otherwise) so the
+    //   parent shows exactly ONE marker at a time, like the children.
     // All best-effort; runs after the load-bearing comment so a state/
     // reaction hiccup never suppresses the rollup.
     await Promise.allSettled([
       kind === 'complete'
         ? transitionIssueState(ctx, parentLinearIssueId, 'started', ['In Review'])
         : Promise.resolve(false),
-      addIssueReaction(ctx, parentLinearIssueId, kind === 'complete' ? EMOJI_SUCCESS : undefined),
+      swapIssueReaction(ctx, parentLinearIssueId, kind === 'complete' ? EMOJI_SUCCESS : EMOJI_FAILURE),
     ]);
   } else {
     logger.warn('Parent rollup comment post returned false', {

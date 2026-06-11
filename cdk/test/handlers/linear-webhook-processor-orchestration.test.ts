@@ -49,12 +49,12 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 }));
 
 const reportIssueFailureMock = jest.fn();
-const addIssueReactionMock = jest.fn();
+const swapIssueReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
-  addIssueReaction: (...args: unknown[]) => addIssueReactionMock(...args),
+  swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   EMOJI_STARTED: 'eyes',
@@ -123,7 +123,7 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     reportIssueFailureMock.mockResolvedValue(undefined);
     resolveLinearOauthTokenMock.mockReset();
     discoverOrchestrationMock.mockReset();
-    addIssueReactionMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-status-1');
   });
@@ -150,7 +150,7 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
     // #10: parent epic gets the start signal — 👀 reaction + In Progress.
-    expect(addIssueReactionMock).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'eyes');
+    expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'eyes');
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
       expect.anything(), expect.any(String), 'started', ['In Progress'],
     );
@@ -203,7 +203,7 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     await handler(eventWith(issue()));
 
     // alreadyExisted ⇒ skip the start reaction/transition (already done on first seed).
-    expect(addIssueReactionMock).not.toHaveBeenCalled();
+    expect(swapIssueReactionMock).not.toHaveBeenCalled();
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
   });
 

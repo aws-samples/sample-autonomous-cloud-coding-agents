@@ -42,7 +42,7 @@ const REQUEST_TIMEOUT_MS = 5000;
  */
 export const EMOJI_STARTED = 'eyes';
 export const EMOJI_SUCCESS = 'white_check_mark';
-const EMOJI_FAILURE = 'x';
+export const EMOJI_FAILURE = 'x';
 
 const COMMENT_CREATE_MUTATION = `
 mutation CreateComment($issueId: String!, $body: String!) {
@@ -78,6 +78,27 @@ mutation ReactIssue($issueId: String!, $emoji: String!) {
   }
 }
 `.trim();
+
+const REACTION_DELETE_MUTATION = `
+mutation UnreactIssue($id: String!) {
+  reactionDelete(id: $id) { success }
+}
+`.trim();
+
+/** Read an issue's reactions (id + emoji) — to swap one bgagent marker for another. */
+const ISSUE_REACTIONS_QUERY = `
+query IssueReactions($issueId: String!) {
+  issue(id: $issueId) { reactions { id emoji } }
+}
+`.trim();
+
+/**
+ * The bgagent status-marker emojis we manage on the PARENT epic. Mirrors
+ * ``_BGAGENT_EMOJIS`` in ``agent/src/linear_reactions.py``. Only these are
+ * ever deleted by {@link swapIssueReaction} — a human's reaction is never
+ * touched.
+ */
+const BGAGENT_EMOJIS: ReadonlySet<string> = new Set([EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE]);
 
 /**
  * Fetch the workflow states for the TEAM that owns ``issueId``, so we can
@@ -262,6 +283,41 @@ export async function addIssueReaction(
 ): Promise<boolean> {
   const token = await resolveToken(ctx);
   if (!token) return false;
+  return graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji });
+}
+
+/**
+ * Swap the PARENT epic's bgagent status marker so only ONE is shown at a
+ * time (👀 → ✅/❌), mirroring the children's reaction behaviour. The
+ * children capture the reaction id in-process and delete it; the parent's
+ * markers are added across SEPARATE lambda invocations (👀 at seed, ✅/❌ at
+ * completion), so we instead query the issue's reactions, delete every
+ * bgagent marker EXCEPT the target, then add the target if absent. Only
+ * bgagent emojis (👀/✅/❌) are ever removed — a human's reaction is left
+ * untouched. Best-effort; returns true if the target marker is present
+ * afterwards.
+ */
+export async function swapIssueReaction(
+  ctx: LinearFeedbackContext,
+  issueId: string,
+  emoji: string,
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+
+  const data = await graphqlData(token, ISSUE_REACTIONS_QUERY, { issueId });
+  const reactions = ((data?.issue as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
+
+  // Delete our stale markers (any bgagent emoji that isn't the target).
+  let targetPresent = false;
+  for (const r of reactions) {
+    if (r.emoji === emoji) { targetPresent = true; continue; }
+    if (BGAGENT_EMOJIS.has(r.emoji)) {
+      await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id });
+    }
+  }
+
+  if (targetPresent) return true; // already the only marker after the deletes above
   return graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji });
 }
 
