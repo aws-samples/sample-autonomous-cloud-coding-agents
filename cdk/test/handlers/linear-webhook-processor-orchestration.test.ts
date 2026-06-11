@@ -51,10 +51,12 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 const reportIssueFailureMock = jest.fn();
 const addIssueReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
+const upsertStatusCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
   addIssueReaction: (...args: unknown[]) => addIssueReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
+  upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   EMOJI_STARTED: 'eyes',
 }));
 
@@ -123,6 +125,7 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     discoverOrchestrationMock.mockReset();
     addIssueReactionMock.mockReset().mockResolvedValue(true);
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-status-1');
   });
 
   test('seeded graph → no parent task created (reconciler owns children)', async () => {
@@ -151,6 +154,39 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
       expect.anything(), expect.any(String), 'started', ['In Progress'],
     );
+  });
+
+  test('seeded → posts the live status block on the parent + stamps its id (#3)', async () => {
+    // project + user lookups (preamble)
+    ddbSend
+      .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } })
+      .mockResolvedValueOnce({ Item: { platform_user_id: 'u1' } });
+    resolveLinearOauthTokenMock.mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn', workspaceSlug: 'acme' });
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['A'], alreadyExisted: false,
+    });
+    // Every subsequent Query (release-path load + post-release status load)
+    // returns a snapshot with a meta row + one child; Updates (release flip,
+    // setStatusCommentId) return {}.
+    const snapshotItems = {
+      Items: [
+        { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'u1' },
+        { sub_issue_id: 'A', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', depends_on: [], child_status: 'released', linear_identifier: 'ABCA-1', title: 'Step A' },
+      ],
+    };
+    ddbSend.mockResolvedValue(snapshotItems);
+
+    await handler(eventWith(issue()));
+
+    // Status block posted (no existing id → create) and its id stamped back.
+    expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
+    const [, parentArg, bodyArg, existingId] = upsertStatusCommentMock.mock.calls[0];
+    expect(parentArg).toBe('issue-1');
+    expect(bodyArg).toContain('ABCA orchestration');
+    expect(existingId).toBeUndefined(); // create, not edit
+    // setStatusCommentId issues an Update with the returned comment id.
+    const stampUpdate = ddbSend.mock.calls.map((c) => c[0]?.input).find((i) => i?.UpdateExpression?.includes('status_comment_id'));
+    expect(stampUpdate?.ExpressionAttributeValues?.[':cid']).toBe('cmt-status-1');
   });
 
   test('seeded on idempotent replay → no duplicate start signal on parent', async () => {

@@ -52,6 +52,25 @@ mutation CreateComment($issueId: String!, $body: String!) {
 }
 `.trim();
 
+/** Create a comment and return its id (for later edit-in-place). */
+const COMMENT_CREATE_RETURNING_ID_MUTATION = `
+mutation CreateCommentReturningId($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment { id }
+  }
+}
+`.trim();
+
+/** Edit an existing comment in place (#247 #3 live status block). */
+const COMMENT_UPDATE_MUTATION = `
+mutation UpdateComment($id: String!, $body: String!) {
+  commentUpdate(id: $id, input: { body: $body }) {
+    success
+  }
+}
+`.trim();
+
 const REACTION_CREATE_MUTATION = `
 mutation ReactIssue($issueId: String!, $emoji: String!) {
   reactionCreate(input: { issueId: $issueId, emoji: $emoji }) {
@@ -203,6 +222,33 @@ export async function postIssueComment(
   const token = await resolveToken(ctx);
   if (!token) return false;
   return graphqlRequest(token, COMMENT_CREATE_MUTATION, { issueId, body });
+}
+
+/**
+ * Upsert the orchestration live status block (#247 #3): if
+ * ``existingCommentId`` is given, EDIT that comment in place; otherwise
+ * CREATE a fresh comment and return its id so the caller can persist it and
+ * edit on the next transition. Returns the comment id on success (the
+ * existing id on update, the new id on create), or null on any failure.
+ * Best-effort — never throws; the status block is advisory.
+ */
+export async function upsertStatusComment(
+  ctx: LinearFeedbackContext,
+  issueId: string,
+  body: string,
+  existingCommentId?: string,
+): Promise<string | null> {
+  const token = await resolveToken(ctx);
+  if (!token) return null;
+
+  if (existingCommentId) {
+    const ok = await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingCommentId, body });
+    return ok ? existingCommentId : null;
+  }
+
+  const data = await graphqlData(token, COMMENT_CREATE_RETURNING_ID_MUTATION, { issueId, body });
+  const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
+  return created?.success && created.comment?.id ? created.comment.id : null;
 }
 
 /**

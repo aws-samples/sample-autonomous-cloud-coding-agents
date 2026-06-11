@@ -52,7 +52,8 @@ import {
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
 import { releaseReadyChildren } from './shared/orchestration-release';
-import { postRollup, rollupKindFromChildren } from './shared/orchestration-rollup';
+import { postRollup, renderStatusBlock, rollupKindFromChildren } from './shared/orchestration-rollup';
+import { upsertStatusComment } from './shared/linear-feedback';
 import {
   claimRollup,
   loadOrchestration,
@@ -246,6 +247,24 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   const allTerminal = freshChildren.every((c) =>
     c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
   );
+
+  // #247 #3: while the orchestration is still in flight, edit the live
+  // status block on the parent so "where are we" stays current on every
+  // child transition. Skipped when all-terminal (the final rollup below
+  // replaces the body with the completion view). Best-effort; only when a
+  // status comment was created at seed.
+  if (!allTerminal && WORKSPACE_REGISTRY_TABLE) {
+    const liveMeta = (fresh ?? snapshot).meta;
+    if (liveMeta.status_comment_id) {
+      await upsertStatusComment(
+        { linearWorkspaceId: liveMeta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
+        liveMeta.parent_linear_issue_id,
+        renderStatusBlock(freshChildren),
+        liveMeta.status_comment_id,
+      );
+    }
+  }
+
   if (allTerminal) {
     const meta = (fresh ?? snapshot).meta;
     const counts = {
@@ -279,6 +298,12 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
           // seeded the orchestration (defaults to 'linear' inside postRollup).
           ...(meta.release_context.channel_source !== undefined && {
             channelSource: meta.release_context.channel_source as ChannelSource,
+          }),
+          // #247 #3: edit the live status block in place into the final
+          // rollup (one comment for the whole run, no stream). Falls back to
+          // a fresh comment inside postRollup when no id was stamped at seed.
+          ...(meta.status_comment_id !== undefined && {
+            statusCommentId: meta.status_comment_id,
           }),
         });
       } else {
