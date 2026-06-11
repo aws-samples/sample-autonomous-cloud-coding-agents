@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { addIssueReaction, EMOJI_STARTED, reportIssueFailure, transitionIssueState, upsertStatusComment } from './shared/linear-feedback';
+import { EMOJI_STARTED, reportIssueFailure, swapIssueReaction, transitionIssueState, upsertStatusComment } from './shared/linear-feedback';
 import { renderStatusBlock } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
@@ -402,7 +402,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       if (WORKSPACE_REGISTRY_TABLE && !discovery.alreadyExisted) {
         const parentCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
         await Promise.allSettled([
-          addIssueReaction(parentCtx, issue.id, EMOJI_STARTED),
+          // swap (not add) so a re-seed never leaves two markers; at seed
+          // there's nothing to clear, so this just posts 👀.
+          swapIssueReaction(parentCtx, issue.id, EMOJI_STARTED),
           transitionIssueState(parentCtx, issue.id, 'started', ['In Progress']),
         ]);
         // #247 #3: post the live status block ('where are we' at a glance) and

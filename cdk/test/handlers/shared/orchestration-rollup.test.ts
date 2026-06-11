@@ -19,14 +19,15 @@
 
 const postIssueCommentMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
-const addIssueReactionMock = jest.fn();
+const swapIssueReactionMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
-  addIssueReaction: (...args: unknown[]) => addIssueReactionMock(...args),
+  swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   EMOJI_SUCCESS: 'white_check_mark',
+  EMOJI_FAILURE: 'x',
 }));
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
@@ -143,7 +144,7 @@ describe('postRollup', () => {
   beforeEach(() => {
     postIssueCommentMock.mockReset();
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
-    addIssueReactionMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
     upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-1');
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
@@ -174,12 +175,12 @@ describe('postRollup', () => {
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
       { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'started', ['In Review'],
     );
-    expect(addIssueReactionMock).toHaveBeenCalledWith(
+    expect(swapIssueReactionMock).toHaveBeenCalledWith(
       { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'white_check_mark',
     );
   });
 
-  test('partial_failure → does NOT advance state, drops ❌ reaction (undefined = default failure)', async () => {
+  test('partial_failure → does NOT advance state, swaps to ❌ reaction', async () => {
     postIssueCommentMock.mockResolvedValue(true);
     await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
@@ -187,8 +188,8 @@ describe('postRollup', () => {
       kind: 'partial_failure', children: [row('a', 'failed')],
     });
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
-    expect(addIssueReactionMock).toHaveBeenCalledWith(
-      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', undefined,
+    expect(swapIssueReactionMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'x',
     );
   });
 
@@ -200,7 +201,7 @@ describe('postRollup', () => {
       kind: 'complete', children: [row('a', 'succeeded')],
     });
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
-    expect(addIssueReactionMock).not.toHaveBeenCalled();
+    expect(swapIssueReactionMock).not.toHaveBeenCalled();
   });
 
   test('post returns false → logs orch.rollup.failed, returns false', async () => {
@@ -224,7 +225,7 @@ describe('postRollup', () => {
     expect(ok).toBe(false);
     expect(postIssueCommentMock).not.toHaveBeenCalled();
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
-    expect(addIssueReactionMock).not.toHaveBeenCalled();
+    expect(swapIssueReactionMock).not.toHaveBeenCalled();
   });
 
   test('explicit linear channelSource behaves like the default', async () => {
