@@ -36,8 +36,18 @@ class TestGetSystemPrompt:
         assert "Write and Edit are not available" in prompt
         assert "{workflow}" not in prompt
 
+    def test_restack_returns_prompt_with_remerge_workflow(self):
+        prompt = get_system_prompt("coding/restack-v1")
+        assert "RE-STACKING" in prompt
+        assert "predecessor" in prompt
+        assert "do NOT add features" in prompt or "NOT new feature work" in prompt or "not new feature" in prompt.lower()
+        assert "{branch_name}" in prompt  # pushes to the SAME existing branch
+        assert "{pr_number}" in prompt
+        assert "{repo_url}" in prompt
+        assert "{workflow}" not in prompt
+
     def test_all_workflows_contain_shared_base_sections(self):
-        for workflow_id in ("coding/new-task-v1", "coding/pr-iteration-v1", "coding/pr-review-v1"):
+        for workflow_id in ("coding/new-task-v1", "coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"):
             prompt = get_system_prompt(workflow_id)
             assert "## Environment" in prompt, f"Missing Environment in {workflow_id}"
             has_rules = "## Rules" in prompt or "## Rules override" in prompt
