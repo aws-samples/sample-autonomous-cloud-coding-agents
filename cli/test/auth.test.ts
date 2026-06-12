@@ -93,6 +93,41 @@ describe('auth', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
+    test('concurrent getAuthToken calls trigger exactly one refresh', async () => {
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      saveCredentials({
+        id_token: 'old-id',
+        refresh_token: 'refresh-token',
+        token_expiry: pastExpiry,
+      });
+
+      // Make the refresh resolve only after we have fired both callers, so
+      // both observe the expired token and would each fire a refresh absent
+      // the in-flight memoization.
+      let resolveSend: (value: unknown) => void = () => undefined;
+      mockSend.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSend = resolve;
+          }),
+      );
+
+      const p1 = getAuthToken();
+      const p2 = getAuthToken();
+      // Let both calls reach the (shared) refresh await.
+      await Promise.resolve();
+
+      resolveSend({
+        AuthenticationResult: { IdToken: 'new-id', ExpiresIn: 3600 },
+      });
+
+      const [t1, t2] = await Promise.all([p1, p2]);
+      expect(t1).toBe('new-id');
+      expect(t2).toBe('new-id');
+      // The load-bearing assertion: a single Cognito refresh round-trip.
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
     test('refreshes expired token', async () => {
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({

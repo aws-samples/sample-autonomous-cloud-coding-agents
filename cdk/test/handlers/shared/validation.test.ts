@@ -37,6 +37,7 @@ import {
   parseStatusFilter,
   validateAttachments,
   validateMagicBytes,
+  validateMaxBudgetUsd,
   validateMaxTurns,
   validatePrNumber,
 } from '../../../src/handlers/shared/validation';
@@ -302,6 +303,37 @@ describe('validateMaxTurns', () => {
     expect(validateMaxTurns(true)).toBeNull();
     expect(validateMaxTurns({})).toBeNull();
     expect(validateMaxTurns([])).toBeNull();
+  });
+});
+
+describe('validateMaxBudgetUsd', () => {
+  test('returns undefined when value is absent', () => {
+    expect(validateMaxBudgetUsd(undefined)).toBeUndefined();
+    expect(validateMaxBudgetUsd(null)).toBeUndefined();
+  });
+
+  test('returns the value for valid numbers in range', () => {
+    expect(validateMaxBudgetUsd(0.01)).toBe(0.01);
+    expect(validateMaxBudgetUsd(5)).toBe(5);
+    expect(validateMaxBudgetUsd(100)).toBe(100);
+  });
+
+  test('returns null for out-of-range values', () => {
+    expect(validateMaxBudgetUsd(0)).toBeNull();
+    expect(validateMaxBudgetUsd(-1)).toBeNull();
+    expect(validateMaxBudgetUsd(100.01)).toBeNull();
+  });
+
+  test('returns null for NaN and Infinity (typeof number, but not finite)', () => {
+    expect(validateMaxBudgetUsd(NaN)).toBeNull();
+    expect(validateMaxBudgetUsd(Infinity)).toBeNull();
+    expect(validateMaxBudgetUsd(-Infinity)).toBeNull();
+  });
+
+  test('returns null for non-number types', () => {
+    expect(validateMaxBudgetUsd('5')).toBeNull();
+    expect(validateMaxBudgetUsd(true)).toBeNull();
+    expect(validateMaxBudgetUsd({})).toBeNull();
   });
 });
 

@@ -19,16 +19,43 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
+import { CliError } from '../errors';
 import { formatEvents, formatJson } from '../format';
+import { Pagination, TaskEvent } from '../types';
+
+/** Defensive cap on pagination drains with ``--all`` so a runaway/looping
+ *  ``next_token`` cannot spin forever. At 100 events/page this covers 10k
+ *  events — far beyond any real task's event stream. */
+const MAX_PAGES = 100;
 
 export function makeEventsCommand(): Command {
   return new Command('events')
     .description('Get task events')
     .argument('<task-id>', 'Task ID')
     .option('--limit <n>', 'Max number of events to return', parseInt)
+    .option('--all', 'Drain all pages of events (follows next_token)')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (taskId: string, opts) => {
+      // Validate --limit as a positive integer (mirrors submit.ts numeric-flag
+      // validation) rather than silently forwarding NaN / a negative.
+      if (opts.limit !== undefined) {
+        if (isNaN(opts.limit) || !Number.isInteger(opts.limit) || opts.limit < 1) {
+          throw new CliError('--limit must be a positive integer.');
+        }
+      }
+
       const client = new ApiClient();
+
+      if (opts.all) {
+        const { events, pagination } = await drainAllEvents(client, taskId, opts.limit);
+        if (opts.output === 'json') {
+          console.log(formatJson({ data: events, pagination }));
+        } else {
+          console.log(formatEvents(events));
+        }
+        return;
+      }
+
       const result = await client.getTaskEvents(taskId, {
         limit: opts.limit,
       });
@@ -42,4 +69,29 @@ export function makeEventsCommand(): Command {
         }
       }
     });
+}
+
+/** Follow ``next_token`` until the server reports no more pages (or the
+ *  defensive ``MAX_PAGES`` cap trips). Returns the concatenated events and the
+ *  final page's pagination (``has_more=false`` on a clean drain). */
+async function drainAllEvents(
+  client: ApiClient,
+  taskId: string,
+  limit?: number,
+): Promise<{ events: TaskEvent[]; pagination: Pagination }> {
+  const events: TaskEvent[] = [];
+  let nextToken: string | undefined;
+  let pagination: Pagination = { next_token: null, has_more: false };
+
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const result = await client.getTaskEvents(taskId, { limit, nextToken });
+    events.push(...result.data);
+    pagination = result.pagination;
+    if (!result.pagination.has_more || !result.pagination.next_token) {
+      return { events, pagination };
+    }
+    nextToken = result.pagination.next_token;
+  }
+
+  return { events, pagination };
 }

@@ -25,6 +25,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { ScreenshotBucket } from './screenshot-bucket';
@@ -149,6 +150,15 @@ export class GitHubScreenshotIntegration extends Construct {
     // never severs an in-flight comment-post. (theagenticguy PR-241
     // review item B1: previous comment under-counted the 35s retry
     // ladder that runs before captureScreenshot's 60s budget.)
+    // Async-invoke failure backstop: the handler swallows its own errors,
+    // but an init-time crash (missing env at cold start, bundling defect)
+    // would otherwise vanish after Lambda's built-in async retries. The
+    // DLQ keeps the failed invocation payload for operator inspection.
+    const processorDlq = new sqs.Queue(this, 'WebhookProcessorDlq', {
+      retentionPeriod: Duration.days(14),
+      enforceSSL: true,
+    });
+
     this.webhookProcessorFn = new lambda.NodejsFunction(this, 'WebhookProcessorFn', {
       entry: path.join(handlersDir, 'github-webhook-processor.ts'),
       handler: 'handler',
@@ -156,6 +166,7 @@ export class GitHubScreenshotIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(120),
       memorySize: 512,
+      deadLetterQueue: processorDlq,
       environment: {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
         SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
@@ -166,6 +177,13 @@ export class GitHubScreenshotIntegration extends Construct {
       },
       bundling: commonBundling,
     });
+
+    NagSuppressions.addResourceSuppressions(processorDlq, [
+      {
+        id: 'AwsSolutions-SQS3',
+        reason: 'This queue IS the async-invoke DLQ for the processor Lambda — a DLQ for the DLQ would be infinite recursion',
+      },
+    ]);
 
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
     props.githubTokenSecret.grantRead(this.webhookProcessorFn);

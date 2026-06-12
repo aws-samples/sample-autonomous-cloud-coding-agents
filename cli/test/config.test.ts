@@ -67,6 +67,11 @@ describe('config', () => {
       expect(loadCredentials()).toBeNull();
     });
 
+    test('throws a CliError pointing at `bgagent login` on corrupt JSON', () => {
+      fs.writeFileSync(path.join(tmpDir, 'credentials.json'), '{ not valid json');
+      expect(() => loadCredentials()).toThrow('bgagent login');
+    });
+
     test('credentials file has restricted permissions', () => {
       saveCredentials({
         id_token: 'tok',

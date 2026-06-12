@@ -46,7 +46,13 @@ async function getSecret(webhookId: string): Promise<string | null> {
     const result = await sm.send(new GetSecretValueCommand({
       SecretId: `${SECRET_PREFIX}${webhookId}`,
     }));
-    if (!result.SecretString) return null;
+    // Treat empty / whitespace-only SecretString as null — an empty secret
+    // must never reach HMAC, or HMAC('', body) becomes forgeable.
+    // (Same guard as the GitHub / Linear / Slack verifiers.)
+    if (!result.SecretString || result.SecretString.trim() === '') {
+      logger.error('Webhook secret is empty — refusing to use for HMAC', { webhook_id: webhookId });
+      return null;
+    }
     secretCache.set(webhookId, { secret: result.SecretString, expiresAt: now + CACHE_TTL_MS });
     return result.SecretString;
   } catch (err) {
@@ -65,6 +71,12 @@ async function getSecret(webhookId: string): Promise<string | null> {
 }
 
 function verifySignature(body: string, secret: string, signature: string): boolean {
+  // Defense-in-depth: getSecret already filters empty secrets, but HMAC('')
+  // must always be rejected — anyone can compute it. (Mirrors the
+  // GitHub / Linear / Slack verifiers.)
+  if (!secret || secret.trim() === '') {
+    return false;
+  }
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
   const providedHex = signature.startsWith('sha256=') ? signature.slice(7) : signature;
 

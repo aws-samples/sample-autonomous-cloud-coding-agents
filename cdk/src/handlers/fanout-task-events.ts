@@ -503,6 +503,47 @@ async function saveCommentState(
 const CONDITIONAL_CHECK_FAILED = 'ConditionalCheckFailedException';
 
 /**
+ * Persist the post-once marker after a successful Linear final-status
+ * comment (see ``dispatchToLinear``). Mirrors ``saveCommentState``'s
+ * failure semantics: a ConditionalCheckFailedException is benign (TTL
+ * eviction, or a concurrent invocation won the race — its comment is
+ * the one that posted), any other failure is logged at ERROR with a
+ * dedicated error_id because the next retry would duplicate the
+ * comment. Never throws — a marker-write failure must not convert a
+ * successful post into a batch retry.
+ */
+async function saveLinearCommentState(taskId: string, eventId: string): Promise<void> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET linear_final_comment_event_id = :eid',
+      ExpressionAttributeValues: { ':eid': eventId },
+      ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_final_comment_event_id)',
+    }));
+  } catch (err) {
+    const name = (err as Error)?.name;
+    if (name === CONDITIONAL_CHECK_FAILED) {
+      logger.info('[fanout/linear] marker condition failed — benign (eviction or sibling race)', {
+        event: 'fanout.linear.marker_condition_failed',
+        task_id: taskId,
+        event_id: eventId,
+      });
+      return;
+    }
+    logger.error('[fanout/linear] marker persist failed — next retry may duplicate comment', {
+      event: 'fanout.linear.marker_persist_failed',
+      error_id: 'FANOUT_LINEAR_PERSIST_FAILED',
+      task_id: taskId,
+      event_id: eventId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Resolve the GitHub comment target for this task. Prefers ``pr_number``
  * (the design-intent surface for pr_iteration / pr_review tasks) and
  * falls back to ``issue_number``. Returns ``null`` if the task has
@@ -919,6 +960,21 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Idempotency across partial-batch retries: Linear has no comment
+  // edit API, so a re-run of this dispatcher (e.g. a sibling channel's
+  // infra rejection pushed the whole stream record into
+  // ``batchItemFailures``) would post a duplicate final-status comment.
+  // The marker is persisted after the first successful post below.
+  if (task.linear_final_comment_event_id) {
+    logger.info('[fanout/linear] final comment already posted — skipping (idempotent retry)', {
+      event: 'fanout.linear.already_posted',
+      task_id: task.task_id,
+      posted_event_id: task.linear_final_comment_event_id,
+      event_id: event.event_id,
+    });
+    return;
+  }
+
   // Derive an error title from `error_message` via the shared classifier.
   // Same data the API surfaces as `error_classification.title` —
   // "Hit max-turns cap", "Insufficient GitHub permissions", etc.
@@ -979,6 +1035,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       event_type: event.event_type,
       posted: true,
     });
+    await saveLinearCommentState(task.task_id, event.event_id);
   } else {
     logger.warn('[fanout/linear] postIssueComment returned false — Linear API path failed', {
       event: 'fanout.linear.post_failed',

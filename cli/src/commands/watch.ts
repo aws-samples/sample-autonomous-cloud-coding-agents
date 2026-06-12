@@ -20,9 +20,14 @@
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { debug, isVerbose } from '../debug';
-import { ApiError } from '../errors';
 import { COST_USD_DECIMALS, formatJson } from '../format';
+import { abortableSleep, isTransientError, transientRetryDelayMs } from '../retry';
 import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
+
+// Re-exported from the shared retry module so existing importers (and the
+// watch tests) keep their entrypoint while the implementation lives in one
+// place shared with ``waitForTask``.
+export { transientRetryDelayMs } from '../retry';
 
 /**
  * Adaptive polling cadence (design INTERACTIVE_AGENTS.md §5.3).
@@ -36,9 +41,6 @@ import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
 const POLL_FAST_INTERVAL_MS = 500;
 // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- the ladder IS the named constant
 const BACKOFF_INTERVALS_MS: readonly number[] = [1_000, 2_000, 5_000];
-
-/** Adaptive poll ceiling — the top of the backoff ladder. */
-const POLL_CEILING_MS = BACKOFF_INTERVALS_MS[BACKOFF_INTERVALS_MS.length - 1];
 
 /** Adaptive polling state, threaded through the poll loop. */
 interface PollCadenceState {
@@ -99,52 +101,6 @@ export function _resetSessionRetries(): void {
   flapWarnEmitted = false;
 }
 
-/** Exponential backoff with **equal-jitter** (AWS Architecture Blog
- *  variant): half of the base delay is fixed, the other half is
- *  randomized. This prevents the degenerate case where ``Math.random()``
- *  rolls near-zero on every retry and the CLI retry-spams a degraded
- *  service with no wait between attempts. Bounded at the ladder cap so
- *  a retry storm never walks longer than the adaptive poll ceiling. */
-export function transientRetryDelayMs(attempt: number): number {
-  const base = Math.min(POLL_CEILING_MS, POLL_FAST_INTERVAL_MS * 2 ** attempt);
-  const half = Math.floor(base / 2);
-  return half + Math.floor(Math.random() * (base - half));
-}
-
-/** Classify an error into retryable vs. terminal. We use a **whitelist**
- *  rather than a blacklist: only conditions we specifically recognize as
- *  transient retry. Everything else (programmer errors, JSON parse
- *  failures, auth-token-expired, CliError) propagates immediately so
- *  users see an actionable message instead of "re-run to resume" that
- *  would never succeed.
- *
- *  Transient:
- *    - ``ApiError`` with status 5xx (server-side hiccup)
- *    - Network failures surfaced by ``fetch`` as a ``TypeError`` —
- *      Node's undici implementation reports connect refused / reset /
- *      DNS failure this way on Node 22+.
- *
- *  Non-transient (propagates with its original message):
- *    - ``ApiError`` with status 4xx (including 401 auth-expired — the
- *      ``bgagent login`` hint is already in the message)
- *    - ``CliError`` (our own deterministic contract-violation signal)
- *    - Anything else (``TypeError`` that is *not* a fetch failure,
- *      ``SyntaxError`` from a bad code path, etc.) — a real bug.
- */
-function isTransientError(err: unknown): boolean {
-  if (err instanceof ApiError) {
-    return err.statusCode >= 500 && err.statusCode < 600;
-  }
-  // Node 22+ fetch surfaces network failures as a ``TypeError`` with a
-  // "fetch failed" message (undici wraps the underlying cause). Match
-  // loosely so we tolerate both direct ``TypeError`` and DOMException
-  // lookalikes without retrying genuine programmer ``TypeError``s.
-  if (err instanceof TypeError && /fetch failed|network/i.test(err.message)) {
-    return true;
-  }
-  return false;
-}
-
 /** Exit code 130 is the conventional POSIX code for "terminated by
  *  SIGINT". Using it lets shell scripts distinguish Ctrl+C from a failed
  *  task run. */
@@ -171,6 +127,56 @@ function formatTime(isoTimestamp: string): string {
   } catch {
     return isoTimestamp;
   }
+}
+
+/** Metadata keys that are noise in a compact milestone dump — either already
+ *  rendered elsewhere (``milestone``) or carry no human-salient value. */
+const MILESTONE_NOISE_KEYS = new Set(['milestone', 'details']);
+
+/**
+ * Render the trailing detail for an ``agent_milestone`` line (text mode only).
+ *
+ * The simple case is a ``details`` string (``repo_setup_complete: branch=main``).
+ * But approval / policy milestones (``approval_requested``, ``approval_granted``,
+ * ``approval_denied``, ``approval_timed_out``, ``policy_decision``, …) carry
+ * structured metadata (``request_id``, ``severity``, ``timeout_s``,
+ * ``matching_rule_ids``, ``scope``) and NO ``details`` key — so the old
+ * renderer printed a bare "★ approval_requested" and dropped every salient
+ * field. Here we surface the salient fields inline, falling back to a compact
+ * JSON dump of the remaining metadata (minus noisy keys) so nothing is lost.
+ *
+ * JSON output mode never calls this — it serializes the raw event verbatim.
+ */
+function renderMilestoneSuffix(meta: Record<string, unknown>): string {
+  const details = meta.details;
+  if (typeof details === 'string' && details.length > 0) {
+    return `: ${details}`;
+  }
+
+  const parts: string[] = [];
+  if (meta.severity != null) parts.push(`[sev=${String(meta.severity)}]`);
+  if (meta.request_id != null) parts.push(`request_id=${String(meta.request_id)}`);
+  if (meta.scope != null) parts.push(`scope=${String(meta.scope)}`);
+  if (meta.timeout_s != null) parts.push(`timeout=${String(meta.timeout_s)}s`);
+  const ruleIds = meta.matching_rule_ids;
+  if (Array.isArray(ruleIds) && ruleIds.length > 0) {
+    parts.push(`rules=${ruleIds.map(String).join(',')}`);
+  }
+  if (parts.length > 0) {
+    return ` ${parts.join(' ')}`;
+  }
+
+  // No recognized salient fields, but there may still be other metadata
+  // (a milestone variant we don't special-case). Dump it compactly, minus
+  // the keys that are noise or already rendered, so the signal survives.
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (!MILESTONE_NOISE_KEYS.has(k)) rest[k] = v;
+  }
+  if (Object.keys(rest).length > 0) {
+    return ` ${JSON.stringify(rest)}`;
+  }
+  return '';
 }
 
 /** Render a single progress event as a human-readable line. */
@@ -204,9 +210,8 @@ export function renderEvent(event: TaskEvent): string {
       return `[${time}]   ◀ ${tool}${isError}: ${preview}`;
     }
     case 'agent_milestone': {
-      const milestone = meta.milestone ?? '';
-      const details = meta.details ?? '';
-      return `[${time}] ★ ${milestone}${details ? ': ' + details : ''}`;
+      const milestone = String(meta.milestone ?? '');
+      return `[${time}] ★ ${milestone}${renderMilestoneSuffix(meta)}`;
     }
     case 'agent_cost_update': {
       const cost = meta.cost_usd != null ? `$${Number(meta.cost_usd).toFixed(COST_USD_DECIMALS)}` : '$?';
@@ -430,26 +435,6 @@ async function withTransientRetry<T>(
       await abortableSleep(delayMs, signal);
     }
   }
-}
-
-/** Sleep that honours an AbortSignal — resolves on abort instead of rejecting,
- *  so the polling loop can check ``signal.aborted`` and exit cleanly. */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 /* ------------------------------------------------------------------------ */

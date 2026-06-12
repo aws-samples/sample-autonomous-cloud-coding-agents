@@ -148,6 +148,43 @@ def ensure_pushed(repo_dir: str, branch: str) -> bool:
     return True
 
 
+_UNPUSHED_COMMITS_NOTE = (
+    "⚠️ **bgagent could not push its follow-up commits to this branch.** "
+    "The `git push` during the `push_resolve` step failed, so the latest "
+    "agent changes are committed locally but are NOT reflected in this PR. "
+    "A maintainer may need to re-run the task or push manually."
+)
+
+
+def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> None:
+    """Post a PR comment warning that follow-up commits failed to push.
+
+    Best-effort surface for the ``push_resolve`` push-failure path: the PR URL
+    is still returned (the PR exists) but it no longer reflects the agent's
+    latest work, so the reviewer must be told. Failure to post the comment is
+    logged but not fatal — the WARN log line emitted by the caller is the
+    fallback signal.
+    """
+    try:
+        run_cmd(
+            [
+                "gh",
+                "pr",
+                "comment",
+                branch,
+                "--repo",
+                config.repo_url,
+                "--body",
+                _UNPUSHED_COMMITS_NOTE,
+            ],
+            label="note-unpushed-commits",
+            cwd=repo_dir,
+            check=False,
+        )
+    except Exception as e:
+        log("WARN", f"Failed to post un-pushed-commits note: {type(e).__name__}: {e}")
+
+
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
@@ -177,8 +214,15 @@ def ensure_pr(
 
     # push_resolve / resolve: skip PR creation — just resolve the existing URL.
     if strategy in ("push_resolve", "resolve"):
+        push_failed = False
         if strategy == "push_resolve":
             if not ensure_pushed(repo_dir, branch):
+                # Surface the failure rather than silently returning the stale
+                # PR URL as success: the local follow-up commits never reached
+                # the remote, so the PR the caller resolves below does NOT
+                # reflect the agent's latest work. We note this on the PR
+                # itself (below) so the reviewer is not misled.
+                push_failed = True
                 log("WARN", "Failed to push commits before resolving PR URL")
         else:
             log("POST", "resolve strategy — skipping push (read-only)")
@@ -204,6 +248,8 @@ def ensure_pr(
         if result.returncode == 0 and result.stdout.strip():
             pr_url = result.stdout.strip()
             log("POST", f"Existing PR: {pr_url}")
+            if push_failed:
+                _note_unpushed_commits(repo_dir, branch, config)
             return pr_url
         stderr_msg = result.stderr.strip() if result.stderr else "(no stderr)"
         log("WARN", f"Could not resolve existing PR URL (rc={result.returncode}): {stderr_msg}")

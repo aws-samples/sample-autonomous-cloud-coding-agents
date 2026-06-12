@@ -75,13 +75,19 @@ export function tryLoadConfig(): CliConfig | null {
   }
 }
 
-/** Load cached credentials. Returns null if no credentials file exists. */
+/** Load cached credentials. Returns null if no credentials file exists.
+ *  A corrupt (non-JSON) credentials file throws a ``CliError`` pointing the
+ *  user at ``bgagent login`` rather than surfacing a raw ``SyntaxError``. */
 export function loadCredentials(): Credentials | null {
   const p = credentialsPath();
   if (!fs.existsSync(p)) {
     return null;
   }
-  return JSON.parse(fs.readFileSync(p, 'utf-8')) as Credentials;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf-8')) as Credentials;
+  } catch {
+    throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
+  }
 }
 
 /** Save credentials with restricted permissions. */

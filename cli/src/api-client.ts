@@ -151,7 +151,7 @@ export class ApiClient {
 
   /** POST /tasks/{task_id}/confirm-uploads — confirm presigned uploads. */
   async confirmUploads(taskId: string): Promise<TaskDetail> {
-    const res = await this.request<SuccessResponse<TaskDetail>>('POST', `/tasks/${taskId}/confirm-uploads`);
+    const res = await this.request<SuccessResponse<TaskDetail>>('POST', `/tasks/${encodeURIComponent(taskId)}/confirm-uploads`);
     return res.data;
   }
 

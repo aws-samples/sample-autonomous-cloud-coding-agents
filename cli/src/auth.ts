@@ -30,6 +30,17 @@ import { Credentials } from './types';
 const TOKEN_REFRESH_BUFFER_MINUTES = 5;
 const TOKEN_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MINUTES * 60 * 1000;
 
+/**
+ * In-flight refresh promise, memoized at module scope. Concurrent callers
+ * that all observe an expired token (e.g. several ``ApiClient`` requests
+ * firing in parallel) would otherwise each send their own
+ * ``REFRESH_TOKEN_AUTH`` and race to ``saveCredentials`` — clobbering each
+ * other's freshly-written tokens. Sharing one refresh promise collapses
+ * those into a single Cognito round-trip; the slot is cleared when the
+ * refresh settles so the next genuine expiry re-refreshes.
+ */
+let inFlightRefresh: Promise<void> | null = null;
+
 /** Authenticate with username/password and cache tokens. */
 export async function login(username: string, password: string): Promise<void> {
   const config = loadConfig();
@@ -85,7 +96,16 @@ async function ensureFreshCredentials(): Promise<Credentials> {
     return creds;
   }
   debug('Tokens expired or near expiry, refreshing...');
-  await refreshToken(creds);
+  // Share a single in-flight refresh across concurrent callers so we do not
+  // fire multiple ``REFRESH_TOKEN_AUTH`` calls that clobber each other's
+  // ``saveCredentials``. The slot is cleared in ``finally`` so a later
+  // expiry triggers a fresh refresh.
+  if (!inFlightRefresh) {
+    inFlightRefresh = refreshToken(creds).finally(() => {
+      inFlightRefresh = null;
+    });
+  }
+  await inFlightRefresh;
   const fresh = loadCredentials();
   if (!fresh) {
     throw new CliError('Credentials vanished after refresh. Run `bgagent login`.');

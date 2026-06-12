@@ -76,6 +76,76 @@ describe('events command', () => {
     expect(mockGetTaskEvents).toHaveBeenCalledWith('abc', { limit: 5 });
   });
 
+  test('--all drains every page via next_token', async () => {
+    mockGetTaskEvents
+      .mockResolvedValueOnce({
+        data: [{ event_id: 'e1', event_type: 'A', timestamp: 't1', metadata: {} }],
+        pagination: { next_token: 'tok-1', has_more: true },
+      })
+      .mockResolvedValueOnce({
+        data: [{ event_id: 'e2', event_type: 'B', timestamp: 't2', metadata: {} }],
+        pagination: { next_token: null, has_more: false },
+      });
+
+    const cmd = makeEventsCommand();
+    await cmd.parseAsync(['node', 'test', 'abc', '--all']);
+
+    expect(mockGetTaskEvents).toHaveBeenCalledTimes(2);
+    expect(mockGetTaskEvents).toHaveBeenNthCalledWith(1, 'abc', { limit: undefined, nextToken: undefined });
+    expect(mockGetTaskEvents).toHaveBeenNthCalledWith(2, 'abc', { limit: undefined, nextToken: 'tok-1' });
+    const output = consoleSpy.mock.calls[0][0] as string;
+    expect(output).toContain('A');
+    expect(output).toContain('B');
+    // No "(More events available)" hint when draining everything.
+    expect(consoleSpy.mock.calls.every(c => !String(c[0]).includes('More events available'))).toBe(true);
+  });
+
+  test('--all emits combined JSON with terminal pagination', async () => {
+    mockGetTaskEvents
+      .mockResolvedValueOnce({
+        data: [{ event_id: 'e1', event_type: 'A', timestamp: 't1', metadata: {} }],
+        pagination: { next_token: 'tok-1', has_more: true },
+      })
+      .mockResolvedValueOnce({
+        data: [{ event_id: 'e2', event_type: 'B', timestamp: 't2', metadata: {} }],
+        pagination: { next_token: null, has_more: false },
+      });
+
+    const cmd = makeEventsCommand();
+    await cmd.parseAsync(['node', 'test', 'abc', '--all', '--output', 'json']);
+
+    const parsed = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(parsed.data).toHaveLength(2);
+    expect(parsed.pagination.has_more).toBe(false);
+  });
+
+  test('rejects a non-positive --limit', async () => {
+    const cmd = makeEventsCommand();
+    await expect(
+      cmd.parseAsync(['node', 'test', 'abc', '--limit', '0']),
+    ).rejects.toThrow('--limit must be a positive integer');
+    expect(mockGetTaskEvents).not.toHaveBeenCalled();
+  });
+
+  test('rejects a non-numeric --limit', async () => {
+    const cmd = makeEventsCommand();
+    await expect(
+      cmd.parseAsync(['node', 'test', 'abc', '--limit', 'abc']),
+    ).rejects.toThrow('--limit must be a positive integer');
+  });
+
+  test('still shows the more-events hint without --all', async () => {
+    mockGetTaskEvents.mockResolvedValue({
+      data: [{ event_id: 'e1', event_type: 'A', timestamp: 't1', metadata: {} }],
+      pagination: { next_token: 'tok-1', has_more: true },
+    });
+
+    const cmd = makeEventsCommand();
+    await cmd.parseAsync(['node', 'test', 'abc']);
+
+    expect(consoleSpy.mock.calls.some(c => String(c[0]).includes('More events available'))).toBe(true);
+  });
+
   test('outputs JSON when --output json', async () => {
     const response = {
       data: [{ event_id: 'evt-1', event_type: 'TASK_SUBMITTED', timestamp: '2026-01-01T00:00:00Z', metadata: {} }],

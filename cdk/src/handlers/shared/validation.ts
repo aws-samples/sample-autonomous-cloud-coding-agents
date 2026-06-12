@@ -221,6 +221,10 @@ export function validateMaxTurns(value: unknown): number | null | undefined {
 export function validateMaxBudgetUsd(value: unknown): number | null | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number') return null;
+  // NaN passes the typeof check and both range comparisons below are false
+  // for it — guard explicitly (JSON.parse can't produce NaN, but non-JSON
+  // callers can).
+  if (!Number.isFinite(value)) return null;
   if (value < MAX_BUDGET_USD_MIN || value > MAX_BUDGET_USD_MAX) return null;
   return value;
 }

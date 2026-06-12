@@ -1,0 +1,91 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { ApiError } from './errors';
+
+/**
+ * Shared transient-retry primitives used by both the ``bgagent watch``
+ * poll loop and ``waitForTask`` (``submit --wait`` / ``status --wait``).
+ *
+ * Both consumers face the same hazard: a single network blip or 5xx hiccup
+ * should not crash a long-lived poll, while deterministic 4xx errors must
+ * fail fast. Centralizing the classification + backoff here keeps the two
+ * call sites in lockstep.
+ */
+
+/** Lower bound on the backoff base — the first retry waits at least this. */
+export const RETRY_BASE_DELAY_MS = 500;
+
+/** Upper bound on a single backoff sleep. Keeps a retry storm from walking
+ *  longer than a few seconds between attempts. */
+export const RETRY_CEILING_MS = 5_000;
+
+/**
+ * Classify an error into retryable (transient) vs. terminal. Whitelist
+ * approach: only conditions we specifically recognize as transient retry.
+ *
+ * Transient:
+ *   - ``ApiError`` with status 5xx (server-side hiccup).
+ *   - Network failures surfaced by ``fetch`` as a ``TypeError`` — Node's
+ *     undici reports connect-refused / reset / DNS failure this way.
+ *
+ * Non-transient (propagates with its original message):
+ *   - ``ApiError`` with status 4xx (deterministic; retry is futile).
+ *   - ``CliError`` and everything else (real bugs, contract violations).
+ */
+export function isTransientError(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    return err.statusCode >= 500 && err.statusCode < 600;
+  }
+  if (err instanceof TypeError && /fetch failed|network/i.test(err.message)) {
+    return true;
+  }
+  return false;
+}
+
+/** Exponential backoff with equal-jitter (AWS Architecture Blog variant):
+ *  half the base delay is fixed, the other half randomized. Prevents a
+ *  near-zero ``Math.random()`` roll from retry-spamming a degraded service.
+ *  Bounded at ``RETRY_CEILING_MS``. ``attempt`` is 1-based. */
+export function transientRetryDelayMs(attempt: number): number {
+  const base = Math.min(RETRY_CEILING_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+  const half = Math.floor(base / 2);
+  return half + Math.floor(Math.random() * (base - half));
+}
+
+/** Sleep that honours an optional AbortSignal — resolves on abort instead of
+ *  rejecting, so a poll loop can check ``signal.aborted`` and exit cleanly.
+ *  With no signal it is a plain ``setTimeout`` sleep. */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}

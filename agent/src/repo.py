@@ -211,6 +211,17 @@ def detect_default_branch(repo_url: str, repo_dir: str) -> str:
     except subprocess.TimeoutExpired:
         log("WARN", "Default branch detection timed out — defaulting to 'main'")
         return "main"
+    except (OSError, subprocess.SubprocessError) as exc:
+        # gh missing from PATH (FileNotFoundError is an OSError), a permission
+        # error spawning it, or any other subprocess failure. The docstring
+        # promises a fallback to 'main'; without this the exception would
+        # escape and fail the whole task. (TimeoutExpired is a
+        # SubprocessError too but is handled above for its distinct message.)
+        log(
+            "WARN",
+            f"Default branch detection failed ({type(exc).__name__}) — defaulting to 'main'",
+        )
+        return "main"
 
     if result.returncode == 0 and result.stdout.strip():
         branch = result.stdout.strip()

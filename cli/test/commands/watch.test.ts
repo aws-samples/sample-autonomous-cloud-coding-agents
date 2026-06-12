@@ -123,6 +123,65 @@ describe('renderEvent', () => {
     expect(output).toContain('branch=main');
   });
 
+  test('renders approval milestone metadata when details is absent', () => {
+    const event = makeEvent({
+      event_type: 'agent_milestone',
+      metadata: {
+        milestone: 'approval_requested',
+        severity: 'high',
+        request_id: 'req-abc',
+        timeout_s: 300,
+        matching_rule_ids: ['rule-1', 'rule-2'],
+        scope: 'this_call',
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('★ approval_requested');
+    expect(output).toContain('[sev=high]');
+    expect(output).toContain('request_id=req-abc');
+    expect(output).toContain('timeout=300s');
+    expect(output).toContain('rules=rule-1,rule-2');
+    expect(output).toContain('scope=this_call');
+  });
+
+  test('renders policy_decision milestone metadata', () => {
+    const event = makeEvent({
+      event_type: 'agent_milestone',
+      metadata: {
+        milestone: 'policy_decision',
+        severity: 'medium',
+        matching_rule_ids: ['deny-net'],
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('★ policy_decision');
+    expect(output).toContain('[sev=medium]');
+    expect(output).toContain('rules=deny-net');
+  });
+
+  test('falls back to a compact JSON dump for unrecognized milestone metadata', () => {
+    const event = makeEvent({
+      event_type: 'agent_milestone',
+      metadata: { milestone: 'custom_phase', phase: 7, note: 'halfway' },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('★ custom_phase');
+    expect(output).toContain('"phase":7');
+    expect(output).toContain('"note":"halfway"');
+    // ``milestone`` is already rendered in the prefix — not duplicated in the dump.
+    expect(output).not.toContain('"milestone"');
+  });
+
+  test('renders a bare milestone with no metadata', () => {
+    const event = makeEvent({
+      event_type: 'agent_milestone',
+      metadata: { milestone: 'started' },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('★ started');
+    expect(output).not.toContain('{');
+  });
+
   test('renders agent_cost_update', () => {
     const event = makeEvent({
       event_type: 'agent_cost_update',
