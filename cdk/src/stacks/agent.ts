@@ -45,7 +45,6 @@ import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
-import { RestackProcessor } from '../constructs/restack-processor';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { StrandedOrchestrationReconciler } from '../constructs/stranded-orchestration-reconciler';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
@@ -1015,60 +1014,13 @@ export class AgentStack extends Stack {
       linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
     });
 
-    // #305 A6: re-stack stale dependents when a predecessor PR's branch
-    // changes. The screenshot webhook receiver forwards pull_request:
-    // synchronize events to this processor, which resolves the changed
-    // branch → orchestration child → dependents and issues coding/restack-v1
-    // tasks. Runs createTaskCore in-process, so it needs the SAME grants as
-    // the orchestration reconciler (repo config, guardrail, orchestrator
-    // invoke, linear-oauth secret).
-    const restackProcessor = new RestackProcessor(this, 'RestackProcessor', {
-      orchestrationTable: orchestrationTable.table,
-      taskTable: taskTable.table,
-      taskEventsTable: taskEventsTable.table,
-      orchestratorFunctionArn: orchestrator.alias.functionArn,
-    });
-    repoTable.table.grantReadData(restackProcessor.fn);
-    restackProcessor.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
-    restackProcessor.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
-    restackProcessor.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
-    linearIntegration.workspaceRegistryTable.grantReadData(restackProcessor.fn);
-    restackProcessor.fn.addEnvironment(
-      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
-      linearIntegration.workspaceRegistryTable.tableName,
-    );
-    restackProcessor.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['lambda:InvokeFunction'],
-      resources: [orchestrator.alias.functionArn],
-    }));
-    restackProcessor.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['bedrock:ApplyGuardrail'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'bedrock',
-          resource: 'guardrail',
-          resourceName: inputGuardrail.guardrailId,
-        }),
-      ],
-    }));
-    restackProcessor.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
-    }));
-    // Connect the receiver → restack processor: the receiver async-invokes
-    // it on pull_request:synchronize (env-gated; this is what arms it).
-    restackProcessor.fn.grantInvoke(githubScreenshot.webhookFn);
-    githubScreenshot.webhookFn.addEnvironment(
-      'GITHUB_RESTACK_PROCESSOR_FUNCTION_NAME',
-      restackProcessor.fn.functionName,
-    );
+    // #247 A6 re-stack is NOT a GitHub-webhook path. It runs inside the
+    // orchestration reconciler (off the TaskTable stream): when a Linear
+    // @bgagent comment re-iterates a sub-issue's PR (coding/pr-iteration-v1)
+    // and that task completes, the reconciler cascades coding/restack-v1
+    // tasks to the changed node's dependents. No inbound pull_request webhook
+    // (those are WAF-blocked by the API's managed rule set anyway), so there
+    // is no RestackProcessor Lambda to wire here.
 
     new CfnOutput(this, 'GitHubWebhookUrl', {
       value: `${taskApi.api.url}github/webhook`,
