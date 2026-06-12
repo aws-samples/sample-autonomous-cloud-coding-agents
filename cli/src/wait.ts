@@ -35,6 +35,12 @@ const MAX_TRANSIENT_FAILURES = 5;
  *  task while still guaranteeing eventual termination. */
 const DEFAULT_MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 
+/** Exit code for "the CLI stopped waiting" (timeout / transient exhaustion).
+ *  Distinct from 1 (= the task itself reached a non-COMPLETED terminal
+ *  status, via ``exitCodeForStatus``) so scripts wrapping ``--wait`` can
+ *  tell "task failed" from "task may still be running; the CLI gave up". */
+export const EXIT_CODE_WAIT_ABORTED = 2;
+
 /**
  * Poll a task until it reaches a terminal status.
  * Prints status updates to stderr. Returns the final task detail.
@@ -56,11 +62,25 @@ export async function waitForTask(
   const startTime = Date.now();
   let consecutiveTransientFailures = 0;
 
+  let lastStatus = 'unknown';
   while (true) {
+    // Ceiling check at loop top so it covers BOTH branches below — checking
+    // only after a successful poll would let a flapping backend defer
+    // enforcement by one retry ladder per cycle.
+    if (Date.now() - startTime >= maxWaitMs) {
+      throw new CliError(
+        `Timed out waiting for task ${taskId} to reach a terminal status `
+        + `after ${Math.round(maxWaitMs / 1_000)}s (last status: ${lastStatus}). `
+        + `Re-run \`bgagent status ${taskId} --wait\` to keep waiting.`,
+        EXIT_CODE_WAIT_ABORTED,
+      );
+    }
+
     let task: TaskDetail;
     try {
       task = await client.getTask(taskId);
       consecutiveTransientFailures = 0;
+      lastStatus = task.status;
     } catch (err) {
       if (!isTransientError(err)) {
         throw err;
@@ -72,6 +92,7 @@ export async function waitForTask(
           `Gave up waiting for task ${taskId} after ${MAX_TRANSIENT_FAILURES} `
           + `consecutive transient failures: ${e.message}. `
           + `Re-run \`bgagent status ${taskId} --wait\` to resume.`,
+          EXIT_CODE_WAIT_ABORTED,
         );
       }
       await abortableSleep(transientRetryDelayMs(consecutiveTransientFailures));
@@ -80,14 +101,6 @@ export async function waitForTask(
 
     if (isTerminal(task.status)) {
       return task;
-    }
-
-    if (Date.now() - startTime >= maxWaitMs) {
-      throw new CliError(
-        `Timed out waiting for task ${taskId} to reach a terminal status `
-        + `after ${Math.round(maxWaitMs / 1_000)}s (last status: ${task.status}). `
-        + `Re-run \`bgagent status ${taskId} --wait\` to keep waiting.`,
-      );
     }
 
     const elapsed = Math.round((Date.now() - startTime) / 1000);

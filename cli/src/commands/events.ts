@@ -32,7 +32,7 @@ export function makeEventsCommand(): Command {
   return new Command('events')
     .description('Get task events')
     .argument('<task-id>', 'Task ID')
-    .option('--limit <n>', 'Max number of events to return', parseInt)
+    .option('--limit <n>', 'Max total number of events to return', parseInt)
     .option('--all', 'Drain all pages of events (follows next_token)')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (taskId: string, opts) => {
@@ -71,9 +71,14 @@ export function makeEventsCommand(): Command {
     });
 }
 
-/** Follow ``next_token`` until the server reports no more pages (or the
- *  defensive ``MAX_PAGES`` cap trips). Returns the concatenated events and the
- *  final page's pagination (``has_more=false`` on a clean drain). */
+/** Follow ``next_token`` until the server reports no more pages, the
+ *  defensive ``MAX_PAGES`` cap trips, or ``limit`` total events have been
+ *  collected. ``limit`` means the same thing on both command paths — a cap
+ *  on the TOTAL events returned — so it is enforced here client-side
+ *  rather than forwarded as a per-page size (the server's ``limit`` param
+ *  is a page size, which would make ``--all --limit 5`` return everything
+ *  in 5-event pages). Returns the concatenated events and the final page's
+ *  pagination (``has_more=false`` on a clean full drain). */
 async function drainAllEvents(
   client: ApiClient,
   taskId: string,
@@ -84,9 +89,12 @@ async function drainAllEvents(
   let pagination: Pagination = { next_token: null, has_more: false };
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const result = await client.getTaskEvents(taskId, { limit, nextToken });
+    const result = await client.getTaskEvents(taskId, { nextToken });
     events.push(...result.data);
     pagination = result.pagination;
+    if (limit !== undefined && events.length >= limit) {
+      return { events: events.slice(0, limit), pagination };
+    }
     if (!result.pagination.has_more || !result.pagination.next_token) {
       return { events, pagination };
     }

@@ -144,6 +144,16 @@ async function refreshToken(creds: Credentials): Promise<void> {
     });
   } catch (err) {
     if (err instanceof CliError) throw err;
-    throw new CliError('Session expired. Run `bgagent login` to re-authenticate.');
+    // Distinguish a genuinely rejected/expired refresh token from a
+    // transient transport failure. Only Cognito's auth-rejection error
+    // names mean the session is really over; telling a user to re-login
+    // over a network blip is wrong advice — and with the shared in-flight
+    // refresh, that one blip's message reaches every concurrent caller.
+    const name = (err as Error)?.name;
+    if (name === 'NotAuthorizedException' || name === 'UserNotFoundException') {
+      throw new CliError('Session expired. Run `bgagent login` to re-authenticate.');
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new CliError(`Token refresh failed (${detail}). Retry, or run \`bgagent login\` if it persists.`);
   }
 }

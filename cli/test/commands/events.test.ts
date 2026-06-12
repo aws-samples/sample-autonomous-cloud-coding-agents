@@ -91,8 +91,8 @@ describe('events command', () => {
     await cmd.parseAsync(['node', 'test', 'abc', '--all']);
 
     expect(mockGetTaskEvents).toHaveBeenCalledTimes(2);
-    expect(mockGetTaskEvents).toHaveBeenNthCalledWith(1, 'abc', { limit: undefined, nextToken: undefined });
-    expect(mockGetTaskEvents).toHaveBeenNthCalledWith(2, 'abc', { limit: undefined, nextToken: 'tok-1' });
+    expect(mockGetTaskEvents).toHaveBeenNthCalledWith(1, 'abc', { nextToken: undefined });
+    expect(mockGetTaskEvents).toHaveBeenNthCalledWith(2, 'abc', { nextToken: 'tok-1' });
     const output = consoleSpy.mock.calls[0][0] as string;
     expect(output).toContain('A');
     expect(output).toContain('B');
@@ -125,6 +125,31 @@ describe('events command', () => {
       cmd.parseAsync(['node', 'test', 'abc', '--limit', '0']),
     ).rejects.toThrow('--limit must be a positive integer');
     expect(mockGetTaskEvents).not.toHaveBeenCalled();
+  });
+
+  test('--all --limit N caps the TOTAL events, not the page size', async () => {
+    // Regression: --limit was once forwarded as the server's per-page size
+    // during the drain, so `--all --limit 2` returned EVERY event in
+    // 2-event pages instead of 2 events total.
+    mockGetTaskEvents
+      .mockResolvedValueOnce({
+        data: [
+          { event_id: 'e1', event_type: 'A', timestamp: 't1', metadata: {} },
+          { event_id: 'e2', event_type: 'B', timestamp: 't2', metadata: {} },
+          { event_id: 'e3', event_type: 'C', timestamp: 't3', metadata: {} },
+        ],
+        pagination: { next_token: 'tok-1', has_more: true },
+      });
+
+    const cmd = makeEventsCommand();
+    await cmd.parseAsync(['node', 'test', 'abc', '--all', '--limit', '2', '--output', 'json']);
+
+    // Limit satisfied by the first page — no second fetch, output truncated.
+    expect(mockGetTaskEvents).toHaveBeenCalledTimes(1);
+    expect(mockGetTaskEvents).toHaveBeenCalledWith('abc', { nextToken: undefined });
+    const parsed = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(parsed.data).toHaveLength(2);
+    expect(parsed.data.map((e: { event_id: string }) => e.event_id)).toEqual(['e1', 'e2']);
   });
 
   test('rejects a non-numeric --limit', async () => {

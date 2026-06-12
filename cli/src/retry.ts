@@ -62,9 +62,15 @@ export function isTransientError(err: unknown): boolean {
 /** Exponential backoff with equal-jitter (AWS Architecture Blog variant):
  *  half the base delay is fixed, the other half randomized. Prevents a
  *  near-zero ``Math.random()`` roll from retry-spamming a degraded service.
- *  Bounded at ``RETRY_CEILING_MS``. ``attempt`` is 1-based. */
+ *  Bounded at ``RETRY_CEILING_MS``. ``attempt`` is 1-based.
+ *
+ *  The exponent is ``2 ** attempt`` (NOT ``attempt - 1``): with the 1-based
+ *  counter both callers use, the first retry's base is 1000ms, then
+ *  2000/4000/5000(cap). This preserves the original watch.ts tuning —
+ *  an earlier extraction accidentally halved the curve, doubling retry
+ *  pressure on a degraded backend. The curve is pinned by tests. */
 export function transientRetryDelayMs(attempt: number): number {
-  const base = Math.min(RETRY_CEILING_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+  const base = Math.min(RETRY_CEILING_MS, RETRY_BASE_DELAY_MS * 2 ** attempt);
   const half = Math.floor(base / 2);
   return half + Math.floor(Math.random() * (base - half));
 }

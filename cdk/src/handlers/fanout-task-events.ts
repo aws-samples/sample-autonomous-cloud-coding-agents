@@ -462,6 +462,11 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
  * persistence bug that risks a duplicate comment on the next event
  * (logged at ERROR with a dedicated ``FANOUT_GITHUB_PERSIST_FAILED``
  * error_id so operators can alarm).
+ *
+ * NOTE for new channels: prefer ``saveDispatchMarker`` (below), which owns
+ * the shared never-throw / benign-CCF classification. This function predates
+ * it and keeps its established log event names (``persist_benign_evicted``
+ * / ``persist_failed``) because operators may filter on them.
  */
 async function saveCommentState(
   taskId: string,
@@ -503,44 +508,74 @@ async function saveCommentState(
 const CONDITIONAL_CHECK_FAILED = 'ConditionalCheckFailedException';
 
 /**
- * Persist the post-once marker after a successful Linear final-status
- * comment (see ``dispatchToLinear``). Mirrors ``saveCommentState``'s
- * failure semantics: a ConditionalCheckFailedException is benign (TTL
- * eviction, or a concurrent invocation won the race — its comment is
- * the one that posted), any other failure is logged at ERROR with a
- * dedicated error_id because the next retry would duplicate the
- * comment. Never throws — a marker-write failure must not convert a
- * successful post into a batch retry.
+ * Shared post-once / dedup marker writer for channel dispatchers. Both the
+ * GitHub comment-id persistence and the Linear post-once marker share the
+ * same load-bearing invariant: a successful external post must NEVER turn
+ * into a batch retry because the marker write failed (the retry IS the
+ * duplicate the marker exists to prevent). So this helper never throws —
+ * it classifies the failure instead:
+ *
+ *   - ConditionalCheckFailedException → benign INFO (TTL eviction, or a
+ *     sibling invocation won the race; its post is the surviving one).
+ *   - anything else → ERROR with the channel's ``error_id`` so operators
+ *     can alarm on "next event/retry may duplicate" distinctly.
  */
-async function saveLinearCommentState(taskId: string, eventId: string): Promise<void> {
+async function saveDispatchMarker(opts: {
+  readonly taskId: string;
+  readonly updateExpression: string;
+  readonly conditionExpression: string;
+  readonly values: Record<string, unknown>;
+  readonly channel: string;
+  readonly errorId: string;
+  readonly logContext?: Record<string, unknown>;
+}): Promise<void> {
   const tableName = process.env.TASK_TABLE_NAME;
   if (!tableName) return;
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
-      Key: { task_id: taskId },
-      UpdateExpression: 'SET linear_final_comment_event_id = :eid',
-      ExpressionAttributeValues: { ':eid': eventId },
-      ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_final_comment_event_id)',
+      Key: { task_id: opts.taskId },
+      UpdateExpression: opts.updateExpression,
+      ExpressionAttributeValues: opts.values,
+      ConditionExpression: opts.conditionExpression,
     }));
   } catch (err) {
     const name = (err as Error)?.name;
     if (name === CONDITIONAL_CHECK_FAILED) {
-      logger.info('[fanout/linear] marker condition failed — benign (eviction or sibling race)', {
-        event: 'fanout.linear.marker_condition_failed',
-        task_id: taskId,
-        event_id: eventId,
+      logger.info(`[fanout/${opts.channel}] marker condition failed — benign (eviction or sibling race)`, {
+        event: `fanout.${opts.channel}.marker_condition_failed`,
+        task_id: opts.taskId,
+        ...opts.logContext,
       });
       return;
     }
-    logger.error('[fanout/linear] marker persist failed — next retry may duplicate comment', {
-      event: 'fanout.linear.marker_persist_failed',
-      error_id: 'FANOUT_LINEAR_PERSIST_FAILED',
-      task_id: taskId,
-      event_id: eventId,
+    logger.error(`[fanout/${opts.channel}] marker persist failed — next event/retry may duplicate`, {
+      event: `fanout.${opts.channel}.marker_persist_failed`,
+      error_id: opts.errorId,
+      task_id: opts.taskId,
+      error_name: name,
       error: err instanceof Error ? err.message : String(err),
+      ...opts.logContext,
     });
   }
+}
+
+/**
+ * Persist the post-once marker after a successful Linear final-status
+ * comment (see ``dispatchToLinear``). Linear has no comment-edit API, so
+ * the marker is what makes the post idempotent across partial-batch
+ * retries.
+ */
+async function saveLinearCommentState(taskId: string, eventId: string): Promise<void> {
+  await saveDispatchMarker({
+    taskId,
+    updateExpression: 'SET linear_final_comment_event_id = :eid',
+    conditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_final_comment_event_id)',
+    values: { ':eid': eventId },
+    channel: 'linear',
+    errorId: 'FANOUT_LINEAR_PERSIST_FAILED',
+    logContext: { event_id: eventId },
+  });
 }
 
 /**

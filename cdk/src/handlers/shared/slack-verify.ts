@@ -19,6 +19,7 @@
 
 import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { isUsableHmacSecret } from './hmac-secret';
 import { logger } from './logger';
 
 const sm = new SecretsManagerClient({});
@@ -52,8 +53,7 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
     // Treat empty / whitespace-only SecretString as null — an empty secret
     // must never be used for HMAC, or HMAC('', input) becomes forgeable.
-    // (Same guard as getGitHubWebhookSecret / getLinearSecret.)
-    if (!result.SecretString || result.SecretString.trim() === '') {
+    if (!isUsableHmacSecret(result.SecretString)) {
       logger.error('Slack signing secret is empty — refusing to use for HMAC', {
         secret_id: secretId,
       });
@@ -106,9 +106,8 @@ export function verifySlackSignature(
 ): boolean {
   // Defense-in-depth: getSlackSecret already filters empty secrets, but
   // if a future caller wires a different secret source we still want
-  // HMAC('') rejected — anyone can compute it. (Mirrors
-  // verifyGitHubSignature / verifyLinearSignature.)
-  if (!signingSecret || signingSecret.trim() === '') {
+  // HMAC('') rejected — anyone can compute it.
+  if (!isUsableHmacSecret(signingSecret)) {
     return false;
   }
   // Reject requests with stale timestamps (replay protection).

@@ -151,7 +151,7 @@ describe('auth', () => {
       await expect(getAuthToken()).rejects.toThrow('Not authenticated');
     });
 
-    test('throws readable error when refresh fails', async () => {
+    test('throws "Session expired" when Cognito rejects the refresh token', async () => {
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({
         id_token: 'old-token',
@@ -159,9 +159,32 @@ describe('auth', () => {
         token_expiry: pastExpiry,
       });
 
-      mockSend.mockRejectedValue(new Error('Token expired'));
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('Refresh Token has expired'), { name: 'NotAuthorizedException' }),
+      );
 
       await expect(getAuthToken()).rejects.toThrow('Session expired');
+    });
+
+    test('transient refresh failure does NOT claim the session expired', async () => {
+      // A network blip is not an auth rejection — telling the user to
+      // re-login is wrong advice, and with the shared in-flight refresh
+      // that message would reach every concurrent caller.
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      saveCredentials({
+        id_token: 'old-token',
+        refresh_token: 'refresh-token',
+        token_expiry: pastExpiry,
+      });
+
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('getaddrinfo ENOTFOUND cognito-idp'), { name: 'TypeError' }),
+      );
+
+      const err = (await getAuthToken().catch((e: Error) => e)) as Error;
+      expect(err.message).toContain('Token refresh failed');
+      expect(err.message).toContain('Retry');
+      expect(err.message).not.toContain('Session expired');
     });
   });
 });

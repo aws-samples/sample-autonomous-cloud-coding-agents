@@ -25,10 +25,10 @@ import {
   makeWatchCommand,
   nextCadence,
   renderEvent,
-  transientRetryDelayMs,
 } from '../../src/commands/watch';
 import { loadConfig as loadConfigMocked } from '../../src/config';
 import { ApiError, CliError } from '../../src/errors';
+import { transientRetryDelayMs } from '../../src/retry';
 import { TaskEvent } from '../../src/types';
 
 jest.mock('../../src/api-client');
@@ -880,6 +880,21 @@ describe('transientRetryDelayMs (equal-jitter backoff)', () => {
       // Attempt 10 would produce base = 500 * 1024 if unbounded.
       expect(transientRetryDelayMs(10)).toBeLessThanOrEqual(5_000);
     }
+  });
+
+  test('pins the backoff curve: 1-based attempts → 1000/2000/4000/5000ms bases', () => {
+    // Regression pin: an extraction to retry.ts once changed the exponent
+    // to 2**(attempt-1), silently halving every delay. Equal jitter means
+    // the result lies in [base/2, base) — assert both bounds per attempt.
+    const expectedBases = [1000, 2000, 4000, 5000, 5000];
+    expectedBases.forEach((base, idx) => {
+      const attempt = idx + 1;
+      for (let i = 0; i < 100; i += 1) {
+        const ms = transientRetryDelayMs(attempt);
+        expect(ms).toBeGreaterThanOrEqual(base / 2);
+        expect(ms).toBeLessThan(base);
+      }
+    });
   });
 });
 

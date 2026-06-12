@@ -141,4 +141,20 @@ describe('waitForTask', () => {
     await flushPolls(3);
     await assertion;
   });
+
+  test('wait-abort errors carry exit code 2, distinct from task-failure exit 1', async () => {
+    // Scripts wrapping `submit --wait` must be able to tell "the CLI gave
+    // up waiting (task may still run)" from "the task terminally failed".
+    mockGetTask.mockResolvedValue(makeTask('RUNNING'));
+    const client = new ApiClient();
+
+    const promise = waitForTask(client, 'task-1', { maxWaitMs: 1 });
+    const settled = promise.catch((e: CliError) => e);
+    await flushPolls(3);
+    const err = (await settled) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.exitCode).toBe(2);
+    // ...while a FAILED terminal status maps to plain exit 1.
+    expect(exitCodeForStatus('FAILED')).toBe(1);
+  });
 });

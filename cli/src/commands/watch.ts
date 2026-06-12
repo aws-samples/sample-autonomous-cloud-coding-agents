@@ -24,11 +24,6 @@ import { COST_USD_DECIMALS, formatJson } from '../format';
 import { abortableSleep, isTransientError, transientRetryDelayMs } from '../retry';
 import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
 
-// Re-exported from the shared retry module so existing importers (and the
-// watch tests) keep their entrypoint while the implementation lives in one
-// place shared with ``waitForTask``.
-export { transientRetryDelayMs } from '../retry';
-
 /**
  * Adaptive polling cadence (design INTERACTIVE_AGENTS.md §5.3).
  *

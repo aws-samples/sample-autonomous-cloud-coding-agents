@@ -9,58 +9,21 @@ import subprocess
 from types import SimpleNamespace
 
 import repo
-from models import TaskConfig
+from tests.conftest import FakeRunCmd, make_task_config
 
 
-class _FakeRunCmd:
-    """Records argv and returns scripted CompletedProcess-like results.
-
-    ``returncodes`` maps a label substring -> returncode; default 0. ``stdouts``
-    maps label substring -> stdout string.
-    """
-
-    def __init__(
-        self,
-        returncodes: dict[str, int] | None = None,
-        stdouts: dict[str, str] | None = None,
-    ):
-        self.calls: list[dict] = []
-        self._returncodes = returncodes or {}
-        self._stdouts = stdouts or {}
-
-    def __call__(self, cmd, label, cwd=None, timeout=600, check=True, **kwargs):
-        self.calls.append({"cmd": cmd, "label": label, "cwd": cwd, "check": check})
-        rc = 0
-        stdout = ""
-        for key, val in self._returncodes.items():
-            if key in label:
-                rc = val
-        for key, val in self._stdouts.items():
-            if key in label:
-                stdout = val
-        return SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
-
-    def labels(self) -> list[str]:
-        return [c["label"] for c in self.calls]
-
-    def cmd_for(self, label_substr: str) -> list[str] | None:
-        for c in self.calls:
-            if label_substr in c["label"]:
-                return c["cmd"]
-        return None
+def _fake_run_cmd(
+    returncodes: dict[str, int] | None = None,
+    stdouts: dict[str, str] | None = None,
+) -> FakeRunCmd:
+    """repo.py keys scripted results off a recognizable label fragment (substring match)."""
+    return FakeRunCmd(returncodes=returncodes, stdouts=stdouts, match_substring=True)
 
 
-def _config(**overrides) -> TaskConfig:
-    return TaskConfig(
-        repo_url=overrides.pop("repo_url", "owner/repo"),
-        aws_region=overrides.pop("aws_region", "us-east-1"),
-        task_id=overrides.pop("task_id", "task-abc"),
-        task_description=overrides.pop("task_description", "Do a thing"),
-        **overrides,
-    )
+_config = make_task_config
 
 
-def _patch_common(monkeypatch, fake: _FakeRunCmd):
+def _patch_common(monkeypatch, fake: FakeRunCmd):
     """Patch run_cmd everywhere repo.py reaches it, plus the commit-hook install."""
     monkeypatch.setattr(repo, "run_cmd", fake)
     # _install_commit_hook touches the filesystem; stub it out (it's its own
@@ -70,7 +33,7 @@ def _patch_common(monkeypatch, fake: _FakeRunCmd):
 
 class TestSetupRepoHappyPath:
     def test_new_task_argv_sequence_and_remote_url_has_no_token(self, monkeypatch):
-        fake = _FakeRunCmd()
+        fake = _fake_run_cmd()
         _patch_common(monkeypatch, fake)
         # detect_default_branch is exercised separately; stub for this test.
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
@@ -104,7 +67,7 @@ class TestSetupRepoHappyPath:
         assert setup.default_branch == "main"
 
     def test_pr_branch_checkout_path(self, monkeypatch):
-        fake = _FakeRunCmd()
+        fake = _fake_run_cmd()
         _patch_common(monkeypatch, fake)
 
         setup = repo.setup_repo(

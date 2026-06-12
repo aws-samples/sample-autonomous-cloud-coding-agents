@@ -23,6 +23,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { createTaskCore } from './shared/create-task-core';
 import { buildWebhookChannelMetadata, extractWebhookContext } from './shared/gateway';
+import { isUsableHmacSecret } from './shared/hmac-secret';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
@@ -48,8 +49,7 @@ async function getSecret(webhookId: string): Promise<string | null> {
     }));
     // Treat empty / whitespace-only SecretString as null — an empty secret
     // must never reach HMAC, or HMAC('', body) becomes forgeable.
-    // (Same guard as the GitHub / Linear / Slack verifiers.)
-    if (!result.SecretString || result.SecretString.trim() === '') {
+    if (!isUsableHmacSecret(result.SecretString)) {
       logger.error('Webhook secret is empty — refusing to use for HMAC', { webhook_id: webhookId });
       return null;
     }
@@ -72,9 +72,8 @@ async function getSecret(webhookId: string): Promise<string | null> {
 
 function verifySignature(body: string, secret: string, signature: string): boolean {
   // Defense-in-depth: getSecret already filters empty secrets, but HMAC('')
-  // must always be rejected — anyone can compute it. (Mirrors the
-  // GitHub / Linear / Slack verifiers.)
-  if (!secret || secret.trim() === '') {
+  // must always be rejected — anyone can compute it.
+  if (!isUsableHmacSecret(secret)) {
     return false;
   }
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');

@@ -1,11 +1,15 @@
 """Context hydration: GitHub issue fetching and prompt assembly.
 
 Security: GitHub issue/PR content is attacker-controllable (anyone who can
-open an issue can inject text). This module routes every externally-sourced
-string (issue title, body, and each comment body) through
-:func:`sanitization.sanitize_external_content` and wraps the assembled
-external block in explicit ``BEGIN/END UNTRUSTED EXTERNAL CONTENT`` delimiters
-so the model treats it as data, not instructions.
+open an issue can inject text). This module sanitizes every externally-sourced
+string (issue title, body, and each comment author/body) through
+:func:`sanitization.sanitize_external_content` **at the source** — inside
+:func:`fetch_github_issue`, as the :class:`GitHubIssue`/:class:`IssueComment`
+objects are constructed — so the model never carries unsanitized data and
+downstream consumers cannot forget to sanitize. :func:`assemble_prompt` then
+wraps the assembled external block in explicit ``BEGIN/END UNTRUSTED EXTERNAL
+CONTENT`` delimiters (presentation, applied at prompt assembly) so the model
+treats it as data, not instructions.
 
 In production (AgentCore server mode) the orchestrator's
 ``assembleUserPrompt()`` in ``context-hydration.ts`` is the prompt assembler
@@ -22,7 +26,15 @@ from sanitization import sanitize_external_content
 
 
 def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIssue:
-    """Fetch a GitHub issue's title, body, and comments."""
+    """Fetch a GitHub issue's title, body, and comments.
+
+    Every attacker-controllable string (title, body, each comment author and
+    body) is passed through :func:`sanitize_external_content` here, as the
+    :class:`GitHubIssue`/:class:`IssueComment` objects are constructed. The
+    returned model is therefore pre-sanitized: consumers (e.g.
+    :func:`assemble_prompt`) must not sanitize again and only need to apply
+    presentation (untrusted-content delimiters).
+    """
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
@@ -47,13 +59,17 @@ def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIs
         )
         comments_resp.raise_for_status()
         comments = [
-            IssueComment(id=int(c["id"]), author=c["user"]["login"], body=c["body"] or "")
+            IssueComment(
+                id=int(c["id"]),
+                author=sanitize_external_content(c["user"]["login"]),
+                body=sanitize_external_content(c["body"] or ""),
+            )
             for c in comments_resp.json()
         ]
 
     return GitHubIssue(
-        title=issue["title"],
-        body=issue.get("body", "") or "",
+        title=sanitize_external_content(issue["title"]),
+        body=sanitize_external_content(issue.get("body", "") or ""),
         number=issue["number"],
         comments=comments,
     )
@@ -73,9 +89,12 @@ _UNTRUSTED_END = "<<<END UNTRUSTED EXTERNAL CONTENT>>>"
 def assemble_prompt(config: TaskConfig) -> str:
     """Assemble the user prompt from issue context and task description.
 
-    Externally-sourced strings (issue title, body, every comment body) are
-    passed through :func:`sanitize_external_content` and the whole GitHub block
-    is wrapped in ``_UNTRUSTED_BEGIN``/``_UNTRUSTED_END`` delimiters.
+    The issue fields are already sanitized at the source
+    (:func:`fetch_github_issue` runs :func:`sanitize_external_content` as the
+    :class:`GitHubIssue`/:class:`IssueComment` objects are built), so this
+    function only applies presentation: it wraps the whole GitHub block in
+    ``_UNTRUSTED_BEGIN``/``_UNTRUSTED_END`` delimiters and does not sanitize
+    again.
 
     .. note::
         In production (AgentCore server mode), the orchestrator's
@@ -85,8 +104,8 @@ def assemble_prompt(config: TaskConfig) -> str:
         ``HydratedContext.user_prompt`` (validated from the incoming JSON).
         This Python implementation is retained only for **local batch mode**
         (``python src/entrypoint.py``) and **dry-run mode** (``DRY_RUN=1``),
-        where the orchestrator's sanitization never runs — so it sanitizes
-        here independently.
+        where the orchestrator's sanitization never runs — so the agent
+        sanitizes independently at fetch time.
     """
     parts = []
 
@@ -96,16 +115,12 @@ def assemble_prompt(config: TaskConfig) -> str:
     if config.issue:
         issue = config.issue
         parts.append(_UNTRUSTED_BEGIN)
-        parts.append(
-            f"\n## GitHub Issue #{issue.number}: {sanitize_external_content(issue.title)}\n"
-        )
-        parts.append(sanitize_external_content(issue.body) or "(no description)")
+        parts.append(f"\n## GitHub Issue #{issue.number}: {issue.title}\n")
+        parts.append(issue.body or "(no description)")
         if issue.comments:
             parts.append("\n### Comments\n")
             for c in issue.comments:
-                author = sanitize_external_content(c.author)
-                body = sanitize_external_content(c.body)
-                parts.append(f"**@{author}**: {body}\n")
+                parts.append(f"**@{c.author}**: {c.body}\n")
         parts.append(_UNTRUSTED_END)
 
     if config.task_description:

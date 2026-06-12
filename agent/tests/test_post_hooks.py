@@ -9,31 +9,13 @@ The two seams are ``subprocess.run`` (read-only git/gh queries) and
 from types import SimpleNamespace
 
 import post_hooks
-from models import RepoSetup, TaskConfig
+from models import RepoSetup
+from tests.conftest import FakeRunCmd, make_task_config
 
-
-class _RunCmdRecorder:
-    """Fake for ``shell.run_cmd``: records argv, returns scripted returncodes/stdout."""
-
-    def __init__(self, returncodes=None, stdouts=None):
-        self.calls: list[dict] = []
-        self._returncodes = returncodes or {}
-        self._stdouts = stdouts or {}
-
-    def __call__(self, cmd, label, cwd=None, timeout=600, check=True, **kwargs):
-        self.calls.append({"cmd": cmd, "label": label})
-        rc = self._returncodes.get(label, 0)
-        stdout = self._stdouts.get(label, "")
-        return SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
-
-    def labels(self) -> list[str]:
-        return [c["label"] for c in self.calls]
-
-    def cmd_for(self, label: str):
-        for c in self.calls:
-            if c["label"] == label:
-                return c["cmd"]
-        return None
+# post_hooks.py keys scripted results off the exact label (FakeRunCmd's default
+# exact-match mode), so e.g. returncodes={"push": 1} does not bleed into the
+# "note-unpushed-commits" label.
+_RunCmdRecorder = FakeRunCmd
 
 
 def _cp(returncode=0, stdout="", stderr=""):
@@ -74,14 +56,7 @@ def _pr_view(url: str) -> _SubprocessRunRecorder:
     return _SubprocessRunRecorder(responder=responder)
 
 
-def _config(**overrides) -> TaskConfig:
-    return TaskConfig(
-        repo_url=overrides.pop("repo_url", "owner/repo"),
-        aws_region=overrides.pop("aws_region", "us-east-1"),
-        task_id=overrides.pop("task_id", "task-xyz"),
-        task_description=overrides.pop("task_description", "Fix the bug"),
-        **overrides,
-    )
+_config = make_task_config
 
 
 def _setup(**overrides) -> RepoSetup:

@@ -8,7 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class IssueComment(BaseModel):
-    """Single GitHub issue comment — mirrors ``IssueComment`` in context-hydration.ts."""
+    """Single GitHub issue comment — mirrors ``IssueComment`` in context-hydration.ts.
+
+    ``author`` and ``body`` are pre-sanitized at fetch time: ``fetch_github_issue``
+    in ``context.py`` runs them through ``sanitize_external_content`` as this object
+    is constructed, so consumers must not sanitize again.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -18,7 +23,15 @@ class IssueComment(BaseModel):
 
 
 class GitHubIssue(BaseModel):
-    """GitHub issue slice — mirrors ``GitHubIssueContext`` in context-hydration.ts."""
+    """GitHub issue slice — mirrors ``GitHubIssueContext`` in context-hydration.ts.
+
+    Externally-sourced fields (``title``, ``body``, and each comment's
+    ``author``/``body``) are pre-sanitized at fetch time: ``fetch_github_issue``
+    in ``context.py`` runs every attacker-controllable string through
+    ``sanitize_external_content`` as this model is constructed. The model never
+    carries unsanitized data, so consumers (e.g. ``assemble_prompt``) must not
+    sanitize again and only apply presentation (untrusted-content delimiters).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
