@@ -85,6 +85,12 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
             label="checkout-pr-branch",
             cwd=repo_dir,
         )
+        # #305 A6 re-stack: a predecessor branch changed; merge its UPDATED
+        # code into this existing PR branch so the child is no longer stale.
+        # (pr_iteration / pr_review pass no merge_branches, so this is a no-op
+        # for them — only the restack path threads predecessors here.)
+        for pred_branch in config.merge_branches:
+            _merge_predecessor_branch(repo_dir, pred_branch, notes)
     elif config.base_branch:
         # #247 A4: stacked child. Branch from the predecessor's branch
         # (linear) or from main (diamond) so the child sees predecessor
