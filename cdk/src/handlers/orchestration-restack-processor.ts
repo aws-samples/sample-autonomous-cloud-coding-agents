@@ -201,13 +201,24 @@ async function restackOne(
   }
 }
 
-/** Read a task's PR number from its TaskRecord. Null if absent/unreadable. */
+/**
+ * Read a dependent's PR number from its TaskRecord. Prefers the numeric
+ * ``pr_number``, but orchestration child tasks commonly persist only
+ * ``pr_url`` (``.../pull/N``) with ``pr_number`` left null — so fall back to
+ * parsing the trailing number out of ``pr_url``. Null if neither resolves.
+ */
 async function resolvePrNumber(taskId?: string): Promise<number | null> {
   if (!taskId) return null;
   try {
     const res = await ddb.send(new GetCommand({ TableName: TASK_TABLE, Key: { task_id: taskId } }));
     const pr = res.Item?.pr_number;
-    return typeof pr === 'number' ? pr : null;
+    if (typeof pr === 'number') return pr;
+    const url = res.Item?.pr_url;
+    if (typeof url === 'string') {
+      const m = url.match(/\/pull\/(\d+)\b/);
+      if (m) return Number(m[1]);
+    }
+    return null;
   } catch (err) {
     logger.warn('Restack: failed to read dependent TaskRecord for PR number', {
       task_id: taskId,
