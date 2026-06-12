@@ -65,6 +65,11 @@ bgagent linear webhook-info
 
 This prints the URL and values to paste into Linear. Open `https://linear.app/<slug>/settings/api/webhooks` and create the webhook with those values.
 
+Under **Resource types**, enable both **Issues** and **Comments**:
+
+- **Issues** — label-triggered tasks and parent/sub-issue epic orchestration.
+- **Comments** — the `@bgagent` re-iteration trigger: a reviewer comments `@bgagent <change>` on a sub-issue and ABCA updates that sub-issue's PR, then re-stacks its dependents. Without the Comments subscription this trigger silently never fires.
+
 Then open the webhook detail page and copy the **signing secret** (`lin_wh_…`).
 
 ### 5. Tell ABCA the signing secret
@@ -215,11 +220,11 @@ If the failing event's `organizationId` doesn't match any registered workspace a
 
 ### "Invalid redirect_uri parameter for the application" during step 3
 
-Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete. In your Linear app settings:
+Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete (it reports `Invalid redirect_uri` regardless of which required field is actually missing). In your Linear app settings, confirm:
 
-- **GitHub username** must end with `[bot]` (e.g. `bgagent[bot]`)
-- **Webhooks** toggle must be ON
-- The Callback URL must be on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects)
+- **GitHub username** is filled in (Linear's inline help describes the field and the `[bot]` suffix) — a blank value triggers this error.
+- **Webhooks** toggle is ON.
+- The Callback URL is on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects).
 
 Re-run `bgagent linear setup` after fixing.
 

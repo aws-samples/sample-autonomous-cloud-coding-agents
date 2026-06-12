@@ -109,9 +109,9 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     'Click Save, copy the Client ID and Client Secret, then return here.',
     '',
-    'Why these specific fields:',
-    '  • GitHub username with [bot] suffix gates the actor=app agent flow.',
-    '    Without it, Linear surfaces a misleading "Invalid redirect_uri" error.',
+    'Non-obvious gotchas (Linear explains the fields themselves inline):',
+    '  • GitHub username is REQUIRED for actor=app — leaving it blank surfaces a',
+    '    misleading "Invalid redirect_uri" error, not a "missing username" one.',
     '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
@@ -369,7 +369,9 @@ export function makeLinearCommand(): Command {
         console.log('In Linear → Settings → API → Webhooks → + New webhook, paste:');
         console.log();
         console.log(`  URL:             ${webhookUrl}`);
-        console.log('  Resource types:  Issues');
+        console.log('  Resource types:  Issues, Comments');
+        console.log('                   (Issues = label-triggered tasks + epic orchestration;');
+        console.log('                    Comments = @bgagent re-iteration on a sub-issue PR)');
         console.log('  Team:            (whichever team owns the projects you map)');
         console.log();
         console.log('Save, then open the webhook detail page and copy the signing secret');
