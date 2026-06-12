@@ -388,19 +388,24 @@ export async function loadOrchestration(
 }
 
 /**
- * Resolve a released child by its head branch (A6 re-stack, #305), via the
- * ChildBranchIndex GSI. A GitHub ``pull_request`` event carries the head
- * branch but not the orchestration; this maps it back to the child row
- * (which carries ``orchestration_id`` + ``sub_issue_id``) so the caller can
- * re-stack that child's dependents when its branch changed.
+ * Resolve a released child by its head branch, via the ChildBranchIndex GSI.
+ * Maps a branch name back to the child row (which carries
+ * ``orchestration_id`` + ``sub_issue_id``).
  *
- * Returns the child row, or null if no released child owns that branch
- * (e.g. a non-orchestration PR, or a branch whose child was reaped). The
+ * RETAINED, currently unused. This backed the original A6 GitHub
+ * ``pull_request`` restack trigger, which the #247 A6 redesign replaced with
+ * a Linear-comment trigger + reconciler-driven cascade (the cascade resolves
+ * the changed node by sub_issue_id, not by branch). The helper + its GSI are
+ * deliberately kept rather than removed: dropping a GSL is a
+ * CFN-update-unfriendly stack change for zero functional gain, and a
+ * branch→child lookup is a plausible future need (e.g. a branch-delete
+ * cleanup path). If it stays unused long-term, remove the helper and the GSI
+ * together in a dedicated migration.
+ *
+ * Returns the child row, or null if no released child owns that branch. The
  * GSI is sparse — only released children carry ``child_branch_name`` — so a
- * miss is the common, cheap case.
- *
- * ``indexName`` is injected (the CDK construct owns the literal) to keep
- * this module free of a CDK dependency.
+ * miss is the common, cheap case. ``indexName`` is injected (the CDK construct
+ * owns the literal) to keep this module free of a CDK dependency.
  */
 export async function findOrchestrationChildByBranch(
   ddb: DynamoDBDocumentClient,
