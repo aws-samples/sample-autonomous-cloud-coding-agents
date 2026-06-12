@@ -13,6 +13,7 @@ from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
+from .restack import RESTACK_WORKFLOW
 from .web_research import WEB_RESEARCH_PROMPT
 
 DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
@@ -26,6 +27,9 @@ _PROMPTS = {
     "coding/new-task-v1": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),
     "coding/pr-iteration-v1": BASE_PROMPT.replace("{workflow}", PR_ITERATION_WORKFLOW),
     "coding/pr-review-v1": BASE_PROMPT.replace("{workflow}", PR_REVIEW_WORKFLOW),
+    # A6 re-stack (#305): re-merge a changed predecessor into an existing
+    # stacked-child branch. push_resolve to the existing PR; not new work.
+    "coding/restack-v1": BASE_PROMPT.replace("{workflow}", RESTACK_WORKFLOW),
     # Repo-less knowledge workflow (#248 Phase 3) — no git/branch/PR placeholders.
     "default/agent-v1": DEFAULT_AGENT_PROMPT,
     # Repo-less reference knowledge workflow (#248) — research-specialized prompt

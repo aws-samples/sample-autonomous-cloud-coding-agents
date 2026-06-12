@@ -17,14 +17,16 @@ DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
 # id whose ``requires_repo`` is false. Used by the load-failure fallback to
 # decide repo-optionality without loading the file.
 REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
-# First-party workflow ids that operate on an existing pull request.
-PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1"))
+# First-party workflow ids that operate on an existing pull request — they
+# check out the existing PR branch instead of creating a fresh one. restack-v1
+# (#305 A6) re-merges a changed predecessor into an existing stacked-child PR.
+PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"))
 # First-party workflow ids that are writeable (NOT read-only). Used only by the
 # load-failure fallback to bias an unrecognised id toward read-only (fail closed
 # on the write-deny invariant). pr-review-v1 is intentionally excluded (it is
 # read-only); default/agent-v1 is excluded because its conservative posture
 # should fail closed too.
-_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(("coding/new-task-v1", "coding/pr-iteration-v1"))
+_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(("coding/new-task-v1", "coding/pr-iteration-v1", "coding/restack-v1"))
 
 
 def resolve_github_token() -> str:
