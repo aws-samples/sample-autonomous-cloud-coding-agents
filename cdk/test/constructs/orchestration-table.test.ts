@@ -84,18 +84,34 @@ describe('OrchestrationTable', () => {
     });
   });
 
+  test('creates ChildBranchIndex GSI with child_branch_name as PK (#305 A6)', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: 'ChildBranchIndex',
+          KeySchema: [
+            { AttributeName: 'child_branch_name', KeyType: 'HASH' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+      ]),
+    });
+  });
+
   test('declares all required attribute definitions', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       AttributeDefinitions: Match.arrayWith([
         { AttributeName: 'orchestration_id', AttributeType: 'S' },
         { AttributeName: 'sub_issue_id', AttributeType: 'S' },
         { AttributeName: 'child_task_id', AttributeType: 'S' },
+        { AttributeName: 'child_branch_name', AttributeType: 'S' },
       ]),
     });
   });
 
-  test('static index name constant matches actual GSI name', () => {
+  test('static index name constants match actual GSI names', () => {
     expect(OrchestrationTable.CHILD_TASK_INDEX).toBe('ChildTaskIndex');
+    expect(OrchestrationTable.CHILD_BRANCH_INDEX).toBe('ChildBranchIndex');
   });
 });
 
