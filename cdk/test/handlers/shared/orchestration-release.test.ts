@@ -18,7 +18,11 @@
  */
 
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { releaseChild } from '../../../src/handlers/shared/orchestration-release';
+import {
+  readConcurrencyBudget,
+  releaseChild,
+  releaseReadyChildren,
+} from '../../../src/handlers/shared/orchestration-release';
 import { deriveOrchestrationId, type OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
 import { isValidIdempotencyKey } from '../../../src/handlers/shared/validation';
 
@@ -281,5 +285,107 @@ describe('releaseChild — idempotency + failure', () => {
       now: NOW,
     });
     expect(createTaskCore.mock.calls[0][0].task_description).toContain('SUB-1');
+  });
+});
+
+describe('releaseReadyChildren — #331 concurrency throttle', () => {
+  // 5 ready leaves, all roots (no deps) so base selection is trivial.
+  const readyRows = (n: number): OrchestrationChildRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeRow({ sub_issue_id: `L${String(i).padStart(2, '0')}`, child_status: 'ready', depends_on: [] }));
+
+  function createOk() {
+    let i = 0;
+    return jest.fn().mockImplementation(() =>
+      Promise.resolve({ statusCode: 201, body: JSON.stringify({ data: { task_id: `T-${i++}` } }) }));
+  }
+
+  test('undefined budget → releases ALL ready children (back-compat)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', readyRows(5), { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, readyRows(5), 'main', undefined,
+    );
+    expect(results.filter((r) => r.kind === 'released')).toHaveLength(5);
+    expect(createTaskCore).toHaveBeenCalledTimes(5);
+  });
+
+  test('budget caps the number released; the rest are NOT created (no fail)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const rows = readyRows(5);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', 2, // budget = 2 free slots
+    );
+    // Only 2 tasks created — the other 3 are simply not released this pass.
+    expect(createTaskCore).toHaveBeenCalledTimes(2);
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.kind === 'released')).toBe(true);
+  });
+
+  test('budget 0 → releases nothing this pass (no tasks created, no failures)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const rows = readyRows(5);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', 0,
+    );
+    expect(createTaskCore).not.toHaveBeenCalled();
+    expect(results).toHaveLength(0);
+  });
+
+  test('negative budget is treated as 0 (releases nothing)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const rows = readyRows(3);
+    await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', -4,
+    );
+    expect(createTaskCore).not.toHaveBeenCalled();
+  });
+
+  test('release order is deterministic by sub_issue_id when throttled', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    // Shuffled input; budget 2 should pick L00, L01 (sorted), not input order.
+    const rows = [makeRow({ sub_issue_id: 'L02', child_status: 'ready' }),
+      makeRow({ sub_issue_id: 'L00', child_status: 'ready' }),
+      makeRow({ sub_issue_id: 'L01', child_status: 'ready' })];
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', 2,
+    );
+    expect(results).toHaveLength(2);
+    // The two UpdateCommands that flip ready→released name L00 then L01.
+    const releasedSubs = (ddb.send.mock.calls as { 0: { input?: { Key?: { sub_issue_id?: string } } } }[])
+      .map((c) => c[0]?.input?.Key?.sub_issue_id)
+      .filter(Boolean);
+    expect(releasedSubs).toEqual(['L00', 'L01']);
+  });
+});
+
+describe('readConcurrencyBudget — #331', () => {
+  test('free budget = cap - active_count', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({ Item: { active_count: 3 } }) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(7);
+  });
+
+  test('no row yet → full cap available', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(10);
+  });
+
+  test('at cap → 0 (never negative)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({ Item: { active_count: 12 } }) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(0);
+  });
+
+  test('read error → degrades to full cap (admission still gates)', async () => {
+    const ddb = { send: jest.fn().mockRejectedValue(new Error('ddb down')) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(10);
   });
 });

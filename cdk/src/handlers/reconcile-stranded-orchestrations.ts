@@ -65,12 +65,17 @@ import {
   ORCHESTRATION_META_SK,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
-import { releaseReadyChildren } from './shared/orchestration-release';
+import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
+// #331: throttle the sweep's releases to the user's free concurrency budget
+// too (it is the drain path for children left ``ready`` by the live
+// reconciler's throttle). Unset → release-all (back-compat; admission gates).
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 
 /** Terminal child-statuses (orchestration-local). */
 const TERMINAL_CHILD = new Set(['succeeded', 'failed', 'skipped']);
@@ -162,18 +167,36 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
     }
   }
 
-  // Releasable: blocked children whose deps are ALL succeeded.
+  // Releasable: children whose deps are ALL succeeded and that have NOT yet
+  // started a task. Includes:
+  //   - ``blocked`` children (lost release-event recovery), and
+  //   - ``ready`` children with no ``child_task_id`` — left un-started by the
+  //     live reconciler's #331 concurrency throttle (or a prior create_failed).
+  //     A ``ready`` child that already has a task was genuinely released; re-
+  //     releasing is idempotent, but we skip it to keep the budget for new work.
   const releasableRows: OrchestrationChildRow[] = fresh.children
-    .filter((c) => statusOf.get(c.sub_issue_id) === 'blocked'
-      && c.depends_on.every((d) => statusOf.get(d) === 'succeeded'))
+    .filter((c) => {
+      const s = statusOf.get(c.sub_issue_id);
+      const depsReady = c.depends_on.every((d) => statusOf.get(d) === 'succeeded');
+      if (!depsReady) return false;
+      if (s === 'blocked') return true;
+      if (s === 'ready' && !c.child_task_id) return true; // throttle-deferred
+      return false;
+    })
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
   if (releasableRows.length === 0) return 0;
 
+  // #331: throttle the sweep's releases to the free budget too.
+  const budget = USER_CONCURRENCY_TABLE
+    ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, fresh.meta.release_context.platform_user_id, MAX_CONCURRENT)
+    : undefined;
   const results = await releaseReadyChildren(
     ddb, ORCHESTRATION_TABLE, releasableRows, fresh.meta.release_context, createTaskCore, now,
     // #247 A4: full child set for predecessor-branch-derived base selection.
     fresh.children,
+    'main',
+    budget,
   );
   const released = results.filter((r) => r.kind === 'released').length;
   if (released > 0) {
