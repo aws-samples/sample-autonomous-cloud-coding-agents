@@ -26,7 +26,7 @@ import { renderStatusBlock } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
-import { releaseReadyChildren } from './shared/orchestration-release';
+import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
 
@@ -40,6 +40,10 @@ const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAM
 // dormant and the handler behaves exactly as one-issue → one-task.
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
+// #331: throttle the seed-time root release to the user's free concurrency
+// budget. Unset → release all roots (back-compat; admission still gates).
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
@@ -374,6 +378,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       let releasedRoots = 0;
       if (snapshot) {
+        // #331: throttle the root release to the user's free concurrency
+        // budget. A wide-root epic (many independent sub-issues, no shared
+        // foundation) would otherwise release >cap roots at once; the
+        // overflow gets hard-failed by admission — and a failed ROOT is
+        // UNRECOVERABLE (the sweep re-releases a child from its succeeded
+        // predecessor; a root has none). Leftover roots stay ``ready`` and
+        // the #303 sweep releases them as slots free. Unset table → release
+        // all (back-compat; admission still gates).
+        const budget = USER_CONCURRENCY_TABLE
+          ? await readConcurrencyBudget(
+            ddb, USER_CONCURRENCY_TABLE, snapshot.meta.release_context.platform_user_id, MAX_CONCURRENT)
+          : undefined;
         const results = await releaseReadyChildren(
           ddb,
           ORCHESTRATION_TABLE,
@@ -381,6 +397,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           snapshot.meta.release_context,
           createTaskCore,
           new Date().toISOString(),
+          // full child set for A4 base selection (roots have no preds → off-main)
+          snapshot.children,
+          'main',
+          budget,
         );
         releasedRoots = results.filter((r) => r.kind === 'released').length;
       }
