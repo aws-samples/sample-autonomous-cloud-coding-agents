@@ -308,6 +308,26 @@ def test_validate_required_params_pr_workflows_require_pr_number():
     )
     assert missing == []
 
+    # #305 A6: restack is a PR workflow — pr_number suffices, NO description
+    # required (regression: it previously fell into the non-PR branch and
+    # 400'd on missing issue_number_or_task_description).
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "resolved_workflow": {"id": "coding/restack-v1", "version": "1.0.0"},
+            "pr_number": "113",
+        }
+    )
+    assert missing == []
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "resolved_workflow": {"id": "coding/restack-v1", "version": "1.0.0"},
+            "pr_number": "",
+        }
+    )
+    assert missing == ["pr_number"]
+
     # A non-PR workflow needs issue OR description.
     missing = server._validate_required_params(
         {

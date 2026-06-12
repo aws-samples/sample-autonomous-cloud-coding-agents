@@ -656,7 +656,8 @@ def _validate_required_params(params: dict) -> list[str]:
     workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
     #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
     or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
-    ``coding/pr-review-v1``) additionally require ``pr_number``.
+    ``coding/pr-review-v1`` / ``coding/restack-v1``) require ``pr_number``
+    instead and carry no description.
     """
     missing: list[str] = []
     workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
@@ -681,7 +682,7 @@ def _validate_required_params(params: dict) -> list[str]:
     if requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
 
-    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1"):
+    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"):
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:
