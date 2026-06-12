@@ -223,3 +223,52 @@ export async function fetchSubIssueGraph(
 
   return { kind: 'ok', parentIssueId: issue.id, children };
 }
+
+/** GraphQL: an issue's parent id (for the A6 comment trigger — sub-issue → parent). */
+const ISSUE_PARENT_QUERY = `
+query IssueParent($issueId: String!) {
+  issue(id: $issueId) { id parent { id } }
+}`;
+
+/**
+ * Fetch a sub-issue's parent issue id (#247 A6 comment trigger). A Linear
+ * comment names the issue it is on (the sub-issue); to find its orchestration
+ * we need the PARENT (orchestration_id is derived from the parent). Returns the
+ * parent id, or null when the issue has no parent (a top-level issue — not part
+ * of any orchestration) or on any fetch/auth/GraphQL failure. Never throws.
+ */
+export async function fetchIssueParentId(
+  accessToken: string,
+  issueId: string,
+  options: FetchSubIssueGraphOptions = {},
+): Promise<string | null> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const resp = await fetchImpl(LINEAR_GRAPHQL_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: ISSUE_PARENT_QUERY, variables: { issueId } }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      logger.warn('Linear issue-parent fetch non-2xx', { status: resp.status, issue_id: issueId });
+      return null;
+    }
+    const raw = (await resp.json()) as { data?: { issue?: { parent?: { id?: string } } }; errors?: unknown };
+    if (raw.errors) {
+      logger.warn('Linear issue-parent fetch GraphQL errors', { issue_id: issueId, errors: raw.errors });
+      return null;
+    }
+    return raw.data?.issue?.parent?.id ?? null;
+  } catch (err) {
+    logger.warn('Linear issue-parent fetch failed', {
+      issue_id: issueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}

@@ -27,7 +27,9 @@ import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
-import { loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { buildIterationInstruction, parseCommentTrigger } from './shared/orchestration-comment-trigger';
+import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -124,6 +126,23 @@ interface LinearIssueEvent {
   readonly webhookId?: string;
 }
 
+/** Shape of a Linear `Comment` webhook (#247 A6 trigger). */
+interface LinearCommentEvent {
+  readonly action: 'create' | 'update' | 'remove' | string;
+  readonly type: 'Comment';
+  readonly data: {
+    readonly id: string;
+    readonly body?: string;
+    /** The issue the comment is on (the sub-issue, for A6). */
+    readonly issueId?: string;
+    readonly issue?: { readonly id?: string };
+    readonly userId?: string;
+    readonly [key: string]: unknown;
+  };
+  readonly actor?: { readonly id?: string; readonly name?: string };
+  readonly organizationId?: string;
+}
+
 interface ProcessorEvent {
   readonly raw_body: string;
 }
@@ -145,9 +164,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  let payload: LinearIssueEvent;
+  let payload: LinearIssueEvent | LinearCommentEvent;
   try {
-    payload = JSON.parse(event.raw_body) as LinearIssueEvent;
+    payload = JSON.parse(event.raw_body) as LinearIssueEvent | LinearCommentEvent;
   } catch (err) {
     logger.error('Linear webhook processor could not parse raw_body', {
       error: err instanceof Error ? err.message : String(err),
@@ -155,12 +174,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  if (payload.type !== 'Issue') {
-    logger.info('Linear processor skipping non-Issue payload', { type: payload.type });
+  // #247 A6: a Comment with an @bgagent mention on an orchestrated sub-issue
+  // re-iterates that sub-issue's PR (the reconciler then cascades the
+  // re-stack). Handled on a separate path from Issue → task creation.
+  if (payload.type === 'Comment') {
+    await handleCommentTrigger(payload as LinearCommentEvent);
     return;
   }
 
-  const issue = payload.data;
+  if ((payload as { type?: string }).type !== 'Issue') {
+    logger.info('Linear processor skipping unrecognized payload', { type: (payload as { type?: string }).type });
+    return;
+  }
+
+  const issue = (payload as LinearIssueEvent).data;
   const projectId = issue.projectId;
 
   // Resolve the per-project label override (if any) BEFORE the label gate so
@@ -498,6 +525,144 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     repo,
     request_id: requestId,
   });
+}
+
+/**
+ * #247 A6 comment trigger. A Linear comment with an ``@bgagent`` mention on an
+ * orchestrated sub-issue runs a ``coding/pr-iteration-v1`` task on that
+ * sub-issue's PR; the comment text is the instruction. When that task
+ * completes, the reconciler cascades the re-stack to dependents (A6.2).
+ *
+ * Resolution: comment.issueId (the sub-issue) → its parent (Linear fetch) →
+ * deriveOrchestrationId(parent) → loadOrchestration → the child row for the
+ * sub-issue → its PR number (from the child's task record). All best-effort;
+ * a non-orchestration comment, a missing mention, or an un-started sub-issue is
+ * a clean no-op (no failure comment — comments are conversational).
+ */
+async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
+  // Orchestration must be enabled + a workspace token resolvable.
+  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
+    return;
+  }
+  const body = payload.data?.body;
+  const trigger = parseCommentTrigger(body);
+  if (!trigger.triggered) {
+    // Ordinary human discussion or the agent's own progress comment — ignore.
+    return;
+  }
+  const subIssueId = payload.data?.issueId ?? payload.data?.issue?.id;
+  const workspaceId = payload.organizationId ?? '';
+  if (!subIssueId || !workspaceId) {
+    logger.info('A6 comment: missing issueId/workspace — ignoring', { has_issue: Boolean(subIssueId) });
+    return;
+  }
+
+  const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
+  if (!resolved) {
+    logger.info('A6 comment: workspace not resolvable — ignoring', { linear_workspace_id: workspaceId });
+    return;
+  }
+
+  // Sub-issue → parent → orchestration.
+  const parentId = await fetchIssueParentId(resolved.accessToken, subIssueId);
+  if (!parentId) {
+    logger.info('A6 comment: commented issue has no parent — not an orchestrated sub-issue', {
+      sub_issue_id: subIssueId,
+    });
+    return;
+  }
+  const orchestrationId = deriveOrchestrationId(parentId);
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot) {
+    logger.info('A6 comment: parent is not an orchestration — ignoring', { parent_id: parentId });
+    return;
+  }
+  const child = snapshot.children.find((c) => c.sub_issue_id === subIssueId);
+  if (!child || !child.child_task_id) {
+    logger.info('A6 comment: sub-issue not a started orchestration child — ignoring', {
+      orchestration_id: orchestrationId,
+      sub_issue_id: subIssueId,
+    });
+    return;
+  }
+
+  // Resolve the sub-issue's PR number (prefer pr_number, else parse pr_url).
+  const prNumber = await resolveChildPrNumber(child.child_task_id);
+  if (prNumber === null) {
+    logger.warn('A6 comment: sub-issue has no resolvable PR — cannot iterate', {
+      orchestration_id: orchestrationId,
+      sub_issue_id: subIssueId,
+      child_task_id: child.child_task_id,
+    });
+    return;
+  }
+
+  // Attribute to the orchestration's release user (the comment author may not
+  // be a linked platform user; the orchestration already ran under this id).
+  const platformUserId = snapshot.meta.release_context.platform_user_id;
+
+  // Idempotency: one iteration per (sub-issue, comment). The comment id is
+  // unique per comment, so a webhook retry of the same comment dedups.
+  const idempotencyKey = `iterate_${subIssueId}_${payload.data.id}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+
+  const channelMetadata: Record<string, string> = {
+    orchestration_id: orchestrationId,
+    orchestration_sub_issue_id: subIssueId,
+    // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
+    // when the iteration completes (A6.2 reads this flag).
+    orchestration_iteration: 'true',
+    linear_workspace_id: workspaceId,
+    linear_oauth_secret_arn: resolved.oauthSecretArn,
+    linear_workspace_slug: resolved.workspaceSlug,
+  };
+  // The agent addresses the real sub-issue (reactions/comments).
+  channelMetadata.linear_issue_id = subIssueId;
+
+  try {
+    const result = await createTaskCore(
+      {
+        repo: child.repo,
+        workflow_ref: 'coding/pr-iteration-v1',
+        pr_number: prNumber,
+        task_description: buildIterationInstruction(trigger),
+      },
+      { userId: platformUserId, channelSource: 'linear', channelMetadata, idempotencyKey },
+      idempotencyKey,
+    );
+    logger.info('A6 comment: iteration task created for sub-issue PR', {
+      orchestration_id: orchestrationId,
+      sub_issue_id: subIssueId,
+      pr_number: prNumber,
+      status_code: result.statusCode,
+    });
+  } catch (err) {
+    logger.error('A6 comment: createTaskCore threw for iteration', {
+      orchestration_id: orchestrationId,
+      sub_issue_id: subIssueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Read a child task's PR number (numeric pr_number, else parse pr_url). Null if neither. */
+async function resolveChildPrNumber(taskId: string): Promise<number | null> {
+  try {
+    const res = await ddb.send(new GetCommand({ TableName: process.env.TASK_TABLE_NAME!, Key: { task_id: taskId } }));
+    const pr = res.Item?.pr_number;
+    if (typeof pr === 'number') return pr;
+    const url = res.Item?.pr_url;
+    if (typeof url === 'string') {
+      const m = url.match(/\/pull\/(\d+)\b/);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  } catch (err) {
+    logger.warn('A6 comment: failed to read sub-issue task record for PR number', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /**
