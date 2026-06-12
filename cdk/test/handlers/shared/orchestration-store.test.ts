@@ -17,11 +17,12 @@
  *  SOFTWARE.
  */
 
-import { GetCommand, BatchWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, BatchWriteCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import {
   seedOrchestration,
   deriveOrchestrationId,
   claimRollup,
+  findOrchestrationChildByBranch,
 } from '../../../src/handlers/shared/orchestration-store';
 import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 
@@ -271,5 +272,34 @@ describe('claimRollup — exactly-once parent rollup', () => {
     const ddb = makeDdb();
     ddb.send.mockRejectedValueOnce(new Error('throttle'));
     await expect(claimRollup(ddb as never, TABLE, 'orch_1', NOW)).rejects.toThrow('throttle');
+  });
+});
+
+describe('findOrchestrationChildByBranch (#305 A6)', () => {
+  test('queries the ChildBranchIndex GSI by branch and returns the child row', async () => {
+    const ddb = makeDdb();
+    const row = { orchestration_id: 'orch_1', sub_issue_id: 'SUB-A', child_branch_name: 'bgagent/01T/abca-1-x' };
+    ddb.send.mockResolvedValueOnce({ Items: [row] });
+
+    const result = await findOrchestrationChildByBranch(
+      ddb as never, TABLE, 'ChildBranchIndex', 'bgagent/01T/abca-1-x',
+    );
+
+    expect(result).toEqual(row);
+    const cmd = ddb.send.mock.calls[0][0] as QueryCommand;
+    expect(cmd).toBeInstanceOf(QueryCommand);
+    expect(cmd.input.IndexName).toBe('ChildBranchIndex');
+    expect(cmd.input.KeyConditionExpression).toBe('child_branch_name = :b');
+    expect(cmd.input.ExpressionAttributeValues).toEqual({ ':b': 'bgagent/01T/abca-1-x' });
+    expect(cmd.input.Limit).toBe(1);
+  });
+
+  test('returns null when no released child owns the branch (non-orchestration PR)', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Items: [] });
+    const result = await findOrchestrationChildByBranch(
+      ddb as never, TABLE, 'ChildBranchIndex', 'feature/some-human-branch',
+    );
+    expect(result).toBeNull();
   });
 });
