@@ -59,6 +59,10 @@ _ALLOWED = frozenset(string.ascii_letters + string.digits + "!$%&'*+-.^_`|~")
 _trace_lock = threading.Lock()
 _trace: str | None = None
 
+# The static md/ segment the per-request appender extends. Computed once —
+# COMPONENT never varies at runtime.
+_MD_SEGMENT = f"md/{SOLUTION_ID}#{COMPONENT}"
+
 
 def sanitize_ua_value(raw: str) -> str:
     """Replace every non-UA-token char (incl. non-ASCII) with ``-``."""
@@ -105,10 +109,14 @@ def register_trace_appender(events: Any) -> None:
 
     ``events`` is a botocore event emitter — either ``client.meta.events``
     (single client) or a botocore session's emitter (propagates to every
-    client *and resource* derived from it). Registered on ``before-send`` so
-    it runs after botocore renders the header (``user_agent_extra`` is the
-    final component, so the suffix lands exactly on our ``md/`` segment) and
-    mutates only the header — the connection pool is untouched.
+    client *and resource* derived from it). Registered on ``before-send``,
+    after botocore has rendered the header; only the header string changes —
+    the connection pool is untouched.
+
+    The trace is spliced onto the ``md/`` segment rather than appended to the
+    header's end: for *resources*, boto3 sets a client-level
+    ``user_agent_extra='Resource'`` marker that renders after the
+    session-level extra, so our segment is not always last.
     """
 
     def _append_trace(request: Any, **_kwargs: Any) -> None:
@@ -119,9 +127,13 @@ def register_trace_appender(events: Any) -> None:
         if current is None:
             return
         # Headers may surface as bytes depending on the transport path.
-        if isinstance(current, bytes):
+        was_bytes = isinstance(current, bytes)
+        if was_bytes:
             current = current.decode("ascii", errors="replace")
-        request.headers["User-Agent"] = f"{current}#{trace}"
+        if _MD_SEGMENT not in current:
+            return
+        updated = current.replace(_MD_SEGMENT, f"{_MD_SEGMENT}#{trace}", 1)
+        request.headers["User-Agent"] = updated.encode("ascii") if was_bytes else updated
 
     events.register("before-send.*", _append_trace, unique_id="abca-ua-trace")
 

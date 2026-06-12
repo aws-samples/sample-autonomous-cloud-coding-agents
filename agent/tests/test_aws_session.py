@@ -298,3 +298,93 @@ class TestTagTruncation:
         assert len(tags["repo"]) == _MAX_TAG_VALUE_LEN == 256
         # Untruncated values are passed through unchanged.
         assert tags["user_id"] == "u-1"
+
+
+# ---------------------------------------------------------------------------
+# Outbound UA solution tracking (#319)
+# ---------------------------------------------------------------------------
+
+
+class TestUserAgentWiring:
+    def test_configure_session_sets_ua_trace(self, monkeypatch):
+        import ua
+
+        configure_session(user_id="u-1", repo="owner/repo", task_id="01KTVYTASK")
+        assert ua.get_trace() == "01KTVYTASK"
+
+    def test_reset_session_cache_clears_trace(self, monkeypatch):
+        import ua
+
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+        reset_session_cache()
+        assert ua.get_trace() is None
+
+    def test_plain_session_emits_solution_ua(self, monkeypatch):
+        """End-to-end wire capture through the real unscoped session path:
+        the singleton session must bake the static segments and append the
+        per-request #{TRACE} without rebuilding the client."""
+        from botocore.awsrequest import AWSResponse
+
+        import ua
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv(ua.STACK_NAME_ENV, "backgroundagent-dev")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+
+        session = get_session()
+        client = session.client("sts")
+
+        captured: list[str] = []
+
+        def _short_circuit(request, **kwargs):
+            value = request.headers["User-Agent"]
+            captured.append(value.decode("ascii") if isinstance(value, bytes) else value)
+            body = (
+                b"<GetCallerIdentityResponse "
+                b'xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
+                b"<GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/t</Arn>"
+                b"<UserId>AIDA</UserId><Account>123456789012</Account>"
+                b"</GetCallerIdentityResult></GetCallerIdentityResponse>"
+            )
+
+            class _Raw:
+                def __init__(self, data):
+                    self._data = data
+
+                def read(self, *a, **k):
+                    data, self._data = self._data, b""
+                    return data
+
+                def stream(self, *a, **k):
+                    yield self.read()
+
+            return AWSResponse(url=request.url, status_code=200, headers={}, raw=_Raw(body))
+
+        client.meta.events.register_last("before-send.sts.GetCallerIdentity", _short_circuit)
+
+        ua.set_trace("trace-one")
+        client.get_caller_identity()
+        ua.set_trace("trace-two")
+        client.get_caller_identity()
+
+        assert f"app/{ua.SOLUTION_ID}/backgroundagent-dev" in captured[0]
+        # boto3 appends "Botocore/x.y.z" AFTER the session-level extra, so the
+        # segment is mid-header — which is exactly why the appender splices
+        # onto the md/ segment instead of appending to the header's end.
+        assert f"md/{ua.SOLUTION_ID}#agent#trace-one " in captured[0] + " "
+        assert f"md/{ua.SOLUTION_ID}#agent#trace-two " in captured[1] + " "
+
+    def test_tenant_resource_unscoped_carries_ua(self, monkeypatch):
+        """The unscoped resource path bypasses the session; it must still
+        carry the static UA via the merged client config."""
+        import ua
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+        from aws_session import tenant_resource
+
+        resource = tenant_resource("dynamodb", region_name="us-east-1")
+        extra = resource.meta.client.meta.config.user_agent_extra
+        assert f"md/{ua.SOLUTION_ID}#agent" in extra
