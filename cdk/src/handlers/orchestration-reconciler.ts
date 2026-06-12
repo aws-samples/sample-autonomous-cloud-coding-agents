@@ -40,6 +40,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   BatchGetCommand,
   DynamoDBDocumentClient,
+  GetCommand,
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -53,6 +54,7 @@ import {
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { postRollup, renderStatusBlock, rollupKindFromChildren } from './shared/orchestration-rollup';
 import { upsertStatusComment } from './shared/linear-feedback';
 import {
@@ -90,6 +92,16 @@ interface TerminalTaskEvent {
   readonly status: TaskStatusType;
   readonly buildPassed?: boolean;
   readonly orchestrationId?: string;
+  /**
+   * A6 cascade (#247 redesign): set when this terminal task is an
+   * ITERATION or RESTACK on an orchestration node (carries
+   * ``orchestration_sub_issue_id`` in channel_metadata but is NOT itself a
+   * child-row task — its task_id isn't a ``child_task_id``). On COMPLETED we
+   * re-stack that node's DIRECT dependents. The marker is set by the comment
+   * trigger (pr-iteration) and by restack tasks themselves (so a restack's
+   * completion cascades the next hop).
+   */
+  readonly cascadeSubIssueId?: string;
 }
 
 /**
@@ -123,11 +135,26 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
 
   const buildPassed = img.build_passed?.BOOL;
 
+  // A6 cascade marker: an iteration/restack task names the node it acted on
+  // via channel_metadata. A restack task also carries
+  // ``restack_predecessor_sub_issue_id`` — its presence (or the explicit
+  // ``orchestration_iteration`` flag the comment trigger sets) marks this as
+  // a cascade SOURCE rather than a normal child task. We resolve the acted-on
+  // node from ``orchestration_sub_issue_id`` and confirm "is this a child row?"
+  // in the handler (a child-row task drives normal gating; a non-child-row
+  // task with this marker drives the cascade).
+  const cm = img.channel_metadata?.M;
+  const isCascadeSource =
+    cm?.restack_predecessor_sub_issue_id?.S !== undefined
+    || cm?.orchestration_iteration?.S === 'true';
+  const cascadeSubIssueId = isCascadeSource ? cm?.orchestration_sub_issue_id?.S : undefined;
+
   return {
     taskId,
     status,
     ...(buildPassed !== undefined && { buildPassed }),
     orchestrationId,
+    ...(cascadeSubIssueId !== undefined && { cascadeSubIssueId }),
   };
 }
 
@@ -390,6 +417,147 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
 }
 
 /**
+ * A6 cascade (#247 redesign). A terminal ITERATION or RESTACK task on node X
+ * just completed — re-stack X's DIRECT dependents so they pick up X's new
+ * branch. Each dependent's own restack completion re-fires this handler and
+ * cascades the next hop (see ``planDirectRestack``). Only on COMPLETED — a
+ * failed iteration leaves dependents on the prior (still-valid) base.
+ *
+ * Idempotent: the per-dependent task's idempotency key includes the SOURCE
+ * task id, so the same completion never spawns a dependent's restack twice;
+ * a different source (the next real change) gets a new key. Best-effort —
+ * a failure to spawn one dependent does not block the others.
+ */
+async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
+  const orchestrationId = evt.orchestrationId!;
+  const changedSubIssueId = evt.cascadeSubIssueId!;
+
+  // Only a successful change should cascade onto dependents.
+  if (evt.status !== TaskStatus.COMPLETED || evt.buildPassed === false) {
+    logger.info('A6 cascade: source task not successful — not cascading', {
+      orchestration_id: orchestrationId,
+      changed_sub_issue_id: changedSubIssueId,
+      status: evt.status,
+    });
+    return;
+  }
+
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot) {
+    logger.warn('A6 cascade: orchestration snapshot not found', { orchestration_id: orchestrationId });
+    return;
+  }
+
+  const steps = planDirectRestack(snapshot.children, changedSubIssueId);
+  if (steps.length === 0) {
+    logger.info('A6 cascade: no started direct dependents to re-stack', {
+      orchestration_id: orchestrationId,
+      changed_sub_issue_id: changedSubIssueId,
+    });
+    return;
+  }
+
+  logger.info('A6 cascade: re-stacking direct dependents', {
+    orchestration_id: orchestrationId,
+    changed_sub_issue_id: changedSubIssueId,
+    source_task_id: evt.taskId,
+    dependent_count: steps.length,
+  });
+
+  for (const step of steps) {
+    await spawnRestackTask(step, snapshot.meta.release_context.platform_user_id, evt.taskId, changedSubIssueId);
+  }
+}
+
+/** Spawn one coding/restack-v1 task for a direct dependent. Best-effort. */
+async function spawnRestackTask(
+  step: RestackStep,
+  platformUserId: string,
+  sourceTaskId: string,
+  changedSubIssueId: string,
+): Promise<void> {
+  const child = step.child;
+  const prNumber = await resolvePrNumber(child.child_task_id);
+  if (prNumber === null) {
+    logger.warn('A6 cascade: dependent has no resolvable PR number — skipping', {
+      orchestration_id: child.orchestration_id,
+      sub_issue_id: child.sub_issue_id,
+      child_task_id: child.child_task_id,
+    });
+    return;
+  }
+
+  // Idempotency keyed on the SOURCE task id: this exact completion re-stacks
+  // a given dependent at most once. Within [A-Za-z0-9_-], ≤128 chars.
+  const idempotencyKey = `restack_${child.sub_issue_id}_${sourceTaskId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+
+  try {
+    const result = await createTaskCore(
+      {
+        repo: child.repo,
+        workflow_ref: 'coding/restack-v1',
+        pr_number: prNumber,
+      },
+      {
+        userId: platformUserId,
+        channelSource: 'webhook',
+        channelMetadata: {
+          orchestration_id: child.orchestration_id,
+          // This dependent is the next cascade SOURCE: when its restack
+          // completes, parseTerminalTaskRecord sees restack_predecessor_*
+          // and cascades to ITS dependents.
+          orchestration_sub_issue_id: child.sub_issue_id,
+          restack_predecessor_sub_issue_id: changedSubIssueId,
+          // repo.py merges these updated predecessor branches into the
+          // dependent's existing branch before the agent runs.
+          orchestration_merge_branches: JSON.stringify(step.mergeBranches),
+        },
+        idempotencyKey,
+      },
+      idempotencyKey,
+    );
+    logger.info('A6 cascade: created restack task for dependent', {
+      orchestration_id: child.orchestration_id,
+      sub_issue_id: child.sub_issue_id,
+      pr_number: prNumber,
+      status_code: result.statusCode,
+    });
+  } catch (err) {
+    logger.error('A6 cascade: createTaskCore threw for dependent', {
+      orchestration_id: child.orchestration_id,
+      sub_issue_id: child.sub_issue_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Read a dependent's PR number from its TaskRecord. Prefers numeric
+ * ``pr_number``; orchestration child tasks commonly persist only ``pr_url``
+ * (``.../pull/N``) with ``pr_number`` null — fall back to parsing it.
+ */
+async function resolvePrNumber(taskId?: string): Promise<number | null> {
+  if (!taskId) return null;
+  try {
+    const res = await ddb.send(new GetCommand({ TableName: TASK_TABLE, Key: { task_id: taskId } }));
+    const pr = res.Item?.pr_number;
+    if (typeof pr === 'number') return pr;
+    const url = res.Item?.pr_url;
+    if (typeof url === 'string') {
+      const m = url.match(/\/pull\/(\d+)\b/);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  } catch (err) {
+    logger.warn('A6 cascade: failed to read dependent TaskRecord for PR number', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Lambda entry point — TaskTable stream handler.
  *
  * Processes records sequentially; a failure on one record throws so the
@@ -401,7 +569,13 @@ export async function handler(event: DynamoDBStreamEvent): Promise<void> {
   for (const record of event.Records) {
     const evt = parseTerminalTaskRecord(record);
     if (!evt) continue;
-    await reconcileTerminalChild(evt);
+    // A6 cascade: an iteration/restack task on a node X (NOT a child-row task)
+    // re-stacks X's direct dependents. Routed here, not through child gating.
+    if (evt.cascadeSubIssueId) {
+      await cascadeRestack(evt);
+    } else {
+      await reconcileTerminalChild(evt);
+    }
     processed += 1;
   }
   logger.info('Orchestration reconciler batch processed', {
