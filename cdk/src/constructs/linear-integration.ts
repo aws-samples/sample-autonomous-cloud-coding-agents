@@ -63,6 +63,21 @@ export interface LinearIntegrationProps {
   /** Orchestrator Lambda function ARN for async task invocation. */
   readonly orchestratorFunctionArn?: string;
 
+  /**
+   * User concurrency counter table (#331). When provided alongside
+   * ``orchestrationTable``, the webhook processor throttles the seed-time
+   * ROOT release to the user's free concurrency budget so a wide-root epic
+   * (many independent sub-issues, no shared foundation) doesn't over-release
+   * roots that admission then hard-fails. A failed root is UNRECOVERABLE
+   * (the sweep can only re-release a child whose predecessor still shows
+   * succeeded — a root has none), so throttling here matters most. Omitted
+   * → release all roots (back-compat; admission still gates).
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /** Per-user concurrency cap, shared with the orchestrator (#331). Default 10. */
+  readonly maxConcurrentTasksPerUser?: number;
+
   /** Bedrock Guardrail ID for input screening. */
   readonly guardrailId?: string;
 
@@ -208,6 +223,12 @@ export class LinearIntegration extends Construct {
         ...(props.orchestrationTable && {
           ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
         }),
+        // #331: throttle the seed-time root release to the free concurrency
+        // budget (see prop doc). Only wired when both tables are present.
+        ...(props.orchestrationTable && props.userConcurrencyTable && {
+          USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+          MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+        }),
       },
       bundling: commonBundling,
     });
@@ -217,6 +238,10 @@ export class LinearIntegration extends Construct {
     // #247: seed the orchestration DAG + release root children.
     if (props.orchestrationTable) {
       props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
+    // #331: read the user concurrency counter to throttle the root release.
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      props.userConcurrencyTable.grantReadData(webhookProcessorFn);
     }
     // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
     // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant

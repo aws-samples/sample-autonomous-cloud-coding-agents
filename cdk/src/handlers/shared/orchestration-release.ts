@@ -43,6 +43,7 @@
 
 import {
   type DynamoDBDocumentClient,
+  GetCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { createTaskCore as CreateTaskCoreFn } from './create-task-core';
@@ -61,6 +62,43 @@ import type { ChannelSource } from './types';
  * seeded before the field existed). #247 trigger-agnostic seam.
  */
 const DEFAULT_ORCHESTRATION_CHANNEL: ChannelSource = 'linear';
+
+/**
+ * #331: read a user's free concurrency budget (``cap - active_count``) so a
+ * release pass throttles to it instead of over-releasing children that admission
+ * control would then hard-fail. Best-effort: on any read error returns the full
+ * ``cap`` (degrade to today's release-all behavior rather than stall the
+ * orchestration — admission control is still the backstop). Never negative.
+ *
+ * NOTE this is an INSTANTANEOUS snapshot — between this read and the child task's
+ * own admission attempt, other tasks may start. That race is fine: admission
+ * control remains the hard ceiling; throttling here just keeps the common case
+ * (a wide fan-out releasing into an empty/quiet user) from mass-failing. A child
+ * that still loses a tighter race is left ``ready`` and retried (it is not over the
+ * cap-as-guillotine path because the throttle keeps the batch small).
+ */
+export async function readConcurrencyBudget(
+  ddb: DynamoDBDocumentClient,
+  concurrencyTableName: string,
+  userId: string,
+  maxConcurrent: number,
+): Promise<number> {
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: concurrencyTableName,
+      Key: { user_id: userId },
+      ProjectionExpression: 'active_count',
+    }));
+    const active = Number(res.Item?.active_count ?? 0);
+    return Math.max(0, maxConcurrent - (Number.isFinite(active) ? active : 0));
+  } catch (err) {
+    logger.warn('Concurrency-budget read failed — releasing without throttle (admission still gates)', {
+      user_id: userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return maxConcurrent;
+  }
+}
 
 export interface ReleaseChildParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -291,12 +329,35 @@ export async function releaseReadyChildren(
   allChildren?: readonly OrchestrationChildRow[],
   /** Repo default branch for roots + diamond bases. Defaults to 'main'. */
   defaultBranch = 'main',
+  /**
+   * #331: max children to actually release this pass — the user's free
+   * concurrency budget (``cap - active_count``). When set, only this many
+   * ``ready`` children are released; the rest are LEFT ``ready`` (a no-op,
+   * not a failure) for a later reconcile pass to pick up as slots free.
+   * ``undefined`` = release all (back-compat; callers that don't throttle).
+   * A value ``<= 0`` releases nothing this pass.
+   */
+  maxToRelease?: number,
 ): Promise<readonly ReleaseChildResult[]> {
   const all = allChildren ?? rows;
   const branchOf = new Map(
     all.filter((c) => c.child_branch_name).map((c) => [c.sub_issue_id, c.child_branch_name as string]),
   );
-  const releasable = rows.filter((r) => r.child_status === 'ready');
+  // #331: throttle to the available budget. Sort by sub_issue_id for a
+  // deterministic, fair release order across passes. Releasing fewer than
+  // are ready is intentional — the leftovers stay ``ready`` and the next
+  // reconcile (sibling completion) or the #303 sweep releases them.
+  const ready = rows.filter((r) => r.child_status === 'ready');
+  const releasable = maxToRelease === undefined
+    ? ready
+    : [...ready].sort((a, b) => a.sub_issue_id.localeCompare(b.sub_issue_id)).slice(0, Math.max(0, maxToRelease));
+  if (maxToRelease !== undefined && releasable.length < ready.length) {
+    logger.info('Orchestration release throttled to concurrency budget', {
+      ready: ready.length,
+      releasing: releasable.length,
+      budget: maxToRelease,
+    });
+  }
   const results: ReleaseChildResult[] = [];
   for (const row of releasable) {
     // Derive the base from this child's predecessors' persisted branches.

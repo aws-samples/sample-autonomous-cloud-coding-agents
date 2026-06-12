@@ -52,7 +52,7 @@ import {
   type ReconcileChild,
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
-import { releaseReadyChildren } from './shared/orchestration-release';
+import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { postRollup, renderStatusBlock, rollupKindFromChildren } from './shared/orchestration-rollup';
 import { upsertStatusComment } from './shared/linear-feedback';
 import {
@@ -70,6 +70,11 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // A5: registry table for the parent rollup comment's per-workspace OAuth
 // token. Unset → rollup is skipped (gating still works).
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+// #331: throttle releases to the user's free concurrency budget so a wide
+// fan-out doesn't over-release children that admission then hard-fails. Unset
+// table → no throttle (release-all, back-compat; admission still gates).
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 
 /** Terminal task statuses that the reconciler reacts to. */
 const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>([
@@ -264,22 +269,35 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
   if (releasableRows.length > 0) {
+    const releaseCtx = (fresh ?? snapshot).meta.release_context;
+    // #331: throttle this pass to the user's free concurrency budget so a
+    // wide fan-out doesn't over-release children that admission then
+    // hard-fails (the cap is a throttle, not a guillotine). Leftover ready
+    // children are released by the next reconcile (a sibling completing
+    // re-fires this handler) or the #303 sweep, as slots free. Unset table
+    // → release all (back-compat; admission still gates).
+    const budget = USER_CONCURRENCY_TABLE
+      ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
+      : undefined;
     const results = await releaseReadyChildren(
       ddb,
       ORCHESTRATION_TABLE,
       releasableRows,
-      (fresh ?? snapshot).meta.release_context,
+      releaseCtx,
       createTaskCore,
       now,
       // #247 A4: pass the full child set so each releasable child's base
       // branch can be derived from its predecessors' persisted branches.
       freshChildren,
+      'main',
+      budget,
     );
     logger.info('Reconciler released children', {
       orchestration_id: orchestrationId,
       trigger_sub_issue_id: subIssueId,
       released: results.filter((r) => r.kind === 'released').length,
       requested: releasableRows.length,
+      ...(budget !== undefined && { concurrency_budget: budget }),
     });
   }
 
