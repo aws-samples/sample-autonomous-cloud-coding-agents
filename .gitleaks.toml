@@ -59,3 +59,19 @@ paths = [
 ]
 # Per-line opt-out: append `# gitleaks:allow account-id` on a legitimate line.
 stopwords = ["gitleaks:allow account-id"]
+
+[[rules.allowlists]]
+# False positives where a 12-digit run is NOT an AWS account ID:
+#  - GitHub Action commit-SHA pins contain digit runs (e.g. jdx/mise-action
+#    `…981980618f…` matches `629881980618`).
+#  - threat-composer artifacts use v4 UUIDs whose final node can be all digits
+#    (e.g. `f30d02f6-9750-46ad-b710-398303478932`).
+#  - Test fixtures use the RFC-4122 example UUID `…-446655440000`.
+# These files contain no real account IDs; scope the exemption by path.
+description = "Non-account 12-digit runs: workflow SHA pins, threat-composer UUIDs, test-fixture UUIDs."
+regexTarget = "line"
+paths = [
+    '''^\.github/workflows/.*\.ya?ml$''',
+    '''^\.threat-composer/.*\.json$''',
+    '''^cdk/test/.*\.test\.ts$''',
+]
