@@ -54,6 +54,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -61,9 +63,15 @@ jobs:
               # Scan exactly the commits this PR introduces.
               echo "range=${PR_BASE_SHA}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
               ;;
-            merge_group|workflow_dispatch|*)
-              # In the merge queue (and on manual dispatch) there is no PR diff to
-              # scope to; scan the full reachable history as a backstop.
+            merge_group)
+              # Scan exactly the commits this merge group introduces (#336).
+              # An empty range here would fall back to full history, which
+              # re-reports the historical #313 findings and deadlocks the queue.
+              echo "range=${MG_BASE_SHA}..${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch|*)
+              # On manual dispatch there is no PR diff to scope to; scan the
+              # full reachable history as a backstop.
               echo "range=" >> "$GITHUB_OUTPUT"
               ;;
           esac
