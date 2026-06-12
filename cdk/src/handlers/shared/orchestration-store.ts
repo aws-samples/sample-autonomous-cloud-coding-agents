@@ -386,3 +386,35 @@ export async function loadOrchestration(
 
   return { meta, children };
 }
+
+/**
+ * Resolve a released child by its head branch (A6 re-stack, #305), via the
+ * ChildBranchIndex GSI. A GitHub ``pull_request`` event carries the head
+ * branch but not the orchestration; this maps it back to the child row
+ * (which carries ``orchestration_id`` + ``sub_issue_id``) so the caller can
+ * re-stack that child's dependents when its branch changed.
+ *
+ * Returns the child row, or null if no released child owns that branch
+ * (e.g. a non-orchestration PR, or a branch whose child was reaped). The
+ * GSI is sparse — only released children carry ``child_branch_name`` — so a
+ * miss is the common, cheap case.
+ *
+ * ``indexName`` is injected (the CDK construct owns the literal) to keep
+ * this module free of a CDK dependency.
+ */
+export async function findOrchestrationChildByBranch(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  indexName: string,
+  branchName: string,
+): Promise<OrchestrationChildRow | null> {
+  const res = await ddb.send(new QueryCommand({
+    TableName: tableName,
+    IndexName: indexName,
+    KeyConditionExpression: 'child_branch_name = :b',
+    ExpressionAttributeValues: { ':b': branchName },
+    Limit: 1,
+  }));
+  const item = res.Items?.[0] as OrchestrationChildRow | undefined;
+  return item ?? null;
+}

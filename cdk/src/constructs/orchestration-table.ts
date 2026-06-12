@@ -72,6 +72,11 @@ export interface OrchestrationTableProps {
  *   child terminal-state event keyed by ``task_id`` and must resolve
  *   which orchestration + child row it belongs to. Sparse: only rows
  *   whose child has been released carry ``child_task_id``.
+ * - ChildBranchIndex (PK: child_branch_name) — the A6 re-stack path
+ *   (#305) receives a GitHub ``pull_request`` event keyed by head branch
+ *   and must resolve which orchestration child opened that branch, so it
+ *   can re-stack the child's dependents when its branch changes. Sparse:
+ *   only released children carry ``child_branch_name``.
  *
  * NOTE (PR A1): this construct is introduced but not yet instantiated
  * in any stack — graph discovery (A2) and the reconciler (A3) wire it
@@ -84,6 +89,13 @@ export class OrchestrationTable extends Construct {
    * PK: child_task_id. Sparse — only released children are projected.
    */
   public static readonly CHILD_TASK_INDEX = 'ChildTaskIndex';
+
+  /**
+   * GSI name for resolving a child's head branch back to its
+   * orchestration + sub-issue row (A6 re-stack, #305).
+   * PK: child_branch_name. Sparse — only released children are projected.
+   */
+  public static readonly CHILD_BRANCH_INDEX = 'ChildBranchIndex';
 
   /**
    * The underlying DynamoDB table. Use this to grant access or read the table name.
@@ -116,6 +128,15 @@ export class OrchestrationTable extends Construct {
     this.table.addGlobalSecondaryIndex({
       indexName: OrchestrationTable.CHILD_TASK_INDEX,
       partitionKey: { name: 'child_task_id', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // GSI: resolve a released child's head branch back to its orchestration
+    // row (A6 re-stack, #305). Sparse — rows without child_branch_name
+    // (not yet released) are not projected.
+    this.table.addGlobalSecondaryIndex({
+      indexName: OrchestrationTable.CHILD_BRANCH_INDEX,
+      partitionKey: { name: 'child_branch_name', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
   }
