@@ -42,9 +42,10 @@ import {
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
 
-const view = (sub: string, status: string, ident?: string, title?: string): RollupChildView => ({
+const view = (sub: string, status: string, ident?: string, title?: string, pr_url?: string): RollupChildView => ({
   sub_issue_id: sub, child_status: status,
   ...(ident && { linear_identifier: ident }), ...(title && { title }),
+  ...(pr_url && { pr_url }),
 });
 
 describe('renderRollupComment', () => {
@@ -82,6 +83,45 @@ describe('renderRollupComment', () => {
     ]);
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
   });
+
+  // #323: per-child PR links + integration-node combined-PR callout.
+  test('renders a PR link on a child line when pr_url is present', () => {
+    const body = renderRollupComment('complete', [
+      view('a', 'succeeded', 'ENG-1', 'Step A', 'https://github.com/o/r/pull/10'),
+      view('b', 'succeeded', 'ENG-2', 'Step B'), // no PR
+    ]);
+    expect(body).toContain('✅ ENG-1: Step A — succeeded — [PR](https://github.com/o/r/pull/10)');
+    // A child without a PR renders no link (no broken markdown).
+    expect(body).toContain('✅ ENG-2: Step B — succeeded');
+    expect(body).not.toContain('ENG-2: Step B — succeeded — [PR]');
+  });
+
+  test('surfaces the integration node combined PR as a prominent callout', () => {
+    const body = renderRollupComment('complete', [
+      view('a', 'succeeded', 'ENG-1', 'Leaf A', 'https://github.com/o/r/pull/1'),
+      view('b', 'succeeded', 'ENG-2', 'Leaf B', 'https://github.com/o/r/pull/2'),
+      view('orch_x__integration', 'succeeded', undefined, 'Integration — combine sub-issue results', 'https://github.com/o/r/pull/9'),
+    ]);
+    expect(body).toContain('🔗 **Combined PR (all sub-issues merged):** [https://github.com/o/r/pull/9](https://github.com/o/r/pull/9)');
+    // The callout appears BEFORE the per-child list.
+    expect(body.indexOf('Combined PR')).toBeLessThan(body.indexOf('ENG-1'));
+  });
+
+  test('no combined-PR callout when the integration node opened no PR', () => {
+    const body = renderRollupComment('partial_failure', [
+      view('a', 'succeeded', 'ENG-1', 'Leaf A', 'https://github.com/o/r/pull/1'),
+      view('orch_x__integration', 'skipped', undefined, 'Integration — combine sub-issue results'), // no PR (skipped)
+    ]);
+    expect(body).not.toContain('Combined PR');
+  });
+
+  test('no combined-PR callout for a plain chain (no integration node)', () => {
+    const body = renderRollupComment('complete', [
+      view('a', 'succeeded', 'ENG-1', 'A', 'https://github.com/o/r/pull/1'),
+      view('b', 'succeeded', 'ENG-2', 'B', 'https://github.com/o/r/pull/2'),
+    ]);
+    expect(body).not.toContain('Combined PR');
+  });
 });
 
 describe('renderStatusBlock (#3 live status)', () => {
@@ -102,6 +142,16 @@ describe('renderStatusBlock (#3 live status)', () => {
     ]);
     expect(body).toContain('ENG-1: A — running');
     expect(body).toContain('ENG-2: B — blocked');
+  });
+
+  test('links a child PR in the live block when pr_url is known (#323)', () => {
+    const body = renderStatusBlock([
+      view('a', 'released', 'ENG-1', 'A', 'https://github.com/o/r/pull/7'),
+      view('b', 'blocked', 'ENG-2', 'B'),
+    ]);
+    expect(body).toContain('ENG-1: A — running — [PR](https://github.com/o/r/pull/7)');
+    expect(body).toContain('ENG-2: B — blocked');
+    expect(body).not.toContain('ENG-2: B — blocked — [PR]');
   });
 
   test('terminal statuses keep their word + icon', () => {
@@ -254,6 +304,24 @@ describe('postRollup', () => {
       { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', expect.any(String), 'cmt-1',
     );
     expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+
+  test('threads prUrls → rendered comment links child PRs + combined PR (#323)', async () => {
+    postIssueCommentMock.mockResolvedValue(true);
+    await postRollup({
+      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded'), row('orch_1__integration', 'succeeded')],
+      prUrls: {
+        a: 'https://github.com/o/r/pull/3',
+        orch_1__integration: 'https://github.com/o/r/pull/9',
+      },
+    });
+    const body = postIssueCommentMock.mock.calls[0][2] as string;
+    expect(body).toContain('[PR](https://github.com/o/r/pull/3)');
+    expect(body).toContain('🔗 **Combined PR (all sub-issues merged):**');
+    expect(body).toContain('https://github.com/o/r/pull/9');
   });
 
   test('without statusCommentId → posts a fresh comment (back-compat)', async () => {

@@ -39,6 +39,7 @@ import {
 } from './linear-feedback';
 import { logger } from './logger';
 import { ORCH_LOG } from './orchestration-log-events';
+import { isIntegrationNode } from './orchestration-integration-node';
 import type { OrchestrationChildRow } from './orchestration-store';
 import type { ChannelSource } from './types';
 
@@ -51,6 +52,15 @@ export interface RollupChildView {
   readonly title?: string;
   readonly child_status: string;
   readonly child_task_id?: string;
+  /**
+   * The child task's PR url, when one was opened (#323). Resolved by the
+   * reconciler from the TaskTable at rollup time (pr_url lands on the
+   * TaskRecord in a separate write from the status transition, so it is
+   * not persisted on the orchestration row). Rendered as a link on the
+   * child's line; the integration node's PR is additionally surfaced as a
+   * prominent callout (it is the fan-out's combined deliverable).
+   */
+  readonly pr_url?: string;
 }
 
 const STATUS_ICON: Record<string, string> = {
@@ -92,13 +102,25 @@ export function renderRollupComment(
       const label = c.linear_identifier
         ? (c.title ? `${c.linear_identifier}: ${c.title}` : c.linear_identifier)
         : (c.title ?? c.sub_issue_id);
-      return `- ${icon} ${label} — ${c.child_status}`;
+      // #323: append the child's PR link when one was opened, so the parent
+      // rollup is a single place to reach every sub-issue's PR.
+      const pr = c.pr_url ? ` — [PR](${c.pr_url})` : '';
+      return `- ${icon} ${label} — ${c.child_status}${pr}`;
     });
 
   const summary = `${counts.succeeded} succeeded, ${counts.failed} failed, ${counts.skipped} skipped `
     + `(of ${children.length}).`;
 
-  return [heading, '', summary, '', ...lines].join('\n');
+  // #323: surface the integration node's combined PR as a prominent callout —
+  // it is the fan-out's single merged deliverable, and (being a synthetic node
+  // with no Linear sub-issue) it is otherwise unreachable from Linear. Only
+  // when the integration node actually opened a PR.
+  const integration = children.find((c) => isIntegrationNode(c.sub_issue_id) && c.pr_url);
+  const callout = integration
+    ? ['', `🔗 **Combined PR (all sub-issues merged):** [${integration.pr_url}](${integration.pr_url})`]
+    : [];
+
+  return [heading, '', summary, ...callout, '', ...lines].join('\n');
 }
 
 /**
@@ -131,7 +153,9 @@ export function renderStatusBlock(children: readonly RollupChildView[]): string 
         c.child_status === 'released' || c.child_status === 'ready' ? 'running'
           : c.child_status === 'blocked' ? 'blocked'
             : c.child_status;
-      return `- ${icon} ${label} — ${word}`;
+      // #323: link the PR as soon as it is known, even mid-run.
+      const pr = c.pr_url ? ` — [PR](${c.pr_url})` : '';
+      return `- ${icon} ${label} — ${word}${pr}`;
     });
 
   return [heading, '', ...lines, '', '_Updates live as sub-issues progress._'].join('\n');
@@ -170,6 +194,14 @@ export interface PostRollupParams {
    * orchestration), the rollup posts a fresh comment.
    */
   readonly statusCommentId?: string;
+  /**
+   * #323: ``sub_issue_id → pr_url`` for children that opened a PR. Supplied
+   * by the reconciler (batch-read from the TaskTable at rollup time, when
+   * pr_urls have settled). Threaded into the rendered comment as per-child
+   * links + the integration node's combined-PR callout. Absent/partial is
+   * fine — a missing entry just renders no link.
+   */
+  readonly prUrls?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -194,6 +226,7 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
     });
     return false;
   }
+  const prUrls = params.prUrls ?? {};
   const body = renderRollupComment(
     kind,
     children.map((c) => ({
@@ -202,6 +235,7 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
       ...(c.title !== undefined && { title: c.title }),
       child_status: c.child_status,
       ...(c.child_task_id !== undefined && { child_task_id: c.child_task_id }),
+      ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
     })),
   );
 

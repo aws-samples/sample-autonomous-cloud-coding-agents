@@ -38,6 +38,7 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   DynamoDBDocumentClient,
   QueryCommand,
   UpdateCommand,
@@ -65,6 +66,7 @@ import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
+const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // A5: registry table for the parent rollup comment's per-workspace OAuth
 // token. Unset → rollup is skipped (gating still works).
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
@@ -139,6 +141,45 @@ async function resolveSubIssueId(taskId: string): Promise<string | null> {
   }));
   const item = res.Items?.[0] as OrchestrationChildRow | undefined;
   return item?.sub_issue_id ?? null;
+}
+
+/**
+ * Batch-read each child's PR url from the TaskTable for the final rollup
+ * (#323). pr_url lands on the TaskRecord in a separate write from the
+ * status transition, so it is not on the orchestration row — but by the
+ * time the orchestration is all-terminal the PRs have settled, so a read
+ * here is reliable. Best-effort: a failed/partial read just yields fewer
+ * links (never throws out of the reconcile). Returns ``sub_issue_id → pr_url``.
+ */
+async function resolveChildPrUrls(
+  children: readonly OrchestrationChildRow[],
+): Promise<Record<string, string>> {
+  const withTask = children.filter((c) => c.child_task_id);
+  if (withTask.length === 0) return {};
+  const taskToSub = new Map(withTask.map((c) => [c.child_task_id!, c.sub_issue_id]));
+  const keys = [...taskToSub.keys()].map((task_id) => ({ task_id }));
+  const out: Record<string, string> = {};
+  try {
+    // BatchGet caps at 100 keys/request; an orchestration is far smaller,
+    // but chunk defensively so a large epic never throws on the limit.
+    for (let i = 0; i < keys.length; i += 100) {
+      const chunk = keys.slice(i, i + 100);
+      const res = await ddb.send(new BatchGetCommand({
+        RequestItems: { [TASK_TABLE]: { Keys: chunk, ProjectionExpression: 'task_id, pr_url' } },
+      }));
+      for (const rec of res.Responses?.[TASK_TABLE] ?? []) {
+        const taskId = rec.task_id as string | undefined;
+        const prUrl = rec.pr_url as string | undefined;
+        const sub = taskId ? taskToSub.get(taskId) : undefined;
+        if (sub && prUrl) out[sub] = prUrl;
+      }
+    }
+  } catch (err) {
+    logger.warn('Rollup pr_url batch-read failed (non-fatal) — rollup posts without links', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return out;
 }
 
 /** Apply one terminal child's reconcile plan. */
@@ -256,10 +297,19 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   if (!allTerminal && WORKSPACE_REGISTRY_TABLE) {
     const liveMeta = (fresh ?? snapshot).meta;
     if (liveMeta.status_comment_id) {
+      // #323: link each child's PR in the live block as soon as it is known.
+      const prUrls = await resolveChildPrUrls(freshChildren);
+      const childViews = freshChildren.map((c) => ({
+        sub_issue_id: c.sub_issue_id,
+        ...(c.linear_identifier !== undefined && { linear_identifier: c.linear_identifier }),
+        ...(c.title !== undefined && { title: c.title }),
+        child_status: c.child_status,
+        ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
+      }));
       await upsertStatusComment(
         { linearWorkspaceId: liveMeta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
         liveMeta.parent_linear_issue_id,
-        renderStatusBlock(freshChildren),
+        renderStatusBlock(childViews),
         liveMeta.status_comment_id,
       );
     }
@@ -288,12 +338,16 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     if (WORKSPACE_REGISTRY_TABLE) {
       const won = await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
       if (won) {
+        // #323: resolve each child's PR url so the rollup links every
+        // sub-issue's PR + the integration node's combined PR.
+        const prUrls = await resolveChildPrUrls(freshChildren);
         await postRollup({
           ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
           orchestrationId,
           parentLinearIssueId: meta.parent_linear_issue_id,
           kind: rollupKindFromChildren(freshChildren),
           children: freshChildren,
+          prUrls,
           // #247 trigger-agnostic: dispatch the rollup to the channel that
           // seeded the orchestration (defaults to 'linear' inside postRollup).
           ...(meta.release_context.channel_source !== undefined && {
