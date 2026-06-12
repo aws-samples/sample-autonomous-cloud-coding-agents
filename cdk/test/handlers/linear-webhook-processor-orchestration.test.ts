@@ -70,9 +70,15 @@ jest.mock('../../src/handlers/shared/orchestration-discovery', () => ({
   discoverOrchestration: (...args: unknown[]) => discoverOrchestrationMock(...args),
 }));
 
+const fetchIssueParentIdMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-subissue-fetch', () => ({
+  fetchIssueParentId: (...args: unknown[]) => fetchIssueParentIdMock(...args),
+}));
+
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
 process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
+process.env.TASK_TABLE_NAME = 'TaskTable';
 // Enable the orchestration path for this file (sibling file leaves it unset).
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
@@ -126,6 +132,7 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-status-1');
+    fetchIssueParentIdMock.mockReset();
   });
 
   test('seeded graph → no parent task created (reconciler owns children)', async () => {
@@ -263,5 +270,95 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
 
     expect(discoverOrchestrationMock).not.toHaveBeenCalled();
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('linear-webhook-processor — #247 A6 comment trigger', () => {
+  /** A Comment webhook payload. */
+  function comment(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      type: 'Comment',
+      action: 'create',
+      organizationId: 'org-1',
+      actor: { id: 'user-9' },
+      data: { id: 'comment-1', body: '@bgagent change the timeout to 30 min', issueId: 'sub-issue-1' },
+      ...overrides,
+    };
+  }
+
+  /** Mock loadOrchestration (Query) → snapshot with the sub-issue as a started child, and GetCommand → its PR url. */
+  function mockOrchWithChild(opts: { subIssueId: string; childTaskId?: string; prUrl?: string }): void {
+    const meta = {
+      sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS', repo: 'o/r', child_count: 1, platform_user_id: 'release-user',
+    };
+    const child: Record<string, unknown> = {
+      orchestration_id: 'orch_x', sub_issue_id: opts.subIssueId, depends_on: [],
+      child_status: 'succeeded', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS',
+    };
+    if (opts.childTaskId) child.child_task_id = opts.childTaskId;
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
+      if (cmd._type === 'Get') return { Item: opts.prUrl ? { pr_url: opts.prUrl } : {} };
+      return {};
+    });
+  }
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    resolveLinearOauthTokenMock.mockReset()
+      .mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme' });
+    fetchIssueParentIdMock.mockReset().mockResolvedValue('PARENT');
+    discoverOrchestrationMock.mockReset();
+  });
+
+  test('@bgagent on a started sub-issue → pr-iteration task on its PR with cascade marker', async () => {
+    mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+    await handler(eventWith(comment()));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [body, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(body.workflow_ref).toBe('coding/pr-iteration-v1');
+    expect(body.pr_number).toBe(42);
+    expect(body.task_description).toBe('change the timeout to 30 min');
+    expect(ctx.channelSource).toBe('linear');
+    expect(ctx.channelMetadata.orchestration_iteration).toBe('true');
+    expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('sub-issue-1');
+    expect(ctx.channelMetadata.linear_issue_id).toBe('sub-issue-1');
+    expect(ctx.idempotencyKey).toContain('comment-1');
+  });
+
+  test('comment WITHOUT @bgagent → no task (ordinary discussion / agent progress comment)', async () => {
+    await handler(eventWith(comment({ data: { id: 'c2', body: 'looks good to me!', issueId: 'sub-issue-1' } })));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // Never even fetched the parent (cheap short-circuit on the mention check).
+    expect(fetchIssueParentIdMock).not.toHaveBeenCalled();
+  });
+
+  test('@bgagent on an issue with no parent → not an orchestrated sub-issue → no task', async () => {
+    fetchIssueParentIdMock.mockResolvedValue(null);
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('@bgagent on a sub-issue whose parent is not an orchestration → no task', async () => {
+    fetchIssueParentIdMock.mockResolvedValue('PARENT');
+    ddbSend.mockResolvedValue({ Items: [] }); // loadOrchestration → no snapshot
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('@bgagent on an un-started sub-issue (no child_task_id) → no task', async () => {
+    mockOrchWithChild({ subIssueId: 'sub-issue-1' }); // no childTaskId
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('bare @bgagent (no text) → falls back to a generic iteration instruction', async () => {
+    mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/7' });
+    await handler(eventWith(comment({ data: { id: 'c3', body: '@bgagent', issueId: 'sub-issue-1' } })));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].task_description).toMatch(/latest review feedback/i);
   });
 });
