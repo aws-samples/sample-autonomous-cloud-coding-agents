@@ -48,12 +48,14 @@ jobs:
         with:
           cache: true
 
-      - name: Resolve PR commit range
+      - name: Resolve commit range
         id: range
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -61,15 +63,20 @@ jobs:
               # Scan exactly the commits this PR introduces.
               echo "range=${PR_BASE_SHA}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
               ;;
-            merge_group|workflow_dispatch|*)
-              # In the merge queue (and on manual dispatch) there is no PR diff to
-              # scope to; scan the full reachable history as a backstop.
-              echo "range=" >> "$GITHUB_OUTPUT"
+            merge_group)
+              # Scan only the queued merge commits — not full history. An empty
+              # range would walk every ref and fail on secrets on other branches
+              # (#334 merge-queue ejection).
+              echo "range=${MG_BASE_SHA}..${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch|*)
+              # Manual dispatch: scan HEAD only (safe default, not full history).
+              echo "range=HEAD" >> "$GITHUB_OUTPUT"
               ;;
           esac
           echo "Resolved GITLEAKS_RANGE='$(tail -n1 "$GITHUB_OUTPUT" | cut -d= -f2-)'"
 
-      - name: Secret scan (gitleaks, PR range)
+      - name: Secret scan (gitleaks, range-scoped)
         env:
           GITLEAKS_RANGE: ${{ steps.range.outputs.range }}
         run: mise run security:secrets:range
