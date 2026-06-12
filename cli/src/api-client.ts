@@ -19,7 +19,7 @@
 
 import { getAuthToken } from './auth';
 import { loadConfig } from './config';
-import { debug } from './debug';
+import { debug, redactSensitive } from './debug';
 import { ApiError, CliError } from './errors';
 import {
   ApprovalRequest,
@@ -73,7 +73,7 @@ export class ApiClient {
 
     debug(`${method} ${url}`);
     if (body) {
-      debug(`Request body: ${JSON.stringify(body)}`);
+      debug(`Request body: ${JSON.stringify(redactSensitive(body))}`);
     }
 
     const res = await fetch(url, {
@@ -98,7 +98,9 @@ export class ApiClient {
     }
 
     if (jsonParseOk) {
-      debug(`Response body: ${JSON.stringify(json)}`);
+      // Redact secret-bearing fields (e.g. the one-time webhook `secret`) —
+      // verbose output ends up in scrollback / CI logs.
+      debug(`Response body: ${JSON.stringify(redactSensitive(json))}`);
     }
 
     if (!res.ok) {

@@ -182,13 +182,13 @@ Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `r
 
 ### Step 3: Context hydration
 
-Assembles the agent's user prompt and transitions the task to `HYDRATING`. The implementation lives in `context-hydration.ts`. What it does, by task type:
+Assembles the agent's user prompt and transitions the task to `HYDRATING`. The implementation lives in `context-hydration.ts`. What it does, by resolved workflow:
 
-**`new_task`:** Fetches the GitHub issue (title, body, comments) if `issue_number` is set, loads memory from past tasks, and combines everything with the user's task description.
+**Non-PR workflows (e.g. `coding/new-task-v1`):** Fetches the GitHub issue (title, body, comments) if `issue_number` is set, loads memory from past tasks, and combines everything with the user's task description.
 
-**`pr_iteration` / `pr_review`:** Fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. Extracts `head_ref` and `base_ref` for branch resolution.
+**PR workflows (`coding/pr-iteration-v1` / `coding/pr-review-v1`):** Fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. Extracts `head_ref` and `base_ref` for branch resolution.
 
-Regardless of task type, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
+Regardless of workflow, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
 
 ### Step 4: Session start
 
@@ -387,18 +387,16 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `user_id` | String | Cognito sub |
 | `status` | String | Current state |
 | `repo` | String | `owner/repo` |
-| `task_type` | String | `new_task`, `pr_iteration`, or `pr_review` |
+| `workflow_ref` | String? | Workflow reference as submitted (e.g. `coding/new-task-v1`); default when absent |
+| `resolved_workflow` | Map | Resolved workflow snapshot `{id, version}` — replaces the former `task_type` enum (#248) |
 | `issue_number` | Number? | GitHub issue number |
-| `pr_number` | Number? | PR number (required for PR task types) |
+| `pr_number` | Number? | PR number (required for PR workflows) |
 | `task_description` | String? | Free-text description |
 | `branch_name` | String | `bgagent/{task_id}/{slug}` for new tasks; PR's `head_ref` for PR tasks |
 | `session_id` | String? | AgentCore session ID |
 | `execution_id` | String? | Durable execution ID |
 | `pr_url` | String? | PR URL (set during finalization) |
 | `error_message` | String? | Error reason if FAILED |
-| `error_code` | String? | Machine-readable error code (e.g. `SESSION_START_FAILED`) |
-
-> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
 | `max_turns` | Number? | Turn limit (per-task overrides per-repo default) |
 | `max_budget_usd` | Number? | Cost ceiling (per-task overrides per-repo default) |
 | `model_id` | String? | Foundation model ID |
@@ -408,6 +406,8 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `duration_s` | Number? | Total duration |
 | `ttl` | Number? | DynamoDB TTL (default: created_at + 90 days) |
 | `created_at` / `updated_at` | String | ISO 8601 timestamps |
+
+> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
 
 **GSIs:** `UserStatusIndex` (PK: `user_id`, SK: `status#created_at`), `StatusIndex` (PK: `status`, SK: `created_at`), `IdempotencyIndex` (PK: `idempotency_key`, sparse).
 
