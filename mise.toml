@@ -21,7 +21,8 @@ gitleaks = "latest"
 # uv must be declared so it is on PATH before semgrep installs: mise's
 # `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
 # present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
-# that breaks under the mise 2026.6.x default `minimum_release_age` (see #320).
+# that breaks under the mise 2026.6.x default `minimum_release_age`
+# (jdx/mise#10279; see #320).
 uv = "latest"
 semgrep = "latest"
 osv-scanner = "latest"
