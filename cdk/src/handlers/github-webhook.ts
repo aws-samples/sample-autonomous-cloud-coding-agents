@@ -34,13 +34,6 @@ const lambdaClient = new LambdaClient({});
 const WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.GITHUB_WEBHOOK_DEDUP_TABLE_NAME!;
 const PROCESSOR_FUNCTION_NAME = process.env.GITHUB_WEBHOOK_PROCESSOR_FUNCTION_NAME!;
-/**
- * A6 re-stack processor (#305). Optional — when set, ``pull_request``
- * events whose commits changed (``synchronize``) are forwarded so the
- * orchestrator can re-stack stale dependents. Unset ⇒ pull_request events
- * are 200-skipped (deploy-safe; the feature is dormant until wired).
- */
-const RESTACK_PROCESSOR_FUNCTION_NAME = process.env.GITHUB_RESTACK_PROCESSOR_FUNCTION_NAME;
 
 /**
  * Dedup window. GitHub redelivers a webhook up to 5 times when our
@@ -94,38 +87,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // operators don't think setup failed.
     if (eventType === 'ping') {
       return jsonResponse(200, { ok: true, ping: true });
-    }
-
-    // A6 re-stack (#305): a pull_request whose commits changed
-    // (``synchronize``) may be a predecessor whose stale dependents need
-    // re-stacking. Forward to the restack processor (env-gated — dormant
-    // until wired). Verified-but-irrelevant PRs are a cheap no-op there
-    // (no orchestration child owns the branch). Other pull_request actions
-    // (labeled, assigned, …) and non-PR/non-deployment events are 200-skipped.
-    if (eventType === 'pull_request') {
-      if (RESTACK_PROCESSOR_FUNCTION_NAME) {
-        let action: string | undefined;
-        try {
-          action = (JSON.parse(event.body) as { action?: string }).action;
-        } catch {
-          return jsonResponse(400, { error: 'Invalid JSON' });
-        }
-        if (action === 'synchronize') {
-          try {
-            await lambdaClient.send(new InvokeCommand({
-              FunctionName: RESTACK_PROCESSOR_FUNCTION_NAME,
-              InvocationType: 'Event',
-              Payload: new TextEncoder().encode(JSON.stringify({ raw_body: event.body })),
-            }));
-          } catch (invokeErr) {
-            logger.error('Failed to invoke restack processor', {
-              error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
-            });
-            return jsonResponse(500, { error: 'Restack dispatch failed' });
-          }
-        }
-      }
-      return jsonResponse(200, { ok: true });
     }
 
     // Anything other than deployment_status is silently 200'd. We'd rather

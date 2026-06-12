@@ -123,67 +123,17 @@ describe('github-webhook receiver', () => {
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
-  test('200 silently ignores non-deployment_status events (restack processor unset)', async () => {
-    // RESTACK_PROCESSOR_FUNCTION_NAME is unset in this module's env, so
-    // pull_request events are a dormant 200 — no invoke (deploy-safe default).
-    const res = await handler(event('{}', { 'X-GitHub-Event': 'pull_request' }));
+  test('200 silently ignores pull_request events (A6 is no longer a GitHub-webhook path)', async () => {
+    // #247 A6 redesign: re-stack is driven by the reconciler off a Linear
+    // @bgagent comment, not a GitHub pull_request webhook (those are
+    // WAF-blocked anyway). pull_request events are a plain 200 no-op — no
+    // restack invoke.
+    const res = await handler(event(
+      JSON.stringify({ action: 'synchronize', pull_request: { head: { ref: 'branch-A', sha: 's' } } }),
+      { 'X-GitHub-Event': 'pull_request' },
+    ));
     expect(res.statusCode).toBe(200);
     expect(lambdaSend).not.toHaveBeenCalled();
-  });
-
-  test('A6: pull_request synchronize → invokes the restack processor when wired', () => {
-    jest.isolateModules(() => {
-      jest.resetModules();
-      const isoLambdaSend = jest.fn();
-      jest.doMock('@aws-sdk/client-lambda', () => ({
-        LambdaClient: jest.fn(() => ({ send: isoLambdaSend })),
-        InvokeCommand: jest.fn((input: unknown) => ({ _type: 'Invoke', input })),
-      }));
-      jest.doMock('../../src/handlers/shared/github-webhook-verify', () => ({
-        verifyGitHubRequest: async () => true,
-      }));
-      process.env.GITHUB_RESTACK_PROCESSOR_FUNCTION_NAME = 'restack-processor';
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { handler: isoHandler } = require('../../src/handlers/github-webhook');
-      const ev = {
-        body: JSON.stringify({ action: 'synchronize', pull_request: { head: { ref: 'branch-A', sha: 's' } } }),
-        headers: { 'X-Hub-Signature-256': 'sha256=x', 'X-GitHub-Event': 'pull_request' },
-      };
-      return isoHandler(ev).then((res: { statusCode: number }) => {
-        expect(res.statusCode).toBe(200);
-        expect(isoLambdaSend).toHaveBeenCalledTimes(1);
-        const sent = isoLambdaSend.mock.calls[0][0].input;
-        expect(sent.FunctionName).toBe('restack-processor');
-        expect(JSON.parse(new TextDecoder().decode(sent.Payload)).raw_body).toContain('synchronize');
-        delete process.env.GITHUB_RESTACK_PROCESSOR_FUNCTION_NAME;
-      });
-    });
-  });
-
-  test('A6: non-synchronize pull_request actions do NOT invoke the restack processor', () => {
-    jest.isolateModules(() => {
-      jest.resetModules();
-      const isoLambdaSend = jest.fn();
-      jest.doMock('@aws-sdk/client-lambda', () => ({
-        LambdaClient: jest.fn(() => ({ send: isoLambdaSend })),
-        InvokeCommand: jest.fn((input: unknown) => ({ _type: 'Invoke', input })),
-      }));
-      jest.doMock('../../src/handlers/shared/github-webhook-verify', () => ({
-        verifyGitHubRequest: async () => true,
-      }));
-      process.env.GITHUB_RESTACK_PROCESSOR_FUNCTION_NAME = 'restack-processor';
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { handler: isoHandler } = require('../../src/handlers/github-webhook');
-      const ev = {
-        body: JSON.stringify({ action: 'labeled', pull_request: { head: { ref: 'b', sha: 's' } } }),
-        headers: { 'X-Hub-Signature-256': 'sha256=x', 'X-GitHub-Event': 'pull_request' },
-      };
-      return isoHandler(ev).then((res: { statusCode: number }) => {
-        expect(res.statusCode).toBe(200);
-        expect(isoLambdaSend).not.toHaveBeenCalled();
-        delete process.env.GITHUB_RESTACK_PROCESSOR_FUNCTION_NAME;
-      });
-    });
   });
 
   test('400 when body is not JSON', async () => {
