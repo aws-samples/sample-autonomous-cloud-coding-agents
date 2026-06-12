@@ -114,6 +114,52 @@ export function planRestack(
   }).filter((step) => step.mergeBranches.length > 0);
 }
 
+/**
+ * Plan the re-stack of a changed node's DIRECT (one-hop) started dependents.
+ *
+ * Used by the reconciler-driven cascade (#247 A6 redesign): when an
+ * iteration/restack task on node X completes, we re-stack only the children
+ * that depend DIRECTLY on X — each of those, when ITS restack task completes,
+ * re-fires the reconciler and cascades to ITS dependents. Doing one hop per
+ * completion (rather than ``planRestack``'s whole transitive set at once) is
+ * what keeps a chain correct: C must re-stack only AFTER B's branch carries
+ * the new code, not racing B's restack task.
+ *
+ * A direct dependent is re-stackable only if it has STARTED (released/terminal
+ * with a branch). Its merge-list is its predecessors' current head branches —
+ * the changed node + any sibling predecessors that have a branch — so a
+ * diamond fan-in re-merges every arm it depends on.
+ *
+ * @param children full orchestration child snapshot (excl. meta)
+ * @param changedSubIssueId the node whose branch just changed
+ * @returns the direct dependents to re-stack now (deterministic by id); empty
+ *   if none have started.
+ */
+export function planDirectRestack(
+  children: readonly OrchestrationChildRow[],
+  changedSubIssueId: string,
+): readonly RestackStep[] {
+  const byId = new Map(children.map((c) => [c.sub_issue_id, c]));
+  if (!byId.has(changedSubIssueId)) return [];
+
+  const directDependents = children
+    .filter((c) => c.depends_on.includes(changedSubIssueId))
+    .filter((c) => c.child_branch_name && RELEASED_OR_TERMINAL.has(c.child_status))
+    .sort((a, b) => a.sub_issue_id.localeCompare(b.sub_issue_id));
+
+  return directDependents
+    .map((child) => {
+      // Merge every predecessor that currently has a branch — the changed
+      // node plus any sibling predecessors (so a diamond fan-in re-merges all
+      // arms, not just the one that changed).
+      const mergeBranches = child.depends_on
+        .map((dep) => byId.get(dep)?.child_branch_name)
+        .filter((b): b is string => Boolean(b));
+      return { child, mergeBranches };
+    })
+    .filter((step) => step.mergeBranches.length > 0);
+}
+
 /** Kahn's algorithm over the in-scope sub-graph (deterministic by id). */
 function topoOrder(
   nodes: readonly OrchestrationChildRow[],
