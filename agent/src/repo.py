@@ -44,18 +44,28 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         label="clone",
     )
 
-    # Configure remote URL with embedded token so git push works without
-    # credential helpers or extra auth setup inside the agent.
-    token = config.github_token
+    # Pin the remote to the plain https URL (no embedded credentials) and
+    # authenticate git push via gh's credential helper. Embedding the token
+    # in the remote URL would persist it in .git/config inside the workspace
+    # the agent (and any code it runs) fully controls — readable by a
+    # prompt-injected step, `git remote -v`, or anything that copies the
+    # tree. The helper resolves credentials at call time from the
+    # GH_TOKEN/GITHUB_TOKEN env vars the caller exports before setup_repo(),
+    # so the token never touches disk.
     run_cmd(
         [
             "git",
             "remote",
             "set-url",
             "origin",
-            f"https://x-access-token:{token}@github.com/{config.repo_url}.git",
+            f"https://github.com/{config.repo_url}.git",
         ],
         label="set-remote-url",
+        cwd=repo_dir,
+    )
+    run_cmd(
+        ["git", "config", "--local", "credential.helper", "!gh auth git-credential"],
+        label="configure-git-credential-helper",
         cwd=repo_dir,
     )
 

@@ -321,6 +321,7 @@ class TestBuildHookMatchers:
 import hashlib
 import json as _json
 from collections import deque
+from datetime import UTC
 from typing import Any
 
 import hooks
@@ -1412,3 +1413,44 @@ class TestDenialBetweenTurnsHook:
         # DDB and returns []. Denial should be injected.
         assert result.get("decision") == "block"
         assert "<user_denial" in result.get("reason", "")
+
+
+class TestRemainingMaxlifetime:
+    """_remaining_maxlifetime_s parses TASK_STARTED_AT correctly."""
+
+    def test_iso_timestamp_parsed_as_utc_regardless_of_local_tz(self, monkeypatch):
+        # The trailing Z means UTC. Before the fix, strptime produced a naive
+        # datetime whose .timestamp() used the container's local TZ, skewing
+        # the remaining-lifetime math by the UTC offset (wrong approval
+        # timeouts / spurious insufficient-lifetime denies on non-UTC hosts).
+        import time as time_module
+        from datetime import datetime
+
+        started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
+        monkeypatch.setenv("TASK_STARTED_AT", "2026-06-11T12:00:00Z")
+        monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "28800")
+        # Freeze "now" at exactly 1000s after the UTC start time.
+        monkeypatch.setattr(hooks.time, "time", lambda: started.timestamp() + 1000, raising=True)
+        # Simulate a non-UTC container: if the implementation regresses to
+        # local-time interpretation, the result shifts by the TZ offset.
+        monkeypatch.setenv("TZ", "America/New_York")
+        time_module.tzset()
+        try:
+            assert hooks._remaining_maxlifetime_s() == 28800 - 1000
+        finally:
+            monkeypatch.delenv("TZ")
+            time_module.tzset()
+
+    def test_epoch_seconds_passthrough(self, monkeypatch):
+        monkeypatch.setenv("TASK_STARTED_AT", "1000000")
+        monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "500")
+        monkeypatch.setattr(hooks.time, "time", lambda: 1000100, raising=True)
+        assert hooks._remaining_maxlifetime_s() == 400
+
+    def test_missing_started_at_returns_none(self, monkeypatch):
+        monkeypatch.delenv("TASK_STARTED_AT", raising=False)
+        assert hooks._remaining_maxlifetime_s() is None
+
+    def test_unparseable_started_at_returns_none(self, monkeypatch):
+        monkeypatch.setenv("TASK_STARTED_AT", "not-a-timestamp")
+        assert hooks._remaining_maxlifetime_s() is None

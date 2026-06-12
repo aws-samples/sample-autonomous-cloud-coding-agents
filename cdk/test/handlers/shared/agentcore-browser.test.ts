@@ -263,6 +263,116 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
     await expect(captureScreenshot('https://preview.example.com')).resolves.toBeDefined();
   });
 
+  test('sub-frame 404 after main-frame 200 → still captures (per-frame attribution)', async () => {
+    // An embedded iframe (ad, widget) can 404 while the page itself is fine.
+    // Before per-frame tracking, "latest Document status wins" let the
+    // sub-frame's 404 overwrite the main frame's 200 → spurious skip.
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [
+          networkResponseEvent(200, 'frame-1'),
+          networkResponseEvent(404, 'iframe-ads'),
+        ],
+      }),
+      () => ({ result: { data: Buffer.from('PNG-main-ok').toString('base64') } }),
+    ];
+    emitLoadEventFired();
+
+    const png = await captureScreenshot('https://preview.example.com');
+    expect(Buffer.from(png).toString()).toBe('PNG-main-ok');
+  });
+
+  test('sub-frame 200 after main-frame 404 → still throws (per-frame attribution)', async () => {
+    // The inverse race: a 404 page that embeds a 200 sub-frame must not
+    // have its failure masked by the later sub-frame response.
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [
+          networkResponseEvent(404, 'frame-1'),
+          networkResponseEvent(200, 'iframe-embed'),
+        ],
+      }),
+      () => {
+        throw new Error('captureScreenshot should not run on non-2xx');
+      },
+    ];
+    emitLoadEventFired();
+
+    await expect(captureScreenshot('https://preview.example.com/missing')).rejects.toThrow(
+      /Preview URL returned HTTP 404/,
+    );
+  });
+
+  test('redirect chain on the main frame → final status wins', async () => {
+    // Same frameId re-fires for each hop; the last recorded status is the
+    // final response (here 200 after a 302 hop) → capture proceeds.
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: { frameId: 'frame-1' } },
+        _events: [
+          networkResponseEvent(302, 'frame-1'),
+          networkResponseEvent(200, 'frame-1'),
+        ],
+      }),
+      () => ({ result: { data: Buffer.from('PNG-redirected').toString('base64') } }),
+    ];
+    emitLoadEventFired();
+
+    const png = await captureScreenshot('https://preview.example.com/old');
+    expect(Buffer.from(png).toString()).toBe('PNG-redirected');
+  });
+
+  test('navigate returns no frameId + single Document status → status still used', async () => {
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: {} }, // no frameId in the navigate response
+        _events: [networkResponseEvent(503, 'frame-unknown')],
+      }),
+    ];
+    emitLoadEventFired();
+
+    await expect(captureScreenshot('https://preview.example.com/down')).rejects.toThrow(/HTTP 503/);
+  });
+
+  test('navigate returns no frameId + multiple ambiguous Document statuses → captures optimistically', async () => {
+    FakeWebSocket.reactions = [
+      () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
+      () => ({ result: { sessionId: 'flat-sess' } }),
+      () => ({ result: {} }),
+      () => ({ result: {} }),
+      () => ({
+        _response: { result: {} },
+        _events: [
+          networkResponseEvent(404, 'frame-a'),
+          networkResponseEvent(200, 'frame-b'),
+        ],
+      }),
+      () => ({ result: { data: Buffer.from('PNG-ambiguous').toString('base64') } }),
+    ];
+    emitLoadEventFired();
+
+    const png = await captureScreenshot('https://preview.example.com');
+    expect(Buffer.from(png).toString()).toBe('PNG-ambiguous');
+  });
+
   test('no Network.responseReceived event ever fires → falls through (pre-#287 behaviour)', async () => {
     // Defensive: if some service variant doesn't emit Network events,
     // we still capture optimistically rather than blocking the pipeline.
