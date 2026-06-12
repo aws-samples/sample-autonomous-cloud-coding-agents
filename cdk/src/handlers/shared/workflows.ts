@@ -122,6 +122,16 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: true,
     requiredInputs: { allOf: ['pr_number'] },
   },
+  // A6 re-stack (#305): re-merge a changed predecessor into an existing
+  // stacked-child PR. Writeable, repo-bound, operates on an existing PR
+  // (pr_number). Platform-issued (the restack processor), not user-facing.
+  'coding/restack-v1': {
+    id: 'coding/restack-v1',
+    version: '1.0.0',
+    requiresRepo: true,
+    readOnly: false,
+    requiredInputs: { allOf: ['pr_number'] },
+  },
   'default/agent-v1': {
     id: 'default/agent-v1',
     version: '1.0.0',
