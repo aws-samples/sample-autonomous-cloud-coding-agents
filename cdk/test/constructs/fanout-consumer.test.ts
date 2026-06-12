@@ -170,4 +170,24 @@ describe('FanOutConsumer', () => {
       expect(vars.TASK_TABLE_NAME).toBeUndefined();
     }
   });
+
+  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (#117)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    new FanOutConsumer(stack, 'FanOut', {
+      taskEventsTable: makeTaskEventsTable(stack),
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Namespace: 'AWS/SQS',
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+      Statistic: 'Maximum',
+      Period: 300,
+    });
+  });
 });
