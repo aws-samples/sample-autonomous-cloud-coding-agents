@@ -2,9 +2,6 @@
   "app": "npx ts-node -P tsconfig.json --prefer-ts-exts src/main.ts",
   "output": "cdk.out",
   "build": "node -e \"process.exit(0)\"",
-  "context": {
-    "blueprintRepo": "krokoko/agent-plugins"
-  },
   "watch": {
     "include": ["src/**/*.ts", "test/**/*.ts"],
     "exclude": [
