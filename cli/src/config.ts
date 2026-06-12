@@ -27,6 +27,9 @@ const CONFIG_DIR_ENV = 'BGAGENT_CONFIG_DIR';
 const CONFIG_FILE = 'config.json';
 const CREDENTIALS_FILE = 'credentials.json';
 
+/** Owner-only read/write — credentials must never be group/world readable. */
+export const SECRET_FILE_MODE = 0o600;
+
 /** Returns the config directory path (~/.bgagent or BGAGENT_CONFIG_DIR). */
 export function getConfigDir(): string {
   return process.env[CONFIG_DIR_ENV] || path.join(os.homedir(), '.bgagent');
@@ -94,9 +97,9 @@ export function loadCredentials(): Credentials | null {
 export function saveCredentials(creds: Credentials): void {
   ensureConfigDir();
   const p = credentialsPath();
-  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: SECRET_FILE_MODE });
   // writeFileSync only honors `mode` when CREATING the file; overwriting a
   // pre-existing loose-permissions file leaves its bits untouched. chmod
   // makes the 0600 intent durable across re-logins.
-  fs.chmodSync(p, 0o600);
+  fs.chmodSync(p, SECRET_FILE_MODE);
 }

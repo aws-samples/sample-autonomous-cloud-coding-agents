@@ -26,7 +26,7 @@ import {
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { Command } from 'commander';
-import { getConfigDir, loadConfig } from '../config';
+import { getConfigDir, loadConfig, SECRET_FILE_MODE } from '../config';
 import { CliError } from '../errors';
 import { CliConfig } from '../types';
 
@@ -230,11 +230,11 @@ function printInviteSummary(email: string, tempPassword: string, bundle: string)
     `  bgagent login --username ${email}`,
     '',
   ].join('\n');
-  fs.writeFileSync(invitePath, shareBlock, { mode: 0o600 });
+  fs.writeFileSync(invitePath, shareBlock, { mode: SECRET_FILE_MODE });
   // writeFileSync only honors `mode` on create — a re-invite into a
   // pre-existing loose-permissions file would keep its old bits. chmod
   // makes the 0600 intent durable.
-  fs.chmodSync(invitePath, 0o600);
+  fs.chmodSync(invitePath, SECRET_FILE_MODE);
 
   const SUMMARY_BAR_WIDTH = 64;
   const bar = '─'.repeat(SUMMARY_BAR_WIDTH);
