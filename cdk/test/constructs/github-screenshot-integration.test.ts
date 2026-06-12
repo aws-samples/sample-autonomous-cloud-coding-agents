@@ -65,6 +65,31 @@ describe('GitHubScreenshotIntegration construct', () => {
     });
   });
 
+  test('alarms on the first record landing in the processor DLQ', () => {
+    // The processor handler swallows its own errors, so only init-time
+    // crashes reach the queue — each one means the screenshot pipeline is
+    // silently down. Without the alarm the queue is "for operator
+    // inspection" that no operator is ever told to make.
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Namespace: 'AWS/SQS',
+      Statistic: 'Maximum',
+      Period: 300,
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      TreatMissingData: 'notBreaching',
+      Dimensions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'QueueName',
+          Value: Match.objectLike({
+            'Fn::GetAtt': Match.arrayWith([Match.stringLikeRegexp('WebhookProcessorDlq')]),
+          }),
+        }),
+      ]),
+    });
+  });
+
   test('wires the DLQ as the processor Lambda async-invoke dead-letter target', () => {
     // The queue existing is not enough — it must be bound to the
     // processor function's DeadLetterConfig or failed async invokes

@@ -137,10 +137,11 @@ const MILESTONE_NOISE_KEYS = new Set(['milestone', 'details']);
  * structured metadata (``request_id``, ``severity``, ``timeout_s``,
  * ``matching_rule_ids``, ``scope``) and NO ``details`` key — so the old
  * renderer printed a bare "★ approval_requested" and dropped every salient
- * field. Here we surface the salient fields inline, falling back to a compact
- * JSON dump of the remaining metadata (minus noisy keys) so nothing is lost.
- *
- * JSON output mode never calls this — it serializes the raw event verbatim.
+ * field. Here we surface the salient fields inline; only when NONE of them
+ * are present do we fall back to a compact JSON dump of the remaining
+ * metadata (minus noisy keys). When salient fields ARE present, any extra
+ * unrecognized keys are intentionally omitted from the text line —
+ * inspect with ``--output json``, which serializes the raw event verbatim.
  */
 function renderMilestoneSuffix(meta: Record<string, unknown>): string {
   const details = meta.details;

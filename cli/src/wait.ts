@@ -30,9 +30,9 @@ const POLL_INTERVAL_MS = 5_000;
 const MAX_TRANSIENT_FAILURES = 5;
 
 /** Generous default wall-clock ceiling so a stuck task can never pin the CLI
- *  forever. ``submit --wait`` / ``status --wait`` expose no ``--timeout`` flag
- *  today, so this is the only bound. 24h comfortably exceeds any legitimate
- *  task while still guaranteeing eventual termination. */
+ *  forever. Overridable via ``status --wait --max-wait <seconds>``; 24h
+ *  comfortably exceeds any legitimate task while still guaranteeing
+ *  eventual termination. */
 const DEFAULT_MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 
 /** Exit code for "the CLI stopped waiting" (timeout / transient exhaustion).
@@ -88,8 +88,11 @@ export async function waitForTask(
       consecutiveTransientFailures += 1;
       if (consecutiveTransientFailures > MAX_TRANSIENT_FAILURES) {
         const e = err instanceof Error ? err : new Error(String(err));
+        // Report the actual count (MAX retried + this one tripping), not
+        // the retry budget — "after 5" while aborting on the 6th read as
+        // an off-by-one to anyone correlating with server logs.
         throw new CliError(
-          `Gave up waiting for task ${taskId} after ${MAX_TRANSIENT_FAILURES} `
+          `Gave up waiting for task ${taskId} after ${consecutiveTransientFailures} `
           + `consecutive transient failures: ${e.message}. `
           + `Re-run \`bgagent status ${taskId} --wait\` to resume.`,
           EXIT_CODE_WAIT_ABORTED,

@@ -77,6 +77,19 @@ describe('isValidRepo', () => {
     expect(isValidRepo('trailing-slash/')).toBe(false);
     expect(isValidRepo('has spaces/repo')).toBe(false);
   });
+
+  test('rejects pure-dot path segments while keeping dotted names', () => {
+    // `owner/..` is a path token, not a repo name — the char class allows
+    // dots so the multi-slash rule alone never caught the single-segment
+    // traversal shapes. Dotted REAL names (next.js) must keep working.
+    expect(isValidRepo('owner/..')).toBe(false);
+    expect(isValidRepo('owner/.')).toBe(false);
+    expect(isValidRepo('../repo')).toBe(false);
+    expect(isValidRepo('./repo')).toBe(false);
+    expect(isValidRepo('vercel/next.js')).toBe(true);
+    expect(isValidRepo('owner/.github')).toBe(true);
+    expect(isValidRepo('owner/repo.')).toBe(true);
+  });
 });
 
 describe('hasTaskSpec', () => {

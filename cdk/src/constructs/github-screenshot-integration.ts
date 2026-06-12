@@ -20,6 +20,7 @@
 import * as path from 'path';
 import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -110,6 +111,11 @@ export class GitHubScreenshotIntegration extends Construct {
   /** Async processor Lambda (browser + S3 + PR comment). */
   public readonly webhookProcessorFn: lambda.NodejsFunction;
 
+  /** Fires when a failed async invocation lands in the processor DLQ —
+   *  mirrors ``FanOutConsumer.dlqDepthAlarm``: without it the queue is
+   *  "for operator inspection" that no operator is ever told to make. */
+  public readonly processorDlqDepthAlarm: cloudwatch.Alarm;
+
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
     super(scope, id);
 
@@ -184,6 +190,22 @@ export class GitHubScreenshotIntegration extends Construct {
         reason: 'This queue IS the async-invoke DLQ for the processor Lambda — a DLQ for the DLQ would be infinite recursion',
       },
     ]);
+
+    // Alarm on any record landing in the DLQ. The processor handler
+    // swallows its own errors, so only init-time crashes reach this queue
+    // — rare, but each one is a screenshot pipeline silently down. Same
+    // threshold-1 shape as FanOutConsumer.dlqDepthAlarm.
+    this.processorDlqDepthAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorDlqDepthAlarm', {
+      metric: processorDlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      alarmDescription:
+        'Screenshot webhook processor DLQ has failed async invocations — the screenshot pipeline is crashing before handling events',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
     props.githubTokenSecret.grantRead(this.webhookProcessorFn);

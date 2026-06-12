@@ -93,5 +93,10 @@ export function loadCredentials(): Credentials | null {
 /** Save credentials with restricted permissions. */
 export function saveCredentials(creds: Credentials): void {
   ensureConfigDir();
-  fs.writeFileSync(credentialsPath(), JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  const p = credentialsPath();
+  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  // writeFileSync only honors `mode` when CREATING the file; overwriting a
+  // pre-existing loose-permissions file leaves its bits untouched. chmod
+  // makes the 0600 intent durable across re-logins.
+  fs.chmodSync(p, 0o600);
 }

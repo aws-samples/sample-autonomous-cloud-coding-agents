@@ -231,6 +231,10 @@ function printInviteSummary(email: string, tempPassword: string, bundle: string)
     '',
   ].join('\n');
   fs.writeFileSync(invitePath, shareBlock, { mode: 0o600 });
+  // writeFileSync only honors `mode` on create — a re-invite into a
+  // pre-existing loose-permissions file would keep its old bits. chmod
+  // makes the 0600 intent durable.
+  fs.chmodSync(invitePath, 0o600);
 
   const SUMMARY_BAR_WIDTH = 64;
   const bar = '─'.repeat(SUMMARY_BAR_WIDTH);

@@ -36,6 +36,22 @@ export const RETRY_BASE_DELAY_MS = 500;
  *  longer than a few seconds between attempts. */
 export const RETRY_CEILING_MS = 5_000;
 
+/** ``error.cause.code`` values that mark a socket-level transient. Node's
+ *  undici wraps most of these in a ``TypeError: fetch failed`` (caught by
+ *  the message check below), but mid-stream failures (``UND_ERR_SOCKET``,
+ *  ``ECONNRESET`` after headers) can surface as other error shapes whose
+ *  cause still carries the syscall code. */
+const TRANSIENT_CAUSE_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
 /**
  * Classify an error into retryable (transient) vs. terminal. Whitelist
  * approach: only conditions we specifically recognize as transient retry.
@@ -44,10 +60,13 @@ export const RETRY_CEILING_MS = 5_000;
  *   - ``ApiError`` with status 5xx (server-side hiccup).
  *   - Network failures surfaced by ``fetch`` as a ``TypeError`` — Node's
  *     undici reports connect-refused / reset / DNS failure this way.
+ *   - Any ``Error`` whose ``cause.code`` is a known socket-level transient
+ *     (see ``TRANSIENT_CAUSE_CODES``) — covers mid-stream terminations
+ *     that undici does NOT wrap as ``TypeError: fetch failed``.
  *
- * Non-transient (propagates with its original message):
- *   - ``ApiError`` with status 4xx (deterministic; retry is futile).
- *   - ``CliError`` and everything else (real bugs, contract violations).
+ * Non-transient: everything else propagates with its original message —
+ * ``ApiError`` 4xx (deterministic; retry is futile), ``CliError``, and any
+ * unrecognized error all fall through to the final ``return false``.
  */
 export function isTransientError(err: unknown): boolean {
   if (err instanceof ApiError) {
@@ -55,6 +74,17 @@ export function isTransientError(err: unknown): boolean {
   }
   if (err instanceof TypeError && /fetch failed|network/i.test(err.message)) {
     return true;
+  }
+  if (err instanceof Error) {
+    // ``Error.cause`` is runtime-present on Node 18+; the compile target's
+    // lib predates its typing, so read it structurally.
+    const cause = (err as Error & { cause?: unknown }).cause;
+    const code = cause instanceof Error
+      ? (cause as Error & { code?: unknown }).code
+      : undefined;
+    if (typeof code === 'string' && TRANSIENT_CAUSE_CODES.has(code)) {
+      return true;
+    }
   }
   return false;
 }

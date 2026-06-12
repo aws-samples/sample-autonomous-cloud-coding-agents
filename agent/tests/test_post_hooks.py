@@ -123,6 +123,30 @@ class TestPushResolveFailureSurface:
         note_cmd = run_cmd.cmd_for("note-unpushed-commits")
         assert "comment" in note_cmd
 
+    def test_failed_note_post_warns_loudly(self, monkeypatch):
+        # check=False means run_cmd never raises on a non-zero gh exit, so
+        # _note_unpushed_commits must inspect the returncode itself — a
+        # failed `gh pr comment` (missing scope, rate limit) was previously
+        # a silent no-op while the PR quietly went stale.
+        monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: False)
+        sub = _pr_view("https://github.com/o/r/pull/9")
+        run_cmd = _RunCmdRecorder(returncodes={"note-unpushed-commits": 1})
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+        warns: list[str] = []
+        monkeypatch.setattr(
+            post_hooks, "log", lambda lvl, msg: warns.append(msg) if lvl == "WARN" else None
+        )
+
+        url = post_hooks.ensure_pr(
+            _config(), _setup(), build_passed=True, lint_passed=True, strategy="push_resolve"
+        )
+
+        # The URL is still returned (PR exists), but the failure to notify
+        # the reviewer is surfaced as a WARN naming the consequence.
+        assert url == "https://github.com/o/r/pull/9"
+        assert any("reviewer has NOT been notified" in w for w in warns)
+
     def test_push_success_does_not_post_note(self, monkeypatch):
         monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: True)
         sub = _pr_view("https://github.com/o/r/pull/9")

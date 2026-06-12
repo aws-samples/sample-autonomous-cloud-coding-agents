@@ -106,6 +106,23 @@ class TestFetchGitHubIssueSanitization:
 
         assert issue.body == ""
 
+    def test_comment_by_deleted_account_does_not_crash(self, monkeypatch):
+        # GitHub returns "user": null for comments whose author account was
+        # deleted ("ghost" comments). An unguarded c["user"]["login"] raised
+        # TypeError and aborted the whole issue hydration.
+        payload = {"title": "Title", "body": "body", "number": 12, "comments": 2}
+        comments = [
+            {"id": 1, "user": None, "body": "comment from a deleted account"},
+            {"id": 2, "user": {"login": "alice"}, "body": "still here"},
+        ]
+        monkeypatch.setattr(context, "requests", _fake_requests(payload, comments))
+
+        issue = fetch_github_issue("owner/repo", "12", "tok")
+
+        assert issue.comments[0].author == "(deleted user)"
+        assert issue.comments[0].body == "comment from a deleted account"
+        assert issue.comments[1].author == "alice"
+
 
 def _fetched_issue(monkeypatch, *, title, body, number, comments=None):
     """Fetch an issue from raw payloads, exercising the source sanitizer.

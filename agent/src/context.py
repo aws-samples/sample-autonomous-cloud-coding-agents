@@ -61,7 +61,10 @@ def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIs
         comments = [
             IssueComment(
                 id=int(c["id"]),
-                author=c["user"]["login"],
+                # GitHub returns "user": null for comments whose author
+                # account was deleted ("ghost" comments) — an unguarded
+                # c["user"]["login"] would abort the whole hydration.
+                author=(c.get("user") or {}).get("login", "(deleted user)"),
                 body=c["body"] or "",
             )
             for c in comments_resp.json()

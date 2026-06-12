@@ -115,7 +115,10 @@ describe('waitForTask', () => {
     const client = new ApiClient();
 
     const promise = waitForTask(client, 'task-1');
-    const assertion = expect(promise).rejects.toThrow(CliError);
+    // The message reports the ACTUAL failure count (6 = 5 retried + the
+    // trip), not the retry budget — "after 5" while aborting on the 6th
+    // read as an off-by-one against server logs.
+    const assertion = expect(promise).rejects.toThrow(/after 6 consecutive transient failures/);
     await flushPolls(12);
     await assertion;
     // 5 retries tolerated, the 6th consecutive failure trips the budget.

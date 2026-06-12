@@ -115,6 +115,12 @@ async function ensureFreshCredentials(): Promise<Credentials> {
 
 function isExpired(creds: Credentials): boolean {
   const expiryMs = new Date(creds.token_expiry).getTime();
+  // A corrupt token_expiry parses to NaN, and every comparison against NaN
+  // is false — the token would be classified as never-expiring and surface
+  // as an opaque 401 instead of a refresh. Treat unparseable as expired.
+  if (!Number.isFinite(expiryMs)) {
+    return true;
+  }
   return Date.now() >= expiryMs - TOKEN_REFRESH_BUFFER_MS;
 }
 

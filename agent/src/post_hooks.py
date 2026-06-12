@@ -164,9 +164,15 @@ def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> No
     latest work, so the reviewer must be told. Failure to post the comment is
     logged but not fatal — the WARN log line emitted by the caller is the
     fallback signal.
+
+    ``check=False`` means ``run_cmd`` does NOT raise on a non-zero ``gh``
+    exit, so the returncode is inspected explicitly — otherwise a failed
+    ``gh pr comment`` (missing scope, rate limit, not-a-PR) is a silent
+    no-op and the reviewer never learns the PR is stale. The ``except``
+    below only covers OS-level failures (gh missing, timeout).
     """
     try:
-        run_cmd(
+        result = run_cmd(
             [
                 "gh",
                 "pr",
@@ -181,6 +187,15 @@ def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> No
             cwd=repo_dir,
             check=False,
         )
+        if result.returncode != 0:
+            stderr_msg = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
+            log(
+                "WARN",
+                "Failed to post un-pushed-commits note "
+                f"(gh exit {result.returncode}): {stderr_msg} — the PR does not "
+                "reflect the agent's latest commits and the reviewer has NOT "
+                "been notified.",
+            )
     except Exception as e:
         log("WARN", f"Failed to post un-pushed-commits note: {type(e).__name__}: {e}")
 

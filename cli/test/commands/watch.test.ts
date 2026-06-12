@@ -260,6 +260,10 @@ describe('watch command — polling', () => {
   });
 
   afterEach(() => {
+    // beforeEach resets exitCode between tests, but only afterEach saves
+    // the LAST test's value (130 from the SIGINT test) from leaking into
+    // the Jest worker's own exit status — green assertions, exit 130.
+    process.exitCode = undefined;
     consoleSpy.mockRestore();
     stderrSpy.mockRestore();
   });

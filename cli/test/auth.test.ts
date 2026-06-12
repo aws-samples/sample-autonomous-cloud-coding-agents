@@ -147,6 +147,28 @@ describe('auth', () => {
       expect(token).toBe('new-id');
     });
 
+    test('treats an unparseable token_expiry as expired (refreshes, not 401s)', async () => {
+      // A corrupt-but-valid-JSON expiry parses to NaN; every comparison
+      // with NaN is false, which used to classify the token as
+      // never-expiring — surfacing as an opaque 401 instead of a refresh.
+      saveCredentials({
+        id_token: 'old-id',
+        refresh_token: 'refresh-token',
+        token_expiry: 'not-a-date',
+      });
+
+      mockSend.mockResolvedValue({
+        AuthenticationResult: {
+          IdToken: 'new-id',
+          ExpiresIn: 3600,
+        },
+      });
+
+      const token = await getAuthToken();
+      expect(token).toBe('new-id');
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
     test('throws when no credentials exist', async () => {
       await expect(getAuthToken()).rejects.toThrow('Not authenticated');
     });
