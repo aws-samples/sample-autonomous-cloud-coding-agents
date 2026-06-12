@@ -63,9 +63,9 @@ describe('linear-feedback', () => {
 
   describe('postIssueComment', () => {
     test('POSTs the commentCreate mutation with the issue id and body', async () => {
-      const ok = await postIssueComment(CTX, ISSUE_ID, '❌ blocked');
+      const result = await postIssueComment(CTX, ISSUE_ID, '❌ blocked');
 
-      expect(ok).toBe(true);
+      expect(result).toEqual({ ok: true });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('https://api.linear.app/graphql');
@@ -80,45 +80,61 @@ describe('linear-feedback', () => {
       expect(body.variables).toEqual({ issueId: ISSUE_ID, body: '❌ blocked' });
     });
 
-    test('returns false (and logs warn) when the token cannot be resolved', async () => {
+    test('terminal failure (not retryable) when the token cannot be resolved', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
 
-      const ok = await postIssueComment(CTX, ISSUE_ID, 'msg');
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
 
-      expect(ok).toBe(false);
+      expect(result).toEqual({ ok: false, retryable: false });
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    test('returns false on non-2xx response (no throw)', async () => {
+    test('retryable failure on 5xx response (no throw)', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
 
-      const ok = await postIssueComment(CTX, ISSUE_ID, 'msg');
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
 
-      expect(ok).toBe(false);
+      expect(result).toEqual({ ok: false, retryable: true });
     });
 
-    test('returns false on GraphQL errors (no throw)', async () => {
+    test('retryable failure on 429 rate limit (no throw)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 429));
+
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
+
+      expect(result).toEqual({ ok: false, retryable: true });
+    });
+
+    test('terminal failure on auth-shaped non-2xx (401)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
+
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
+
+      expect(result).toEqual({ ok: false, retryable: false });
+    });
+
+    test('terminal failure on GraphQL errors (no throw)', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'auth' }] }));
 
-      const ok = await postIssueComment(CTX, ISSUE_ID, 'msg');
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
 
-      expect(ok).toBe(false);
+      expect(result).toEqual({ ok: false, retryable: false });
     });
 
-    test('returns false on network failure (swallowed)', async () => {
+    test('retryable failure on network failure (swallowed)', async () => {
       fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'));
 
-      const ok = await postIssueComment(CTX, ISSUE_ID, 'msg');
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
 
-      expect(ok).toBe(false);
+      expect(result).toEqual({ ok: false, retryable: true });
     });
 
-    test('returns false when resolveLinearOauthToken throws (swallowed at resolveToken layer)', async () => {
+    test('terminal failure when resolveLinearOauthToken throws (swallowed at resolveToken layer)', async () => {
       resolveLinearOauthTokenMock.mockRejectedValueOnce(new Error('AccessDenied'));
 
-      const ok = await postIssueComment(CTX, ISSUE_ID, 'msg');
+      const result = await postIssueComment(CTX, ISSUE_ID, 'msg');
 
-      expect(ok).toBe(false);
+      expect(result).toEqual({ ok: false, retryable: false });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });

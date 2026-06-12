@@ -940,14 +940,20 @@ function formatDuration(seconds: number): string {
  *      ``channel_metadata``. Skip if either is missing — defensive,
  *      shouldn't happen for properly-admitted Linear tasks.
  *   4. Render the comment + post via the existing ``postIssueComment``
- *      helper, which itself swallows network/auth errors and returns
- *      false rather than throwing.
+ *      helper, which never throws and classifies failures as
+ *      retryable (network, timeout, 5xx/429) or terminal (auth,
+ *      GraphQL errors, unresolvable token).
  *
- * Failure handling: ``postIssueComment`` is best-effort — a Linear API
- * outage logs and returns false rather than throwing. We reflect that
- * outcome in the dispatcher log but never reject the dispatcher
- * promise: a failed Linear comment shouldn't trigger ``routeEvent``'s
- * batch-retry path because retrying won't fix Linear's API.
+ * Failure handling: terminal failures log-and-resolve — retrying won't
+ * fix a revoked workspace or a bad issue id, and burning Lambda
+ * retries on them would only delay sibling channels. Retryable
+ * failures THROW so ``routeEvent`` records an infra rejection and the
+ * record lands in ``batchItemFailures`` for a Lambda retry — without
+ * this, a 30-second Linear blip permanently loses the final-status
+ * comment, which for the agent-crash case (#239) is the user's only
+ * completion signal. The retry is idempotent: the post-once marker
+ * below is persisted only after a successful post, so a re-run either
+ * posts the missing comment or short-circuits on the marker.
  */
 async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   const registryTableName = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
@@ -1051,7 +1057,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     errorTitle: classification?.title ?? null,
   });
 
-  const ok = await postIssueComment(
+  const postResult = await postIssueComment(
     { linearWorkspaceId: workspaceId, registryTableName },
     issueId,
     body,
@@ -1062,7 +1068,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   // on the specific failure reason (auth, network, etc.); this
   // backstop ensures a steady drip of post-failures shows up in the
   // dispatcher's own log channel for cross-channel alarms.
-  if (ok) {
+  if (postResult.ok) {
     logger.info('[fanout/linear] comment dispatched', {
       event: 'fanout.linear.dispatched',
       task_id: task.task_id,
@@ -1072,14 +1078,26 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     });
     await saveLinearCommentState(task.task_id, event.event_id);
   } else {
-    logger.warn('[fanout/linear] postIssueComment returned false — Linear API path failed', {
+    logger.warn('[fanout/linear] postIssueComment failed — Linear API path failed', {
       event: 'fanout.linear.post_failed',
       error_id: 'FANOUT_LINEAR_POST_FAILED',
       task_id: task.task_id,
       issue_id: issueId,
       event_type: event.event_type,
       posted: false,
+      retryable: postResult.retryable,
     });
+    if (postResult.retryable) {
+      // Escalate to routeEvent's Promise.allSettled so the record
+      // enters batchItemFailures and Lambda retries. Safe because the
+      // marker above was NOT persisted — the retry posts the missing
+      // comment or, if a concurrent run won, short-circuits on the
+      // marker. Terminal failures stay log-only: a retry cannot fix
+      // them and would burn the event-source's bounded retryAttempts.
+      throw new Error(
+        `[fanout/linear] transient Linear post failure for task ${task.task_id} — escalating for batch retry`,
+      );
+    }
   }
 }
 

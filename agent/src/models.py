@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from sanitization import sanitize_external_content
 
 
 class IssueComment(BaseModel):
     """Single GitHub issue comment — mirrors ``IssueComment`` in context-hydration.ts.
 
-    ``author`` and ``body`` are pre-sanitized at fetch time: ``fetch_github_issue``
-    in ``context.py`` runs them through ``sanitize_external_content`` as this object
-    is constructed, so consumers must not sanitize again.
+    ``author`` and ``body`` are sanitized by a field validator at construction,
+    so EVERY instance — whatever code path built it — is safe by the time it
+    exists. Consumers must not sanitize again.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -21,16 +23,25 @@ class IssueComment(BaseModel):
     author: str
     body: str
 
+    @field_validator("author", "body", mode="after")
+    @classmethod
+    def _sanitize(cls, v: str) -> str:
+        # Enforced here, not at the fetch site, so a future second fetcher
+        # (or deserialization from a cache) cannot construct an instance
+        # carrying raw attacker-controllable GitHub content. Idempotent:
+        # re-validating already-sanitized text is a no-op.
+        return sanitize_external_content(v)
+
 
 class GitHubIssue(BaseModel):
     """GitHub issue slice — mirrors ``GitHubIssueContext`` in context-hydration.ts.
 
     Externally-sourced fields (``title``, ``body``, and each comment's
-    ``author``/``body``) are pre-sanitized at fetch time: ``fetch_github_issue``
-    in ``context.py`` runs every attacker-controllable string through
-    ``sanitize_external_content`` as this model is constructed. The model never
-    carries unsanitized data, so consumers (e.g. ``assemble_prompt``) must not
-    sanitize again and only apply presentation (untrusted-content delimiters).
+    ``author``/``body`` via :class:`IssueComment`) are sanitized by field
+    validators at construction: every construction path — ``fetch_github_issue``,
+    tests, any future fetcher or cache load — yields a sanitized instance.
+    Consumers (e.g. ``assemble_prompt``) must not sanitize again and only
+    apply presentation (untrusted-content delimiters).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -39,6 +50,12 @@ class GitHubIssue(BaseModel):
     body: str = ""
     number: int
     comments: list[IssueComment] = Field(default_factory=list)
+
+    @field_validator("title", "body", mode="after")
+    @classmethod
+    def _sanitize(cls, v: str) -> str:
+        # See IssueComment._sanitize — same structural-enforcement rationale.
+        return sanitize_external_content(v)
 
 
 class MemoryContext(BaseModel):
