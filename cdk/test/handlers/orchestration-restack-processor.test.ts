@@ -118,14 +118,28 @@ describe('orchestration-restack-processor', () => {
     expect(reqId).toBe(ctx.idempotencyKey);
   });
 
-  test('dependent with no resolvable PR number → skipped (no task)', async () => {
+  test('resolves PR number from pr_url when pr_number is null (orchestration child tasks)', async () => {
     findChildByBranchMock.mockResolvedValueOnce(childRow('A'));
     loadOrchestrationMock.mockResolvedValueOnce({
       meta: { release_context: { platform_user_id: 'u1' } },
       children: [childRow('A'), childRow('B', ['A'])],
     });
     planRestackMock.mockReturnValueOnce([{ child: childRow('B', ['A']), mergeBranches: ['branch-A'] }]);
-    ddbSend.mockResolvedValueOnce({ Item: {} }); // no pr_number
+    // pr_number null, but pr_url carries .../pull/113 — the fallback path.
+    ddbSend.mockResolvedValueOnce({ Item: { pr_number: null, pr_url: 'https://github.com/o/r/pull/113' } });
+    await handler(prEvent('synchronize', 'branch-A'));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(113);
+  });
+
+  test('dependent with neither pr_number nor pr_url → skipped (no task)', async () => {
+    findChildByBranchMock.mockResolvedValueOnce(childRow('A'));
+    loadOrchestrationMock.mockResolvedValueOnce({
+      meta: { release_context: { platform_user_id: 'u1' } },
+      children: [childRow('A'), childRow('B', ['A'])],
+    });
+    planRestackMock.mockReturnValueOnce([{ child: childRow('B', ['A']), mergeBranches: ['branch-A'] }]);
+    ddbSend.mockResolvedValueOnce({ Item: {} }); // neither field
     await handler(prEvent('synchronize', 'branch-A'));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
