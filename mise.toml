@@ -108,12 +108,23 @@ run = [
 ##################
 
 [tasks."security:secrets"]
-description = "Scan for secrets with gitleaks"
-run = "gitleaks detect --source . --no-banner"
+description = "Scan all git history for secrets with gitleaks (full-history sweep)"
+# `gitleaks git` (history-aware) replaces the deprecated `gitleaks detect`
+# (removed from --help in v8.19.0). With no --log-opts this scans the full
+# history reachable from the checkout, matching the previous behaviour.
+run = "gitleaks git . --no-banner --redact"
+
+[tasks."security:secrets:range"]
+description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
+# Range-scoped scan: only the commits a branch/PR introduces, not full history.
+# Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
+# to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
+run = 'gitleaks git . --no-banner --redact --log-opts="${GITLEAKS_RANGE:-}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
-run = "gitleaks protect --staged --no-banner"
+# `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
+run = "gitleaks git . --staged --no-banner --redact"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"

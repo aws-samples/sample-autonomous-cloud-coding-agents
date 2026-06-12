@@ -1,6 +1,10 @@
 name: build
 on:
   pull_request: {}
+  # Required-status-check support: a check must run on the `merge_group` event to
+  # report inside the merge queue. Without this trigger, marking `build` a required
+  # check would deadlock the queue (the check never reports). See issue #327.
+  merge_group: {}
   workflow_dispatch:
     inputs:
       deploy:
@@ -54,8 +58,10 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Keep secret and dependency scanning enabled in CI; only disable the
-      # remaining tools that are intentionally skipped here.
+      # The `build` task DAG does not invoke any `security:*` task, so this only
+      # pre-disables the heavy scanners if a future build step pulls one in. Fast
+      # secret/dependency/workflow scanning runs as required PR checks in
+      # security-pr.yml (issue #327); the full image/SAST suite runs in security.yml.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
     steps:
       - name: Free Disk Space
