@@ -1,0 +1,81 @@
+name: security-pr
+# Fast, required-on-PR security gate (issue #327). Catches the incident class
+# (#313: secrets reaching history because the scan only ran weekly) at PR time.
+#
+# Scope is deliberately the FAST scanners only — secrets (range-scoped),
+# dependencies, and workflow static-analysis — so this stays off the slow path
+# (<~3 min) and can be a required status check without throttling the inner loop.
+# The heavy image + SAST suite (trivy/grype/semgrep) runs in security.yml and is
+# tracked separately by #235; the full-history secret sweep also lives there.
+on:
+  pull_request: {}
+  # Must also run on merge_group so this check reports inside the merge queue;
+  # otherwise marking it a required check deadlocks the queue. See #327.
+  merge_group: {}
+  workflow_dispatch: {}
+
+# Least privilege: read the code, nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets-deps-actions:
+    name: Secrets, deps, and workflow scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CI: "true"
+      MISE_EXPERIMENTAL: "1"
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history so the range scan can resolve the base ref. A shallow
+          # clone would leave origin/<base> unresolvable for the commit-range diff.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install mise
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          cache: true
+
+      - name: Resolve PR commit range
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              # Scan exactly the commits this PR introduces.
+              echo "range=${PR_BASE_SHA}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              ;;
+            merge_group|workflow_dispatch|*)
+              # In the merge queue (and on manual dispatch) there is no PR diff to
+              # scope to; scan the full reachable history as a backstop.
+              echo "range=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          echo "Resolved GITLEAKS_RANGE='$(tail -n1 "$GITHUB_OUTPUT" | cut -d= -f2-)'"
+
+      - name: Secret scan (gitleaks, PR range)
+        env:
+          GITLEAKS_RANGE: ${{ steps.range.outputs.range }}
+        run: mise run security:secrets:range
+
+      - name: Dependency scan (osv-scanner)
+        run: mise run security:deps
+
+      - name: Workflow static analysis (zizmor)
+        run: mise run security:gh-actions
