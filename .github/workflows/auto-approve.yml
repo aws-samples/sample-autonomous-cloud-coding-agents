@@ -3,16 +3,19 @@ name: auto-approve
 # upgrade-main dependency PRs). pull_request_target is intentional and safe
 # here: the job never checks out or executes PR code — it only calls the
 # review API. Branch protection still requires the build workflow to pass.
+#
+# Trigger is `labeled` ONLY: each approval requires an explicit label event
+# from someone with triage+ permission. Approving on `synchronize` would
+# re-approve arbitrary future commits pushed to an already-labeled PR with no
+# human re-review — combined with Mergify's auto-merge that is an
+# unreviewed-merge path. The Mergify `dismiss stale approvals` rule is the
+# other half of this invariant: a push invalidates the bot's prior approval,
+# and re-approval requires removing and re-adding the label (deliberate
+# friction: new content needs a fresh, explicit trigger).
 on:
   pull_request_target:
     types:
       - labeled
-      - unlabeled
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-      - review_requested
 permissions:
   actions: none
   attestations: none
@@ -34,7 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-    if: contains(github.event.pull_request.labels.*.name, 'auto-approve')
+    # Only act on the auto-approve label itself, and never on fork PRs —
+    # a fork head can be force-pushed by the fork owner after labeling.
+    if: |
+      github.event.label.name == 'auto-approve' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: hmarr/auto-approve-action@f0939ea97e9205ef24d872e76833fa908a770363 # v4.0.0
         with:

@@ -11,6 +11,18 @@ queue_rules:
 
       {{ body }}
 pull_request_rules:
+  # Approvals must cover the commits actually being merged. Without this,
+  # the auto-approve bot's review (or any human review) would keep
+  # satisfying `#approved-reviews-by>=1` after arbitrary new commits are
+  # pushed, letting unreviewed content auto-merge. Dismissing on every
+  # push forces a fresh approval (for label-gated PRs: remove and re-add
+  # the `auto-approve` label) before the queue rule can fire again.
+  - name: Dismiss stale approvals when new commits are pushed
+    conditions:
+      - base=main
+    actions:
+      dismiss_reviews:
+        approved: true
   - name: Automatic merge on approval and successful build
     actions:
       delete_head_branch: {}
