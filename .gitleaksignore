@@ -1,0 +1,9 @@
+# gitleaks baseline — historical findings that cannot be removed without
+# rewriting shared `main` history. A real AWS account ID was committed in
+# 0dca217 (two docs-backlog files + a diagram). The live diagram is scrubbed to
+# a placeholder in this change; the backlog docs were already deleted from HEAD.
+# These fingerprints suppress only those past commits — any NEW occurrence is
+# still flagged. See #313.
+0dca2171f244f693ac7c649ecf376d1ce6af2b38:docs/backlog/EARLY_PROGRESS_MILESTONES.md:aws-account-id:5
+0dca2171f244f693ac7c649ecf376d1ce6af2b38:docs/backlog/CLI_COGNITO_NEW_PASSWORD_CHALLENGE.md:aws-account-id:5
+0dca2171f244f693ac7c649ecf376d1ce6af2b38:docs/diagrams/phase3-cedar-hitl.drawio:aws-account-id:28

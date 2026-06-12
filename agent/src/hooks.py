@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
@@ -805,7 +806,12 @@ def _remaining_maxlifetime_s() -> int | None:
         else:
             from datetime import datetime
 
-            started_epoch = int(datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            # The trailing Z means UTC; strptime returns a naive datetime whose
+            # .timestamp() would otherwise be interpreted in the container's
+            # local TZ, skewing remaining-lifetime math by the UTC offset.
+            started_epoch = int(
+                datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+            )
     except (ValueError, AttributeError):
         return None
     elapsed = int(time.time()) - started_epoch

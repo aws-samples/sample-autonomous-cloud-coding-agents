@@ -82,7 +82,7 @@ The `@backgroundagent/cli` package provides the `bgagent` executable for submitt
 - `src/api-client.ts` — HTTP client wrapping `fetch` with auth header injection
 - `src/auth.ts` — Cognito login, token caching (`~/.bgagent/credentials.json`), auto-refresh
 - `src/config.ts` — Read/write `~/.bgagent/config.json`
-- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`), including `TaskType` (`new_task` | `pr_iteration` | `pr_review`)
+- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`), including `workflow_ref` / `ResolvedWorkflow` (workflow ids like `coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`; replaced the former `TaskType` enum, #248)
 - `src/format.ts` — Output formatting (table, detail view, JSON)
 - `src/debug.ts` — Verbose/debug logging (`--verbose` flag)
 - `src/errors.ts` — `CliError` and `ApiError` classes

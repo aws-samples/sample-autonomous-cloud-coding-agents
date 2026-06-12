@@ -54,7 +54,13 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    if (!result.SecretString) {
+    // Treat empty / whitespace-only SecretString as null — an empty secret
+    // must never be used for HMAC, or HMAC('', body) becomes forgeable.
+    // (Same guard as getGitHubWebhookSecret.)
+    if (!result.SecretString || result.SecretString.trim() === '') {
+      logger.error('Linear webhook secret is empty — refusing to use for HMAC', {
+        secret_id: secretId,
+      });
       secretCache.delete(secretId);
       return null;
     }
@@ -101,6 +107,14 @@ export function verifyLinearSignature(
   signature: string,
   body: string,
 ): boolean {
+  // Defense-in-depth: getLinearSecret already filters empty secrets, but
+  // callers like verifyLinearRequestForWorkspace pass secrets from other
+  // sources (per-workspace OAuth bundles) — HMAC('') must always be
+  // rejected or an attacker can forge signatures against a misconfigured
+  // empty secret. (Mirrors verifyGitHubSignature, PR-241 review B2.)
+  if (!webhookSecret || webhookSecret.trim() === '') {
+    return false;
+  }
   const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
