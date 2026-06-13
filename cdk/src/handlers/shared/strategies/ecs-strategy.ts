@@ -22,11 +22,12 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
+import { abcaUserAgent } from '../ua';
 
 let sharedClient: ECSClient | undefined;
 function getClient(): ECSClient {
   if (!sharedClient) {
-    sharedClient = new ECSClient({});
+    sharedClient = new ECSClient({ ...abcaUserAgent() });
   }
   return sharedClient;
 }

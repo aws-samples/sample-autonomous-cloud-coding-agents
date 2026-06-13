@@ -27,8 +27,9 @@ import { logger } from './shared/logger';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { ApprovalRequest, ApprovalResponse, ApprovalScope } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME;

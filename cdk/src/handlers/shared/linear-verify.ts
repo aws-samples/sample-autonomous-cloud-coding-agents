@@ -24,9 +24,10 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { abcaUserAgent } from './ua';
 
-const sm = new SecretsManagerClient({});
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const sm = new SecretsManagerClient({ ...abcaUserAgent() });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 
 // In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();

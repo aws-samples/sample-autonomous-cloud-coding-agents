@@ -21,8 +21,9 @@ import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { isUsableHmacSecret } from './hmac-secret';
 import { logger } from './logger';
+import { abcaUserAgent } from './ua';
 
-const sm = new SecretsManagerClient({});
+const sm = new SecretsManagerClient({ ...abcaUserAgent() });
 
 /** Prefix for Slack-related secrets in Secrets Manager. */
 export const SLACK_SECRET_PREFIX = 'bgagent/slack/';

@@ -25,9 +25,10 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
 import { type WebhookRecord, toWebhookDetail } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 import { decodePaginationToken, encodePaginationToken, parseLimit } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 
 /** Default page size when the caller omits ``?limit=``. */

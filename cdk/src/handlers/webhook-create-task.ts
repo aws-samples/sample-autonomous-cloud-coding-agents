@@ -27,9 +27,10 @@ import { isUsableHmacSecret } from './shared/hmac-secret';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 import { parseBody } from './shared/validation';
 
-const sm = new SecretsManagerClient({});
+const sm = new SecretsManagerClient({ ...abcaUserAgent() });
 const SECRET_PREFIX = 'bgagent/webhook/';
 
 // In-memory secret cache with 5-minute TTL
