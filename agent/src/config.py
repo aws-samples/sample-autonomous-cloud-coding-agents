@@ -40,10 +40,10 @@ def resolve_github_token() -> str:
         return cached
     secret_arn = os.environ.get("GITHUB_TOKEN_SECRET_ARN")
     if secret_arn:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("secretsmanager", region_name=region)
+        client = platform_client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=secret_arn)
         token = resp["SecretString"]
         # Cache in env so downstream tools (git, gh CLI) work unchanged
@@ -101,14 +101,15 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime, timedelta
 
-        import boto3
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:
         log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
         # nosemgrep: py-silent-success-masking -- optional Linear MCP; boto3 unavailable
         return ""
 
-    sm = boto3.client("secretsmanager", region_name=region)
+    from aws_session import platform_client
+
+    sm = platform_client("secretsmanager", region_name=region)
 
     def _fetch_token() -> dict | None:
         """Fetch + parse the per-workspace OAuth secret.
