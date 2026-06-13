@@ -39,7 +39,10 @@ export const MAX_MAX_TURNS = 500;
 /** Maximum allowed length for task_description. */
 export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
 
-const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
+// Dots are legal inside segments (`vercel/next.js`) but a segment of ONLY
+// dots (`owner/..`, `./repo`) is a path token, not a repo name — the
+// lookaheads reject those so URL/key interpolation never sees `.`/`..`.
+const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
 // ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
@@ -221,6 +224,10 @@ export function validateMaxTurns(value: unknown): number | null | undefined {
 export function validateMaxBudgetUsd(value: unknown): number | null | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number') return null;
+  // NaN passes the typeof check and both range comparisons below are false
+  // for it — guard explicitly (JSON.parse can't produce NaN, but non-JSON
+  // callers can).
+  if (!Number.isFinite(value)) return null;
   if (value < MAX_BUDGET_USD_MIN || value > MAX_BUDGET_USD_MAX) return null;
   return value;
 }
