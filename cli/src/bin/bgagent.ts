@@ -41,6 +41,11 @@ import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
 import { ApiError, CliError } from '../errors';
+import { setAbcaTrace } from '../ua';
+
+// User-Agent solution tracking (#319): the pid correlates all AWS calls
+// made by this CLI invocation.
+setAbcaTrace(String(process.pid));
 
 const program = new Command();
 

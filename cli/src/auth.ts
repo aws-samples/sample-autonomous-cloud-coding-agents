@@ -26,6 +26,7 @@ import { loadConfig, loadCredentials, saveCredentials } from './config';
 import { debug } from './debug';
 import { CliError } from './errors';
 import { Credentials } from './types';
+import { abcaUserAgent, withAbcaTrace } from './ua';
 
 const TOKEN_REFRESH_BUFFER_MINUTES = 5;
 const TOKEN_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MINUTES * 60 * 1000;
@@ -45,7 +46,7 @@ let inFlightRefresh: Promise<void> | null = null;
 export async function login(username: string, password: string): Promise<void> {
   const config = loadConfig();
   debug(`Cognito region: ${config.region}, client_id: ${config.client_id}, user_pool_id: ${config.user_pool_id}`);
-  const client = new CognitoIdentityProviderClient({ region: config.region });
+  const client = withAbcaTrace(new CognitoIdentityProviderClient({ region: config.region, ...abcaUserAgent() }));
 
   const result = await client.send(new InitiateAuthCommand({
     AuthFlow: AuthFlowType.USER_PASSWORD_AUTH,
@@ -126,7 +127,7 @@ function isExpired(creds: Credentials): boolean {
 
 async function refreshToken(creds: Credentials): Promise<void> {
   const config = loadConfig();
-  const client = new CognitoIdentityProviderClient({ region: config.region });
+  const client = withAbcaTrace(new CognitoIdentityProviderClient({ region: config.region, ...abcaUserAgent() }));
 
   try {
     const result = await client.send(new InitiateAuthCommand({

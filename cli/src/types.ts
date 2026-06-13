@@ -372,6 +372,8 @@ export interface CliConfig {
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;
+  /** Deployed stack name for User-Agent solution tracking (#319); optional. */
+  readonly stack_name?: string;
 }
 
 /** Cached credentials stored in ~/.bgagent/credentials.json.
