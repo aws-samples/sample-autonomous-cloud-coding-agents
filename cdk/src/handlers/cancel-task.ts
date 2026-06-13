@@ -28,11 +28,12 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { TaskRecord } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 import { computeTtlEpoch } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const agentCoreClient = new BedrockAgentCoreClient({});
-const ecsClient = new ECSClient({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const agentCoreClient = new BedrockAgentCoreClient({ ...abcaUserAgent() });
+const ecsClient = new ECSClient({ ...abcaUserAgent() });
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');

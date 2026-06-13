@@ -25,6 +25,7 @@ import {
 } from '@aws-sdk/client-bedrock-agentcore';
 import { logger } from './logger';
 import { sanitizeExternalContent } from './sanitization';
+import { abcaUserAgent } from './ua';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 // ---------------------------------------------------------------------------
@@ -146,7 +147,7 @@ function processMemoryRecords(
 let agentCoreClient: BedrockAgentCoreClient | undefined;
 function getClient(): BedrockAgentCoreClient {
   if (!agentCoreClient) {
-    agentCoreClient = new BedrockAgentCoreClient({});
+    agentCoreClient = new BedrockAgentCoreClient({ ...abcaUserAgent() });
   }
   return agentCoreClient;
 }

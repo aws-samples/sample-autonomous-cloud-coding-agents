@@ -29,10 +29,11 @@ import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
+import { abcaUserAgent } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -431,7 +432,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       ? {
         guardrailId: process.env.GUARDRAIL_ID,
         guardrailVersion: process.env.GUARDRAIL_VERSION,
-        bedrockClient: new BedrockRuntimeClient({}),
+        bedrockClient: new BedrockRuntimeClient({ ...abcaUserAgent() }),
       }
       : undefined;
 

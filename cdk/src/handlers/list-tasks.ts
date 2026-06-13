@@ -25,9 +25,10 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
 import { type TaskRecord, toTaskSummary } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 import { decodePaginationToken, encodePaginationToken, parseLimit, parseStatusFilter } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 
 /**

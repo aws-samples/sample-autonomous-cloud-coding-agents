@@ -26,8 +26,9 @@ import { logger } from './shared/logger';
 import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPendingResponse, PendingApprovalSummary, Severity } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 if (!TASK_APPROVALS_TABLE_NAME) {
   throw new Error('get-pending handler requires TASK_APPROVALS_TABLE_NAME env var');

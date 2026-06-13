@@ -24,9 +24,10 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { abcaUserAgent } from './ua';
 
-const sm = new SecretsManagerClient({});
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const sm = new SecretsManagerClient({ ...abcaUserAgent() });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 
 /** Prefix for Linear-related secrets in Secrets Manager. */
 export const LINEAR_SECRET_PREFIX = 'bgagent/linear/';

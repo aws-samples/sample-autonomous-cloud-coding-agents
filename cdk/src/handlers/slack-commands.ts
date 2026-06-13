@@ -21,8 +21,9 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { getSlackSecret, verifySlackRequest } from './shared/slack-verify';
+import { abcaUserAgent } from './shared/ua';
 
-const lambdaClient = new LambdaClient({});
+const lambdaClient = new LambdaClient({ ...abcaUserAgent() });
 
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;
 const PROCESSOR_FUNCTION_NAME = process.env.SLACK_COMMAND_PROCESSOR_FUNCTION_NAME!;

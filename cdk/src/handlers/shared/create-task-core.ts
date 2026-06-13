@@ -53,6 +53,7 @@ import {
   type TaskRecord,
   toTaskDetail,
 } from './types';
+import { abcaUserAgent } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
@@ -68,10 +69,10 @@ export interface TaskCreationContext {
   readonly idempotencyKey?: string;
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({}) : undefined;
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({ ...abcaUserAgent() }) : undefined;
 const bedrockClient = (process.env.GUARDRAIL_ID && process.env.GUARDRAIL_VERSION)
-  ? new BedrockRuntimeClient({}) : undefined;
+  ? new BedrockRuntimeClient({ ...abcaUserAgent() }) : undefined;
 if (process.env.GUARDRAIL_ID && !process.env.GUARDRAIL_VERSION) {
   logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
     metric_type: 'guardrail_misconfiguration',
