@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { getAuthToken, login } from '../src/auth';
 import { saveConfig, saveCredentials } from '../src/config';
 
@@ -70,6 +71,22 @@ describe('auth', () => {
       expect(creds.id_token).toBe('id-token-123');
       expect(creds.refresh_token).toBe('refresh-token-123');
       expect(creds.token_expiry).toBeDefined();
+    });
+
+    test('constructs the Cognito client with the ABCA solution User-Agent (#319)', async () => {
+      mockSend.mockResolvedValue({
+        AuthenticationResult: {
+          IdToken: 'id-token-123',
+          RefreshToken: 'refresh-token-123',
+          ExpiresIn: 3600,
+        },
+      });
+
+      await login('user@example.com', 'password123');
+
+      const calls = (CognitoIdentityProviderClient as unknown as jest.Mock).mock.calls;
+      const ctorArg = calls[calls.length - 1][0];
+      expect(ctorArg.customUserAgent).toEqual([['md/uksb-wt64nei4u6', 'cli']]);
     });
 
     test('throws on missing auth result', async () => {
