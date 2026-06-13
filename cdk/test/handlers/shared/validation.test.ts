@@ -37,6 +37,7 @@ import {
   parseStatusFilter,
   validateAttachments,
   validateMagicBytes,
+  validateMaxBudgetUsd,
   validateMaxTurns,
   validatePrNumber,
 } from '../../../src/handlers/shared/validation';
@@ -75,6 +76,19 @@ describe('isValidRepo', () => {
     expect(isValidRepo('/leading-slash')).toBe(false);
     expect(isValidRepo('trailing-slash/')).toBe(false);
     expect(isValidRepo('has spaces/repo')).toBe(false);
+  });
+
+  test('rejects pure-dot path segments while keeping dotted names', () => {
+    // `owner/..` is a path token, not a repo name — the char class allows
+    // dots so the multi-slash rule alone never caught the single-segment
+    // traversal shapes. Dotted REAL names (next.js) must keep working.
+    expect(isValidRepo('owner/..')).toBe(false);
+    expect(isValidRepo('owner/.')).toBe(false);
+    expect(isValidRepo('../repo')).toBe(false);
+    expect(isValidRepo('./repo')).toBe(false);
+    expect(isValidRepo('vercel/next.js')).toBe(true);
+    expect(isValidRepo('owner/.github')).toBe(true);
+    expect(isValidRepo('owner/repo.')).toBe(true);
   });
 });
 
@@ -302,6 +316,37 @@ describe('validateMaxTurns', () => {
     expect(validateMaxTurns(true)).toBeNull();
     expect(validateMaxTurns({})).toBeNull();
     expect(validateMaxTurns([])).toBeNull();
+  });
+});
+
+describe('validateMaxBudgetUsd', () => {
+  test('returns undefined when value is absent', () => {
+    expect(validateMaxBudgetUsd(undefined)).toBeUndefined();
+    expect(validateMaxBudgetUsd(null)).toBeUndefined();
+  });
+
+  test('returns the value for valid numbers in range', () => {
+    expect(validateMaxBudgetUsd(0.01)).toBe(0.01);
+    expect(validateMaxBudgetUsd(5)).toBe(5);
+    expect(validateMaxBudgetUsd(100)).toBe(100);
+  });
+
+  test('returns null for out-of-range values', () => {
+    expect(validateMaxBudgetUsd(0)).toBeNull();
+    expect(validateMaxBudgetUsd(-1)).toBeNull();
+    expect(validateMaxBudgetUsd(100.01)).toBeNull();
+  });
+
+  test('returns null for NaN and Infinity (typeof number, but not finite)', () => {
+    expect(validateMaxBudgetUsd(NaN)).toBeNull();
+    expect(validateMaxBudgetUsd(Infinity)).toBeNull();
+    expect(validateMaxBudgetUsd(-Infinity)).toBeNull();
+  });
+
+  test('returns null for non-number types', () => {
+    expect(validateMaxBudgetUsd('5')).toBeNull();
+    expect(validateMaxBudgetUsd(true)).toBeNull();
+    expect(validateMaxBudgetUsd({})).toBeNull();
   });
 });
 

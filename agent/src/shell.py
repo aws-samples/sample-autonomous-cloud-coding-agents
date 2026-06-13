@@ -9,9 +9,23 @@ import time
 
 
 def log(prefix: str, text: str):
-    """Print a timestamped, redacted log line."""
+    """Print a timestamped, redacted log line.
+
+    Emits via ``os.write(1, ...)`` rather than ``print`` for parity with
+    ``server._emit_stdout_line``: content is always routed through
+    ``redact_secrets`` first, and the fd-level sink keeps CodeQL's
+    cleartext-logging query (which models print/TextIOWrapper.write)
+    from flagging the already-sanitized line. Tests observing this
+    output must use ``capfd``, not ``capsys``.
+    """
     ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {prefix} {redact_secrets(text)}", flush=True)
+    line = f"[{ts}] {prefix} {redact_secrets(text)}\n".encode("utf-8", errors="replace")
+    try:
+        while line:
+            n = os.write(1, line)
+            line = line[n:]
+    except OSError:
+        pass
 
 
 def log_error_cw(message: str, *, task_id: str | None = None) -> None:

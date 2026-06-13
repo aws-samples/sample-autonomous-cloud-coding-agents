@@ -3,6 +3,12 @@
   "bin": {
     "bgagent": "lib/bin/bgagent.js"
   },
+  "files": [
+    "lib"
+  ],
+  "engines": {
+    "node": ">= 20.x <= 24.x"
+  },
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "eslint": "eslint --fix --no-error-on-unmatched-pattern src test build-tools",
@@ -30,8 +36,6 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agentcore": "3.1024.0",
-    "@aws-sdk/client-bedrock-agentcore-control": "3.1024.0",
     "@aws-sdk/client-cloudformation": "3.1024.0",
     "@aws-sdk/client-cognito-identity-provider": "3.1024.0",
     "@aws-sdk/client-dynamodb": "3.1024.0",

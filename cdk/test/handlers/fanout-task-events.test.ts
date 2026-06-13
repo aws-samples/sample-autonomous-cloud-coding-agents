@@ -96,9 +96,9 @@ jest.mock('../../src/handlers/slack-notify', () => {
 // Linear dispatcher posts via the existing `postIssueComment` helper
 // in `linear-feedback.ts` (#239). Mock it here so dispatcher tests
 // observe the call shape without exercising the real OAuth-resolver
-// + GraphQL path. Default ``true`` so a test that forgets to script
-// the mock still drives the happy path.
-const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue(true);
+// + GraphQL path. Default ``{ ok: true }`` so a test that forgets to
+// script the mock still drives the happy path.
+const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
@@ -642,7 +642,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // a no-op for these GitHub-focused tests so a non-Linear-channel
     // task short-circuits inside the dispatcher (channel_source ===
     // 'api' / 'github'). Pre-existing tests don't assert on it.
-    mockPostIssueComment.mockReset().mockResolvedValue(true);
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
   });
 
   test('first terminal event POSTs a new comment and persists the comment_id to TaskTable', async () => {
@@ -1340,7 +1340,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
 
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
-    mockPostIssueComment.mockReset().mockResolvedValue(true);
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
     // Slack/GitHub mocks aren't asserted here but leaving them
     // un-reset would let prior-test rejections bleed in.
     mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
@@ -1465,19 +1465,104 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(mockPostIssueComment).not.toHaveBeenCalled();
   });
 
-  test('postIssueComment returning false (Linear API down) does not reject the dispatcher', async () => {
-    // postIssueComment is best-effort — a Linear outage returns false
-    // rather than throwing. The dispatcher logs the failure but
-    // resolves cleanly so the routing layer doesn't flag the record
-    // for retry (retrying won't fix Linear's API).
+  test('terminal post failure (auth, bad issue id) does not reject the dispatcher', async () => {
+    // Terminal failures log-and-resolve: retrying won't fix a revoked
+    // workspace or a GraphQL validation error, so the routing layer
+    // must not flag the record for retry.
     mockGet(TASK_RECORD_LINEAR);
-    mockPostIssueComment.mockReset().mockResolvedValue(false);
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: false });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
     const result = await handler(event);
 
     expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
     // Critical: resolve, don't reject. No batchItemFailures.
+    expect(result).toEqual({ batchItemFailures: [] });
+  });
+
+  test('retryable post failure (network, 5xx, 429) escalates to batchItemFailures', async () => {
+    // A transient Linear blip must NOT permanently drop the final-status
+    // comment — for the agent-crash case (#239) it is the user's only
+    // completion signal. The dispatcher throws, routeEvent records an
+    // infra rejection, and the record lands in batchItemFailures so
+    // Lambda retries. The retry is idempotent: no marker was persisted.
+    mockGet(TASK_RECORD_LINEAR);
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: true });
+
+    const records = [mkEvent('task_completed', 't-lin')];
+    const event: DynamoDBStreamEvent = { Records: records };
+    const result = await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    expect(result.batchItemFailures).toHaveLength(1);
+    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].eventID });
+
+    // And no marker write: the retry must be allowed to post.
+    const updates = mockDdbSend.mock.calls
+      .map(([cmd]) => cmd as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd?._type === 'Update'
+        && cmd.input?.UpdateExpression?.includes('linear_final_comment_event_id'));
+    expect(updates).toHaveLength(0);
+  });
+
+  test('successful post persists the post-once marker on the TaskRecord', async () => {
+    mockGet(TASK_RECORD_LINEAR);
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    const updates = mockDdbSend.mock.calls
+      .map(([cmd]) => cmd as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd?._type === 'Update'
+        && cmd.input?.UpdateExpression?.includes('linear_final_comment_event_id'));
+    expect(updates).toHaveLength(1);
+  });
+
+  test('marker already on the TaskRecord → retry skips the duplicate post (idempotency)', async () => {
+    // Partial-batch retry scenario: a sibling channel's infra rejection
+    // pushed the whole stream record into batchItemFailures, so the
+    // Linear dispatcher re-runs for an event whose comment already
+    // posted. Linear has no edit API — the marker must suppress the
+    // duplicate.
+    mockGet({ ...TASK_RECORD_LINEAR, linear_final_comment_event_id: 'EVT001' });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    const result = await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+    expect(result).toEqual({ batchItemFailures: [] });
+  });
+
+  test('failed post does not persist the marker (next retry may post)', async () => {
+    mockGet(TASK_RECORD_LINEAR);
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: false });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    await handler(event);
+
+    const updates = mockDdbSend.mock.calls
+      .map(([cmd]) => cmd as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd?._type === 'Update'
+        && cmd.input?.UpdateExpression?.includes('linear_final_comment_event_id'));
+    expect(updates).toHaveLength(0);
+  });
+
+  test('marker persist failure does not reject the dispatcher (post already succeeded)', async () => {
+    // A marker-write outage must not convert a successful post into a
+    // batch retry — that retry would be the very duplicate the marker
+    // exists to prevent on the NEXT terminal event, so log-and-continue
+    // is the least-bad option.
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: TASK_RECORD_LINEAR });
+      if (cmd?._type === 'Update') return Promise.reject(new Error('DDB throttled'));
+      return Promise.resolve({});
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-lin')] };
+    const result = await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ batchItemFailures: [] });
   });
 

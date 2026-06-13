@@ -39,7 +39,6 @@ junit.xml
 # ──────────────────────────────────────────────
 node_modules/
 jspm_packages/
-*.tsbuildinfo
 .eslintcache
 *.tgz
 .yarn-integrity
@@ -94,7 +93,7 @@ local-docs/
 # ──────────────────────────────────────────────
 .idea
 .vscode
-*.DS_STORE
+.DS_Store
 
 # ──────────────────────────────────────────────
 # Security scan outputs

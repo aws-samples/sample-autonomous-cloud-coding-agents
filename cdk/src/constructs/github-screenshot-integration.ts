@@ -20,11 +20,13 @@
 import * as path from 'path';
 import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { ScreenshotBucket } from './screenshot-bucket';
@@ -109,6 +111,11 @@ export class GitHubScreenshotIntegration extends Construct {
   /** Async processor Lambda (browser + S3 + PR comment). */
   public readonly webhookProcessorFn: lambda.NodejsFunction;
 
+  /** Fires when a failed async invocation lands in the processor DLQ —
+   *  mirrors ``FanOutConsumer.dlqDepthAlarm``: without it the queue is
+   *  "for operator inspection" that no operator is ever told to make. */
+  public readonly processorDlqDepthAlarm: cloudwatch.Alarm;
+
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
     super(scope, id);
 
@@ -149,6 +156,15 @@ export class GitHubScreenshotIntegration extends Construct {
     // never severs an in-flight comment-post. (theagenticguy PR-241
     // review item B1: previous comment under-counted the 35s retry
     // ladder that runs before captureScreenshot's 60s budget.)
+    // Async-invoke failure backstop: the handler swallows its own errors,
+    // but an init-time crash (missing env at cold start, bundling defect)
+    // would otherwise vanish after Lambda's built-in async retries. The
+    // DLQ keeps the failed invocation payload for operator inspection.
+    const processorDlq = new sqs.Queue(this, 'WebhookProcessorDlq', {
+      retentionPeriod: Duration.days(14),
+      enforceSSL: true,
+    });
+
     this.webhookProcessorFn = new lambda.NodejsFunction(this, 'WebhookProcessorFn', {
       entry: path.join(handlersDir, 'github-webhook-processor.ts'),
       handler: 'handler',
@@ -156,6 +172,7 @@ export class GitHubScreenshotIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(120),
       memorySize: 512,
+      deadLetterQueue: processorDlq,
       environment: {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
         SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
@@ -165,6 +182,29 @@ export class GitHubScreenshotIntegration extends Construct {
         }),
       },
       bundling: commonBundling,
+    });
+
+    NagSuppressions.addResourceSuppressions(processorDlq, [
+      {
+        id: 'AwsSolutions-SQS3',
+        reason: 'This queue IS the async-invoke DLQ for the processor Lambda — a DLQ for the DLQ would be infinite recursion',
+      },
+    ]);
+
+    // Alarm on any record landing in the DLQ. The processor handler
+    // swallows its own errors, so only init-time crashes reach this queue
+    // — rare, but each one is a screenshot pipeline silently down. Same
+    // threshold-1 shape as FanOutConsumer.dlqDepthAlarm.
+    this.processorDlqDepthAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorDlqDepthAlarm', {
+      metric: processorDlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      alarmDescription:
+        'Screenshot webhook processor DLQ has failed async invocations — the screenshot pipeline is crashing before handling events',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);

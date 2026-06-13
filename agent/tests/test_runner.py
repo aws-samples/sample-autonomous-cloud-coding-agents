@@ -212,7 +212,7 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_includes_cap_and_threaded_source(
-        self, _mock_policy_engine, _mock_build_hooks, capsys
+        self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
         # Non-None cap came from the orchestrator payload (blueprint value
         # or the platform-default-50 frozen on the TaskRecord at submit).
@@ -223,7 +223,7 @@ class TestInitializePolicyEngineAndHooks:
         config = _config(approval_gate_cap=200)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "Cedar policy engine initialized" in captured.out
         assert "approval_gate_cap=200" in captured.out
         assert "approval_gate_cap_source=threaded" in captured.out
@@ -231,7 +231,7 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_marks_engine_default_when_cap_none(
-        self, _mock_policy_engine, _mock_build_hooks, capsys
+        self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
         # Legacy task — cap falls through to ``PolicyEngine``'s own
         # default. Operator signal is ``approval_gate_cap_source=engine_default``
@@ -244,7 +244,7 @@ class TestInitializePolicyEngineAndHooks:
         config = _config(approval_gate_cap=None)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "approval_gate_cap_source=engine_default" in captured.out
         assert "approval_gate_cap=unset" in captured.out
 

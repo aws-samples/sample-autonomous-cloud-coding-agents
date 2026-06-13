@@ -93,15 +93,15 @@ After adding the Blueprint, the stack must be redeployed:
 
 ```bash
 export MISE_EXPERIMENTAL=1
-mise run //cdk:compile   # Verify TypeScript compiles
-mise run //cdk:test      # Run tests
-mise run //cdk:diff      # Preview changes
+mise //cdk:compile   # Verify TypeScript compiles
+mise //cdk:test      # Run tests
+mise //cdk:diff      # Preview changes
 ```
 
 Show the diff to the user. If it looks correct, ask if they want to deploy now.
 
 ```bash
-mise run //cdk:deploy
+mise //cdk:deploy
 ```
 
 ## Step 5: Verify

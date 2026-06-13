@@ -19,6 +19,7 @@
 
 import * as path from 'path';
 import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -123,6 +124,10 @@ export interface FanOutConsumerProps {
 export class FanOutConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
+  /** Fires when records land in the fan-out DLQ — a silent fan-out
+   *  outage (every Slack/GitHub/Linear notification failing) would
+   *  otherwise accumulate unnoticed for the queue's 14-day retention. */
+  public readonly dlqDepthAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
     super(scope, id);
@@ -213,6 +218,23 @@ export class FanOutConsumer extends Construct {
         resources: [props.linearOauthSecretArnPattern],
       }));
     }
+
+    // Alarm on any record landing in the DLQ. Notifications are
+    // best-effort by design, so individual failures don't fail the
+    // batch — which means the DLQ is the ONLY persistent signal of a
+    // fan-out outage. Threshold 1 / single period: even one poisoned
+    // record means three Lambda retries already failed.
+    this.dlqDepthAlarm = new cloudwatch.Alarm(this, 'FanOutDlqDepthAlarm', {
+      metric: this.dlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      alarmDescription:
+        'Fan-out DLQ has undelivered task-event records — Slack/GitHub/Linear notifications are failing',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,

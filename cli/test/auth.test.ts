@@ -93,6 +93,41 @@ describe('auth', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
+    test('concurrent getAuthToken calls trigger exactly one refresh', async () => {
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      saveCredentials({
+        id_token: 'old-id',
+        refresh_token: 'refresh-token',
+        token_expiry: pastExpiry,
+      });
+
+      // Make the refresh resolve only after we have fired both callers, so
+      // both observe the expired token and would each fire a refresh absent
+      // the in-flight memoization.
+      let resolveSend: (value: unknown) => void = () => undefined;
+      mockSend.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSend = resolve;
+          }),
+      );
+
+      const p1 = getAuthToken();
+      const p2 = getAuthToken();
+      // Let both calls reach the (shared) refresh await.
+      await Promise.resolve();
+
+      resolveSend({
+        AuthenticationResult: { IdToken: 'new-id', ExpiresIn: 3600 },
+      });
+
+      const [t1, t2] = await Promise.all([p1, p2]);
+      expect(t1).toBe('new-id');
+      expect(t2).toBe('new-id');
+      // The load-bearing assertion: a single Cognito refresh round-trip.
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
     test('refreshes expired token', async () => {
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({
@@ -112,11 +147,33 @@ describe('auth', () => {
       expect(token).toBe('new-id');
     });
 
+    test('treats an unparseable token_expiry as expired (refreshes, not 401s)', async () => {
+      // A corrupt-but-valid-JSON expiry parses to NaN; every comparison
+      // with NaN is false, which used to classify the token as
+      // never-expiring — surfacing as an opaque 401 instead of a refresh.
+      saveCredentials({
+        id_token: 'old-id',
+        refresh_token: 'refresh-token',
+        token_expiry: 'not-a-date',
+      });
+
+      mockSend.mockResolvedValue({
+        AuthenticationResult: {
+          IdToken: 'new-id',
+          ExpiresIn: 3600,
+        },
+      });
+
+      const token = await getAuthToken();
+      expect(token).toBe('new-id');
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
     test('throws when no credentials exist', async () => {
       await expect(getAuthToken()).rejects.toThrow('Not authenticated');
     });
 
-    test('throws readable error when refresh fails', async () => {
+    test('throws "Session expired" when Cognito rejects the refresh token', async () => {
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({
         id_token: 'old-token',
@@ -124,9 +181,32 @@ describe('auth', () => {
         token_expiry: pastExpiry,
       });
 
-      mockSend.mockRejectedValue(new Error('Token expired'));
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('Refresh Token has expired'), { name: 'NotAuthorizedException' }),
+      );
 
       await expect(getAuthToken()).rejects.toThrow('Session expired');
+    });
+
+    test('transient refresh failure does NOT claim the session expired', async () => {
+      // A network blip is not an auth rejection — telling the user to
+      // re-login is wrong advice, and with the shared in-flight refresh
+      // that message would reach every concurrent caller.
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      saveCredentials({
+        id_token: 'old-token',
+        refresh_token: 'refresh-token',
+        token_expiry: pastExpiry,
+      });
+
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('getaddrinfo ENOTFOUND cognito-idp'), { name: 'TypeError' }),
+      );
+
+      const err = (await getAuthToken().catch((e: Error) => e)) as Error;
+      expect(err.message).toContain('Token refresh failed');
+      expect(err.message).toContain('Retry');
+      expect(err.message).not.toContain('Session expired');
     });
   });
 });

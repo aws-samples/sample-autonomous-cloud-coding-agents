@@ -389,6 +389,16 @@ export interface Credentials {
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
 
+/**
+ * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
+ * (no ``--workflow``/``--pr``/``--review-pr``) maps to this workflow — the
+ * old ``new_task`` default that clones, builds, and opens a PR. Also used by
+ * the formatters to suppress a redundant "Workflow:" line when the resolved
+ * workflow is just the default. Hoisted to a single constant so the literal
+ * is not duplicated across ``submit.ts`` and ``format.ts``.
+ */
+export const DEFAULT_CODING_WORKFLOW_ID = 'coding/new-task-v1';
+
 // ---------------------------------------------------------------------------
 // Cedar HITL approval types — mirrored from
 // ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.

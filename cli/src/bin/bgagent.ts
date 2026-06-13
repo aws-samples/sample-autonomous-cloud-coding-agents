@@ -95,7 +95,9 @@ if (require.main === module) {
       } else {
         console.error('An unexpected error occurred.');
       }
-      process.exitCode = 1;
+      // CliError carries a per-failure-class exit code (e.g. 2 for
+      // wait-timeout) so scripts can branch on it; everything else is 1.
+      process.exitCode = err instanceof CliError ? err.exitCode : 1;
     })
     .finally(() => {
       // Node's global ``fetch`` (undici) keeps TCP sockets alive in a

@@ -1,7 +1,8 @@
 # ADR-014: Workflow-driven tasks with an agent-side step runner
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-06-04
+**Implementation:** Shipped ([#248](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/248)). The `task_type` enum is removed; `workflow_ref` resolves to a pinned `resolved_workflow` ({id, version}) at the create-task boundary, and the agent runs first-party workflows (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`, plus repo-less `default/agent-v1` and `knowledge/web-research-v1`) via the agent-side step runner. The Cedar `context.read_only` migration (Phase 2a) and the repo-optional schema freeze are in place (see the 2026-06-08 addenda).
 
 ## Context
 

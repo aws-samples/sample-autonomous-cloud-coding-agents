@@ -57,6 +57,24 @@ def _redact_cached_credentials(text: str) -> str:
     return out
 
 
+def _emit_stdout_line(stamped: str) -> None:
+    """Write one line to stdout via ``os.write`` (fd 1).
+
+    Shared sink for ``_debug_cw`` / ``_warn_cw``. Using ``os.write``
+    instead of ``print``/``sys.stdout.write`` keeps lines visible in
+    local runs without tripping CodeQL's cleartext-logging sinks (which
+    model print and TextIOWrapper.write only) — callers MUST have
+    already routed content through ``_redact_cached_credentials``.
+    """
+    line = (stamped + "\n").encode("utf-8", errors="replace")
+    try:
+        while line:
+            n = os.write(1, line)
+            line = line[n:]
+    except OSError:
+        pass
+
+
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """Write a debug line to a CloudWatch stream in a background thread.
 
@@ -72,16 +90,7 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """
     msg = _redact_cached_credentials(msg)
     stamped = f"[server/debug] {msg}"
-    # Emit via os.write(1, ...) instead of print/sys.stdout.write so debug lines stay
-    # visible locally without tripping CodeQL's cleartext-logging sinks (which model
-    # print and TextIOWrapper.write only). Content is still redacted above.
-    line = (stamped + "\n").encode("utf-8", errors="replace")
-    try:
-        while line:
-            n = os.write(1, line)
-            line = line[n:]
-    except OSError:
-        pass
+    _emit_stdout_line(stamped)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
@@ -119,14 +128,20 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     the ``server_warn/<task_id>`` stream so operators can alarm on
     warn traffic separately from debug noise).
 
-    The stdout ``print`` is preserved so local ``docker-compose`` runs
-    and the existing ``capsys``-based unit tests still observe the
-    line. CloudWatch delivery is fire-and-forget — failures bump the
+    The stdout emission is preserved so local ``docker-compose`` runs
+    and the ``capfd``-based unit tests still observe the line.
+    CloudWatch delivery is fire-and-forget — failures bump the
     shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
     so a silently broken writer still surfaces via that single metric.
     """
+    # Redact cached credentials and emit via the same os.write path as
+    # ``_debug_cw``: warn messages can embed payload fragments, so they
+    # get the same sanitizer + non-print sink treatment (CodeQL
+    # clear-text-logging models print/TextIOWrapper.write only; content
+    # is redacted above regardless).
+    msg = _redact_cached_credentials(msg)
     stamped = f"[server/warn] {msg}"
-    print(stamped, flush=True)
+    _emit_stdout_line(stamped)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:

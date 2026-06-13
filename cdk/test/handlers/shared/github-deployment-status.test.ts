@@ -84,10 +84,24 @@ describe('validateDeploymentStatusPayload', () => {
     ['absent deployment_status object', build({ deployment: FULL.deployment, repository: FULL.repository })],
     ['absent deployment object', build({ status: FULL.status, repository: FULL.repository })],
     ['absent repository object', build({ status: FULL.status, deployment: FULL.deployment })],
+    // Shape (not just presence) checks — repoFullName/sha are interpolated
+    // into the GitHub API URL and S3 key downstream.
+    ['malformed repoFullName (no slash)', build({ ...FULL, repository: { full_name: 'just-a-name' } })],
+    ['malformed repoFullName (path traversal)', build({ ...FULL, repository: { full_name: 'owner/repo/../x' } })],
+    ['non-hex sha', build({ ...FULL, deployment: { ...FULL.deployment, sha: 'not-a-sha!' } })],
+    ['too-short sha', build({ ...FULL, deployment: { ...FULL.deployment, sha: 'abc12' } })],
   ];
 
   test.each(rejects)('rejects when %s', (_label, raw) => {
     expect(validateDeploymentStatusPayload(raw)).toBeNull();
+  });
+
+  test('accepts a full 40-char hex sha', () => {
+    const raw = build({
+      ...FULL,
+      deployment: { ...FULL.deployment, sha: 'a'.repeat(40) },
+    });
+    expect(validateDeploymentStatusPayload(raw)?.sha).toBe('a'.repeat(40));
   });
 
   test('rejects a wholly empty envelope', () => {
