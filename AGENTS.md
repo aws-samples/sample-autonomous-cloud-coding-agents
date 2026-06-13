@@ -67,6 +67,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **Branch without issue number** — Unauthorized work.
 - **`MISE_EXPERIMENTAL=1`** — Required for `mise //cdk:build` and other namespaced tasks ([CONTRIBUTING.md](./CONTRIBUTING.md)).
 - **`prek install` fails** — Another hook manager owns `core.hooksPath`; see [CONTRIBUTING.md](./CONTRIBUTING.md).
+- **Dropping solution UA on a new AWS client (#319)** — every outbound AWS call carries `md/uksb-wt64nei4u6#{component}` (the `app/` segment is SDK-native via `AWS_SDK_UA_APP_ID`, set by `SolutionUaAspect`). Carry the `md/` label explicitly: `agent/src/` via `aws_session.tenant_client`/`tenant_resource`/`platform_client` (never naked `boto3.client(...)`); `cdk/src/handlers/` and `cli/src/` spread `...abcaUserAgent()`. Keep the three `ua` modules (`agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`) identical in id/wire-format/sanitization.
 - **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
 
 ## Tech stack
