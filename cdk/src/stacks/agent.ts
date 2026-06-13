@@ -18,10 +18,9 @@
  */
 
 import * as path from 'path';
-import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -366,6 +365,16 @@ export class AgentStack extends Stack {
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
       lifecycleConfiguration: lifecycleConfiguration,
+      loggingConfigs: [
+        {
+          logType: agentcore.LogType.APPLICATION_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(applicationLogGroup),
+        },
+        {
+          logType: agentcore.LogType.USAGE_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(usageLogGroup),
+        },
+      ],
     });
 
     runtimeArnHolder = runtime.agentRuntimeArn;
@@ -462,11 +471,9 @@ export class AgentStack extends Stack {
     agentSessionRole.grantAssumeToComputeRole(runtime.role);
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
-    // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
-    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
+    // which needs CloudWatch Logs resource policy propagation. Re-enable via
+    // tracingEnabled: true once resolved.
 
     NagSuppressions.addResourceSuppressions(runtime, [
       {

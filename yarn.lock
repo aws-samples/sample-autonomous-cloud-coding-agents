@@ -256,11 +256,6 @@
   resolved "https://registry.yarnpkg.com/@aws-cdk/asset-node-proxy-agent-v6/-/asset-node-proxy-agent-v6-2.1.2.tgz#71733894b092032309523cfcba24dc2bb3e7fd84"
   integrity sha512-pDiuqH+qY3zM9lhhLjbKJ1tnKOHzQ2V4Wr/3qsxyKeKAkuPMI/BVGvZG1PbrikUw949cGVTfVEt4ETKKYnrj0Q==
 
-"@aws-cdk/aws-bedrock-agentcore-alpha@2.257.0-alpha.0":
-  version "2.257.0-alpha.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-agentcore-alpha/-/aws-bedrock-agentcore-alpha-2.257.0-alpha.0.tgz#8040931f4dae22ce3f971772edc3cb823e75c648"
-  integrity sha512-NRxCj9ge31qyUEmHJqjMIGqbwcB2n5VZIjpu6ClODsVhN1tSJl4U2zZ94bJ+xbsmmYqpltf10kzEE8pRyLwkmA==
-
 "@aws-cdk/aws-bedrock-alpha@2.257.0-alpha.0":
   version "2.257.0-alpha.0"
   resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-alpha/-/aws-bedrock-alpha-2.257.0-alpha.0.tgz#ba6a1bc947f63c4006d89c88b12821b3dca934c4"
@@ -302,11 +297,6 @@
   version "2.257.0-alpha.0"
   resolved "https://registry.yarnpkg.com/@aws-cdk/integ-tests-alpha/-/integ-tests-alpha-2.257.0-alpha.0.tgz#1e4c0378786670a74d3cf5c75f960b96ba4970a5"
   integrity sha512-8bUIIK/yGi2C6hq0cpQJJDT6WTbIZtAj9o1pp17H6yk3bBxFi2W19qKat4nH7e7O0tVoq/lxKUQ/GwiVsQ5Zkw==
-
-"@aws-cdk/mixins-preview@2.257.0-alpha.0":
-  version "2.257.0-alpha.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/mixins-preview/-/mixins-preview-2.257.0-alpha.0.tgz#8a62483b492682cfe52604b94696283fc9f27584"
-  integrity sha512-h4IQTJCN3K2hqOWIJg7hOZkWDsbRuQHPIvgYq8IZsd/iHeDghkIS6XPrw3U6srG25XQcn2pSHpSvA1L7Ob9eWA==
 
 "@aws-cdk/service-spec-types@^0.0.250":
   version "0.0.250"

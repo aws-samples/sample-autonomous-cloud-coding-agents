@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import { Duration } from 'aws-cdk-lib';
+import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import type * as iam from 'aws-cdk-lib/aws-iam';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -75,11 +75,11 @@ export class AgentMemory extends Construct {
       expirationDuration: props?.expirationDuration ?? Duration.days(365),
       memoryStrategies: [
         agentcore.MemoryStrategy.usingSemantic({
-          name: 'SemanticKnowledge',
+          strategyName: 'SemanticKnowledge',
           namespaces: ['/{actorId}/knowledge/'],
         }),
         agentcore.MemoryStrategy.usingEpisodic({
-          name: 'TaskEpisodes',
+          strategyName: 'TaskEpisodes',
           namespaces: ['/{actorId}/episodes/{sessionId}/'],
           reflectionConfiguration: {
             namespaces: ['/{actorId}/episodes/'],
