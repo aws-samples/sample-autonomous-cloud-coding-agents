@@ -48,8 +48,9 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { ulid } from 'ulid';
 import { logger } from './shared/logger';
+import { abcaUserAgent, withAbcaTrace } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
+const ddb = withAbcaTrace(new DynamoDBClient(abcaUserAgent()));
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
 const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;

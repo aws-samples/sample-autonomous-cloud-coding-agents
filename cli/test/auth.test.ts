@@ -52,6 +52,19 @@ describe('auth', () => {
   });
 
   describe('login', () => {
+    test('Cognito client carries the ABCA solution customUserAgent (#319)', async () => {
+      const { CognitoIdentityProviderClient } = jest.requireMock(
+        '@aws-sdk/client-cognito-identity-provider',
+      );
+      mockSend.mockResolvedValue({
+        AuthenticationResult: { IdToken: 'i', AccessToken: 'a', RefreshToken: 'r', ExpiresIn: 3600 },
+      });
+      await login('user', 'pass');
+      const calls = (CognitoIdentityProviderClient as jest.Mock).mock.calls;
+      const config = calls[calls.length - 1]?.[0];
+      expect(config.customUserAgent).toEqual([['md/uksb-wt64nei4u6', 'cli']]);
+    });
+
     test('saves credentials on successful login', async () => {
       mockSend.mockResolvedValue({
         AuthenticationResult: {

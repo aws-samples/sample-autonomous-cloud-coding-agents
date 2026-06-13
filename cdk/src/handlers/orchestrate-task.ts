@@ -36,6 +36,7 @@ import {
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
 import type { TaskRecord } from './shared/types';
+import { setAbcaTrace } from './shared/ua';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
 interface OrchestrateTaskEvent {
@@ -49,6 +50,7 @@ const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
   const { task_id: taskId } = event;
+  setAbcaTrace(taskId);
 
   // Step 1: Load task record
   const task = await context.step('load-task', async () => {

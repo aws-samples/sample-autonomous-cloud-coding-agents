@@ -26,6 +26,7 @@ import {
 import { Command } from 'commander';
 import { loadConfig } from '../config';
 import { CliError } from '../errors';
+import { abcaUserAgent, withAbcaTrace } from '../ua';
 
 /** Width of the `═` banner rules printed around webhook-info output. */
 const BANNER_WIDTH = 72;
@@ -116,7 +117,7 @@ export function makeGithubCommand(): Command {
           );
         }
 
-        const sm = new SecretsManagerClient({ region });
+        const sm = withAbcaTrace(new SecretsManagerClient({ region, ...abcaUserAgent() }));
 
         // Show whether a secret is already configured so the operator
         // doesn't accidentally rotate it without realising. Linear's
@@ -166,7 +167,7 @@ export function makeGithubCommand(): Command {
 // ─── Stack-output helper ─────────────────────────────────────────────────────
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
-  const cf = new CloudFormationClient({ region });
+  const cf = withAbcaTrace(new CloudFormationClient({ region, ...abcaUserAgent() }));
   try {
     const result = await cf.send(new DescribeStacksCommand({ StackName: stackName }));
     const stack = result.Stacks?.[0];

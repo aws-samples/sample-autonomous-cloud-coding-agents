@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
@@ -93,6 +93,8 @@ export class PendingUploadCleanup extends Construct {
         ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName,
         PENDING_UPLOAD_TIMEOUT_SECONDS: String(timeoutSeconds),
         TASK_RETENTION_DAYS: String(retentionDays),
+        ABCA_STACK_NAME: Stack.of(this).stackName,
+        ABCA_COMPONENT: 'orchestr',
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],

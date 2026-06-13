@@ -22,8 +22,9 @@ import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayRequestAuthorizerEvent, APIGatewayAuthorizerResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import type { WebhookRecord } from './shared/types';
+import { abcaUserAgent, withAbcaTrace } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 
 function generatePolicy(

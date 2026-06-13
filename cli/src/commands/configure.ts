@@ -37,6 +37,7 @@ export function makeConfigureCommand(): Command {
     .option('--region <region>', 'AWS region')
     .option('--user-pool-id <id>', 'Cognito User Pool ID')
     .option('--client-id <id>', 'Cognito App Client ID')
+    .option('--stack-name <name>', 'Deployed stack name (User-Agent solution tracking)')
     .option('--from-bundle <base64>', 'Base64 config bundle from `bgagent admin invite-user`')
     .action((opts) => {
       // --from-bundle is mutually exclusive with the individual flags. Mixing
@@ -58,6 +59,7 @@ export function makeConfigureCommand(): Command {
           ...(opts.region !== undefined ? { region: opts.region } : {}),
           ...(opts.userPoolId !== undefined ? { user_pool_id: opts.userPoolId } : {}),
           ...(opts.clientId !== undefined ? { client_id: opts.clientId } : {}),
+          ...(opts.stackName !== undefined ? { stack_name: opts.stackName } : {}),
         };
       }
       const merged: Partial<CliConfig> = {

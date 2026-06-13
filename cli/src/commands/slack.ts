@@ -27,6 +27,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
 import { formatJson } from '../format';
+import { abcaUserAgent, withAbcaTrace } from '../ua';
 
 export function makeSlackCommand(): Command {
   const slack = new Command('slack')
@@ -208,7 +209,7 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
 
     // Store in Secrets Manager.
     console.log('');
-    const sm = new SecretsManagerClient({ region });
+    const sm = withAbcaTrace(new SecretsManagerClient({ region, ...abcaUserAgent() }));
 
     const secrets = [
       { id: arns.signingSecretArn, value: signingSecret, label: 'signing secret' },
@@ -345,7 +346,7 @@ function findRepoRoot(): string {
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
-    const cfn = new CloudFormationClient({ region });
+    const cfn = withAbcaTrace(new CloudFormationClient({ region, ...abcaUserAgent() }));
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
     const outputs = result.Stacks?.[0]?.Outputs ?? [];
     const output = outputs.find((o) => o.OutputKey === outputKey);

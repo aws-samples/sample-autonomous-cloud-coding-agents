@@ -35,12 +35,12 @@ def _get_client():
     global _client
     if _client is not None:
         return _client
-    import boto3
+    from aws_session import platform_client
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     if not region:
         raise ValueError("AWS_REGION or AWS_DEFAULT_REGION must be set for memory operations")
-    _client = boto3.client("bedrock-agentcore", region_name=region)
+    _client = platform_client("bedrock-agentcore", region_name=region)
     return _client
 
 

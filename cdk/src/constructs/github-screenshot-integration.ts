@@ -121,6 +121,13 @@ export class GitHubScreenshotIntegration extends Construct {
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
+    // Outbound SDK User-Agent solution tracking (#319), spread into every
+    // handler environment in this construct.
+    const abcaEnv: Record<string, string> = {
+      ABCA_STACK_NAME: Stack.of(this).stackName,
+      ABCA_COMPONENT: 'webhook',
+    };
+
     // --- Screenshot bucket (private; served via CloudFront with OAC) ---
     this.screenshotBucket = new ScreenshotBucket(this, 'ScreenshotBucket', {
       removalPolicy,
@@ -174,6 +181,7 @@ export class GitHubScreenshotIntegration extends Construct {
       memorySize: 512,
       deadLetterQueue: processorDlq,
       environment: {
+        ...abcaEnv,
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
         SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
@@ -266,6 +274,7 @@ export class GitHubScreenshotIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
       environment: {
+        ...abcaEnv,
         GITHUB_WEBHOOK_SECRET_ARN: this.webhookSecret.secretArn,
         GITHUB_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         GITHUB_WEBHOOK_PROCESSOR_FUNCTION_NAME: this.webhookProcessorFn.functionName,

@@ -94,15 +94,23 @@ def configure_session(user_id: str, repo: str, task_id: str) -> None:
         for key, value in (("user_id", user_id), ("repo", repo), ("task_id", task_id))
         if value
     }
+    # The task id doubles as the UA trace handle (#319): every AWS call made
+    # while this task runs carries md/...#agent#{task_id}.
+    import ua
+
+    ua.set_trace(task_id or None)
 
 
 def reset_session_cache() -> None:
-    """Drop the cached session and tags. For tests that toggle config."""
+    """Drop the cached session, tags, and UA trace. For tests that toggle config."""
     global _session, _scoped, _tags
     with _lock:
         _session = None
         _scoped = None
         _tags = {}
+    import ua
+
+    ua.set_trace(None)
 
 
 def _session_tags() -> list[dict[str, str]]:
@@ -128,6 +136,8 @@ def _build_scoped_session(role_arn: str) -> Any:
     )
     from botocore.session import get_session as get_botocore_session
 
+    import ua
+
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     task_id = _tags.get("task_id", "")
     # Role session name must be <=64 chars and match [\w+=,.@-]. task_id is a
@@ -139,7 +149,8 @@ def _build_scoped_session(role_arn: str) -> Any:
     # A dedicated STS client built from the *ambient* (compute-role) chain.
     # This is the role-chaining caller; the assumed SessionRole credentials it
     # returns must NOT be used to build it, or refresh would recurse.
-    sts_client = boto3.client("sts", region_name=region)
+    sts_client = boto3.client("sts", region_name=region, config=ua.client_config())
+    ua.register_trace_appender(sts_client.meta.events)
 
     def _refresh() -> dict[str, str]:
         resp = sts_client.assume_role(
@@ -167,6 +178,12 @@ def _build_scoped_session(role_arn: str) -> Any:
     )
     if region:
         botocore_session.set_config_variable("region", region)
+    # Outbound UA solution tracking (#319): session-level so every client and
+    # resource derived from this singleton carries the static segments; the
+    # per-request #{TRACE} appender mutates only the header, preserving the
+    # session's connection pool across trace changes.
+    botocore_session.user_agent_extra = ua.static_user_agent_extra()
+    ua.register_trace_appender(botocore_session.get_component("event_emitter"))
     return boto3.Session(botocore_session=botocore_session)
 
 
@@ -209,10 +226,19 @@ def get_session() -> Any:
                 ) from exc
         else:
             # Scoping not requested (local/dev/tests, or pre-provisioning):
-            # plain ambient session, behaviorally identical to pre-feature code.
-            _session = boto3.Session(
-                region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-            )
+            # plain ambient session, behaviorally identical to pre-feature code
+            # apart from the UA solution-tracking segments (#319).
+            from botocore.session import get_session as get_botocore_session
+
+            import ua
+
+            botocore_session = get_botocore_session()
+            region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+            if region:
+                botocore_session.set_config_variable("region", region)
+            botocore_session.user_agent_extra = ua.static_user_agent_extra()
+            ua.register_trace_appender(botocore_session.get_component("event_emitter"))
+            _session = boto3.Session(botocore_session=botocore_session)
             _scoped = False
         return _session
 
@@ -235,9 +261,7 @@ def tenant_client(service_name: str, **kwargs: Any) -> Any:
     session = get_session()
     if is_scoped():
         return session.client(service_name, **kwargs)
-    import boto3
-
-    return boto3.client(service_name, **kwargs)
+    return platform_client(service_name, **kwargs)
 
 
 def tenant_resource(service_name: str, **kwargs: Any) -> Any:
@@ -247,4 +271,43 @@ def tenant_resource(service_name: str, **kwargs: Any) -> Any:
         return session.resource(service_name, **kwargs)
     import boto3
 
-    return boto3.resource(service_name, **kwargs)
+    resource = boto3.resource(service_name, **_with_ua(kwargs))
+    # Guarded like platform_client: test doubles may lack the meta chain.
+    inner = getattr(getattr(resource, "meta", None), "client", None)
+    events = getattr(getattr(inner, "meta", None), "events", None)
+    if events is not None:
+        import ua
+
+        ua.register_trace_appender(events)
+    return resource
+
+
+def platform_client(service_name: str, **kwargs: Any) -> Any:
+    """boto3 client for platform (non-tenant) calls, with the ABCA UA (#319).
+
+    For call sites that intentionally use the ambient compute-role chain
+    (CloudWatch Logs debug writers, Secrets Manager, AgentCore memory) rather
+    than the tenant-scoped session. Same signature as ``boto3.client`` plus
+    the solution-tracking User-Agent and per-request trace appender.
+    """
+    import boto3
+
+    client = boto3.client(service_name, **_with_ua(kwargs))
+    # Real clients always expose meta.events; test doubles (MagicMock, or the
+    # bare fakes some suites install as a stub boto3 module) may not — the
+    # appender is solution telemetry, never worth failing a call site over.
+    events = getattr(getattr(client, "meta", None), "events", None)
+    if events is not None:
+        import ua
+
+        ua.register_trace_appender(events)
+    return client
+
+
+def _with_ua(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Merge the ABCA UA config into a boto3 client/resource kwargs dict."""
+    import ua
+
+    supplied = kwargs.get("config")
+    config = supplied.merge(ua.client_config()) if supplied is not None else ua.client_config()
+    return {**kwargs, "config": config}

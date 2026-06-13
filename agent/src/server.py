@@ -166,10 +166,10 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
     covers both writers.
     """
     try:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         stream = f"server_warn/{task_id or 'server'}"
         with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
@@ -193,10 +193,10 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         stream = f"server_debug/{task_id or 'server'}"
         with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):

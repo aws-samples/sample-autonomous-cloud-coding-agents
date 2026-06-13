@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -163,6 +163,10 @@ export class FanOutConsumer extends Construct {
         externalModules: ['@aws-sdk/*'],
       },
     });
+
+    // Outbound SDK User-Agent solution tracking (#319).
+    this.fn.addEnvironment('ABCA_STACK_NAME', Stack.of(this).stackName);
+    this.fn.addEnvironment('ABCA_COMPONENT', 'orchestr');
 
     // GitHub dispatcher plumbing. Each grant/env var is guarded so the
     // fan-out plane still deploys cleanly in a dev environment that

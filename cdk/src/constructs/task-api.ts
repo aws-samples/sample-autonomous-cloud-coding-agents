@@ -443,6 +443,9 @@ export class TaskApi extends Construct {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+      // Outbound SDK User-Agent solution tracking (#319) — see handlers/shared/ua.ts
+      ABCA_STACK_NAME: Stack.of(this).stackName,
+      ABCA_COMPONENT: 'api',
     };
     // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
     // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
@@ -931,6 +934,8 @@ export class TaskApi extends Construct {
       const webhookEnv: Record<string, string> = {
         WEBHOOK_TABLE_NAME: props.webhookTable.tableName,
         WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? 30),
+        ABCA_STACK_NAME: Stack.of(this).stackName,
+        ABCA_COMPONENT: 'webhook',
       };
 
       // --- Webhook management Lambdas (Cognito-authenticated) ---

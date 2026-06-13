@@ -223,6 +223,9 @@ export class TaskOrchestrator extends Construct {
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         RUNTIME_ARN: props.runtimeArn,
+        // Outbound SDK User-Agent solution tracking (#319)
+        ABCA_STACK_NAME: Stack.of(this).stackName,
+        ABCA_COMPONENT: 'orchestr',
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
         TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),

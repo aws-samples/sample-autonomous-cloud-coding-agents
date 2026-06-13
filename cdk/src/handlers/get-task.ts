@@ -25,8 +25,9 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type TaskRecord, toTaskDetail } from './shared/types';
+import { abcaUserAgent, setAbcaTrace, withAbcaTrace } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 
 /**
@@ -34,6 +35,7 @@ const TABLE_NAME = process.env.TASK_TABLE_NAME!;
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     // 1. Extract authenticated user

@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { FilterCriteria, FilterRule, StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
@@ -123,6 +123,11 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       timeout: Duration.minutes(1),
       memorySize: 256,
       logGroup,
+      // Outbound SDK User-Agent solution tracking (#319).
+      environment: {
+        ABCA_STACK_NAME: Stack.of(this).stackName,
+        ABCA_COMPONENT: 'orchestr',
+      },
       bundling: {
         externalModules: ['@aws-sdk/*'],
       },

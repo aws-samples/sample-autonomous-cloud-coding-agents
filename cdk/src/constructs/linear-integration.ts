@@ -144,6 +144,13 @@ export class LinearIntegration extends Construct {
     };
 
     // --- Task creation environment (matches TaskApi / SlackIntegration pattern) ---
+    // Outbound SDK User-Agent solution tracking (#319), spread into every
+    // handler environment in this construct.
+    const abcaEnv: Record<string, string> = {
+      ABCA_STACK_NAME: Stack.of(this).stackName,
+      ABCA_COMPONENT: 'webhook',
+    };
+
     const createTaskEnv: Record<string, string> = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
@@ -190,6 +197,7 @@ export class LinearIntegration extends Construct {
       // 30s deadline on cold starts.
       memorySize: 512,
       environment: {
+        ...abcaEnv,
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
@@ -248,6 +256,7 @@ export class LinearIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
       environment: {
+        ...abcaEnv,
         LINEAR_WEBHOOK_SECRET_ARN: this.webhookSecret.secretArn,
         LINEAR_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME: webhookProcessorFn.functionName,
@@ -287,6 +296,7 @@ export class LinearIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
       environment: {
+        ...abcaEnv,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
       },
       bundling: commonBundling,
