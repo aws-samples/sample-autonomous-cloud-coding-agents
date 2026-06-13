@@ -279,7 +279,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     if (identifier) {
       const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
       if (linearIssue) {
-        const ok = await postIssueComment(
+        const postResult = await postIssueComment(
           {
             linearWorkspaceId: linearIssue.linearWorkspaceId,
             registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
@@ -287,7 +287,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           linearIssue.issueId,
           renderLinearCommentBody(publicUrl, previewUrl),
         );
-        if (ok) {
+        if (postResult.ok) {
           logger.info('Posted screenshot comment to Linear issue', {
             identifier,
             linear_issue_id: linearIssue.issueId,

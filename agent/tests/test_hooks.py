@@ -125,6 +125,83 @@ class TestPreToolUseHook:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "unparseable tool input" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
+    def _non_dict_hook_input(self, tool_input):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": tool_input,
+            "tool_use_id": "test-nd",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+
+    def test_denies_string_json_list_tool_input(self):
+        # A string that decodes to a JSON list ("[1,2]") is valid JSON but not
+        # an object — must fail closed with the explicit reason.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input("[1,2]"), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+    def test_denies_string_json_scalar_tool_input(self):
+        # A string that decodes to a JSON scalar ('"foo"') is valid JSON but
+        # not an object.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input('"foo"'), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+    def test_denies_direct_non_dict_tool_input(self):
+        # A non-dict passed directly (not via a JSON string) — e.g. a list.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input([1, 2]), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+
+class TestTruncate:
+    def test_returns_text_when_under_max(self):
+        from hooks import _truncate
+
+        assert _truncate("hello", 100) == "hello"
+
+    def test_none_returns_empty(self):
+        from hooks import _truncate
+
+        assert _truncate(None, 10) == ""
+
+    def test_adds_ellipsis_when_over_max(self):
+        from hooks import _truncate
+
+        out = _truncate("abcdefghij", 8)
+        assert out == "abcde..."
+        assert len(out) == 8
+
+    def test_small_max_len_does_not_slice_negatively(self):
+        # Regression: for max_len <= 3, ``max_len - 3`` slices negatively
+        # (dropping chars off the END). Guard returns a plain prefix instead.
+        from hooks import _truncate
+
+        assert _truncate("abcdef", 2) == "ab"
+        assert _truncate("abcdef", 3) == "abc"
+        assert _truncate("abcdef", 0) == ""
+
 
 class TestPostToolUseHook:
     def test_passes_through_clean_output(self):

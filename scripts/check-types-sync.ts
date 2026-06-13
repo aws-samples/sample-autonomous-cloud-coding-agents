@@ -158,6 +158,13 @@ const CLI_ONLY_ALLOWLIST = new Set<string>([
   'Credentials',
   // Terminal-status helper for CLI exit codes:
   'TERMINAL_STATUSES',
+  // Client-side display/default helper: the workflow id the CLI treats
+  // as "the default coding workflow" (suppressed in detail output,
+  // applied by `submit` when no --workflow is given). Distinct from
+  // CDK's DEFAULT_WORKFLOW_ID ('default/agent-v1'), which is the
+  // server-side fallback for repo-less tasks — the two are different
+  // contracts, hence the different name.
+  'DEFAULT_CODING_WORKFLOW_ID',
 ]);
 
 function parseFile(filePath: string): Map<string, ExportSummary> {
