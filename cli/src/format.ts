@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { CreateWebhookResponse, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
@@ -29,7 +29,7 @@ export function formatTaskDetail(task: TaskDetail): string {
     `Status:      ${task.status}`,
     `Repo:        ${task.repo ?? '— (repo-less)'}`,
   ];
-  if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
+  if (task.resolved_workflow && task.resolved_workflow.id !== DEFAULT_CODING_WORKFLOW_ID) {
     lines.push(`Workflow:    ${task.resolved_workflow.id}`);
   }
   if (task.pr_number !== null) {
@@ -171,7 +171,7 @@ export function formatStatusSnapshot(
   // Non-default workflows carry meaningful context for the default
   // snapshot (a coding/pr-iteration-v1 against #42 is a different mental
   // model than coding/new-task-v1). Mirrors the ``formatTaskDetail`` treatment.
-  if (task.resolved_workflow && task.resolved_workflow.id !== 'coding/new-task-v1') {
+  if (task.resolved_workflow && task.resolved_workflow.id !== DEFAULT_CODING_WORKFLOW_ID) {
     const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
     lines.push(`  Workflow:      ${task.resolved_workflow.id}${prSuffix}`);
   }

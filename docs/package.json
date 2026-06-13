@@ -24,6 +24,9 @@
     "typescript": "^6.0.2"
   },
   "main": "lib/index.js",
+  "engines": {
+    "node": ">= 20.x <= 24.x"
+  },
   "license": "MIT-0",
   "version": "0.0.0",
   "jest": {
