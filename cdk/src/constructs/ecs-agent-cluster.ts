@@ -31,6 +31,7 @@ import { Construct } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
+import { buildAppId } from './solution-ua-aspect';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -169,6 +170,15 @@ export class EcsAgentCluster extends Construct {
       },
     });
 
+    // Outbound SDK solution attribution (#319): botocore reads
+    // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
+    // Lambda-only stack aspect can't reach this container, so set it here.
+    // `-c sdkUaAppId=''` opts out (buildAppId → undefined → omitted).
+    const sdkUaAppId = buildAppId(
+      Stack.of(this).stackName,
+      this.node.tryGetContext('sdkUaAppId') as string | undefined,
+    );
+
     // Container
     this.taskDefinition.addContainer(this.containerName, {
       image: ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset),
@@ -207,6 +217,7 @@ export class EcsAgentCluster extends Construct {
         ...(props.agentSessionRole && {
           AGENT_SESSION_ROLE_ARN: props.agentSessionRole.role.roleArn,
         }),
+        ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
       },
     });
 

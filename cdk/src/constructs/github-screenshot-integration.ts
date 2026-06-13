@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -30,6 +30,7 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { ScreenshotBucket } from './screenshot-bucket';
+import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Async screenshot-processor Lambda timeout (seconds). */
 const PROCESSOR_TIMEOUT_SECONDS = 120;
@@ -130,6 +131,12 @@ export class GitHubScreenshotIntegration extends Construct {
 
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
     super(scope, id);
+
+    // Solution-attribution component label (#319): every Lambda in this GitHub
+    // screenshot integration is part of the webhook ingest surface. One aspect
+    // labels them all (and any future function added here); the universal
+    // `app/` segment is set by the stack-level aspect.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
