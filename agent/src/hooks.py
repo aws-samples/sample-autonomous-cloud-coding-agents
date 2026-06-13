@@ -1088,6 +1088,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         pending = nudge_reader.read_pending(task_id)
     except Exception as exc:
         log("WARN", f"nudge read_pending raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; DDB blip must not block agent
         return []
 
     # Filter out any nudges already injected in this process (regardless of
@@ -1102,6 +1103,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         formatted = nudge_reader.format_as_user_message(pending)
     except Exception as exc:
         log("WARN", f"nudge format failed: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; bad nudge must not block agent
         return []
 
     # Record injection BEFORE mark_consumed so a persistent mark_consumed
@@ -1163,6 +1165,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
         pending = engine.drain_denial_injections()
     except Exception as exc:  # pragma: no cover — defensive
         log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
         return []
     if not pending:
         return []
@@ -1217,6 +1220,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
         record = task_state.get_task(task_id)
     except task_state.TaskFetchError as exc:
         log("WARN", f"cancel hook get_task raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open cancel; DDB blip delays one turn
         return []
     if record and record.get("status") == "CANCELLED":
         ctx["_cancel_requested"] = True

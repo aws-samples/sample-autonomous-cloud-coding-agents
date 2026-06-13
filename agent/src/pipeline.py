@@ -120,6 +120,7 @@ def _maybe_upload_trace(
         artifact = trajectory.dump_gzipped_jsonl()
     except Exception as e:
         log("WARN", f"Trace dump_gzipped_jsonl failed: {type(e).__name__}: {e}")
+        # nosemgrep: py-silent-success-masking -- trace upload best-effort; missing artifact ok
         return None
     if not artifact:
         log(

@@ -67,7 +67,7 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Slack secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing Slack signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Slack secret from Secrets Manager', {
       secret_id: secretId,

@@ -111,8 +111,9 @@ Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common co
 - **`mise //docs:build`** — Sync and build docs site.
 - **`mise run security:secrets`** — Gitleaks at repo root.
 - **`mise run security:sast`** — Semgrep on the repo (root; includes **`agent/`** Python among paths).
+- **`mise run security:sast:masking`** — Custom semgrep rules for silent-success masking (`catch`/`except` returning empty defaults, AI004). Blocking; emits SARIF to `test-reports/`. Allowlist intentional fallbacks with an inline justified `nosemgrep: <rule-id> -- <reason>` comment.
 - **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
-- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
+- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:sast:masking`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
 - **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.
 - **`mise run security:gh-actions`** — Static analysis of GitHub Actions under **`.github/`** ([zizmor](https://github.com/zizmorcore/zizmor)).
 - **`mise run hooks:install`** — Re-install **[prek](https://github.com/j178/prek)** git hooks (also run automatically at the end of **`mise run install`** inside a Git checkout). See [CONTRIBUTING.md](./CONTRIBUTING.md) if `core.hooksPath` blocks install.

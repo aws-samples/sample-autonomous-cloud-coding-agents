@@ -433,4 +433,5 @@ def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str 
         return None
     except Exception as e:
         log("WARN", f"Failed to extract agent notes from PR body: {type(e).__name__}: {e}")
+        # nosemgrep: py-silent-success-masking -- PR body notes optional; extraction failure logged
         return None

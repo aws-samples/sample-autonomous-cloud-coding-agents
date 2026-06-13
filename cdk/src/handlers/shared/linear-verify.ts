@@ -71,7 +71,7 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Linear secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing Linear signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Linear secret from Secrets Manager', {
       secret_id: secretId,

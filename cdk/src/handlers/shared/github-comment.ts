@@ -320,7 +320,7 @@ export function sanitizeMarkdownLinkTarget(url: string | null | undefined): stri
   try {
     parsed = new URL(url);
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- malformed URL input is rejected; null is the validation contract, not a masked infra error
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
   return url;

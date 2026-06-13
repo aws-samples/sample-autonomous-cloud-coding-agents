@@ -471,6 +471,7 @@ def upload_trace_to_s3(
         return f"s3://{bucket}/{key}"
     except ImportError:
         print("[trace/upload] boto3 not available — skipping", flush=True)
+        # nosemgrep: py-silent-success-masking -- trace upload optional; missing boto3 skips upload
         return None
     except Exception as e:
         exc_type = type(e).__name__
@@ -484,6 +485,7 @@ def upload_trace_to_s3(
                 "[trace/upload] WARNING: IAM misconfiguration likely — trace artifact is lost.",
                 flush=True,
             )
+        # nosemgrep: py-silent-success-masking -- S3 trace upload best-effort; failure logged
         return None
 
 
