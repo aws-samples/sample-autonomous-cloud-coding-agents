@@ -60,7 +60,7 @@ export function parseBody<T>(body: string | null): T | null {
   try {
     return JSON.parse(body) as T;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- parseBody contract: invalid JSON yields null, same as a missing body
   }
 }
 
@@ -164,7 +164,7 @@ export function decodePaginationToken(token: string | undefined): Record<string,
     const json = Buffer.from(token, 'base64').toString('utf-8');
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- invalid pagination token is rejected; undefined is the decode contract, not masked infra failure
   }
 }
 

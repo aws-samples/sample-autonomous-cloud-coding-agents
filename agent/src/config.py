@@ -105,6 +105,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:
         log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
+        # nosemgrep: py-silent-success-masking -- optional Linear MCP; boto3 unavailable
         return ""
 
     sm = boto3.client("secretsmanager", region_name=region)
@@ -127,6 +128,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
                 f"resolve_linear_api_token: secret '{secret_arn}' is not valid JSON "
                 f"({type(e).__name__}: {e}); workspace requires re-onboarding",
             )
+            # nosemgrep: py-silent-success-masking -- corrupt OAuth JSON; None means no token
             return None
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
@@ -270,6 +272,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
             fresh = _fetch_token()
         except (ClientError, BotoCoreError) as e:
             log("WARN", f"resolve_linear_api_token: re-read after invalid_grant failed: {e}")
+            # nosemgrep: py-silent-success-masking -- transient SM re-read after invalid_grant
             return None
         if fresh is None:
             # Secret is unreadable (corrupted JSON). Already logged inside
@@ -309,6 +312,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
         severity = "ERROR" if is_hard_failure else "WARN"
         log(severity, f"resolve_linear_api_token failed: {type(e).__name__}: {e}")
+        # nosemgrep: py-silent-success-masking -- SM fetch logged; empty token disables Linear
         return ""
     if token_obj is None:
         # Corrupted secret JSON; already logged inside _fetch_token.

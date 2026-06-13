@@ -130,6 +130,17 @@ run = "gitleaks git . --staged --no-banner --redact"
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
 
+[tasks."security:sast:masking"]
+description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
+# `semgrep test` validates the rules against their .semgrep/ fixtures first.
+# The scan excludes those fixtures (they trigger by design) and writes SARIF
+# to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
+run = [
+  "semgrep test .semgrep/",
+  "mkdir -p test-reports",
+  "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --sarif-output=test-reports/semgrep-silent-success-masking.sarif --error --quiet .",
+]
+
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 # Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
@@ -158,6 +169,7 @@ run = [
     { task = "security:secrets" },
     { task = "security:deps" },
     { task = "security:sast" },
+    { task = "security:sast:masking" },
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },

@@ -1723,7 +1723,7 @@ async function queryLinearWorkspaceMembers(
     return body.data?.users?.nodes ?? [];
   } catch (err) {
     console.log(`  ⚠ Could not query Linear workspace members: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- setup self-link picker is optional UX; null skips the picker without failing setup
   }
 }
 
@@ -1849,7 +1849,7 @@ async function queryLinearIdentity(
     return { viewer: body.data.viewer, organization: body.data.organization };
   } catch (err) {
     console.log(`  ⚠ Could not query Linear identity: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- auto-link is optional setup UX; null skips gracefully so admin can link manually
   }
 }
 
@@ -1958,7 +1958,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
     }
     throw err;
   }
