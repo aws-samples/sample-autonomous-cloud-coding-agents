@@ -46,6 +46,7 @@ import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
+import { buildAppId } from '../constructs/solution-ua-aspect';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 import { TaskApi } from '../constructs/task-api';
 import { TaskApprovalsTable } from '../constructs/task-approvals-table';
@@ -293,6 +294,15 @@ export class AgentStack extends Stack {
     //
     // One runtime, invoked by OrchestratorFn via SigV4. See
     // `docs/design/INTERACTIVE_AGENTS.md` §3.1 and AD-1.
+    // Outbound SDK solution attribution (#319): the same app-id the
+    // SolutionUaAspect sets on Lambdas, computed here so the AgentCore runtime
+    // and ECS container (which the Lambda-only Aspect can't reach) carry it
+    // too. Respects the `-c sdkUaAppId` override / empty-string opt-out.
+    const sdkUaAppId = buildAppId(
+      this.stackName,
+      this.node.tryGetContext('sdkUaAppId') as string | undefined,
+    );
+
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
@@ -341,6 +351,10 @@ export class AgentStack extends Stack {
       CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
       npm_config_cache: '/mnt/workspace/.npm-cache',
       // ENABLE_CLI_TELEMETRY: '1',
+      // Outbound SDK solution attribution (#319): botocore reads
+      // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
+      // Lambda-only Aspect can't reach this runtime, so set it explicitly.
+      ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {

@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -31,6 +31,7 @@ import { Construct } from 'constructs';
 import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
 import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
+import { ComponentUaAspect } from './solution-ua-aspect';
 
 /**
  * Properties for LinearIntegration construct.
@@ -108,6 +109,12 @@ export class LinearIntegration extends Construct {
 
   constructor(scope: Construct, id: string, props: LinearIntegrationProps) {
     super(scope, id);
+
+    // Solution-attribution component label (#319): every Lambda in this Linear
+    // integration is part of the webhook ingest surface. One aspect labels
+    // them all (and any future function added here); the universal `app/`
+    // segment is set by the stack-level aspect.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 

@@ -145,6 +145,16 @@ describe('TaskOrchestrator construct', () => {
     });
   });
 
+  test('orchestrator Lambda carries the ABCA_COMPONENT=orchestr label (#319)', () => {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ABCA_COMPONENT: 'orchestr',
+        }),
+      },
+    });
+  });
+
   test('respects custom maxConcurrentTasksPerUser', () => {
     const { template } = createStack({ maxConcurrentTasksPerUser: 5 });
     template.hasResourceProperties('AWS::Lambda::Function', {

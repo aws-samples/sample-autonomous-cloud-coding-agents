@@ -164,6 +164,11 @@ export class FanOutConsumer extends Construct {
       },
     });
 
+    // Solution-attribution component label (#319): fan-out is part of the
+    // orchestration plane. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
+    // set by the stack-level SolutionUaAspect.
+    this.fn.addEnvironment('ABCA_COMPONENT', 'orchestr');
+
     // GitHub dispatcher plumbing. Each grant/env var is guarded so the
     // fan-out plane still deploys cleanly in a dev environment that
     // hasn't onboarded the RepoTable or a platform GitHub token yet —
