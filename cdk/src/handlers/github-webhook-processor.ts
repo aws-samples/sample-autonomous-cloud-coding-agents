@@ -417,7 +417,7 @@ async function findPullRequestForSha(
       timed_out: ac.signal.aborted,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub commit-pulls lookup is best-effort; null means "no PR for this SHA"
   } finally {
     clearTimeout(timer);
   }
@@ -443,7 +443,7 @@ async function findPullRequestForSha(
       sha,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- malformed GitHub body treated as no-PR; prevents processor crash on transient HTML/502
   }
   if (!Array.isArray(parsed)) {
     logger.warn('GitHub commit-pulls did not return an array', { repo, sha });

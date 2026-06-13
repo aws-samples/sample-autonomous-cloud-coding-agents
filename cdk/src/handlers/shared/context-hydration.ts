@@ -425,7 +425,7 @@ export async function fetchGitHubIssue(
     logger.warn('GitHub issue fetch error', {
       repo, issue_number: issueNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub issue fetch is optional hydration; null skips issue context without failing the task
   }
 }
 
@@ -560,7 +560,7 @@ async function fetchReviewCommentsGraphQL(
     logger.warn('GitHub GraphQL review threads fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- review-thread fetch is optional; empty list degrades PR context without failing hydration
   }
 
   return comments;
@@ -686,7 +686,7 @@ export async function fetchGitHubPullRequest(
     logger.warn('GitHub PR fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub PR fetch is optional hydration; null skips PR context without failing the task
   }
 }
 

@@ -72,7 +72,7 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
     if (errorName === 'ResourceNotFoundException') {
       logger.error('GitHub webhook secret not found', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing webhook secret means "cannot verify"; ResourceNotFound is an expected config state
     }
     logger.error('Failed to fetch GitHub webhook secret', {
       secret_id: secretId,
