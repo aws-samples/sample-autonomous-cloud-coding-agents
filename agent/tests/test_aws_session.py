@@ -298,3 +298,58 @@ class TestTagTruncation:
         assert len(tags["repo"]) == _MAX_TAG_VALUE_LEN == 256
         # Untruncated values are passed through unchanged.
         assert tags["user_id"] == "u-1"
+
+
+class TestSolutionUserAgent:
+    """The static md/ solution-attribution segment (#319) rides every client."""
+
+    def test_platform_client_carries_md_segment(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        with patch("boto3.client", return_value=MagicMock(name="logs")) as mk:
+            platform_client("logs", region_name="us-east-1")
+
+        cfg = mk.call_args.kwargs["config"]
+        assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_unscoped_tenant_client_carries_md_segment(self, monkeypatch):
+        # No SESSION_ROLE_ARN -> unscoped path delegates to boto3.client.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import tenant_client
+
+        with patch("boto3.client", return_value=MagicMock(name="ddb")) as mk:
+            tenant_client("dynamodb")
+
+        cfg = mk.call_args.kwargs["config"]
+        assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_caller_config_is_merged_not_overwritten(self, monkeypatch):
+        from botocore.config import Config
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        with patch("boto3.client", return_value=MagicMock()) as mk:
+            platform_client("logs", config=Config(read_timeout=7))
+
+        cfg = mk.call_args.kwargs["config"]
+        # Both the caller's setting and our UA survive the merge.
+        assert cfg.read_timeout == 7
+        assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_scoped_session_sets_session_level_extra(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+
+        fake_botocore_session = MagicMock(name="botocore-session")
+        with (
+            patch("boto3.client", return_value=MagicMock(name="sts")),
+            patch("boto3.Session", return_value=MagicMock(name="boto3-session")),
+            patch("botocore.credentials.DeferredRefreshableCredentials"),
+            patch("botocore.session.get_session", return_value=fake_botocore_session),
+        ):
+            get_session()
+
+        assert fake_botocore_session.user_agent_extra == "md/uksb-wt64nei4u6#agent"

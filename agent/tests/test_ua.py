@@ -62,9 +62,7 @@ class TestWireCapture:
         def _grab(request, **_kwargs):
             ua_header = request.headers.get("User-Agent")
             captured["ua"] = (
-                ua_header.decode("ascii", "replace")
-                if isinstance(ua_header, bytes)
-                else ua_header
+                ua_header.decode("ascii", "replace") if isinstance(ua_header, bytes) else ua_header
             )
             return AWSResponse("https://x", 200, {}, b"")
 
