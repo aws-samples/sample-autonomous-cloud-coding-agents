@@ -311,7 +311,8 @@ export async function screenWithGuardrail(text: string, taskId: string): Promise
 // ---------------------------------------------------------------------------
 
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const SECRET_CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = SECRET_CACHE_TTL_MINUTES * 60 * 1000; // 5 minutes
 
 const smClient = new SecretsManagerClient({});
 
@@ -699,8 +700,11 @@ export async function fetchGitHubPullRequest(
  * @param text - the input text.
  * @returns the estimated token count.
  */
+/** Rough token estimate: ~4 chars per token for English text. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 /**

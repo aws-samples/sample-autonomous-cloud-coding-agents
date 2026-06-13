@@ -32,6 +32,12 @@ import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
 import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
 
+/** Default task-record retention used for TTL computation (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/** Webhook-processor Lambda timeout (seconds). */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
+
 /**
  * Properties for LinearIntegration construct.
  */
@@ -147,7 +153,7 @@ export class LinearIntegration extends Construct {
     const createTaskEnv: Record<string, string> = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
@@ -182,7 +188,7 @@ export class LinearIntegration extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(30),
+      timeout: Duration.seconds(WEBHOOK_PROCESSOR_TIMEOUT_SECONDS),
       // Default 128 MB OOMs at module init since the attachment-screening
       // path (#176) bundles pdf-parse + URL-resolver libs alongside the
       // existing AWS SDK + bedrock-agentcore deps. 512 MB gives ~4× headroom

@@ -28,6 +28,12 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+/** DLQ message retention for persistent-failure records (days). */
+const DLQ_RETENTION_DAYS = 14;
+
+/** Max batching window before the Lambda is invoked on a partial batch (seconds). */
+const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
+
 /**
  * Properties for ``ApprovalMetricsPublisherConsumer`` — the Chunk 8
  * consumer that reads ``TaskEventsTable`` via DynamoDB Streams and
@@ -97,7 +103,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       // Chunk 10 follow-ups — until a notification channel is wired
       // to SNS, an alarm on ``ApproximateNumberOfMessagesVisible``
       // would fire into the void.
-      retentionPeriod: Duration.days(14),
+      retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
@@ -146,7 +152,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,
       batchSize: props.batchSize ?? 100,
-      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(5),
+      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(DEFAULT_MAX_BATCHING_WINDOW_SECONDS),
       retryAttempts: 3,
       onFailure: new SqsDlq(this.dlq),
       reportBatchItemFailures: true,

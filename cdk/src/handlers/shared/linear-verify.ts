@@ -33,7 +33,8 @@ export const LINEAR_SECRET_PREFIX = 'bgagent/linear/';
 
 // In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /** Maximum age of a Linear webhookTimestamp (ms) before it is rejected (replay protection). */
 export const MAX_WEBHOOK_TIMESTAMP_AGE_MS = 60 * 1000;

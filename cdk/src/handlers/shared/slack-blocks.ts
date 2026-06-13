@@ -18,6 +18,9 @@
  */
 
 import { formatDuration, truncate } from './slack-format';
+
+/** Max length for task-failure reason text in Slack blocks. */
+const TASK_FAILED_REASON_MAX_LEN = 300;
 import type { TaskRecord } from './types';
 
 /** A Slack Block Kit mrkdwn text object. */
@@ -168,7 +171,7 @@ function taskFailedMessage(
   const reason = task.error_message
     ?? (eventMetadata?.error as string | undefined)
     ?? 'Unknown error';
-  const text = `:x: *Task failed* for \`${task.repo}\`\n_Reason:_ ${truncate(reason, 300)}`;
+  const text = `:x: *Task failed* for \`${task.repo}\`\n_Reason:_ ${truncate(reason, TASK_FAILED_REASON_MAX_LEN)}`;
   return {
     text: `Task failed for ${task.repo}`,
     blocks: [section(text)],

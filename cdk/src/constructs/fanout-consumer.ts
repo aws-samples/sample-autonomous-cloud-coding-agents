@@ -31,6 +31,15 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+/** DLQ message retention for persistent-failure records (days). */
+const DLQ_RETENTION_DAYS = 14;
+
+/** Max batching window before the Lambda is invoked on a partial batch (seconds). */
+const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
+
+/** DLQ-depth alarm metric period (minutes). */
+const DLQ_ALARM_PERIOD_MINUTES = 5;
+
 /**
  * Properties for `FanOutConsumer` — the Phase 1b §8.9 fan-out plane
  * consumer that reads `TaskEventsTable` via DynamoDB Streams and
@@ -137,7 +146,7 @@ export class FanOutConsumer extends Construct {
     this.dlq = new sqs.Queue(this, 'FanOutDlq', {
       // Persistent failures (e.g., dispatcher throws non-caught error
       // five times in a row) land here for operator inspection.
-      retentionPeriod: Duration.days(14),
+      retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
@@ -226,7 +235,7 @@ export class FanOutConsumer extends Construct {
     // record means three Lambda retries already failed.
     this.dlqDepthAlarm = new cloudwatch.Alarm(this, 'FanOutDlqDepthAlarm', {
       metric: this.dlq.metricApproximateNumberOfMessagesVisible({
-        period: Duration.minutes(5),
+        period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
         statistic: 'Maximum',
       }),
       threshold: 1,
@@ -239,7 +248,7 @@ export class FanOutConsumer extends Construct {
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,
       batchSize: props.batchSize ?? 100,
-      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(5),
+      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(DEFAULT_MAX_BATCHING_WINDOW_SECONDS),
       // Fan-out delivery is best-effort; don't block the stream if one
       // poisonous record blows up the Lambda. After 3 retries, send the
       // record batch to the DLQ and advance the iterator.

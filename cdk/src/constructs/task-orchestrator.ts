@@ -30,6 +30,22 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
 /**
+ * Durable-execution wall-clock ceiling (hours). Must exceed the longest
+ * agent run including HITL approval waits (2h approval stranded-timeout
+ * plus the agent's own multi-hour budget).
+ */
+const DURABLE_EXECUTION_TIMEOUT_HOURS = 9;
+
+/** Durable-execution state retention after completion (days). */
+const DURABLE_RETENTION_DAYS = 14;
+
+/** Default task-record retention used for TTL computation (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/** Orchestrator error-alarm metric period (minutes). */
+const ERROR_ALARM_PERIOD_MINUTES = 5;
+
+/**
  * Properties for TaskOrchestrator construct.
  */
 export interface TaskOrchestratorProps {
@@ -215,8 +231,8 @@ export class TaskOrchestrator extends Construct {
       timeout: Duration.seconds(60),
       memorySize: 1024,
       durableConfig: {
-        executionTimeout: Duration.hours(9),
-        retentionPeriod: Duration.days(14),
+        executionTimeout: Duration.hours(DURABLE_EXECUTION_TIMEOUT_HOURS),
+        retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),
       },
       environment: {
         TASK_TABLE_NAME: props.taskTable.tableName,
@@ -224,7 +240,7 @@ export class TaskOrchestrator extends Construct {
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         RUNTIME_ARN: props.runtimeArn,
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
-        TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+        TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),
         ...(props.githubTokenSecretArn && { GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecretArn }),
         ...(props.userPromptTokenBudget !== undefined && {
@@ -355,7 +371,7 @@ export class TaskOrchestrator extends Construct {
     // are consistently failing (throttled, dropped, or crashing).
     this.errorAlarm = new cloudwatch.Alarm(this, 'OrchestratorErrorAlarm', {
       metric: this.fn.metricErrors({
-        period: Duration.minutes(5),
+        period: Duration.minutes(ERROR_ALARM_PERIOD_MINUTES),
       }),
       threshold: 3,
       evaluationPeriods: 2,
