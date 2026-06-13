@@ -111,7 +111,7 @@ Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common co
 - **`mise //docs:build`** — Sync and build docs site.
 - **`mise run security:secrets`** — Gitleaks at repo root.
 - **`mise run security:sast`** — Semgrep on the repo (root; includes **`agent/`** Python among paths).
-- **`mise run security:sast:masking`** — Custom semgrep rules for silent-success masking (`catch`/`except` returning empty defaults, AI004). Advisory while the baseline in **`.semgrep/BASELINE.md`** is open; emits SARIF to `test-reports/`. Allowlist intentional fallbacks with an inline justified `nosemgrep: <rule-id> -- <reason>` comment.
+- **`mise run security:sast:masking`** — Custom semgrep rules for silent-success masking (`catch`/`except` returning empty defaults, AI004). Blocking; emits SARIF to `test-reports/`. Allowlist intentional fallbacks with an inline justified `nosemgrep: <rule-id> -- <reason>` comment.
 - **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
 - **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:sast:masking`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
 - **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.

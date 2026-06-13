@@ -286,7 +286,7 @@ export async function loadMemoryContext(
       error_type: err instanceof Error ? err.constructor.name : typeof err,
       metric_type: isProgrammingError ? 'memory_load_bug' : 'memory_load_infra_failure',
     });
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- memory hydration is fail-open; task proceeds without past episodes when load fails
   }
 }
 

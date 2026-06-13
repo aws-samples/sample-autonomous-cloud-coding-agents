@@ -18,7 +18,7 @@
 # even though it does not mask the outer failure. Rare in practice; use the
 # nosemgrep allowlist if it occurs.
 #
-# Run:  mise run security:sast:masking        (advisory; emits SARIF)
+# Run:  mise run security:sast:masking        (blocking; emits SARIF)
 # Test: semgrep test .semgrep/
 rules:
   - id: ts-silent-success-masking
