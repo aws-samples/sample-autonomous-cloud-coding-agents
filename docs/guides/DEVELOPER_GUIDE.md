@@ -62,8 +62,8 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
 
 ```typescript
-new Blueprint(this, ‘MyServiceBlueprint’, {
-  repo: ‘acme/my-service’,
+new Blueprint(this, 'MyServiceBlueprint', {
+  repo: 'acme/my-service',
   repoTable: repoTable.table,
 });
 ```
@@ -87,7 +87,7 @@ new Blueprint(this, 'MyServiceBlueprint', {
 
 If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model.
 
-Redeploy after changing Blueprints: `mise run //cdk:deploy`.
+Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
 ### Customizing the agent image
 
@@ -199,7 +199,7 @@ curl http://localhost:8080/ping
 
 curl -X POST http://localhost:8080/invocations \
   -H "Content-Type: application/json" \
-  -d ‘{"input":{"prompt":"Fix the login bug","repo_url":"owner/repo"}}’
+  -d '{"input":{"prompt":"Fix the login bug","repo_url":"owner/repo"}}'
 ```
 
 #### Monitoring
@@ -260,14 +260,14 @@ Follow the [Quick Start](./QUICK_START.md) steps 3-6 for first-time deployment. 
 
 ```bash
 mise run build
-mise run //cdk:deploy
+mise //cdk:deploy
 ```
 
 A full deploy takes approximately 10 minutes. Expect variation by region and whether container layers are cached.
 
 ### Stack outputs
 
-After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query ‘Stacks[0].Outputs’ --output table`):
+After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table`):
 
 | Output | Description |
 |---|---|

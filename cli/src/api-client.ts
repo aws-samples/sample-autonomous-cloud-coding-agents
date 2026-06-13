@@ -19,7 +19,7 @@
 
 import { getAuthToken } from './auth';
 import { loadConfig } from './config';
-import { debug } from './debug';
+import { debug, isVerbose, redactSensitive } from './debug';
 import { ApiError, CliError } from './errors';
 import {
   ApprovalRequest,
@@ -72,8 +72,10 @@ export class ApiClient {
     const url = `${this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
-    if (body) {
-      debug(`Request body: ${JSON.stringify(body)}`);
+    // Redaction + stringification are gated on isVerbose() so the deep copy
+    // doesn't run on every request when verbose is off (watch polls hot).
+    if (body && isVerbose()) {
+      debug(`Request body: ${JSON.stringify(redactSensitive(body))}`);
     }
 
     const res = await fetch(url, {
@@ -97,8 +99,10 @@ export class ApiClient {
       jsonParseOk = false;
     }
 
-    if (jsonParseOk) {
-      debug(`Response body: ${JSON.stringify(json)}`);
+    if (jsonParseOk && isVerbose()) {
+      // Redact secret-bearing fields (e.g. the one-time webhook `secret`) —
+      // verbose output ends up in scrollback / CI logs.
+      debug(`Response body: ${JSON.stringify(redactSensitive(json))}`);
     }
 
     if (!res.ok) {
@@ -149,7 +153,7 @@ export class ApiClient {
 
   /** POST /tasks/{task_id}/confirm-uploads — confirm presigned uploads. */
   async confirmUploads(taskId: string): Promise<TaskDetail> {
-    const res = await this.request<SuccessResponse<TaskDetail>>('POST', `/tasks/${taskId}/confirm-uploads`);
+    const res = await this.request<SuccessResponse<TaskDetail>>('POST', `/tasks/${encodeURIComponent(taskId)}/confirm-uploads`);
     return res.data;
   }
 

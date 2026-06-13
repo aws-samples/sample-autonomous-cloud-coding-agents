@@ -156,12 +156,38 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   }
   const eventWaiters: EventWaiter[] = [];
 
+  // Track the latest Document response status PER FRAME so we can fail fast
+  // on 4xx/5xx (404 / 503 / auth wall pages) instead of capturing what looks
+  // like the app but isn't. The main frame's id is only known once
+  // Page.navigate resolves, but `Network.responseReceived` for the main
+  // document frequently arrives BEFORE that response — so record every
+  // Document status keyed by frameId and resolve which one is the main
+  // document afterwards. (Recording a single "latest" status instead would
+  // race: an early sub-frame response could be misattributed as the main
+  // document, or the real main-document status missed entirely.)
+  // Redirect chains re-fire for the same frameId; last write wins, which is
+  // the final response. (Auth walls that return 200 are out of scope — #287.)
+  const documentStatusByFrame = new Map<string, number>();
+
   ws.on('message', (raw: RawData) => {
     const data = raw.toString();
     let msg: CdpMessage;
     try {
       msg = JSON.parse(data) as CdpMessage;
     } catch {
+      return;
+    }
+    if (msg.method === 'Network.responseReceived') {
+      const params = msg.params as
+        | { type?: string; frameId?: string; response?: { status?: number } }
+        | undefined;
+      // CDP's `Network.responseReceived` fires for every resource (HTML,
+      // JS, CSS, images, XHR, …). Only type==='Document' responses are
+      // candidate main-document responses.
+      if (params?.type === 'Document' && typeof params.frameId === 'string') {
+        const status = params.response?.status;
+        if (typeof status === 'number') documentStatusByFrame.set(params.frameId, status);
+      }
       return;
     }
     if (typeof msg.id === 'number') {
@@ -262,14 +288,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     });
   }
 
-  // Track the main-document HTTP response so we can fail fast on 4xx/5xx
-  // (404 / 503 / auth wall pages) instead of capturing what looks like the
-  // app but isn't. Captured in a Network.responseReceived listener below;
-  // checked after Page.loadEventFired but before Page.captureScreenshot.
-  // (Auth walls that return 200 are out of scope — see issue #287.)
-  let mainDocumentStatus: number | null = null;
-  let mainDocumentFrameId: string | null = null;
-
   try {
     // 1. List existing targets, find the default about:blank page.
     const targetsResp = await cdpSend('Target.getTargets');
@@ -293,33 +311,10 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     //    we wait on below AND the main-document response status. Network
     //    has to be enabled BEFORE Page.navigate, or the response event
     //    fires before our listener is wired and we miss the status.
+    //    (Document statuses are recorded per-frame by the single message
+    //    listener above; we resolve the main frame's status after load.)
     await cdpSend('Page.enable', {}, pageSessionId);
     await cdpSend('Network.enable', {}, pageSessionId);
-
-    // Tap the raw message stream for Network.responseReceived events —
-    // we want a multi-fire listener (Document responses can appear for
-    // redirect chains), not the one-shot waiter pattern that
-    // eventWaiters / waitForEvent use. Records the latest matching
-    // status; the post-load check below acts on whatever was captured.
-    ws.on('message', (raw: RawData) => {
-      let msg: CdpMessage;
-      try {
-        msg = JSON.parse(raw.toString()) as CdpMessage;
-      } catch {
-        return;
-      }
-      if (msg.method !== 'Network.responseReceived') return;
-      const params = msg.params as
-        | { type?: string; frameId?: string; response?: { status?: number } }
-        | undefined;
-      // CDP's `Network.responseReceived` fires for every resource (HTML,
-      // JS, CSS, images, XHR, …). Only the type==='Document' event for
-      // the navigated frame is the main-document response we care about.
-      if (!params || params.type !== 'Document') return;
-      if (mainDocumentFrameId && params.frameId !== mainDocumentFrameId) return;
-      const status = params.response?.status;
-      if (typeof status === 'number') mainDocumentStatus = status;
-    });
 
     // 4. Navigate. The response includes a `frameId`; we wait on the
     //    `Page.loadEventFired` event below (more reliable than
@@ -330,7 +325,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     if (navError) {
       throw new Error(`Page.navigate failed: ${navError}`);
     }
-    mainDocumentFrameId = (navResp.result?.frameId as string | undefined) ?? null;
+    const mainDocumentFrameId = (navResp.result?.frameId as string | undefined) ?? null;
 
     // 5. Wait for the page load event. SPA-style apps may continue
     //    fetching after this fires, so add a 2s settle wait. For
@@ -344,10 +339,21 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     //    perspective; the user sees a confidently-wrong screenshot of an
     //    error page posted as the deploy preview. Throw → processor's
     //    catch logs and skips the PR/Linear comment cleanly.
-    //    If we never captured a status (Network.responseReceived was
-    //    queued but predicate didn't match — e.g. a redirect chain that
-    //    doesn't expose the final frame), fall through and capture
+    //    The main frame's id comes from the Page.navigate response; its
+    //    Document responses were recorded per-frame by the message
+    //    listener even if they arrived before navigate resolved. If
+    //    Page.navigate returned no frameId, only an unambiguous single
+    //    recorded status is trusted — with multiple frames we cannot
+    //    tell which is the main document.
+    //    If we never captured a status (e.g. a service variant that
+    //    doesn't emit Network events), fall through and capture
     //    optimistically; that's the pre-#287 behaviour.
+    let mainDocumentStatus: number | null = null;
+    if (mainDocumentFrameId !== null) {
+      mainDocumentStatus = documentStatusByFrame.get(mainDocumentFrameId) ?? null;
+    } else if (documentStatusByFrame.size === 1) {
+      mainDocumentStatus = documentStatusByFrame.values().next().value ?? null;
+    }
     if (mainDocumentStatus !== null && (mainDocumentStatus < 200 || mainDocumentStatus >= 300)) {
       throw new Error(`Preview URL returned HTTP ${mainDocumentStatus}; skipping screenshot`);
     }

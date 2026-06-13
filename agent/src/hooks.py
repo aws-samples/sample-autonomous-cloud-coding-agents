@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
@@ -53,6 +54,7 @@ POLL_SLOW_INTERVAL_S: float = 5.0
 POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this count (§13.2)
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this count (§13.2)
 TOOL_INPUT_PREVIEW_MAX: int = 256  # §6.5: strip-ANSI, truncate
+ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
 # ``permissionDecisionReason`` fields (§12.7). Re-derives the pattern from
@@ -66,15 +68,19 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
-def _truncate(text: str, max_len: int) -> str:
+def _truncate(text: str | None, max_len: int) -> str:
     """Truncate ``text`` to ``max_len`` chars with an ellipsis marker."""
     if text is None:
         return ""
     if len(text) <= max_len:
         return text
     # Reserve 3 chars for the ellipsis so the returned string never
-    # exceeds ``max_len``.
-    return text[: max_len - 3] + "..."
+    # exceeds ``max_len``. For very small ``max_len`` (<= 3) there is no
+    # room for the ellipsis and ``max_len - 3`` would slice negatively
+    # (dropping characters off the END), so fall back to a plain prefix.
+    if max_len <= ELLIPSIS_LEN:
+        return text[:max_len]
+    return text[: max_len - ELLIPSIS_LEN] + "..."
 
 
 def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) -> str:
@@ -167,6 +173,17 @@ async def pre_tool_use_hook(
         except (json.JSONDecodeError, TypeError):
             log("WARN", f"PreToolUse hook failed to parse tool_input — denying {tool_name}")
             return _deny_response("unparseable tool input")
+
+    # Fail-closed contract: every downstream consumer (Cedar evaluation,
+    # the approval-row builder, the SHA-256 cache key) assumes ``tool_input``
+    # is a JSON object. A bare list/scalar (e.g. ``"[1,2]"`` or ``"\"foo\""``
+    # decoded by the branch above, or a non-dict passed in directly) would
+    # otherwise raise an AttributeError deep in the engine and rely on the
+    # SDK-boundary wrapper to catch it. Make the rejection explicit here so
+    # the deny reason names the malformed input rather than a stack trace.
+    if not isinstance(tool_input, dict):
+        log("WARN", f"PreToolUse hook received non-dict tool_input — denying {tool_name}")
+        return _deny_response("tool input is not an object")
 
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
@@ -805,7 +822,12 @@ def _remaining_maxlifetime_s() -> int | None:
         else:
             from datetime import datetime
 
-            started_epoch = int(datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            # The trailing Z means UTC; strptime returns a naive datetime whose
+            # .timestamp() would otherwise be interpreted in the container's
+            # local TZ, skewing remaining-lifetime math by the UTC offset.
+            started_epoch = int(
+                datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+            )
     except (ValueError, AttributeError):
         return None
     elapsed = int(time.time()) - started_epoch
