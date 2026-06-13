@@ -44,9 +44,10 @@ import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-
 import { ulid } from 'ulid';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../constructs/attachments-bucket';
 import { logger } from './shared/logger';
+import { abcaUserAgent, withAbcaTrace } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
-const s3 = new S3Client({});
+const ddb = withAbcaTrace(new DynamoDBClient(abcaUserAgent()));
+const s3 = withAbcaTrace(new S3Client(abcaUserAgent()));
 
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;

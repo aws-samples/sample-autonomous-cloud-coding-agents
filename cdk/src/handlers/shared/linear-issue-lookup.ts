@@ -21,8 +21,9 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { abcaUserAgent, withAbcaTrace } from './ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
 
 /**
  * Linear issue identifier shape, e.g. `ABCA-42`. Linear identifiers are

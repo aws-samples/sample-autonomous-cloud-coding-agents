@@ -35,11 +35,12 @@ import { estimateImageTokensFromBuffer } from './shared/image-tokens';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type AttachmentRecord, createAttachmentRecord, type TaskRecord, toTaskDetail } from './shared/types';
+import { abcaUserAgent, setAbcaTrace, withAbcaTrace } from './shared/ua';
 import { computeTtlEpoch } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const s3Client = new S3Client({});
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({}) : undefined;
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
+const s3Client = withAbcaTrace(new S3Client(abcaUserAgent()));
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? withAbcaTrace(new LambdaClient(abcaUserAgent())) : undefined;
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -80,6 +81,7 @@ interface S3ObjectMeta {
  */
 export async function handler(event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     // 1. Auth
@@ -697,7 +699,7 @@ async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
   if (!process.env.GUARDRAIL_ID || !process.env.GUARDRAIL_VERSION) return undefined;
   if (!_bedrockClient) {
     const { BedrockRuntimeClient } = await import('@aws-sdk/client-bedrock-runtime');
-    _bedrockClient = new BedrockRuntimeClient({});
+    _bedrockClient = withAbcaTrace(new BedrockRuntimeClient(abcaUserAgent()));
   }
   return {
     guardrailId: process.env.GUARDRAIL_ID,

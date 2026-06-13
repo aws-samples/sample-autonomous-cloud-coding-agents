@@ -22,11 +22,12 @@ import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand, StopRuntimeSessionCo
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
+import { abcaUserAgent, withAbcaTrace } from '../ua';
 
 let sharedClient: BedrockAgentCoreClient | undefined;
 function getClient(): BedrockAgentCoreClient {
   if (!sharedClient) {
-    sharedClient = new BedrockAgentCoreClient({});
+    sharedClient = withAbcaTrace(new BedrockAgentCoreClient(abcaUserAgent()));
   }
   return sharedClient;
 }

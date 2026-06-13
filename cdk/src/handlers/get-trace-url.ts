@@ -28,9 +28,10 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { TaskRecord } from './shared/types';
+import { abcaUserAgent, setAbcaTrace, withAbcaTrace } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const s3 = new S3Client({});
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
+const s3 = withAbcaTrace(new S3Client(abcaUserAgent()));
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const TRACE_BUCKET_NAME = process.env.TRACE_ARTIFACTS_BUCKET_NAME!;
 
@@ -63,6 +64,7 @@ export const TRACE_URL_TTL_SECONDS = 900;
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     const userId = extractUserId(event);

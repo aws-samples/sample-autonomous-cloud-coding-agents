@@ -27,10 +27,11 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { CreateWebhookRequest, CreateWebhookResponse, WebhookRecord } from './shared/types';
+import { abcaUserAgent, setAbcaTrace, withAbcaTrace } from './shared/ua';
 import { isValidWebhookName, parseBody } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const sm = new SecretsManagerClient({});
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
+const sm = withAbcaTrace(new SecretsManagerClient(abcaUserAgent()));
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 const SECRET_PREFIX = 'bgagent/webhook/';
 
@@ -39,6 +40,7 @@ const SECRET_PREFIX = 'bgagent/webhook/';
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     const userId = extractUserId(event);

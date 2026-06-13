@@ -25,6 +25,7 @@ import {
 } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { abcaUserAgent, withAbcaTrace } from './ua';
 
 /**
  * Lambda-side resolver for the per-workspace Linear OAuth token written
@@ -152,8 +153,8 @@ export async function resolveLinearOauthToken(
   options: ResolverOptions = {},
 ): Promise<ResolvedLinearToken | null> {
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient({ region, ...abcaUserAgent() })));
+  const sm = options.secretsManagerClient ?? withAbcaTrace(new SecretsManagerClient({ region, ...abcaUserAgent() }));
 
   // ─── Step 1: Registry row ────────────────────────────────────────
   const row = await getRegistryRow(ddb, registryTableName, linearWorkspaceId);

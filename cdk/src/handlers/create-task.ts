@@ -24,6 +24,7 @@ import { buildChannelMetadata, extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
+import { setAbcaTrace } from './shared/ua';
 import { parseBody } from './shared/validation';
 
 /**
@@ -31,6 +32,7 @@ import { parseBody } from './shared/validation';
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     // 1. Extract authenticated user

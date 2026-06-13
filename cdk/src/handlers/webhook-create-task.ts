@@ -27,9 +27,10 @@ import { isUsableHmacSecret } from './shared/hmac-secret';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
+import { abcaUserAgent, setAbcaTrace, withAbcaTrace } from './shared/ua';
 import { parseBody } from './shared/validation';
 
-const sm = new SecretsManagerClient({});
+const sm = withAbcaTrace(new SecretsManagerClient(abcaUserAgent()));
 const SECRET_PREFIX = 'bgagent/webhook/';
 
 // In-memory secret cache with 5-minute TTL
@@ -104,6 +105,7 @@ function verifySignature(body: string, secret: string, signature: string): boole
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     // 1. Extract webhook auth context (injected by REQUEST authorizer)

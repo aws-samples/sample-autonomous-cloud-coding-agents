@@ -25,6 +25,7 @@ import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
+import { abcaUserAgent, withAbcaTrace } from './shared/ua';
 import type { SlackCommandPayload } from './slack-commands';
 
 /**
@@ -76,7 +77,7 @@ function normalizeEvent(event: RawEvent): CommandProcessorEvent {
   return { ...event, source: 'slash' };
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
 
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;

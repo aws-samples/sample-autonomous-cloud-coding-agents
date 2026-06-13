@@ -20,6 +20,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { abcaUserAgent, withAbcaTrace } from './ua';
 
 /**
  * Per-repository configuration written by the Blueprint CDK construct
@@ -79,7 +80,7 @@ export interface BlueprintConfig {
   readonly approval_gate_cap?: number;
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
 
 /**
  * Combined result of a single RepoTable GetItem used by the submit

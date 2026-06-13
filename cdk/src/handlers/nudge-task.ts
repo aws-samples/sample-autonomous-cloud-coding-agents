@@ -28,8 +28,9 @@ import { logger } from './shared/logger';
 import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
+import { abcaUserAgent, setAbcaTrace, withAbcaTrace } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(withAbcaTrace(new DynamoDBClient(abcaUserAgent())));
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;
 const NUDGES_TABLE_NAME = process.env.NUDGES_TABLE_NAME;
 if (!TASK_TABLE_NAME || !NUDGES_TABLE_NAME) {
@@ -62,6 +63,7 @@ const RATE_LIMIT_ROW_TTL_SECONDS = 120;
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  setAbcaTrace(requestId);
 
   try {
     // 1. Auth

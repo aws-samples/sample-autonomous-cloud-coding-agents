@@ -29,8 +29,9 @@ import { postIssueComment } from './shared/linear-feedback';
 import { extractLinearIdentifier, findLinearIssueByIdentifier } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
 import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import { abcaUserAgent, withAbcaTrace } from './shared/ua';
 
-const s3 = new S3Client({});
+const s3 = withAbcaTrace(new S3Client(abcaUserAgent()));
 
 const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
 // CloudFront distribution domain — `<dist>.cloudfront.net`. Used as
