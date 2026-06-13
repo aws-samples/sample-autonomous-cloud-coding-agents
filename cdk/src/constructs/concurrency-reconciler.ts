@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
@@ -71,6 +71,8 @@ export class ConcurrencyReconciler extends Construct {
       environment: {
         TASK_TABLE_NAME: props.taskTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+        ABCA_STACK_NAME: Stack.of(this).stackName,
+        ABCA_COMPONENT: 'orchestr',
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],

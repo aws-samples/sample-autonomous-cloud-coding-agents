@@ -295,6 +295,9 @@ export class AgentStack extends Stack {
     // `docs/design/INTERACTIVE_AGENTS.md` §3.1 and AD-1.
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
+      // Outbound SDK User-Agent solution tracking (#319); the agent
+      // hardcodes its component label ('agent') in agent/src/ua.py.
+      ABCA_STACK_NAME: this.stackName,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',

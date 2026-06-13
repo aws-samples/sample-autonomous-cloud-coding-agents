@@ -109,6 +109,26 @@ describe('TaskApi construct', () => {
     });
   });
 
+  test('Lambdas carry ABCA UA solution-tracking env vars (#319)', () => {
+    // Every API-surface Lambda gets the stack name + 'api' component label;
+    // webhook-surface Lambdas get 'webhook'.
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ABCA_STACK_NAME: 'TestStack',
+          ABCA_COMPONENT: 'api',
+        }),
+      },
+    });
+    webhookTemplate.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ABCA_COMPONENT: 'webhook',
+        }),
+      },
+    });
+  });
+
   test('creates a REST API with correct stage name', () => {
     baseTemplate.resourceCountIs('AWS::ApiGateway::RestApi', 1);
     baseTemplate.hasResourceProperties('AWS::ApiGateway::RestApi', {

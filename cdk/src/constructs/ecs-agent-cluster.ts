@@ -123,6 +123,9 @@ export class EcsAgentCluster extends Construct {
       }),
       environment: {
         CLAUDE_CODE_USE_BEDROCK: '1',
+        // Outbound SDK User-Agent solution tracking (#319); component label
+        // ('agent') is hardcoded in agent/src/ua.py.
+        ABCA_STACK_NAME: Stack.of(this).stackName,
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,

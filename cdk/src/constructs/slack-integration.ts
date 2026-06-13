@@ -157,6 +157,13 @@ export class SlackIntegration extends Construct {
       authorizationType: apigw.AuthorizationType.NONE,
     };
 
+    // Outbound SDK User-Agent solution tracking (#319), spread into every
+    // handler environment in this construct.
+    const abcaEnv: Record<string, string> = {
+      ABCA_STACK_NAME: Stack.of(this).stackName,
+      ABCA_COMPONENT: 'webhook',
+    };
+
     // --- Task creation environment (matches TaskApi createTaskEnv pattern) ---
     const createTaskEnv: Record<string, string> = {
       TASK_TABLE_NAME: props.taskTable.tableName,
@@ -186,6 +193,7 @@ export class SlackIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(15),
       environment: {
+        ...abcaEnv,
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
         SLACK_CLIENT_ID_SECRET_ARN: this.clientIdSecret.secretArn,
         SLACK_CLIENT_SECRET_ARN: this.clientSecret.secretArn,
@@ -218,6 +226,7 @@ export class SlackIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
       environment: {
+        ...abcaEnv,
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
         SLACK_SIGNING_SECRET_ARN: this.signingSecret.secretArn,
       },
@@ -250,6 +259,7 @@ export class SlackIntegration extends Construct {
       timeout: Duration.seconds(30),
       memorySize: 512,
       environment: {
+        ...abcaEnv,
         ...createTaskEnv,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
@@ -295,6 +305,7 @@ export class SlackIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
       environment: {
+        ...abcaEnv,
         SLACK_SIGNING_SECRET_ARN: this.signingSecret.secretArn,
         TASK_TABLE_NAME: props.taskTable.tableName,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
@@ -314,6 +325,7 @@ export class SlackIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(3),
       environment: {
+        ...abcaEnv,
         SLACK_SIGNING_SECRET_ARN: this.signingSecret.secretArn,
         SLACK_COMMAND_PROCESSOR_FUNCTION_NAME: commandProcessorFn.functionName,
       },
@@ -333,6 +345,7 @@ export class SlackIntegration extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
       environment: {
+        ...abcaEnv,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
       },
       bundling: commonBundling,

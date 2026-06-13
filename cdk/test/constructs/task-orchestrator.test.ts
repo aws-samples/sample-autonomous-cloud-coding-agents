@@ -130,6 +130,17 @@ describe('TaskOrchestrator construct', () => {
     });
   });
 
+  test('orchestrator Lambda carries ABCA UA solution-tracking env vars (#319)', () => {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ABCA_STACK_NAME: 'TestStack',
+          ABCA_COMPONENT: 'orchestr',
+        }),
+      },
+    });
+  });
+
   test('Lambda function has correct environment variables', () => {
     baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
