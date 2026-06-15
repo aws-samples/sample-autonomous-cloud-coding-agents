@@ -86,6 +86,11 @@ const userPoolId = output('UserPoolId');
 const appClientId = output('AppClientId');
 const taskTableName = output('TaskTableName');
 const taskApprovalsTableName = output('TaskApprovalsTableName');
+// The submit path enforces an onboarding gate: a repo must have an active row in
+// RepoTable or POST /tasks returns 422 REPO_NOT_ONBOARDED before clone/preflight.
+// The gate scenarios onboard SANDBOX_REPO here (a putItem assertion) rather than
+// adding a Blueprint construct to the production stack — test-side only.
+const repoTableName = output('RepoTableName');
 // AgentStack creates its OWN empty GitHubTokenSecret (agent.ts:181,
 // RemovalPolicy.DESTROY) — it does not reference an external one. The gate
 // scenarios populate it post-deploy from the pre-seeded secret below, which is
@@ -182,7 +187,11 @@ const submitComplete = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
   },
   body: JSON.stringify({
     workflow_ref: 'default/agent-v1',
-    task_description: 'Reply with exactly the single word: done. Do not use any tools.',
+    // Keep this a plain, benign natural-language request. An earlier terse,
+    // imperative phrasing ("Reply with exactly the single word: done. Do not
+    // use any tools.") tripped the Bedrock content-policy guardrail at submit
+    // (400 VALIDATION_ERROR "Task description was blocked by content policy").
+    task_description: 'Please write a one-sentence summary explaining what a pull request is in software development.',
     max_turns: 2,
     max_budget_usd: 0.5,
   }),
@@ -206,11 +215,26 @@ pollComplete
   }))
   .waitForAssertions(TERMINAL_POLL);
 
-// --- Scenario 2: FAILED (coding/new-task-v1 against a nonexistent repo) --------
-// The coding workflow requires a repo and clones it. Pointing it at a repo that
-// does not exist makes preflight/clone fail fast, so the orchestrator writes a
-// terminal FAILED with an error_message — no agent turn, no runtime spin-up, and
-// no valid GitHub token required.
+// --- Scenario 2: FAILED (coding/new-task-v1, onboarded repo, clone fails) ------
+// The submit path runs the onboarding gate (RepoTable) BEFORE clone/preflight,
+// so an un-onboarded repo is rejected at submit (422 REPO_NOT_ONBOARDED) and the
+// task never reaches a terminal FAILED. To exercise the terminal-error path we
+// must therefore ONBOARD the repo first, then make CLONE fail: the onboarding
+// gate only checks RepoTable, not GitHub, so we onboard a repo slug that does
+// not exist on GitHub. Submit then passes admission, preflight/clone 404s, and
+// the orchestrator writes terminal FAILED + error_message — no agent turn, no
+// runtime spin-up. (onboardFailRepo is sequenced before this submit.)
+const failRepo = `abca-integ-nonexistent/does-not-exist-${randomBytes(6).toString('hex')}`;
+const onboardFailRepo = integ.assertions.awsApiCall('DynamoDB', 'putItem', {
+  TableName: repoTableName,
+  Item: {
+    repo: { S: failRepo },
+    status: { S: 'active' },
+    onboarded_at: { S: '2026-01-01T00:00:00.000Z' },
+    updated_at: { S: '2026-01-01T00:00:00.000Z' },
+  },
+});
+
 const submitFail = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
   method: 'POST',
   headers: {
@@ -219,7 +243,7 @@ const submitFail = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
   },
   body: JSON.stringify({
     workflow_ref: 'coding/new-task-v1',
-    repo: `abca-integ-nonexistent/does-not-exist-${randomBytes(6).toString('hex')}`,
+    repo: failRepo,
     task_description: 'This task targets a nonexistent repo and must fail at clone/preflight.',
     max_turns: 1,
     max_budget_usd: 0.5,
@@ -256,6 +280,20 @@ const seedGet = integ.assertions.awsApiCall('SecretsManager', 'getSecretValue', 
 const seedPut = integ.assertions.awsApiCall('SecretsManager', 'putSecretValue', {
   SecretId: githubTokenSecretArn,
   SecretString: seedGet.getAttString('SecretString'),
+});
+
+// Onboard SANDBOX_REPO so the gate submits pass the onboarding gate (otherwise
+// 422 REPO_NOT_ONBOARDED at submit, before the agent ever runs). A minimal active
+// row is enough — the agent reads the GitHub token from the platform-default
+// GitHubTokenSecret we seeded above, so the blueprint needs no per-repo token.
+const onboardSandbox = integ.assertions.awsApiCall('DynamoDB', 'putItem', {
+  TableName: repoTableName,
+  Item: {
+    repo: { S: SANDBOX_REPO },
+    status: { S: 'active' },
+    onboarded_at: { S: '2026-01-01T00:00:00.000Z' },
+    updated_at: { S: '2026-01-01T00:00:00.000Z' },
+  },
 });
 
 // --- Scenario 3: AWAITING_APPROVAL -> approve ---------------------------------
@@ -410,20 +448,24 @@ pollDenyDecision
   .waitForAssertions(GATE_POLL);
 
 // --- Execution order ----------------------------------------------------------
-// Auth first, then the two no-repo scenarios (submit both, then wait so their
-// agent runs proceed concurrently). Next seed the GitHub token, then submit both
-// gate tasks so they spin up concurrently and park at their gates; finally drive
-// approve then deny. The approve/deny flows are sequential because each
-// approve/deny POST needs the request_id read from the parked task's approval row.
+// Auth first. Scenario 1 (no repo) can submit immediately. Scenario 2 needs its
+// repo onboarded BEFORE submit (else 422 at the onboarding gate), so onboardFail
+// precedes submitFail. Both no-repo/clone-fail terminals are then awaited so they
+// proceed concurrently. Next seed the GitHub token AND onboard the sandbox, then
+// submit both gate tasks so they spin up concurrently and park at their gates;
+// finally drive approve then deny. The approve/deny flows are sequential because
+// each POST needs the request_id read from the parked task's approval row.
 createUser
   .next(setPassword)
   .next(auth)
   .next(submitComplete)
+  .next(onboardFailRepo)
   .next(submitFail)
   .next(pollComplete)
   .next(pollFail)
   .next(seedGet)
   .next(seedPut)
+  .next(onboardSandbox)
   .next(submitApprove)
   .next(submitDeny)
   .next(pollGateApprove)
