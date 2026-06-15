@@ -39,6 +39,12 @@ const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9
 const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 
+/** Timeout for the RepoConfig custom resource (minutes). */
+const REPO_CONFIG_CR_TIMEOUT_MINUTES = 5;
+
+/** TTL (days) applied to a RepoConfig row on blueprint delete before cleanup. */
+const REMOVED_REPO_TTL_DAYS = 30;
+
 /**
  * Properties for the Blueprint construct.
  */
@@ -244,7 +250,7 @@ export class Blueprint extends Construct {
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
-      timeout: Duration.minutes(5),
+      timeout: Duration.minutes(REPO_CONFIG_CR_TIMEOUT_MINUTES),
       onCreate: {
         service: 'DynamoDB',
         action: 'putItem',
@@ -289,7 +295,7 @@ export class Blueprint extends Construct {
           ExpressionAttributeValues: {
             ':removed': { S: 'removed' },
             ':now': { S: new Date().toISOString() },
-            ':ttl': { N: String(Math.floor(Date.now() / 1000) + 30 * 86400) },
+            ':ttl': { N: String(Math.floor(Date.now() / 1000) + REMOVED_REPO_TTL_DAYS * 86400) },
           },
         },
       },

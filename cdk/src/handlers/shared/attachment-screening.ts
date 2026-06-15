@@ -34,8 +34,20 @@ export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 /** Bedrock Guardrail image filter max side (docs: 8000x8000). */
 export const MAX_IMAGE_DIMENSION_PX = 8000;
 
+/* eslint-disable @typescript-eslint/no-magic-numbers -- file format magic-byte signatures */
 const PNG_FILE_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_FILE_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+/* eslint-enable @typescript-eslint/no-magic-numbers */
+
+const PNG_IHDR_TYPE_OFFSET = 12;
+const PNG_IHDR_TYPE_LENGTH = 4;
+const PNG_IHDR_WIDTH_OFFSET = 16;
+const PNG_IHDR_HEIGHT_OFFSET = 20;
+const PNG_MIN_IHDR_LENGTH = 24;
+
+/** JPEGs above this size (MiB) must have readable dimensions (fail-closed otherwise). */
+const JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_MB = 5;
+const JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_BYTES = JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_MB * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -340,16 +352,16 @@ export function assertImageUploadBytes(
 
 /** Read width/height from the PNG IHDR chunk (bytes 16–23). */
 export function readPngDimensions(content: Buffer): { width: number; height: number } | undefined {
-  if (content.length < 24) {
+  if (content.length < PNG_MIN_IHDR_LENGTH) {
     return undefined;
   }
   if (!content.subarray(0, PNG_FILE_SIGNATURE.length).equals(PNG_FILE_SIGNATURE)) {
     return undefined;
   }
-  if (content.toString('ascii', 12, 16) !== 'IHDR') {
+  if (content.toString('ascii', PNG_IHDR_TYPE_OFFSET, PNG_IHDR_TYPE_OFFSET + PNG_IHDR_TYPE_LENGTH) !== 'IHDR') {
     return undefined;
   }
-  return { width: content.readUInt32BE(16), height: content.readUInt32BE(20) };
+  return { width: content.readUInt32BE(PNG_IHDR_WIDTH_OFFSET), height: content.readUInt32BE(PNG_IHDR_HEIGHT_OFFSET) };
 }
 
 /**
@@ -357,6 +369,7 @@ export function readPngDimensions(content: Buffer): { width: number; height: num
  * SOF0 (0xFFC0), SOF1 (0xFFC1), SOF2 (0xFFC2) contain dimensions.
  */
 export function readJpegDimensions(content: Buffer): { width: number; height: number } | undefined {
+  /* eslint-disable @typescript-eslint/no-magic-numbers -- JPEG SOF marker scan */
   if (content.length < 4) return undefined;
   if (content[0] !== 0xff || content[1] !== 0xd8) return undefined;
 
@@ -383,6 +396,7 @@ export function readJpegDimensions(content: Buffer): { width: number; height: nu
     const segmentLength = content.readUInt16BE(offset + 2);
     offset += 2 + segmentLength;
   }
+  /* eslint-enable @typescript-eslint/no-magic-numbers */
   return undefined;
 }
 
@@ -406,7 +420,7 @@ function assertImageDimensionsWithinLimits(
     if (!dims) {
       // Fail-closed for large JPEGs where dimensions cannot be verified (> 5 MB).
       // Smaller files are allowed through to Bedrock which will reject if oversized.
-      if (content.length > 5 * 1024 * 1024) {
+      if (content.length > JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_BYTES) {
         throw new AttachmentScreeningError(
           `Image "${filename}" is ${(content.length / (1024 * 1024)).toFixed(1)} MB and its dimensions ` +
           'could not be verified. Please use a standard JPEG encoder or convert to PNG.',

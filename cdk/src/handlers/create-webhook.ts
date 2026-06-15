@@ -34,6 +34,9 @@ const sm = new SecretsManagerClient({});
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 const SECRET_PREFIX = 'bgagent/webhook/';
 
+/** Webhook HMAC secret entropy (bytes; 256-bit). */
+const WEBHOOK_SECRET_BYTES = 32;
+
 /**
  * POST /v1/webhooks — Create a new webhook integration.
  */
@@ -61,7 +64,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const webhookId = ulid();
-    const secret = crypto.randomBytes(32).toString('hex');
+    const secret = crypto.randomBytes(WEBHOOK_SECRET_BYTES).toString('hex');
     const now = new Date().toISOString();
 
     // 1. Create secret in Secrets Manager (tags inline to avoid separate TagResource IAM action)

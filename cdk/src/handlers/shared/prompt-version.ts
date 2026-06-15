@@ -19,6 +19,9 @@
 
 import { createHash } from 'crypto';
 
+/** Hex prefix length for prompt-version fingerprints. */
+const PROMPT_VERSION_HASH_HEX_LENGTH = 12;
+
 /**
  * Compute a deterministic prompt version hash from the system prompt template
  * and optional overrides. Excludes runtime-variable data (memory context,
@@ -37,5 +40,5 @@ export function computePromptVersion(template: string, overrides?: Record<string
     }, {});
     input += JSON.stringify(sorted);
   }
-  return createHash('sha256').update(input).digest('hex').slice(0, 12);
+  return createHash('sha256').update(input).digest('hex').slice(0, PROMPT_VERSION_HASH_HEX_LENGTH);
 }

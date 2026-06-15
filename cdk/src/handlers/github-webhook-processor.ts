@@ -69,6 +69,18 @@ const POST_CAPTURE_RESERVE_MS = 8_000;
  */
 const MIN_CAPTURE_BUDGET_MS = 15_000;
 
+/** Backoff schedule (ms) while waiting for GitHub to link a PR to a deploy SHA. */
+const PR_LOOKUP_RETRY_DELAY_0_MS = 0;
+const PR_LOOKUP_RETRY_DELAY_1_MS = 5_000;
+const PR_LOOKUP_RETRY_DELAY_2_MS = 10_000;
+const PR_LOOKUP_RETRY_DELAY_3_MS = 20_000;
+const PR_LOOKUP_RETRY_DELAYS_MS = [
+  PR_LOOKUP_RETRY_DELAY_0_MS,
+  PR_LOOKUP_RETRY_DELAY_1_MS,
+  PR_LOOKUP_RETRY_DELAY_2_MS,
+  PR_LOOKUP_RETRY_DELAY_3_MS,
+] as const;
+
 interface ProcessorEvent {
   readonly raw_body: string;
 }
@@ -341,9 +353,8 @@ async function findPullRequestForShaWithRetry(
   budgetMs: number,
 ): Promise<OpenPr | null> {
   const deadline = Date.now() + budgetMs;
-  const delays = [0, 5_000, 10_000, 20_000];
-  for (let i = 0; i < delays.length; i++) {
-    const delay = delays[i];
+  for (let i = 0; i < PR_LOOKUP_RETRY_DELAYS_MS.length; i++) {
+    const delay = PR_LOOKUP_RETRY_DELAYS_MS[i];
     if (delay > 0) {
       // Skip the wait if the deadline would land mid-sleep.
       const remaining = deadline - Date.now();
@@ -353,7 +364,7 @@ async function findPullRequestForShaWithRetry(
     if (Date.now() >= deadline) return null;
     const pr = await findPullRequestForSha(repo, sha, token);
     if (pr) return pr;
-    const next = delays[i + 1];
+    const next = PR_LOOKUP_RETRY_DELAYS_MS[i + 1];
     if (next !== undefined) {
       logger.info('Open PR not found yet for SHA — will retry', {
         repo,

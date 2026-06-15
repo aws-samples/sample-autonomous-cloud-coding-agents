@@ -31,7 +31,8 @@ const sm = new SecretsManagerClient({});
  * timeout. After rotation, the verifier transparently re-fetches once.
  */
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /**
  * Fetch a GitHub webhook secret from Secrets Manager with caching.

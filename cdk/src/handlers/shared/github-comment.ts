@@ -276,6 +276,9 @@ export const BGAGENT_COMMENT_MARKER_PREFIX = 'bgagent:task-id=';
  *  ``renderCommentBody`` time rather than failing the PATCH with 422. */
 const MAX_COMMENT_BODY_CHARS = 60_000;
 
+/** Decimal places when rendering USD cost in GitHub comment tables. */
+const COST_USD_DECIMAL_PLACES = 4;
+
 /** Sanitize a server-sourced event type for inclusion in a Markdown
  *  table cell. Strips backticks, pipes, and newlines that would break
  *  the table layout. Event types today are enum-like (snake_case), so
@@ -418,7 +421,7 @@ export function renderCommentBody(input: CommentBodyInput): string {
     lines.push(`| Duration | ${durationS}s |`);
   }
   if (costUsd !== null) {
-    lines.push(`| Cost | $${costUsd.toFixed(4)} |`);
+    lines.push(`| Cost | $${costUsd.toFixed(COST_USD_DECIMAL_PLACES)} |`);
   }
   const rendered = lines.join('\n');
   if (rendered.length <= MAX_COMMENT_BODY_CHARS) return rendered;

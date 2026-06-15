@@ -147,6 +147,9 @@ export function parseApprovalScope(scope: string): ParseResult {
  * Used by `create-task` on `bash_pattern:` / `write_path:` scopes at
  * submit time; runtime allowlist evaluation does not re-check.
  */
+/** Wildcard-to-total-length ratio above which a pattern is degenerate (§7.4). */
+const DEGENERATE_WILDCARD_RATIO_THRESHOLD = 0.5;
+
 export function isDegeneratePattern(pattern: string): boolean {
   const trimmed = pattern.trim();
   if (trimmed.length <= 2) return true;
@@ -154,5 +157,5 @@ export function isDegeneratePattern(pattern: string): boolean {
   const wildcardChars = (trimmed.match(/[*?]/g) ?? []).length;
   const literalChars = trimmed.length - wildcardChars;
   if (literalChars === 0) return true;
-  return wildcardChars / trimmed.length > 0.5;
+  return wildcardChars / trimmed.length > DEGENERATE_WILDCARD_RATIO_THRESHOLD;
 }
