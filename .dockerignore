@@ -9,6 +9,14 @@ cdk/cdk.out/
 cdk/lib/
 cdk/node_modules/
 
+# integ-runner output dirs. The agent artifact's build context is the repo
+# root, and integ-runner writes its synth/snapshot output UNDER that root
+# (cdk/test/integ/cdk-integ.out.<test>.ts[.snapshot]/). Without these excludes,
+# staging the root copies its own output dir into itself recursively until the
+# path overflows (ENAMETOOLONG). Mirrors .gitignore lines 70-71.
+cdk/test/integ/cdk-integ.out.*/
+cdk/test/integ/*.snapshot/
+
 # CLI and docs build artifacts
 cli/lib/
 cli/node_modules/
