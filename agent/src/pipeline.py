@@ -566,6 +566,8 @@ def run_task(
     task_id: str = "",
     hydrated_context: dict | None = None,
     system_prompt_overrides: str = "",
+    build_command: str = "",
+    lint_command: str = "",
     prompt_version: str = "",
     memory_id: str = "",
     resolved_workflow: dict | None = None,
@@ -610,6 +612,8 @@ def run_task(
         aws_region=aws_region,
         task_id=task_id,
         system_prompt_overrides=system_prompt_overrides,
+        build_command=build_command,
+        lint_command=lint_command,
         resolved_workflow=resolved_workflow,
         branch_name=branch_name,
         pr_number=pr_number,
@@ -997,8 +1001,8 @@ def run_task(
                 safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
-                build_passed = verify_build(setup.repo_dir)
-                lint_passed = verify_lint(setup.repo_dir)
+                build_passed = verify_build(setup.repo_dir, config.build_command)
+                lint_passed = verify_lint(setup.repo_dir, config.lint_command)
                 pr_url = ensure_pr(
                     config,
                     setup,

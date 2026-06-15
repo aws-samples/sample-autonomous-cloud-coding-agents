@@ -107,6 +107,27 @@ export interface BlueprintProps {
      * Override the default poll interval (ms) for awaiting agent completion.
      */
     readonly pollIntervalMs?: number;
+
+    /**
+     * Command the agent runs to BUILD/verify the repo before opening a PR
+     * (and as the pre-change baseline). Drives build-regression gating: if
+     * the repo built green before the agent's change and fails after, the
+     * task fails. Defaults to ``mise run build`` when unset.
+     *
+     * Set this for repos that do NOT use mise (e.g. ``'npm run build'``,
+     * ``'gradle build'``, ``'make'``). Without a runnable build command,
+     * build-regression gating is INERT — a change that breaks the build
+     * still reports success (the agent emits a one-time warning on the PR).
+     * Runs in the agent's cloud container against the cloned repo; this is a
+     * compile/test verification, NOT a deployment.
+     */
+    readonly buildCommand?: string;
+
+    /**
+     * Command the agent runs to LINT the repo (advisory gate). Defaults to
+     * ``mise run lint`` when unset. Same semantics as ``buildCommand``.
+     */
+    readonly lintCommand?: string;
   };
 
   /**
@@ -233,6 +254,12 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) {
       item.poll_interval_ms = { N: String(props.pipeline.pollIntervalMs) };
     }
+    if (props.pipeline?.buildCommand) {
+      item.build_command = { S: props.pipeline.buildCommand };
+    }
+    if (props.pipeline?.lintCommand) {
+      item.lint_command = { S: props.pipeline.lintCommand };
+    }
     if (this.egressAllowlist.length > 0) {
       item.egress_allowlist = { L: this.egressAllowlist.map(d => ({ S: d })) };
     }
@@ -311,6 +338,8 @@ export class Blueprint extends Construct {
     if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
+    if (props.pipeline?.buildCommand) fields.push(', #build_command = :build_command');
+    if (props.pipeline?.lintCommand) fields.push(', #lint_command = :lint_command');
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
@@ -326,6 +355,8 @@ export class Blueprint extends Construct {
     if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
+    if (props.pipeline?.buildCommand) names['#build_command'] = 'build_command';
+    if (props.pipeline?.lintCommand) names['#lint_command'] = 'lint_command';
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
     if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
@@ -341,6 +372,8 @@ export class Blueprint extends Construct {
     if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
+    if (props.pipeline?.buildCommand) values[':build_command'] = { S: props.pipeline.buildCommand };
+    if (props.pipeline?.lintCommand) values[':lint_command'] = { S: props.pipeline.lintCommand };
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
     if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };

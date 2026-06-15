@@ -248,6 +248,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
+    build_command: repoConfig?.build_command,
+    lint_command: repoConfig?.lint_command,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
   };
@@ -531,6 +533,11 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
+    // #1: per-repo build/lint verification commands. Absent → agent defaults
+    // to ``mise run build`` / ``mise run lint``. Set for non-mise repos so
+    // build-regression gating actually runs the repo's real command.
+    ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
+    ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
     // Cedar HITL: the agent's PreToolUse hook uses this to compute
     // the maxLifetime ceiling on per-gate approval timeouts (§6.5).

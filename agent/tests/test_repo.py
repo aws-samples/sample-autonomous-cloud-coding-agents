@@ -11,7 +11,6 @@ differently-named one, the fetch 404s, and the child falls back to main.
 
 from unittest.mock import patch
 
-from config import AGENT_WORKSPACE
 from models import RepoSetup, TaskConfig
 
 

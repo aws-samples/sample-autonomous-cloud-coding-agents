@@ -374,6 +374,8 @@ def _run_task_background(
     session_id: str = "",
     hydrated_context: dict | None = None,
     system_prompt_overrides: str = "",
+    build_command: str = "",
+    lint_command: str = "",
     prompt_version: str = "",
     memory_id: str = "",
     resolved_workflow: dict | None = None,
@@ -460,6 +462,8 @@ def _run_task_background(
             task_id=task_id,
             hydrated_context=hydrated_context,
             system_prompt_overrides=system_prompt_overrides,
+            build_command=build_command,
+            lint_command=lint_command,
             prompt_version=prompt_version,
             memory_id=memory_id,
             resolved_workflow=resolved_workflow,
@@ -511,6 +515,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         inp.get("model_id") or inp.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL", "")
     )
     system_prompt_overrides = inp.get("system_prompt_overrides", "")
+    # #1: per-repo build/lint verification commands. Empty → agent defaults to mise.
+    build_command = inp.get("build_command", "")
+    lint_command = inp.get("lint_command", "")
     max_turns = int(inp.get("max_turns", 0)) or int(os.environ.get("MAX_TURNS", "100"))
     max_budget_usd = float(inp.get("max_budget_usd", 0)) or None
     aws_region = inp.get("aws_region") or os.environ.get("AWS_REGION", "")
@@ -628,6 +635,8 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "session_id": session_id,
         "hydrated_context": hydrated_context,
         "system_prompt_overrides": system_prompt_overrides,
+        "build_command": build_command,
+        "lint_command": lint_command,
         "prompt_version": prompt_version,
         "memory_id": memory_id,
         "resolved_workflow": resolved_workflow,

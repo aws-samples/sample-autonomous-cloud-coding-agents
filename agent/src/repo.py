@@ -153,36 +153,47 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     else:
         notes.append("mise install: OK")
 
-    # Initial build (record whether the project builds before agent changes)
-    log("SETUP", "Running initial build (mise run build)...")
+    # Initial build (record whether the project builds before agent changes).
+    # #1: use the repo's configured build command (default mise run build).
+    from post_hooks import (
+        DEFAULT_BUILD_COMMAND,
+        DEFAULT_LINT_COMMAND,
+        resolve_verify_argv,
+    )
+
+    build_argv = resolve_verify_argv(config.build_command, DEFAULT_BUILD_COMMAND)
+    build_cmd_str = " ".join(build_argv)
+    log("SETUP", f"Running initial build ({build_cmd_str})...")
     result = run_cmd(
-        ["mise", "run", "build"],
-        label="mise-run-build-pre",
+        build_argv,
+        label="verify-build-pre",
         cwd=repo_dir,
         check=False,
     )
     if result.returncode != 0:
-        note = "Initial build (mise run build) FAILED before agent changes"
+        note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
         notes.append(note)
         build_before = False
     else:
-        notes.append("Initial build (mise run build): OK")
+        notes.append(f"Initial build ({build_cmd_str}): OK")
         build_before = True
 
     # Initial lint baseline (record whether lint passes before agent changes)
-    log("SETUP", "Running initial lint (mise run lint)...")
+    lint_argv = resolve_verify_argv(config.lint_command, DEFAULT_LINT_COMMAND)
+    lint_cmd_str = " ".join(lint_argv)
+    log("SETUP", f"Running initial lint ({lint_cmd_str})...")
     result = run_cmd(
-        ["mise", "run", "lint"],
-        label="mise-run-lint-pre",
+        lint_argv,
+        label="verify-lint-pre",
         cwd=repo_dir,
         check=False,
     )
     if result.returncode != 0:
-        note = "Initial lint (mise run lint) FAILED before agent changes"
+        note = f"Initial lint ({lint_cmd_str}) FAILED before agent changes"
         notes.append(note)
         lint_before = False
     else:
-        notes.append("Initial lint (mise run lint): OK")
+        notes.append(f"Initial lint ({lint_cmd_str}): OK")
         lint_before = True
 
     # Detect default branch (used as the PR base + the commit-diff range).
