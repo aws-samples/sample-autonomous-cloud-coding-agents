@@ -104,7 +104,7 @@ const githubTokenSecretArn = output('GitHubTokenSecretArn');
 // Until these hold real values the gate submits will FAIL at clone/preflight
 // (like scenario 2) rather than reaching AWAITING_APPROVAL — so flip them to the
 // provisioned repo/secret before relying on scenarios 3 & 4.
-const SANDBOX_REPO = 'PLACEHOLDER-ORG/abca-integ-sandbox';
+const SANDBOX_REPO = 'ayushtr-aws/abca-integ-sandbox';
 const PRESEEDED_PAT_SECRET = 'bgagent/integ/github-pat';
 
 const integ = new IntegTest(app, 'TaskLifecycle', {
