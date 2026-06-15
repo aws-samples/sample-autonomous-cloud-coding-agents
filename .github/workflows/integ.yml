@@ -220,6 +220,12 @@ jobs:
         run: yarn install --immutable
 
       - name: Run integ tests (deploy → assert → destroy)
+        # COMMIT_HASH drives the per-run unique stack name `int-<hash>` (see
+        # cdk/test/integ/integ.task-lifecycle.ts + cdk/mise.toml). Using the
+        # resolved head SHA means a stranded stack from a failed teardown never
+        # collides with / blocks a later run on a different commit.
+        env:
+          COMMIT_HASH: ${{ needs.resolve.outputs.head_sha }}
         run: mise //cdk:integ
 
       # Safety net: integ-runner forces teardown on success and failure, but if
@@ -233,55 +239,37 @@ jobs:
       # CloudFormation name instead. delete-stack is idempotent (no-op if
       # already gone), so `|| true` only guards transient API errors.
       #
-      # Both integ stacks are swept: backgroundagent-integ (Phase-0 smoke) and
-      # backgroundagent-integ-lifecycle (Phase-1 full-stack lifecycle).
+      # Best-effort delete-stack safety net for crash/cancel cases. integ-runner
+      # already runs its own destroy (and tolerates the expected ENI DELETE_FAILED
+      # via expectError); this only catches a run that died BEFORE integ-runner's
+      # own teardown (e.g. the job was cancelled mid-deploy).
       #
-      # RETRY-WITH-BACKOFF: the full lifecycle stack runs the AgentCore Runtime
-      # in VPC mode, which injects service-managed ("agentic_ai") ENIs into the
-      # private subnets. When CloudFormation deletes the Runtime resource, those
-      # ENIs are reclaimed ASYNCHRONOUSLY by AWS — for a minute or few AFTER the
-      # Runtime is gone. A single delete-stack races that reaper and fails with
-      # DELETE_FAILED on the subnets + RuntimeSG ("has dependencies / dependent
-      # object"). Empirically a second delete a few minutes later succeeds once
-      # the ENIs have drained. So we loop: delete, wait, and on DELETE_FAILED
-      # back off and re-issue. Only after exhausting all attempts do we fail the
-      # step loudly (a genuine leak that needs a human).
-      - name: Ensure stacks torn down
+      # Stacks swept: backgroundagent-integ (Phase-0 smoke, fixed name) and the
+      # Phase-1 per-run stack `int-<short-sha>` (matches the name computed in
+      # cdk/test/integ/integ.task-lifecycle.ts from the same head SHA).
+      #
+      # IMPORTANT — this step does NOT retry-until-deleted and does NOT fail the
+      # job on a stranded stack. The AgentCore Runtime's service-managed
+      # `agentic_ai` ENIs are released asynchronously by AWS (minutes to hours),
+      # so an immediate delete reliably hits DELETE_FAILED on the subnets/SG/VPC.
+      # Because the stack name is now per-commit-UNIQUE, a stranded `int-<sha>`
+      # stack never blocks a future run, so we leave it for the out-of-band
+      # ephemeral sweeper to reclaim once the ENIs detach. We fire one delete to
+      # start the teardown and move on.
+      - name: Ensure stacks torn down (best effort)
         if: always()
         env:
           AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
         run: |
           set -uo pipefail
-
-          # Delete one stack, retrying on the async-ENI-reaper DELETE_FAILED race.
-          # Returns 0 once the stack no longer exists; non-zero only if every
-          # attempt is exhausted while the stack still exists.
-          teardown() {
-            local stack="$1" attempts=6 i status
-            for ((i=1; i<=attempts; i++)); do
-              aws cloudformation delete-stack --stack-name "$stack" || true
-              # wait returns non-zero on DELETE_FAILED or if the stack is gone;
-              # we read the real status afterward rather than trust its exit code.
-              aws cloudformation wait stack-delete-complete --stack-name "$stack" 2>/dev/null || true
-              status="$(aws cloudformation describe-stacks --stack-name "$stack" \
-                --query 'Stacks[0].StackStatus' --output text 2>&1 || true)"
-              if echo "$status" | grep -qiE 'does not exist|ValidationError'; then
-                echo "✅ $stack deleted (attempt $i)"
-                return 0
-              fi
-              echo "⏳ $stack still present after attempt $i (status: $status) — backing off for the ENI reaper"
-              sleep $((i * 60))   # linear backoff: 60s, 120s, ... up to 6 min
-            done
-            echo "❌ $stack still present after $attempts attempts — manual cleanup required (likely orphaned agentic_ai ENIs)"
-            return 1
-          }
-
-          rc=0
-          for stack in backgroundagent-integ backgroundagent-integ-lifecycle; do
-            teardown "$stack" || rc=1
+          INT_STACK="int-$(printf '%s' "$HEAD_SHA" | cut -c1-8)"
+          for stack in backgroundagent-integ "$INT_STACK"; do
+            echo "Best-effort delete-stack: $stack"
+            aws cloudformation delete-stack --stack-name "$stack" || true
           done
-          exit $rc
+          echo "Initiated teardown; stranded int-* stacks (if any) are reclaimed by the ephemeral sweeper once their ENIs detach."
 
       # Sandbox cleanup for the gate scenarios (3 & 4): coding/new-task-v1 pushes
       # a `bgagent/<task_id>/<slug>` branch and (on approve) opens a PR on the

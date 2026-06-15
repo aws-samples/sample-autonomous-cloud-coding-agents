@@ -63,6 +63,25 @@ const presentString = Match.objectLike({ S: Match.stringLikeRegexp('.+') });
 
 const app = new App();
 
+// Per-run UNIQUE stack name: `int-<commit-hash>`. A fixed name is a trap for this
+// stack — the AgentCore Runtime injects service-managed `agentic_ai` ENIs that AWS
+// releases ASYNCHRONOUSLY, so `cdk destroy` reliably fails the subnet/SG/VPC
+// deletes (DependencyViolation) and strands the stack. With a fixed name that
+// stranded stack BLOCKS the next run (name conflict). A unique per-commit name
+// means a failed teardown never blocks a later run, and an out-of-band ephemeral
+// sweeper can reclaim `int-*` stacks once their ENIs detach.
+//
+// The hash comes from the COMMIT_HASH env var (set by CI from the resolved head
+// SHA; the mise //cdk:integ task falls back to the local git SHA). We read the
+// ENV directly rather than CDK context: integ-runner synthesizes the test app in
+// its own subprocess and does NOT forward CDK_CONTEXT_JSON / `-c` from our shell
+// to that synth, but the subprocess DOES inherit the environment — so the env var
+// reaches `process.env` here reliably where `tryGetContext` would not. Falls back
+// to 'local' outside CI/git. (Date.now()/random are avoided — they'd break integ
+// snapshot determinism; CI always supplies a real sha.)
+const commitHash = (process.env.COMMIT_HASH ?? '').slice(0, 8) || 'local';
+const stackName = `int-${commitHash}`;
+
 // The real, full production stack. Environment-agnostic on purpose (same
 // rationale as Phase 0): an explicit env would force the IntegTest DeployAssert
 // stack — always environment-agnostic — into cross-region references it cannot
@@ -70,8 +89,8 @@ const app = new App();
 //
 // DO NOT set runtimeName/memoryName here or pin them in agent.ts for this
 // deploy: the committed defaults auto-generate stack-name-scoped unique names,
-// which is exactly what lets backgroundagent-integ-lifecycle stand alone.
-const stack = new AgentStack(app, 'backgroundagent-integ-lifecycle', {
+// so each `int-<hash>` stack gets its own non-colliding AgentCore names.
+const stack = new AgentStack(app, stackName, {
   description: 'ABCA Phase-1 integ lifecycle stack (full AgentStack: orchestrator + agent runtime)',
 });
 
@@ -134,10 +153,23 @@ const integ = new IntegTest(app, 'TaskLifecycle', {
   // deploy is correct here.
   stackUpdateWorkflow: false,
   // Force teardown on success and failure so a failed assertion never strands
-  // the (expensive) full stack in the shared E2E account. The CI workflow keeps
-  // a CloudFormation delete-stack safety net on top of this.
+  // the (expensive) full stack in the shared E2E account.
+  //
+  // expectError on destroy: `cdk destroy` RELIABLY fails this stack — the
+  // AgentCore Runtime's service-managed `agentic_ai` ENIs are released
+  // asynchronously by AWS, so the subnet/SG/VPC deletes hit DependencyViolation
+  // ("has dependencies and cannot be deleted" / "has a dependent object") while
+  // the ENIs linger. Without expectError, integ-runner would mark the whole run
+  // FAILED on teardown alone — masking whether the ASSERTIONS passed. We tolerate
+  // the teardown failure (scoped to the dependency-violation message so unrelated
+  // teardown bugs still surface) and hand the stranded `int-<hash>` stack to the
+  // out-of-band ephemeral sweeper, which reclaims it once AWS detaches the ENIs.
   cdkCommandOptions: {
-    destroy: { args: { force: true } },
+    destroy: {
+      args: { force: true },
+      expectError: true,
+      expectedMessage: 'cannot be deleted|dependent object|DELETE_FAILED',
+    },
   },
 });
 
