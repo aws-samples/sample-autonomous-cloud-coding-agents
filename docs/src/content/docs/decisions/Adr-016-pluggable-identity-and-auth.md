@@ -31,6 +31,8 @@ ABCA propagates *who* as data but not as an enforceable credential. Issue [#245]
 
 `bedrock-agentcore` stays in `agent/pyproject.toml` as vestigial. The Phase-2.0a AgentCore Identity attempt parked on a USER_FEDERATION service-side bug, so Phase-2.0b reads Secrets Manager directly. The platform side has since moved: AgentCore Identity GA'd 2025-10-13 and the OBO (`ON_BEHALF_OF_TOKEN_EXCHANGE`) flow GA'd April 2026 across 14 regions. This ADR records the decision to resume that path rather than build a credential plane from scratch. The RFC behind it is issue [#249](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/249).
 
+> **Phase 0 re-validation, executed 2026-06-14 (`us-east-1`): GO-LIKELY.** A throwaway spike confirmed the parked USER_FEDERATION bug does not reproduce in the current service build. The PAR (`request_uri`, RFC 9126) parameter that was the prime no-go suspect stays on AgentCore's own front-channel; AgentCore then redirects to the downstream provider with plain authorization-code + PKCE, so no `request_uri` reaches the provider. The production-shape JWT binding (`get_workload_access_token_for_jwt` on the IdP's `(iss, sub)`) and the substrate-independent path (vault calls from a non-Runtime boto3 context) both passed. The one step left for a full GO is a human OAuth-consent click, which cannot run headless. The recorded result is on [#249](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/249); it is what reopens Phase 1.
+
 ## Decision
 
 Introduce a **pluggable identity-and-auth abstraction with two seams**: one for inbound principal verification, one for outbound credential resolution. The verification provider and the token backend each become swappable behind a contract, with AgentCore Identity as one implementation rather than the only path.
@@ -73,7 +75,7 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 
 | Phase | Action | Gate |
 |---|---|---|
-| P0 | Re-validate `USER_FEDERATION` / OBO post-GA against the live service. | Recorded go/no-go with date + region (OBO GA'd April 2026, 14 regions). |
+| P0 ✅ | Re-validate `USER_FEDERATION` / OBO post-GA against the live service. | **Done 2026-06-14 (`us-east-1`): GO-LIKELY** — parked PAR bug does not reproduce (see [#249](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/249)). Full GO pending one human consent click. |
 | P1 | Route GitHub through the vault `GithubOauth2` provider behind a flag; retire the shared PAT. | Flag-gated; PAT fallback retained until green. |
 | P2 | Move Linear onto the vault (`CustomOauth2`); delete the manual-refresh logic in `linear-oauth-resolver.ts`. | Per-workspace token isolation preserved. |
 | P3 | OBO `act`-claim delegation feeding #237's `correlation` block. | Delegation chain visible in audit. |
