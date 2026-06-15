@@ -137,7 +137,7 @@ async function resolveToken(ctx: LinearFeedbackContext): Promise<string | null> 
       linear_workspace_id: ctx.linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- Linear feedback is best-effort; null token skips the comment without failing the caller
   }
 }
 
