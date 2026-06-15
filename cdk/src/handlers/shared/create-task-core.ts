@@ -748,7 +748,7 @@ export async function createTaskCore(
       return errorResponse(500, ErrorCode.INTERNAL_ERROR,
         'Failed to generate upload instructions. Please try again.', requestId);
     }
-    const taskExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 min auto-cancel window
+    const taskExpiresAt = new Date(Date.now() + PENDING_UPLOAD_EXPIRY_MINUTES * 60 * 1000).toISOString();
     return successResponse(202, {
       ...toTaskDetail(taskRecord),
       upload_instructions: uploadInstructions,
@@ -759,12 +759,18 @@ export async function createTaskCore(
   return successResponse(201, toTaskDetail(taskRecord), requestId);
 }
 
+/** Auto-cancel window for tasks awaiting presigned uploads (minutes). */
+const PENDING_UPLOAD_EXPIRY_MINUTES = 30;
+
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Base64 encodes 3 bytes into 4 characters — length must be a multiple of this. */
+const BASE64_GROUP_SIZE = 4;
 
 /** Validate that a string is well-formed base64. */
 function isValidBase64(data: string): boolean {
   if (data.length === 0) return false;
-  if (data.length % 4 !== 0) return false;
+  if (data.length % BASE64_GROUP_SIZE !== 0) return false;
   return BASE64_PATTERN.test(data);
 }
 
