@@ -436,24 +436,33 @@ pollDenyDecision
   .waitForAssertions(GATE_POLL);
 
 // --- Execution order ----------------------------------------------------------
-// Auth first. Scenario 1 (no repo) can submit immediately. Scenario 2 needs its
-// repo onboarded BEFORE submit (else 422 at the onboarding gate), so onboardFail
-// precedes submitFail. Both no-repo/clone-fail terminals are then awaited so they
-// proceed concurrently. Next seed the GitHub token AND onboard the sandbox, then
-// submit both gate tasks so they spin up concurrently and park at their gates;
-// finally drive approve then deny. The approve/deny flows are sequential because
-// each POST needs the request_id read from the parked task's approval row.
+// Auth first, then SEED THE GITHUB TOKEN BEFORE ANY SUBMIT. This ordering is
+// load-bearing: the orchestrator's resolveGitHubToken caches the secret value
+// for 5 min keyed by ARN (context-hydration.ts). Any coding-workflow task that
+// runs GitHub preflight reads + caches the token. Scenario 2 (coding/new-task-v1)
+// runs preflight too — so if it ran BEFORE seedPut, it would cache the stack's
+// INITIAL EMPTY secret and every later gate task would reuse that empty token →
+// preflight 401 GITHUB_UNREACHABLE → FAILED before ever reaching the gate
+// (observed live). Seeding right after auth means the secret is populated before
+// the first token read, so no empty value is ever cached. This is exactly the
+// documented operator flow (QUICK_START §4: populate the secret before submitting
+// tasks) — no agent.ts change.
+//
+// Onboarding: scenario 2's repo and the sandbox both need a RepoTable row before
+// submit (else 422 REPO_NOT_ONBOARDED), so both onboard steps precede their
+// submits. Gate approve/deny run sequentially since each POST needs the
+// request_id read from the parked task's approval row.
 createUser
   .next(setPassword)
   .next(auth)
-  .next(submitComplete)
+  .next(seedGet)
+  .next(seedPut)
   .next(onboardFailRepo)
+  .next(onboardSandbox)
+  .next(submitComplete)
   .next(submitFail)
   .next(pollComplete)
   .next(pollFail)
-  .next(seedGet)
-  .next(seedPut)
-  .next(onboardSandbox)
   .next(submitApprove)
   .next(submitDeny)
   .next(pollGateApprove)
