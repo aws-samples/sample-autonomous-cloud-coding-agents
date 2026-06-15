@@ -492,7 +492,7 @@ class TestVerifyHandlers:
         from workflow.runner import _handle_verify_build
 
         # build red after, but it was already red before → not a regression.
-        monkeypatch.setattr("post_hooks.verify_build", lambda _d: False)
+        monkeypatch.setattr("post_hooks.verify_build", lambda _d, _c="": False)
         wf = _workflow(
             [
                 {"kind": "verify_build", "name": "build", "gate": "regression_only"},
@@ -509,7 +509,7 @@ class TestVerifyHandlers:
         from models import RepoSetup
         from workflow.runner import _handle_verify_build
 
-        monkeypatch.setattr("post_hooks.verify_build", lambda _d: False)
+        monkeypatch.setattr("post_hooks.verify_build", lambda _d, _c="": False)
         wf = _workflow(
             [
                 {"kind": "verify_build", "name": "build", "gate": "regression_only"},
@@ -525,7 +525,7 @@ class TestVerifyHandlers:
         from workflow.runner import _handle_verify_lint
 
         # read_only workflow: a lint failure must not gate (symmetry with build).
-        monkeypatch.setattr("post_hooks.verify_lint", lambda _d: False)
+        monkeypatch.setattr("post_hooks.verify_lint", lambda _d, _c="": False)
         wf = _workflow(
             [
                 {"kind": "clone_repo"},

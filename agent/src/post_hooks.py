@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -11,14 +12,35 @@ from shell import log, run_cmd
 if TYPE_CHECKING:
     from models import AgentResult, RepoSetup, TaskConfig
 
+# Default verification commands (#1 build-gate fix). A repo that uses mise gets
+# these for free; a non-mise repo sets ``pipeline.buildCommand`` /
+# ``lintCommand`` in its blueprint (threaded to the agent as build_command /
+# lint_command) so gating runs the repo's real command.
+DEFAULT_BUILD_COMMAND = "mise run build"
+DEFAULT_LINT_COMMAND = "mise run lint"
 
-def verify_build(repo_dir: str) -> bool:
-    """Run mise run build after agent completion to verify the build."""
-    log("POST", "Running post-agent build verification (mise run build)...")
+
+def resolve_verify_argv(command: str | None, default: str) -> list[str]:
+    """Split a configured verify command into argv, falling back to the default.
+
+    Empty/whitespace/None ``command`` → the default (mise). Parsed with ``shlex`` so
+    a configured ``'npm run build && npm test'`` would need a shell — we keep it
+    simple argv here; chained shell commands should be wrapped in a mise/npm
+    task by the repo. A single command with args (``npm run build``) splits
+    cleanly.
+    """
+    cmd = (command or "").strip() or default
+    return shlex.split(cmd)
+
+
+def verify_build(repo_dir: str, command: str = "") -> bool:
+    """Run the configured build command (default ``mise run build``) to verify the build."""
+    argv = resolve_verify_argv(command, DEFAULT_BUILD_COMMAND)
+    log("POST", f"Running post-agent build verification ({' '.join(argv)})...")
     try:
         result = run_cmd(
-            ["mise", "run", "build"],
-            label="mise-run-build-post",
+            argv,
+            label="verify-build-post",
             cwd=repo_dir,
             check=False,
         )
@@ -32,13 +54,14 @@ def verify_build(repo_dir: str) -> bool:
     return True
 
 
-def verify_lint(repo_dir: str) -> bool:
-    """Run mise run lint after agent completion to verify lint passes."""
-    log("POST", "Running post-agent lint verification (mise run lint)...")
+def verify_lint(repo_dir: str, command: str = "") -> bool:
+    """Run the configured lint command (default ``mise run lint``) to verify lint passes."""
+    argv = resolve_verify_argv(command, DEFAULT_LINT_COMMAND)
+    log("POST", f"Running post-agent lint verification ({' '.join(argv)})...")
     try:
         result = run_cmd(
-            ["mise", "run", "lint"],
-            label="mise-run-lint-post",
+            argv,
+            label="verify-lint-post",
             cwd=repo_dir,
             check=False,
         )

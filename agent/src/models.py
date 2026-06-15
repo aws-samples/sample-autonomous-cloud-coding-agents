@@ -128,6 +128,13 @@ class TaskConfig(BaseModel):
     max_turns: int = 10
     max_budget_usd: float | None = None
     system_prompt_overrides: str = ""
+    # Per-repo build/lint verification commands (#1 build-gate fix). When set
+    # (from the blueprint, via the payload), the agent runs these instead of
+    # the hardcoded ``mise run build`` / ``mise run lint`` to gate build/lint
+    # regressions. Empty → default to mise. Set for non-mise repos (e.g.
+    # ``npm run build``) so gating actually runs the repo's real command.
+    build_command: str = ""
+    lint_command: str = ""
     # The pinned workflow this task runs ({"id", "version"}), resolved at the
     # create-task boundary and threaded through the payload (#248). None on
     # local/batch runs, where the pipeline defaults to coding/new-task-v1.
