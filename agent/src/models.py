@@ -275,6 +275,13 @@ class RepoSetup(BaseModel):
     build_before: bool = True
     lint_before: bool = True
     default_branch: str = "main"
+    # #1: True when the build verification command is INERT — it could not run
+    # at all (no build task / command not found) AND no explicit build_command
+    # was configured. In that state build-regression gating is effectively OFF
+    # (a change that breaks the build still reports success), so the agent
+    # surfaces a one-time warning on the PR. Distinct from a genuinely red build
+    # (command ran, exited non-zero), which IS meaningful gating signal.
+    build_gate_inert: bool = False
 
 
 class TokenUsage(BaseModel):

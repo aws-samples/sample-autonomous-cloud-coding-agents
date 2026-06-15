@@ -9,6 +9,7 @@ import post_hooks
 from post_hooks import (
     DEFAULT_BUILD_COMMAND,
     DEFAULT_LINT_COMMAND,
+    is_verify_command_inert,
     resolve_verify_argv,
     verify_build,
     verify_lint,
@@ -69,3 +70,21 @@ class TestVerifyBuildHonorsCommand:
 
         monkeypatch.setattr(post_hooks, "run_cmd", boom)
         assert verify_build("/repo", "npm run build") is False
+
+
+class TestIsVerifyCommandInert:
+    def test_mise_no_tasks_defined_is_inert(self):
+        assert is_verify_command_inert(1, "mise ERROR no tasks defined in /repo") is True
+
+    def test_command_not_found_exit_127_is_inert(self):
+        assert is_verify_command_inert(127, "gradle: command not found") is True
+
+    def test_no_task_named_is_inert(self):
+        assert is_verify_command_inert(1, "mise ERROR: no task named 'build'") is True
+
+    def test_genuine_build_failure_is_NOT_inert(self):
+        # Real compiler/test output, exited non-zero → meaningful gating signal.
+        assert is_verify_command_inert(2, "TypeError: cannot read property 'x'\n1 test failed") is False
+
+    def test_clean_exit_is_not_inert(self):
+        assert is_verify_command_inert(0, "") is False

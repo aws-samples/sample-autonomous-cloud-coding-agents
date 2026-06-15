@@ -20,6 +20,31 @@ DEFAULT_BUILD_COMMAND = "mise run build"
 DEFAULT_LINT_COMMAND = "mise run lint"
 
 
+def is_verify_command_inert(returncode: int, stderr: str) -> bool:
+    """True when a verify command did not actually RUN (vs ran-and-failed).
+
+    Distinguishes the #1 inert-gate state — the build/lint command isn't
+    runnable in this repo, so gating is effectively OFF — from a genuine red
+    build (command executed, exited non-zero), which IS meaningful signal.
+
+    Heuristics (conservative — only the unambiguous "couldn't run" signals):
+      - exit 127: shell "command not found" (e.g. ``gradle`` not installed).
+      - mise "no tasks defined" / "no task named" / "not found": the configured
+        (or default ``mise run build``) task does not exist in the repo.
+    A repo that genuinely fails its build returns some other non-zero code with
+    real compiler/test output, which this does NOT flag.
+    """
+    if returncode == 127:
+        return True
+    s = (stderr or "").lower()
+    return (
+        "no tasks defined" in s
+        or "no task named" in s
+        or ("mise" in s and "not found" in s)
+        or "command not found" in s
+    )
+
+
 def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     """Split a configured verify command into argv, falling back to the default.
 
@@ -305,10 +330,25 @@ def ensure_pr(
 
     build_status = "PASS" if build_passed else "FAIL"
     lint_status = "PASS" if lint_passed else "FAIL"
+    # #1: show the actual commands run (default mise), not a hardcoded label.
+    build_label = (config.build_command or DEFAULT_BUILD_COMMAND).strip()
+    lint_label = (config.lint_command or DEFAULT_LINT_COMMAND).strip()
 
     cost_line = ""
     if agent_result and agent_result.cost_usd is not None:
         cost_line = f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
+
+    # #1: when build-regression gating is inert (no runnable build command, none
+    # configured), say so plainly — otherwise a green "build: PASS" misleads:
+    # nothing was actually verified.
+    gate_warning = ""
+    if getattr(setup, "build_gate_inert", False):
+        gate_warning = (
+            "> ⚠️ **Build-regression gating is OFF for this repo.** No runnable "
+            f"`{DEFAULT_BUILD_COMMAND}` task was found and no build command is configured, "
+            "so a change that breaks the build still reports success. To enable gating, set "
+            "`pipeline.buildCommand` in this repo's ABCA blueprint (e.g. `npm run build`).\n\n"
+        )
 
     pr_body = (
         f"## Summary\n\n"
@@ -316,8 +356,9 @@ def ensure_pr(
         f"### Commits\n\n"
         f"```\n{commits}\n```\n\n"
         f"## Verification\n\n"
-        f"- `mise run build` (post-agent): **{build_status}**\n"
-        f"- `mise run lint` (post-agent): **{lint_status}**\n"
+        f"{gate_warning}"
+        f"- `{build_label}` (post-agent): **{build_status}**\n"
+        f"- `{lint_label}` (post-agent): **{lint_status}**\n"
         f"{cost_line}\n"
         f"---\n\n"
         f"By submitting this pull request, I confirm that you can use, modify, copy, "
