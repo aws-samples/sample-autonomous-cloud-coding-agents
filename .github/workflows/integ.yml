@@ -175,7 +175,12 @@ jobs:
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
     environment: integ
-    timeout-minutes: 45
+    # The lifecycle test (integ.task-lifecycle.ts) deploys the full AgentStack
+    # (orchestrator + AgentCore runtime + Docker image build) and drives real
+    # agent runs through their terminal states before destroying — far heavier
+    # than the Phase-0 trimmed smoke test. 90 min covers deploy + cold Docker
+    # build + agent runs + teardown with margin.
+    timeout-minutes: 90
     permissions:
       id-token: write
       contents: read
@@ -218,26 +223,65 @@ jobs:
         run: mise //cdk:integ
 
       # Safety net: integ-runner forces teardown on success and failure, but if
-      # the run is cancelled or crashes mid-deploy the stack can be stranded in
-      # the shared account. Delete it directly via CloudFormation so we never
+      # the run is cancelled or crashes mid-deploy a stack can be stranded in
+      # the shared account. Delete them directly via CloudFormation so we never
       # leak billable resources.
       #
-      # NOTE: `cdk destroy backgroundagent-integ` would NOT work here — it
-      # synthesizes the main app (src/main.ts), which does not contain the integ
-      # stack, so it exits 0 having deleted nothing. Target the stack by its
-      # literal CloudFormation name instead. delete-stack is idempotent (no-op if
+      # NOTE: `cdk destroy <stack>` would NOT work here — it synthesizes the
+      # main app (src/main.ts), which does not contain the integ stacks, so it
+      # exits 0 having deleted nothing. Target each stack by its literal
+      # CloudFormation name instead. delete-stack is idempotent (no-op if
       # already gone), so `|| true` only guards transient API errors.
-      - name: Ensure stack torn down
+      #
+      # Both integ stacks are swept: backgroundagent-integ (Phase-0 smoke) and
+      # backgroundagent-integ-lifecycle (Phase-1 full-stack lifecycle).
+      - name: Ensure stacks torn down
         if: always()
         env:
           AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         run: |
           set -euo pipefail
-          aws cloudformation delete-stack --stack-name backgroundagent-integ || true
-          # No `|| true` on the wait: a DELETE_FAILED must surface loudly so we
+          for stack in backgroundagent-integ backgroundagent-integ-lifecycle; do
+            aws cloudformation delete-stack --stack-name "$stack" || true
+          done
+          # No `|| true` on the waits: a DELETE_FAILED must surface loudly so we
           # never silently leak billable resources in the shared account.
-          aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ
+          for stack in backgroundagent-integ backgroundagent-integ-lifecycle; do
+            aws cloudformation wait stack-delete-complete --stack-name "$stack"
+          done
+
+      # Sandbox cleanup for the gate scenarios (3 & 4): coding/new-task-v1 pushes
+      # a `bgagent/<task_id>/<slug>` branch and (on approve) opens a PR on the
+      # sandbox repo. The agent never closes these, so each run would accumulate
+      # stale branches/PRs. Reconstructing the exact branch name in the test is
+      # fragile (it depends on the agent-side slug), so we sweep by prefix here:
+      # delete every `bgagent/*` branch on the sandbox, which also closes the
+      # associated PRs. Reads the same PAT the agent used, from the pre-seeded
+      # secret. Gated on the repo vars being set so this is a no-op until the
+      # sandbox + secret are provisioned. Never fails the job — best-effort.
+      - name: Clean up sandbox PRs/branches
+        if: always() && vars.INTEG_SANDBOX_REPO != '' && vars.INTEG_PAT_SECRET_ID != ''
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          SANDBOX_REPO: ${{ vars.INTEG_SANDBOX_REPO }}
+          PAT_SECRET_ID: ${{ vars.INTEG_PAT_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          GH_TOKEN="$(aws secretsmanager get-secret-value \
+            --secret-id "$PAT_SECRET_ID" \
+            --query SecretString --output text)"
+          export GH_TOKEN
+          # List bgagent/* branch refs; delete each (deleting the branch closes
+          # any open PR from it). Best-effort: never fail the job on cleanup.
+          gh api "repos/${SANDBOX_REPO}/git/matching-refs/heads/bgagent/" \
+            --jq '.[].ref | sub("^refs/heads/"; "")' 2>/dev/null \
+          | while read -r branch; do
+              [ -n "$branch" ] || continue
+              echo "Deleting sandbox branch: $branch"
+              gh api -X DELETE "repos/${SANDBOX_REPO}/git/refs/heads/${branch}" || true
+            done || true
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
