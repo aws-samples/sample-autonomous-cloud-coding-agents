@@ -56,7 +56,8 @@ import {
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { postRollup, renderStatusBlock, rollupKindFromChildren } from './shared/orchestration-rollup';
-import { upsertStatusComment } from './shared/linear-feedback';
+import { postIssueComment, upsertStatusComment } from './shared/linear-feedback';
+import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   claimRollup,
   loadOrchestration,
@@ -464,18 +465,82 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     dependent_count: steps.length,
   });
 
+  // Human-readable label for the changed node (the predecessor that was
+  // revised), used in the surfacing comments. Prefer its Linear identifier.
+  const meta = snapshot.meta;
+  const changedRow = snapshot.children.find((c) => c.sub_issue_id === changedSubIssueId);
+  const changedLabel = changedRow?.linear_identifier ?? changedRow?.title ?? 'a predecessor';
+
+  const feedbackCtx = WORKSPACE_REGISTRY_TABLE
+    ? { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE }
+    : undefined;
+
+  const restackedLabels: string[] = [];
   for (const step of steps) {
-    await spawnRestackTask(step, snapshot.meta.release_context.platform_user_id, evt.taskId, changedSubIssueId);
+    const created = await spawnRestackTask(step, meta.release_context.platform_user_id, evt.taskId, changedSubIssueId);
+    // Surface ONLY on a genuinely NEW restack task (201). A 200 means an
+    // idempotent replay (the cascade source's stream record is redelivered
+    // multiple times — observed 3× live), and surfacing on those would post
+    // duplicate comments. ``false`` means the spawn failed/was skipped.
+    if (created !== 'created') continue;
+    const dep = step.child;
+    restackedLabels.push(dep.linear_identifier ?? dep.sub_issue_id);
+    // A6 surfacing (#34): tell the DEPENDENT's sub-issue it was re-stacked, so
+    // a reviewer watching that issue sees its PR was updated to pick up the
+    // predecessor's change. Skip synthetic integration nodes (no Linear issue).
+    if (feedbackCtx && !isIntegrationNode(dep.sub_issue_id)) {
+      try {
+        await postIssueComment(
+          feedbackCtx,
+          dep.sub_issue_id,
+          `🔄 **Re-stacked** — picked up changes from ${changedLabel} and updated this PR. `
+          + 'No action needed; review the refreshed PR when ready.',
+        );
+      } catch (err) {
+        logger.warn('A6 cascade: dependent re-stack comment failed (non-fatal)', {
+          orchestration_id: orchestrationId, sub_issue_id: dep.sub_issue_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // A6 surfacing (#35): the parent rollup is frozen from the original run, so a
+  // post-completion comment-triggered change is otherwise invisible at the
+  // epic level. Post a concise cascade note on the PARENT so the
+  // comment-to-change loop is visible there. Best-effort; Linear plane only.
+  if (feedbackCtx && restackedLabels.length > 0) {
+    try {
+      const list = restackedLabels.join(', ');
+      await postIssueComment(
+        feedbackCtx,
+        meta.parent_linear_issue_id,
+        `🔄 **${changedLabel} was revised** (via a comment) → re-stacked `
+        + `${restackedLabels.length} dependent${restackedLabels.length === 1 ? '' : 's'}: ${list}. `
+        + 'Their PRs were updated to include the change.',
+      );
+    } catch (err) {
+      logger.warn('A6 cascade: parent cascade note failed (non-fatal)', {
+        orchestration_id: orchestrationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 
-/** Spawn one coding/restack-v1 task for a direct dependent. Best-effort. */
+/**
+ * Spawn one coding/restack-v1 task for a direct dependent. Best-effort.
+ * Returns ``'created'`` for a genuinely new task (201), ``'exists'`` for an
+ * idempotent replay (200 — the source event was redelivered), or ``'failed'``.
+ * The caller surfaces the re-stack to the user ONLY on ``'created'`` so
+ * redelivered stream records don't post duplicate comments.
+ */
 async function spawnRestackTask(
   step: RestackStep,
   platformUserId: string,
   sourceTaskId: string,
   changedSubIssueId: string,
-): Promise<void> {
+): Promise<'created' | 'exists' | 'failed'> {
   const child = step.child;
   const prNumber = await resolvePrNumber(child.child_task_id);
   if (prNumber === null) {
@@ -484,7 +549,7 @@ async function spawnRestackTask(
       sub_issue_id: child.sub_issue_id,
       child_task_id: child.child_task_id,
     });
-    return;
+    return 'failed';
   }
 
   // Idempotency keyed on the SOURCE task id: this exact completion re-stacks
@@ -522,12 +587,19 @@ async function spawnRestackTask(
       pr_number: prNumber,
       status_code: result.statusCode,
     });
+    // 201 = newly created, 200 = idempotent replay (task already existed from a
+    // prior delivery of this same source event). Only 201 should surface a
+    // user-facing comment; 200 means we already did. Other codes = not created.
+    if (result.statusCode === 201) return 'created';
+    if (result.statusCode === 200) return 'exists';
+    return 'failed';
   } catch (err) {
     logger.error('A6 cascade: createTaskCore threw for dependent', {
       orchestration_id: child.orchestration_id,
       sub_issue_id: child.sub_issue_id,
       error: err instanceof Error ? err.message : String(err),
     });
+    return 'failed';
   }
 }
 

@@ -34,12 +34,21 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
   createTaskCore: (...args: unknown[]) => createTaskCoreMock(...args),
 }));
 
+const postIssueCommentMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
+  upsertStatusComment: jest.fn(),
+}));
+
 jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 process.env.TASK_TABLE_NAME = 'TaskTable';
+// A6 surfacing (#34/#35): the cascade posts Linear comments only when the
+// workspace registry is configured. Set it so the surfacing path is exercised.
+process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
 
 import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
 
@@ -249,7 +258,7 @@ describe('parseTerminalTaskRecord — A6 cascade marker', () => {
 /** Mock for the cascade path: loadOrchestration + per-dependent GetCommand pr_url. */
 function mockCascade(children: Array<{
   sub_issue_id: string; depends_on?: string[]; child_status: string;
-  child_task_id?: string; child_branch_name?: string;
+  child_task_id?: string; child_branch_name?: string; linear_identifier?: string;
 }>): void {
   const meta = {
     sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
@@ -260,6 +269,7 @@ function mockCascade(children: Array<{
     child_status: c.child_status, repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS',
     ...(c.child_task_id && { child_task_id: c.child_task_id }),
     ...(c.child_branch_name && { child_branch_name: c.child_branch_name }),
+    ...(c.linear_identifier && { linear_identifier: c.linear_identifier }),
   }));
   ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
     if (cmd._type === 'Query') return { Items: [meta, ...rows] }; // loadOrchestration
@@ -277,6 +287,7 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
     ddbSend.mockReset();
     createTaskCoreMock.mockReset();
     createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
   });
 
   test('restack on B completes → re-stacks B\'s direct dependent C (one hop)', async () => {
@@ -352,5 +363,78 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
     const gsiCalls = ddbSend.mock.calls.filter(
       (c) => c[0]?._type === 'Query' && c[0]?.input?.IndexName === 'ChildTaskIndex');
     expect(gsiCalls).toHaveLength(0);
+  });
+});
+
+describe('orchestration-reconciler handler — A6 cascade surfacing (#34/#35)', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
+  });
+
+  const iterEvent = (sub: string) => ({
+    Records: [taskRecord({
+      task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: sub, orchestration_iteration: true,
+    })],
+  }) as never;
+
+  test('posts a re-stack note on the dependent sub-issue AND a cascade note on the parent', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler(iterEvent('A'));
+
+    // Two comments: one on dependent B's sub-issue, one on the parent.
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(2);
+    const targets = postIssueCommentMock.mock.calls.map((c) => c[1]);
+    expect(targets).toContain('B');        // dependent sub-issue
+    expect(targets).toContain('PARENT');   // parent epic
+    // Dependent note names the changed predecessor by its Linear identifier.
+    const depCall = postIssueCommentMock.mock.calls.find((c) => c[1] === 'B');
+    expect(depCall[2]).toMatch(/Re-stacked/i);
+    expect(depCall[2]).toContain('ENG-1');
+    // Parent note summarizes which dependents were re-stacked.
+    const parentCall = postIssueCommentMock.mock.calls.find((c) => c[1] === 'PARENT');
+    expect(parentCall[2]).toMatch(/revised/i);
+    expect(parentCall[2]).toContain('ENG-2');
+  });
+
+  test('idempotent replay (200, NOT 201) does NOT post duplicate comments', async () => {
+    // The cascade source's stream record is redelivered → createTaskCore
+    // returns 200 (task already exists). Surfacing must NOT fire again.
+    createTaskCoreMock.mockResolvedValue({ statusCode: 200, body: '{}' });
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler(iterEvent('A'));
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+
+  test('does NOT comment on a synthetic integration node dependent (no Linear issue)', async () => {
+    // A's only direct dependent is the synthetic integration node → no
+    // sub-issue comment for it, but the parent note still posts.
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'orch_1__integration', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-int', child_branch_name: 'branch-int' },
+    ]);
+    await handler(iterEvent('A'));
+    const targets = postIssueCommentMock.mock.calls.map((c) => c[1]);
+    expect(targets).not.toContain('orch_1__integration'); // synthetic → skipped
+    expect(targets).toContain('PARENT');                   // parent note still posts
+  });
+
+  test('a comment failure on the dependent does not block the parent note (best-effort)', async () => {
+    postIssueCommentMock.mockRejectedValueOnce(new Error('linear 500')); // first (dependent) throws
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler(iterEvent('A'));
+    // Both attempted (dependent threw, parent still attempted) — no crash.
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(2);
   });
 });
