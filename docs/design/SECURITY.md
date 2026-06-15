@@ -3,7 +3,7 @@
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 
 - **Use this doc for:** understanding the security boundaries, what can go wrong, and how the platform mitigates each threat.
-- **Related docs:** [COMPUTE.md](./COMPUTE.md) for runtime isolation details, [MEMORY.md](./MEMORY.md) for memory threat analysis, [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for per-repo security configuration, [INPUT_GATEWAY.md](./INPUT_GATEWAY.md) for authentication flows.
+- **Related docs:** [COMPUTE.md](./COMPUTE.md) for runtime isolation details, [MEMORY.md](./MEMORY.md) for memory threat analysis, [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for per-repo security configuration, [INPUT_GATEWAY.md](./INPUT_GATEWAY.md) for authentication flows, [IDENTITY_AND_AUTH.md](./IDENTITY_AND_AUTH.md) for the worked identity/auth examples and the credential-plane direction.
 
 ## Design principle
 
@@ -36,7 +36,7 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 **Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](../guides/ROADMAP.md)).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](../guides/ROADMAP.md), the [ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md) two-seam design, and the [IDENTITY_AND_AUTH.md](./IDENTITY_AND_AUTH.md) worked examples).
 
 **Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole` or the ECS Fargate task role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
 
