@@ -20,6 +20,7 @@
 import { GetCommand, BatchWriteCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import {
   seedOrchestration,
+  extendOrchestration,
   deriveOrchestrationId,
   claimRollup,
   findOrchestrationChildByBranch,
@@ -301,5 +302,120 @@ describe('findOrchestrationChildByBranch (#305 A6)', () => {
       ddb as never, TABLE, 'ChildBranchIndex', 'feature/some-human-branch',
     );
     expect(result).toBeNull();
+  });
+});
+
+describe('extendOrchestration — add nodes to an already-seeded epic', () => {
+  const PARENT = 'parent-issue-1';
+  const ORCH = deriveOrchestrationId(PARENT);
+
+  /** A loadOrchestration Query response: meta + existing child rows. */
+  function existing(children: Array<{ id: string; deps?: string[]; status: string }>) {
+    const meta = {
+      orchestration_id: ORCH, sub_issue_id: '#meta', parent_linear_issue_id: PARENT,
+      linear_workspace_id: 'WS', repo: 'o/r', child_count: children.length,
+      platform_user_id: 'u1', created_at: NOW, updated_at: NOW,
+    };
+    const rows = children.map((c) => ({
+      orchestration_id: ORCH, sub_issue_id: c.id, parent_linear_issue_id: PARENT,
+      linear_workspace_id: 'WS', repo: 'o/r', depends_on: c.deps ?? [],
+      child_status: c.status, created_at: NOW, updated_at: NOW,
+    }));
+    return { Items: [meta, ...rows] };
+  }
+
+  function extendParams(graph: SubIssueNode[]) {
+    return {
+      tableName: TABLE, parentLinearIssueId: PARENT, linearWorkspaceId: 'WS',
+      repo: 'o/r', graph, now: NOW,
+    };
+  }
+
+  test('adds a NEW node blocked-by a finished node → releasable immediately', async () => {
+    const ddb = makeDdb();
+    // load (Query) → existing A succeeded; then BatchWrite (new rows) + Update (meta).
+    ddb.send
+      .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }]))
+      .mockResolvedValueOnce({}) // BatchWrite
+      .mockResolvedValueOnce({}); // Update meta
+    // Graph now has A (existing) + B (new, depends on the finished A).
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', ['A'], { title: 'UI' })]),
+    });
+    expect(result.addedSubIssueIds).toEqual(['B']);
+    expect(result.releasableSubIssueIds).toEqual(['B']); // A already succeeded
+    // The new row was written as 'ready' (deps satisfied).
+    const bw = ddb.send.mock.calls.find((c) => c[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: { sub_issue_id: string; child_status: string } } }>)[0].PutRequest.Item;
+    expect(written.sub_issue_id).toBe('B');
+    expect(written.child_status).toBe('ready');
+  });
+
+  test('adds a NEW node whose predecessor is NOT yet done → blocked, not releasable', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([{ id: 'A', status: 'released' }])) // A still running
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', ['A'])]),
+    });
+    expect(result.addedSubIssueIds).toEqual(['B']);
+    expect(result.releasableSubIssueIds).toEqual([]); // A not succeeded → B blocked
+  });
+
+  test('no new nodes (graph unchanged) → no-op, no writes', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }]));
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A')]),
+    });
+    expect(result.addedSubIssueIds).toEqual([]);
+    // Only the load Query ran — no BatchWrite/Update.
+    expect(ddb.send.mock.calls.filter((c) => c[0] instanceof BatchWriteCommand)).toHaveLength(0);
+    expect(ddb.send.mock.calls.filter((c) => c[0] instanceof UpdateCommand)).toHaveLength(0);
+  });
+
+  test('a new edge that introduces a CYCLE → rejected, nothing written', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce(existing([
+      { id: 'A', status: 'succeeded' }, { id: 'B', deps: ['A'], status: 'succeeded' },
+    ]));
+    // New node C depends on B, but the augmented graph also makes A depend on C → cycle.
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A', ['C']), child('B', ['A']), child('C', ['B'])]),
+    });
+    expect(result.rejected?.reason).toBe('cycle');
+    expect(result.addedSubIssueIds).toEqual([]);
+    expect(ddb.send.mock.calls.filter((c) => c[0] instanceof BatchWriteCommand)).toHaveLength(0);
+  });
+
+  test('no existing orchestration (load returns nothing) → empty result', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Items: [] }); // loadOrchestration → null
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A')]),
+    });
+    expect(result.addedSubIssueIds).toEqual([]);
+  });
+
+  test('bumps meta child_count by the number of added nodes', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }, { id: 'B', deps: ['A'], status: 'succeeded' }]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', ['A']), child('C', ['A']), child('D', ['B'])]),
+    });
+    const upd = ddb.send.mock.calls.find((c) => c[0] instanceof UpdateCommand)![0];
+    // 2 existing + 2 new (C, D) = 4.
+    expect(upd.input.ExpressionAttributeValues[':n']).toBe(4);
   });
 });

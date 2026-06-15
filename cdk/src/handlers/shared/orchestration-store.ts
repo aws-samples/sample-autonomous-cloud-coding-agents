@@ -44,6 +44,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 import type { SubIssueNode } from './linear-subissue-fetch';
+import { validateDag } from './orchestration-dag';
 
 /** Orchestration-local lifecycle marker on each sub-issue row. */
 export type ChildStatus =
@@ -246,6 +247,136 @@ export async function seedOrchestration(
   });
 
   return { orchestrationId, rowsWritten, alreadyExisted: false };
+}
+
+/** Result of extending an already-seeded orchestration (#247 orchestration-extend). */
+export interface ExtendOrchestrationResult {
+  readonly orchestrationId: string;
+  /** Sub-issue ids newly ADDED to the DAG by this extend (empty if nothing new). */
+  readonly addedSubIssueIds: readonly string[];
+  /**
+   * Subset of ``addedSubIssueIds`` that are immediately releasable — their
+   * predecessors are all already ``succeeded`` (or they're new roots). The
+   * caller releases these now; the rest are ``blocked`` and the reconciler
+   * releases them as predecessors finish, exactly like seed-time children.
+   */
+  readonly releasableSubIssueIds: readonly string[];
+  /** Why an extend was rejected (cycle introduced by the new edges), if any. */
+  readonly rejected?: { readonly reason: string; readonly message: string };
+}
+
+/**
+ * Extend an ALREADY-SEEDED orchestration with sub-issues added to the Linear
+ * epic after the first seed (#247 orchestration-extend). The seed path is
+ * idempotent (frozen at first seed) so a graph can't grow on its own; this is
+ * the additive counterpart, invoked when a labeled parent that already has an
+ * orchestration is re-triggered.
+ *
+ * Diffs the freshly-fetched ``graph`` against the persisted children:
+ *  - existing nodes are LEFT UNTOUCHED (their status/branch/task are preserved
+ *    — we never re-seed or reset a node that already ran),
+ *  - genuinely-new nodes are validated (the augmented graph must stay acyclic),
+ *    then added as ``ready`` (deps all already succeeded, or no deps) or
+ *    ``blocked``,
+ *  - the meta ``child_count`` is bumped.
+ *
+ * Idempotent: re-running with no new nodes is a no-op (empty result). A cycle
+ * introduced by the new edges rejects WITHOUT writing anything.
+ *
+ * @param graph the full current sub-issue node set (post-#16 augmentation),
+ *   from the same source the seed used.
+ */
+export async function extendOrchestration(params: {
+  readonly ddb: DynamoDBDocumentClient;
+  readonly tableName: string;
+  readonly parentLinearIssueId: string;
+  readonly linearWorkspaceId: string;
+  readonly repo: string;
+  readonly graph: readonly SubIssueNode[];
+  readonly now: string;
+  readonly ttl?: number;
+}): Promise<ExtendOrchestrationResult> {
+  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, graph, now, ttl } = params;
+  const orchestrationId = deriveOrchestrationId(parentLinearIssueId);
+
+  const snapshot = await loadOrchestration(ddb, tableName, orchestrationId);
+  if (!snapshot) {
+    // No existing orchestration — caller should have seeded, not extended.
+    return { orchestrationId, addedSubIssueIds: [], releasableSubIssueIds: [] };
+  }
+
+  const existingIds = new Set(snapshot.children.map((c) => c.sub_issue_id));
+  const newNodes = graph.filter((n) => !existingIds.has(n.id));
+  if (newNodes.length === 0) {
+    return { orchestrationId, addedSubIssueIds: [], releasableSubIssueIds: [] };
+  }
+
+  // Validate the AUGMENTED graph (existing + new) — adding nodes/edges must not
+  // introduce a cycle or a dangling edge. Reject without writing if it does.
+  const validation = validateDag(graph.map((n) => ({ id: n.id, depends_on: n.depends_on })));
+  if (!validation.ok) {
+    logger.warn('Orchestration extend rejected — augmented graph invalid', {
+      orchestration_id: orchestrationId, reason: validation.reason,
+    });
+    return {
+      orchestrationId, addedSubIssueIds: [], releasableSubIssueIds: [],
+      rejected: { reason: validation.reason, message: validation.message },
+    };
+  }
+
+  // A node is immediately releasable iff every predecessor is already
+  // ``succeeded`` (or it has none). Predecessors may be existing (check their
+  // persisted status) or other new nodes (not succeeded yet → blocked).
+  const succeeded = new Set(
+    snapshot.children.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
+  );
+  const releasable = new Set<string>();
+  const newRows: OrchestrationChildRow[] = newNodes.map((n) => {
+    const allDepsSucceeded = n.depends_on.every((d) => succeeded.has(d));
+    if (allDepsSucceeded) releasable.add(n.id);
+    return {
+      orchestration_id: orchestrationId,
+      sub_issue_id: n.id,
+      parent_linear_issue_id: parentLinearIssueId,
+      linear_workspace_id: linearWorkspaceId,
+      repo,
+      depends_on: n.depends_on,
+      child_status: allDepsSucceeded ? 'ready' : 'blocked',
+      ...(n.identifier !== undefined && { linear_identifier: n.identifier }),
+      ...(n.title !== undefined && { title: n.title }),
+      created_at: now,
+      updated_at: now,
+      ...(ttl !== undefined && { ttl }),
+    };
+  });
+
+  // Persist new child rows (chunks of 25), then bump meta child_count.
+  for (let i = 0; i < newRows.length; i += 25) {
+    const chunk = newRows.slice(i, i + 25);
+    await ddb.send(new BatchWriteCommand({
+      RequestItems: { [tableName]: chunk.map((Item) => ({ PutRequest: { Item } })) },
+    }));
+  }
+  await ddb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
+    UpdateExpression: 'SET child_count = :n, updated_at = :now',
+    ExpressionAttributeValues: { ':n': snapshot.children.length + newRows.length, ':now': now },
+  }));
+
+  logger.info('Orchestration extended', {
+    orchestration_id: orchestrationId,
+    parent_linear_issue_id: parentLinearIssueId,
+    added: newRows.length,
+    releasable: releasable.size,
+    added_ids: newRows.map((r) => r.sub_issue_id),
+  });
+
+  return {
+    orchestrationId,
+    addedSubIssueIds: newRows.map((r) => r.sub_issue_id),
+    releasableSubIssueIds: [...releasable],
+  };
 }
 
 /**
