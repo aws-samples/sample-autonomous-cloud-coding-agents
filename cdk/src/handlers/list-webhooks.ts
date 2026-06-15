@@ -30,6 +30,12 @@ import { decodePaginationToken, encodePaginationToken, parseLimit } from './shar
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 
+/** Default page size when the caller omits ``?limit=``. */
+const DEFAULT_PAGE_LIMIT = 20;
+
+/** Hard page-size ceiling. */
+const MAX_PAGE_LIMIT = 100;
+
 /**
  * GET /v1/webhooks — List webhooks for the authenticated user.
  */
@@ -42,7 +48,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
-    const limit = parseLimit(event.queryStringParameters?.limit, 20, 100);
+    const limit = parseLimit(event.queryStringParameters?.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const startKey = decodePaginationToken(event.queryStringParameters?.next_token);
     const includeRevoked = event.queryStringParameters?.include_revoked === 'true';
 
