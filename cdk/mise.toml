@@ -66,7 +66,13 @@ run = [
   # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
   # snapshot to diff against or update. --force re-runs the deploy-then-verify
   # unconditionally, which is what we want in CI.
-  "npx integ-runner --language typescript --directory test/integ --force",
+  #
+  # --verbose: integ-runner otherwise prints only a one-line pass/fail per test,
+  # which hides WHICH assertion failed and its actual-vs-expected payload. The
+  # lifecycle test polls DynamoDB for terminal task status; without --verbose a
+  # failure (e.g. task stuck at SUBMITTED instead of COMPLETED) is undiagnosable
+  # from the log alone. Verbose surfaces the assertion diffs we need.
+  "npx integ-runner --language typescript --directory test/integ --force --verbose",
 ]
 
 [tasks.bundle]
