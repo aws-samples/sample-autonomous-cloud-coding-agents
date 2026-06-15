@@ -9,7 +9,7 @@
     "build": "npm run docs:build",
     "preview": "astro preview",
     "security:retire": "retire --path . --severity high",
-    "link-check": "mise run link-check"
+    "link-check": "bash scripts/link-check.sh"
   },
   "devDependencies": {
     "jest": "^30.3.0",
