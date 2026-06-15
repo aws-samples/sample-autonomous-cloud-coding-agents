@@ -126,15 +126,53 @@ describe('discoverOrchestration', () => {
     expect(result.kind).toBe('error');
   });
 
-  test('replay → seeded with alreadyExisted=true', async () => {
-    const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: { sub_issue_id: '#meta' } }) };
+  test('re-trigger of an existing epic with the SAME graph → extended, no new nodes', async () => {
+    // seedOrchestration's GetCommand sees the meta row (already seeded) →
+    // alreadyExisted, so discovery routes to extendOrchestration. extend's own
+    // loadOrchestration Query returns the existing children (A, B); the fetched
+    // graph is identical → no new nodes → extended with empty addedSubIssueIds.
+    const orchId = '#meta';
+    const ddb = { send: jest.fn()
+      // 1) seedOrchestration GetCommand → meta exists
+      .mockResolvedValueOnce({ Item: { sub_issue_id: orchId } })
+      // 2) extendOrchestration loadOrchestration Query → meta + A + B
+      .mockResolvedValueOnce({ Items: [
+        { sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1' },
+        { sub_issue_id: 'A', orchestration_id: 'orch_x', depends_on: [], child_status: 'succeeded', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r' },
+        { sub_issue_id: 'B', orchestration_id: 'orch_x', depends_on: ['A'], child_status: 'succeeded', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r' },
+      ] }),
+    };
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
       fetchOptions: { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) },
     });
-    expect(result.kind).toBe('seeded');
-    if (result.kind === 'seeded') expect(result.alreadyExisted).toBe(true);
+    expect(result.kind).toBe('extended');
+    if (result.kind === 'extended') expect(result.addedSubIssueIds).toEqual([]);
+  });
+
+  test('re-trigger with a NEW sub-issue → extended, adds the new node', async () => {
+    const ddb = { send: jest.fn()
+      .mockResolvedValueOnce({ Item: { sub_issue_id: '#meta' } })        // seed: meta exists
+      .mockResolvedValueOnce({ Items: [                                  // extend load: A + B exist
+        { sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1' },
+        { sub_issue_id: 'A', orchestration_id: 'orch_x', depends_on: [], child_status: 'succeeded', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r' },
+        { sub_issue_id: 'B', orchestration_id: 'orch_x', depends_on: ['A'], child_status: 'succeeded', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r' },
+      ] })
+      .mockResolvedValueOnce({})  // BatchWrite new rows
+      .mockResolvedValueOnce({}), // Update meta child_count
+    };
+    // Fetched graph adds C (depends on the finished B) → C is new + releasable.
+    const result = await discoverOrchestration({
+      ...base,
+      ddb: ddb as never,
+      fetchOptions: { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['B'] }]) },
+    });
+    expect(result.kind).toBe('extended');
+    if (result.kind === 'extended') {
+      expect(result.addedSubIssueIds).toEqual(['C']);
+      expect(result.releasableSubIssueIds).toEqual(['C']); // B already succeeded
+    }
   });
 
   // #247/#299 trigger-agnostic seam: a custom graphSource (declarative /

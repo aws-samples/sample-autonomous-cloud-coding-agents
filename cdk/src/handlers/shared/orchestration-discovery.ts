@@ -52,7 +52,7 @@ import {
 import type { FetchSubIssueGraphOptions } from './linear-subissue-fetch';
 import { validateDag } from './orchestration-dag';
 import { withIntegrationNode } from './orchestration-integration-node';
-import { deriveOrchestrationId, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
+import { deriveOrchestrationId, extendOrchestration, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -93,6 +93,15 @@ export type DiscoverOrchestrationResult =
       readonly childCount: number;
       readonly rootSubIssueIds: readonly string[];
       readonly alreadyExisted: boolean;
+    }
+  | {
+      // An already-seeded orchestration that was EXTENDED with sub-issues
+      // added to the epic after the first seed (orchestration-extend). Carries
+      // the new node ids + which are immediately releasable.
+      readonly kind: 'extended';
+      readonly orchestrationId: string;
+      readonly addedSubIssueIds: readonly string[];
+      readonly releasableSubIssueIds: readonly string[];
     }
   | { readonly kind: 'rejected'; readonly reason: string; readonly message: string }
   | { readonly kind: 'error'; readonly message: string };
@@ -186,6 +195,42 @@ export async function discoverOrchestration(
       error: err instanceof Error ? err.message : String(err),
     });
     return { kind: 'error', message: 'Could not persist the orchestration graph. Please re-apply the trigger.' };
+  }
+
+  // ── 3b. Already-seeded → EXTEND with any sub-issues added since the first
+  // seed (orchestration-extend). seedOrchestration is frozen-at-first-seed, so
+  // a re-trigger of an existing epic lands here; diff the current graph against
+  // the persisted children and add genuinely-new nodes. A re-trigger with no
+  // new nodes is a clean no-op (addedSubIssueIds empty).
+  if (seedResult.alreadyExisted) {
+    let extendResult;
+    try {
+      extendResult = await extendOrchestration({
+        ddb,
+        tableName,
+        parentLinearIssueId,
+        linearWorkspaceId,
+        repo,
+        graph: childrenToSeed,
+        now,
+        ...(ttl !== undefined && { ttl }),
+      });
+    } catch (err) {
+      logger.error('Failed to extend orchestration graph', {
+        parent_linear_issue_id: parentLinearIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: 'error', message: 'Could not extend the orchestration graph. Please re-apply the trigger.' };
+    }
+    if (extendResult.rejected) {
+      return { kind: 'rejected', reason: extendResult.rejected.reason, message: extendResult.rejected.message };
+    }
+    return {
+      kind: 'extended',
+      orchestrationId: extendResult.orchestrationId,
+      addedSubIssueIds: extendResult.addedSubIssueIds,
+      releasableSubIssueIds: extendResult.releasableSubIssueIds,
+    };
   }
 
   // Roots = layer 0 of the validated topological layering. The

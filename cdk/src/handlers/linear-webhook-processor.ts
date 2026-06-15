@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { EMOJI_STARTED, reportIssueFailure, swapIssueReaction, transitionIssueState, upsertStatusComment } from './shared/linear-feedback';
+import { EMOJI_STARTED, postIssueComment, reportIssueFailure, swapIssueReaction, transitionIssueState, upsertStatusComment } from './shared/linear-feedback';
 import { renderStatusBlock } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
@@ -480,6 +480,76 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
       // The parent issue itself spawns no task; the reconciler (off the
       // TaskTable stream) releases downstream children as roots succeed.
+      return;
+    }
+    if (discovery.kind === 'extended') {
+      // Orchestration-extend: sub-issues were added to an already-seeded epic.
+      // Release the newly-added nodes whose predecessors are ALREADY done (the
+      // store marked them 'ready'); the rest are 'blocked' and the reconciler
+      // releases them as predecessors finish. A re-trigger with no new nodes
+      // returns empty → nothing to do.
+      if (discovery.addedSubIssueIds.length === 0) {
+        logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
+          issue_id: issue.id, orchestration_id: discovery.orchestrationId,
+        });
+        return;
+      }
+      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      let releasedAdded = 0;
+      if (snapshot) {
+        // Release only the newly-added 'ready' nodes. Pass the FULL child set
+        // as allChildren so A4 base-branch selection sees finished
+        // predecessors' branches (a new node stacks on its done predecessor).
+        const releasableRows = snapshot.children.filter(
+          (c) => discovery.releasableSubIssueIds.includes(c.sub_issue_id) && c.child_status === 'ready',
+        );
+        if (releasableRows.length > 0) {
+          const budget = USER_CONCURRENCY_TABLE
+            ? await readConcurrencyBudget(
+              ddb, USER_CONCURRENCY_TABLE, snapshot.meta.release_context.platform_user_id, MAX_CONCURRENT)
+            : undefined;
+          const results = await releaseReadyChildren(
+            ddb,
+            ORCHESTRATION_TABLE,
+            releasableRows,
+            snapshot.meta.release_context,
+            createTaskCore,
+            new Date().toISOString(),
+            snapshot.children, // full set → A4 base branch off finished predecessors
+            'main',
+            budget,
+          );
+          releasedAdded = results.filter((r) => r.kind === 'released').length;
+        }
+      }
+      logger.info('Linear orchestration extended — added sub-issues', {
+        issue_id: issue.id,
+        orchestration_id: discovery.orchestrationId,
+        added: discovery.addedSubIssueIds.length,
+        released_now: releasedAdded,
+      });
+      // Surface the addition on the parent epic so it's visible the graph grew.
+      if (WORKSPACE_REGISTRY_TABLE) {
+        try {
+          const addedLabels = (snapshot?.children ?? [])
+            .filter((c) => discovery.addedSubIssueIds.includes(c.sub_issue_id))
+            .map((c) => c.linear_identifier ?? c.sub_issue_id);
+          await postIssueComment(
+            { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+            issue.id,
+            `➕ **Added ${discovery.addedSubIssueIds.length} sub-issue`
+            + `${discovery.addedSubIssueIds.length === 1 ? '' : 's'}** to this orchestration: `
+            + `${addedLabels.join(', ')}. `
+            + `${releasedAdded > 0 ? `${releasedAdded} started now (predecessors already done); ` : ''}`
+            + 'the rest start as their predecessors finish.',
+          );
+        } catch (err) {
+          logger.warn('Failed to post orchestration-extend note (non-fatal)', {
+            issue_id: issue.id, orchestration_id: discovery.orchestrationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return;
     }
     // discovery.kind === 'single_task' → fall through to the single-task
