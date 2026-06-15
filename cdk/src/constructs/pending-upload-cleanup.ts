@@ -40,6 +40,9 @@ const CLEANUP_TIMEOUT_SECONDS = 30;
 /** Default cleanup schedule interval (minutes). */
 const DEFAULT_SCHEDULE_MINUTES = 5;
 
+/** Cleanup Lambda memory (MB). */
+const CLEANUP_MEMORY_MB = 256;
+
 /**
  * Properties for PendingUploadCleanup construct.
  */
@@ -98,7 +101,7 @@ export class PendingUploadCleanup extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(CLEANUP_TIMEOUT_SECONDS),
-      memorySize: 256,
+      memorySize: CLEANUP_MEMORY_MB,
       environment: {
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,

@@ -34,6 +34,9 @@ const DLQ_RETENTION_DAYS = 14;
 /** Max batching window before the Lambda is invoked on a partial batch (seconds). */
 const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
 
+/** Approval-metrics publisher Lambda memory (MB). */
+const PUBLISHER_MEMORY_MB = 256;
+
 /**
  * Properties for ``ApprovalMetricsPublisherConsumer`` — the Chunk 8
  * consumer that reads ``TaskEventsTable`` via DynamoDB Streams and
@@ -127,7 +130,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       // lines) — 256 MB is more than enough. Timeout is 1 minute to
       // match fanout; actual invocations should finish in tens of ms.
       timeout: Duration.minutes(1),
-      memorySize: 256,
+      memorySize: PUBLISHER_MEMORY_MB,
       logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],

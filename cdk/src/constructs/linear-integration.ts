@@ -38,6 +38,9 @@ const DEFAULT_TASK_RETENTION_DAYS = 90;
 /** Webhook-processor Lambda timeout (seconds). */
 const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
 
+/** Webhook-processor Lambda memory (MB). */
+const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
+
 /**
  * Properties for LinearIntegration construct.
  */
@@ -194,7 +197,7 @@ export class LinearIntegration extends Construct {
       // existing AWS SDK + bedrock-agentcore deps. 512 MB gives ~4× headroom
       // and lifts CPU enough that p99 startup stays under the API Gateway
       // 30s deadline on cold starts.
-      memorySize: 512,
+      memorySize: WEBHOOK_PROCESSOR_MEMORY_MB,
       environment: {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,

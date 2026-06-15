@@ -43,6 +43,9 @@ const COMMAND_PROCESSOR_TIMEOUT_SECONDS = 30;
 /** Slash-command acknowledger Lambda timeout (seconds). */
 const COMMAND_ACK_TIMEOUT_SECONDS = 3;
 
+/** Slash-command processor Lambda memory (MB). */
+const COMMAND_PROCESSOR_MEMORY_MB = 512;
+
 /**
  * Properties for SlackIntegration construct.
  */
@@ -260,7 +263,7 @@ export class SlackIntegration extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(COMMAND_PROCESSOR_TIMEOUT_SECONDS),
-      memorySize: 512,
+      memorySize: COMMAND_PROCESSOR_MEMORY_MB,
       environment: {
         ...createTaskEnv,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,

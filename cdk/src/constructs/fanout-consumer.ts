@@ -40,6 +40,9 @@ const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
 /** DLQ-depth alarm metric period (minutes). */
 const DLQ_ALARM_PERIOD_MINUTES = 5;
 
+/** Fan-out consumer Lambda memory (MB). */
+const FANOUT_MEMORY_MB = 256;
+
 /**
  * Properties for `FanOutConsumer` — the Phase 1b §8.9 fan-out plane
  * consumer that reads `TaskEventsTable` via DynamoDB Streams and
@@ -166,7 +169,7 @@ export class FanOutConsumer extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(1),
-      memorySize: 256,
+      memorySize: FANOUT_MEMORY_MB,
       logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],

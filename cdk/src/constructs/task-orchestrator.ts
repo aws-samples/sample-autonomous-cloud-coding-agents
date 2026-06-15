@@ -45,6 +45,12 @@ const DEFAULT_TASK_RETENTION_DAYS = 90;
 /** Orchestrator error-alarm metric period (minutes). */
 const ERROR_ALARM_PERIOD_MINUTES = 5;
 
+/** Orchestrator Lambda timeout (seconds). */
+const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
+
+/** Orchestrator Lambda memory (MB). */
+const ORCHESTRATOR_MEMORY_MB = 1024;
+
 /**
  * Properties for TaskOrchestrator construct.
  */
@@ -228,8 +234,8 @@ export class TaskOrchestrator extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(60),
-      memorySize: 1024,
+      timeout: Duration.seconds(ORCHESTRATOR_TIMEOUT_SECONDS),
+      memorySize: ORCHESTRATOR_MEMORY_MB,
       durableConfig: {
         executionTimeout: Duration.hours(DURABLE_EXECUTION_TIMEOUT_HOURS),
         retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),

@@ -30,6 +30,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { CEDAR_WASM_MIN_LAMBDA_MEMORY_MB } from './cedar-wasm-layer';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -51,6 +52,15 @@ const API_HANDLER_TIMEOUT_SECONDS = 15;
  * invocation, so it gets a much larger budget than the standard handlers.
  */
 const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
+
+/** Standard API-handler Lambda memory (MB). */
+const API_HANDLER_MEMORY_MB = 256;
+
+/** Memory for handlers with attachment screening or heavy SDK init (MB). */
+const SCREENING_HANDLER_MEMORY_MB = 512;
+
+/** Memory for confirm-uploads / webhook-create attachment path (MB). */
+const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
 
 /**
  * Properties for TaskApi construct.
@@ -514,7 +524,7 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
       bundling: attachmentScreeningBundling,
-      memorySize: 512,
+      memorySize: SCREENING_HANDLER_MEMORY_MB,
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
 
@@ -557,7 +567,7 @@ export class TaskApi extends Construct {
       // is not enough once cold-start TLS handshakes for bedrock-agentcore
       // are added.  15s gives comfortable headroom.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-      memorySize: 256,
+      memorySize: API_HANDLER_MEMORY_MB,
     });
 
     const getTaskEventsFn = new lambda.NodejsFunction(this, 'GetTaskEventsFn', {
@@ -655,7 +665,7 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: confirmUploadsEnv,
         bundling: attachmentScreeningBundling,
-        memorySize: 1024,
+        memorySize: HEAVY_ATTACHMENT_HANDLER_MEMORY_MB,
         timeout: Duration.seconds(CONFIRM_UPLOADS_TIMEOUT_SECONDS),
       });
 
@@ -739,7 +749,7 @@ export class TaskApi extends Construct {
         // Cold-start SDK load (s3-client + s3-request-presigner + lib-dynamodb)
         // exceeds Lambda's 3s default, causing INIT timeout → 502 Bad Gateway.
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-        memorySize: 512,
+        memorySize: SCREENING_HANDLER_MEMORY_MB,
       });
 
       props.taskTable.grantReadData(getTraceUrlFn);
@@ -824,7 +834,7 @@ export class TaskApi extends Construct {
         environment: approvalEnv,
         bundling: commonBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-        memorySize: 256,
+        memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(approveTaskFn);
       props.taskApprovalsTable.grantReadWriteData(approveTaskFn);
@@ -839,7 +849,7 @@ export class TaskApi extends Construct {
         environment: approvalEnv,
         bundling: commonBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-        memorySize: 256,
+        memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
@@ -854,7 +864,7 @@ export class TaskApi extends Construct {
         environment: approvalEnv,
         bundling: commonBundling,
         timeout: Duration.seconds(10),
-        memorySize: 256,
+        memorySize: API_HANDLER_MEMORY_MB,
       });
       // Least-privilege: GetPendingFn only reads (Query on
       // user_id-status-index for the user's pending rows) and writes
@@ -927,7 +937,7 @@ export class TaskApi extends Construct {
           layers: [props.cedarWasmLayer],
           // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
           // the wasm binary is ~4 MB which pushes init time.
-          memorySize: 512,
+          memorySize: CEDAR_WASM_MIN_LAMBDA_MEMORY_MB,
           timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         });
         props.taskApprovalsTable.grantReadData(getPoliciesFn);
@@ -1000,7 +1010,7 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: createTaskEnv,
         bundling: attachmentScreeningBundling,
-        memorySize: 1024,
+        memorySize: HEAVY_ATTACHMENT_HANDLER_MEMORY_MB,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       });
 

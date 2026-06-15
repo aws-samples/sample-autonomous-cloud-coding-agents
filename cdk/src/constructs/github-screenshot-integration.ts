@@ -40,6 +40,9 @@ const PROCESSOR_DLQ_RETENTION_DAYS = 14;
 /** DLQ-depth alarm metric period (minutes). */
 const DLQ_ALARM_PERIOD_MINUTES = 5;
 
+/** Async screenshot-processor Lambda memory (MB). */
+const PROCESSOR_MEMORY_MB = 512;
+
 /**
  * Properties for GitHubScreenshotIntegration construct.
  */
@@ -180,7 +183,7 @@ export class GitHubScreenshotIntegration extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(PROCESSOR_TIMEOUT_SECONDS),
-      memorySize: 512,
+      memorySize: PROCESSOR_MEMORY_MB,
       deadLetterQueue: processorDlq,
       environment: {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,

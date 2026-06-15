@@ -33,6 +33,9 @@ const RECONCILER_TIMEOUT_MINUTES = 5;
 /** Default reconciliation schedule interval (minutes). */
 const DEFAULT_SCHEDULE_MINUTES = 15;
 
+/** Reconciler Lambda memory (MB). */
+const RECONCILER_MEMORY_MB = 256;
+
 /**
  * Properties for ConcurrencyReconciler construct.
  */
@@ -73,7 +76,7 @@ export class ConcurrencyReconciler extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(RECONCILER_TIMEOUT_MINUTES),
-      memorySize: 256,
+      memorySize: RECONCILER_MEMORY_MB,
       environment: {
         TASK_TABLE_NAME: props.taskTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
