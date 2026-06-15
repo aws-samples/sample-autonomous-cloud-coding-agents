@@ -158,9 +158,11 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     from post_hooks import (
         DEFAULT_BUILD_COMMAND,
         DEFAULT_LINT_COMMAND,
+        is_verify_command_inert,
         resolve_verify_argv,
     )
 
+    build_gate_inert = False
     build_argv = resolve_verify_argv(config.build_command, DEFAULT_BUILD_COMMAND)
     build_cmd_str = " ".join(build_argv)
     log("SETUP", f"Running initial build ({build_cmd_str})...")
@@ -174,6 +176,20 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
         notes.append(note)
         build_before = False
+        # #1: if the build command could not RUN (no task / not found) AND no
+        # explicit build_command was configured, build-regression gating is
+        # INERT — flag it so the agent warns on the PR rather than silently
+        # passing every task. A configured command that fails to run is the
+        # operator's typo, not the silent-default trap, so only flag the
+        # unconfigured (mise-default) case.
+        if not config.build_command and is_verify_command_inert(result.returncode, result.stderr):
+            build_gate_inert = True
+            notes.append(
+                "⚠️ Build-regression gating is INERT: no runnable `mise run build` task in this "
+                "repo and no build command configured. A change that breaks the build will still "
+                "report success. Set pipeline.buildCommand in the repo's blueprint (e.g. "
+                "'npm run build') to enable gating."
+            )
     else:
         notes.append(f"Initial build ({build_cmd_str}): OK")
         build_before = True
@@ -216,6 +232,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         build_before=build_before,
         lint_before=lint_before,
         default_branch=default_branch,
+        build_gate_inert=build_gate_inert,
     )
 
 
