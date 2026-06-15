@@ -515,11 +515,11 @@ def gate_status(
 
 
 def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run ``mise run build``. Gating vs informational is the step's ``gate``."""
+    """Run the repo's build command (default ``mise run build``); gating is the step's ``gate``."""
     from post_hooks import verify_build
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
-    passed = verify_build(repo_dir)
+    passed = verify_build(repo_dir, ctx.config.build_command)
     # was_passing_before defaults True (assume green-before, so a post-agent
     # failure IS a regression) — the same conservative default pipeline.py uses.
     was_passing_before = ctx.setup.build_before if ctx.setup else True
@@ -539,11 +539,11 @@ def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run ``mise run lint`` (typically an advisory ``on_failure: continue`` gate)."""
+    """Run the repo's lint command (default ``mise run lint``; usually an advisory gate)."""
     from post_hooks import verify_lint
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
-    passed = verify_lint(repo_dir)
+    passed = verify_lint(repo_dir, ctx.config.lint_command)
     was_passing_before = ctx.setup.lint_before if ctx.setup else True
     status = gate_status(
         passed=passed,
