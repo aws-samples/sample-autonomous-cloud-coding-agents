@@ -31,13 +31,15 @@
  *   3. submit -> run -> AWAITING_APPROVAL -> approve    (write_env_files soft-deny gate)
  *   4. submit -> run -> AWAITING_APPROVAL -> deny       (write_env_files soft-deny gate)
  *
- * This runs in the DEDICATED E2E account (<integ-account>), which has no
- * backgroundagent-dev stack — so the AgentCore account-unique runtime/memory
- * name collision that forced Phase 0 to trim DOES NOT apply here. We deploy the
- * committed AgentStack unchanged: it leaves runtimeName/memoryName UNSET, and
- * CDK auto-generates names that include the stack name (backgroundagent-integ-
- * lifecycle), guaranteeing uniqueness. (A local developer's uncommitted agent.ts
- * pin must be stashed before a local `mise //cdk:integ`, or it would collide.)
+ * This is environment-agnostic: it deploys to whatever account/region the
+ * caller's AWS credentials resolve to (CI assumes the integ role; local runs use
+ * your own creds). It should run in a DEDICATED integ account with no
+ * backgroundagent-dev/main stack, so the AgentCore account-unique runtime/memory
+ * names don't collide. We deploy the committed AgentStack unchanged: it leaves
+ * runtimeName/memoryName UNSET and CDK auto-generates names scoped to the
+ * per-run stack name (int-<commit-hash>, see below), guaranteeing uniqueness.
+ * (A local developer's uncommitted agent.ts name pin must be stashed before a
+ * local `mise //cdk:integ`, or it would collide.)
  *
  * Determinism: there is no mock/scripted agent mode — every scenario runs the
  * real `claude` CLI against Bedrock. We bound cost and wall-clock with low
@@ -123,8 +125,9 @@ const githubTokenSecretArn = output('GitHubTokenSecretArn');
 
 // --- Gate-scenario configuration (scenarios 3 & 4) ----------------------------
 // These two constants are the ONLY out-of-band wiring the gate scenarios need.
-// They point at resources an admin provisions once in the E2E account
-// (<integ-account>); scenarios 1 & 2 do NOT depend on them and run regardless.
+// They point at resources an operator provisions once in the integ account
+// (whichever account the run deploys to); scenarios 1 & 2 do NOT depend on them
+// and run regardless.
 //
 //   SANDBOX_REPO  — a throwaway GitHub repo (owner/name) with a committed
 //                   baseline (README + default branch). coding/new-task-v1
@@ -132,10 +135,13 @@ const githubTokenSecretArn = output('GitHubTokenSecretArn');
 //                   trips the write_env_files soft-deny gate, and (on approve)
 //                   pushes a `bgagent/<task_id>/<slug>` branch + opens a PR. The
 //                   CI `always()` cleanup step deletes those branches each run.
-//   PRESEEDED_PAT_SECRET — name (or ARN) of a STABLE Secrets Manager secret in
-//                   the E2E account holding a fine-grained PAT scoped to
-//                   SANDBOX_REPO. Copied into the stack-created GitHubTokenSecret
-//                   by the token-seeding assertion below.
+//                   The PAT below must have Contents+PR WRITE on this repo (a
+//                   read-only token clones fine but the agent's `git push` 403s).
+//   PRESEEDED_PAT_SECRET — name of a STABLE Secrets Manager secret in the integ
+//                   account holding a fine-grained PAT scoped to SANDBOX_REPO.
+//                   Resolved by NAME (not ARN) so it is account-agnostic; copied
+//                   into the stack-created GitHubTokenSecret by the token-seeding
+//                   assertion below.
 //
 // Until these hold real values the gate submits will FAIL at clone/preflight
 // (like scenario 2) rather than reaching AWAITING_APPROVAL — so flip them to the
