@@ -124,6 +124,15 @@ const PRESEEDED_PAT_SECRET = 'bgagent/integ/github-pat';
 
 const integ = new IntegTest(app, 'TaskLifecycle', {
   testCases: [stack],
+  // Disable the two-phase update workflow. By default integ-runner deploys the
+  // committed snapshot first, then re-deploys the current version to verify
+  // in-place updates don't break. The AgentCore Runtime takes several minutes to
+  // go CREATING -> READY and is partly immutable; the second deploy phase races
+  // the first (Runtime still CREATING) -> 409 "agent is currently being modified"
+  // -> integ-runner aborts mid-deploy and teardown strands a CREATING Runtime.
+  // We validate runtime BEHAVIOR, not stack-update safety, so a single clean
+  // deploy is correct here.
+  stackUpdateWorkflow: false,
   // Force teardown on success and failure so a failed assertion never strands
   // the (expensive) full stack in the shared E2E account. The CI workflow keeps
   // a CloudFormation delete-stack safety net on top of this.
