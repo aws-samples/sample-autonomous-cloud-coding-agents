@@ -89,6 +89,7 @@ export default defineConfig({
             { slug: 'architecture/architecture' },
             { slug: 'architecture/orchestrator' },
             { slug: 'architecture/security' },
+            { slug: 'architecture/identity-and-auth' },
             { slug: 'architecture/deployment-roles' },
             { slug: 'architecture/memory' },
             { slug: 'architecture/api-contract' },
