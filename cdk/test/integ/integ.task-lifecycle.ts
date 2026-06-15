@@ -48,8 +48,18 @@
 import { randomBytes } from 'node:crypto';
 import { ExpectedResult, IntegTest } from '@aws-cdk/integ-tests-alpha';
 import { App, type CfnOutput, Duration } from 'aws-cdk-lib';
+import { Match } from 'aws-cdk-lib/assertions';
 import { TaskStatus } from '../../src/constructs/task-status';
 import { AgentStack } from '../../src/stacks/agent';
+
+// Presence matcher for DynamoDB string attributes ({ S: <non-empty> }). Used to
+// assert task-record fields exist and are populated without pinning their
+// runtime-generated values (e.g. user_id is the caller's Cognito `sub`, a UUID
+// not known at synth time; created_at/updated_at are ISO timestamps). #317 asks
+// the terminal-state assertions to cover task_id, user_id, status, timestamps,
+// and approval metadata — these matchers satisfy the "exists + non-empty" half
+// while `status` is asserted exactly.
+const presentString = Match.objectLike({ S: Match.stringLikeRegexp('.+') });
 
 const app = new App();
 
@@ -185,7 +195,15 @@ const pollComplete = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   Key: { task_id: { S: submitComplete.getAttString('body.data.task_id') } },
 });
 pollComplete
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.COMPLETED } } }))
+  .expect(ExpectedResult.objectLike({
+    Item: Match.objectLike({
+      status: { S: TaskStatus.COMPLETED },
+      task_id: presentString,
+      user_id: presentString,
+      created_at: presentString,
+      updated_at: presentString,
+    }),
+  }))
   .waitForAssertions(TERMINAL_POLL);
 
 // --- Scenario 2: FAILED (coding/new-task-v1 against a nonexistent repo) --------
@@ -213,7 +231,17 @@ const pollFail = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   Key: { task_id: { S: submitFail.getAttString('body.data.task_id') } },
 });
 pollFail
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.FAILED } } }))
+  .expect(ExpectedResult.objectLike({
+    Item: Match.objectLike({
+      status: { S: TaskStatus.FAILED },
+      task_id: presentString,
+      user_id: presentString,
+      created_at: presentString,
+      updated_at: presentString,
+      // The terminal error path must record WHY it failed (clone/preflight).
+      error_message: presentString,
+    }),
+  }))
   .waitForAssertions(TERMINAL_POLL);
 
 // --- Token seeding (prerequisite for gate scenarios) --------------------------
@@ -260,7 +288,16 @@ const pollGateApprove = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   Key: { task_id: { S: approveTaskId } },
 });
 pollGateApprove
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.AWAITING_APPROVAL } } }))
+  .expect(ExpectedResult.objectLike({
+    Item: Match.objectLike({
+      status: { S: TaskStatus.AWAITING_APPROVAL },
+      task_id: presentString,
+      user_id: presentString,
+      // Cedar HITL invariant: AWAITING_APPROVAL rows carry the pending request id
+      // that the approve/deny call must reference (task-status.ts §invariant).
+      awaiting_approval_request_id: presentString,
+    }),
+  }))
   .waitForAssertions(GATE_POLL);
 
 // Read the PENDING approval row's request_id (SK). Querying by task_id (PK) is
@@ -290,7 +327,18 @@ const pollApproveDecision = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   Key: { task_id: { S: approveTaskId }, request_id: { S: approveRequestId } },
 });
 pollApproveDecision
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: 'APPROVED' } } }))
+  .expect(ExpectedResult.objectLike({
+    Item: Match.objectLike({
+      status: { S: 'APPROVED' },
+      task_id: presentString,
+      request_id: presentString,
+      // ApproveTaskFn writes decided_at + the caller's user_id on the row; their
+      // presence proves the decision was recorded by the owning caller, not just
+      // that a status string flipped (approval metadata, per #317).
+      user_id: presentString,
+      decided_at: presentString,
+    }),
+  }))
   .waitForAssertions(GATE_POLL);
 
 // --- Scenario 4: AWAITING_APPROVAL -> deny ------------------------------------
@@ -317,7 +365,14 @@ const pollGateDeny = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   Key: { task_id: { S: denyTaskId } },
 });
 pollGateDeny
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.AWAITING_APPROVAL } } }))
+  .expect(ExpectedResult.objectLike({
+    Item: Match.objectLike({
+      status: { S: TaskStatus.AWAITING_APPROVAL },
+      task_id: presentString,
+      user_id: presentString,
+      awaiting_approval_request_id: presentString,
+    }),
+  }))
   .waitForAssertions(GATE_POLL);
 
 const queryDeny = integ.assertions.awsApiCall('DynamoDB', 'query', {
@@ -341,7 +396,17 @@ const pollDenyDecision = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
   Key: { task_id: { S: denyTaskId }, request_id: { S: denyRequestId } },
 });
 pollDenyDecision
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: 'DENIED' } } }))
+  .expect(ExpectedResult.objectLike({
+    Item: Match.objectLike({
+      status: { S: 'DENIED' },
+      task_id: presentString,
+      request_id: presentString,
+      user_id: presentString,
+      decided_at: presentString,
+      // DenyTaskFn persists the (sanitized) reason; we sent a non-empty one.
+      deny_reason: presentString,
+    }),
+  }))
   .waitForAssertions(GATE_POLL);
 
 // --- Execution order ----------------------------------------------------------
