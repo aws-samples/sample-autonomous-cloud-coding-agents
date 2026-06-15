@@ -1,0 +1,124 @@
+# Custom semgrep rules: silent-success masking (AI004 / CA-09, issue #257).
+#
+# Detects catch/except blocks that swallow a failure and return a
+# plausible-but-empty default ([] / {} / null / undefined / None / "" ...)
+# instead of surfacing the error. Bare-except and empty-catch are covered by
+# existing gates (ruff E722/B, eslint); this targets the more dangerous
+# variant where the caller sees a "successful" empty result and cannot tell
+# it apart from a real one.
+#
+# Allowlist mechanism: intentional degraded-mode fallbacks get an inline
+#   // nosemgrep: <rule-id> -- <justification>     (TS)
+#   # nosemgrep: <rule-id> -- <justification>      (Py)
+# on the flagged return line (repo convention; precedent in
+# scripts/check-types-sync.ts and agent/src/config.py).
+#
+# Known limitation: a `return null`/`return []` inside a callback *defined
+# within* a catch block (e.g. `.map(i => ... return null ...)`) is flagged
+# even though it does not mask the outer failure. Rare in practice; use the
+# nosemgrep allowlist if it occurs.
+#
+# Run:  mise run security:sast:masking        (blocking; emits SARIF)
+# Test: semgrep test .semgrep/
+rules:
+  - id: ts-silent-success-masking
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: correctness
+      confidence: MEDIUM
+      abca-finding: AI004
+      references:
+        - https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/257
+    message: >-
+      This catch block swallows the error and returns an empty default, so
+      the caller cannot distinguish failure from a genuinely empty result
+      (silent-success masking, AI004). Fix: re-throw (`throw err;`), throw a
+      typed error that adds context, or return a result shape that encodes
+      the failure. Logging alone is not enough — the failure must reach the
+      caller. If this fallback is intentional degraded-mode behavior, keep it
+      and add on the return line
+      "// nosemgrep: ts-silent-success-masking -- <why callers may safely
+      treat this failure as an empty success>".
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try { ... } catch ($E) { ... return $RET; ... }
+          - pattern: |
+              try { ... } catch { ... return $RET; ... }
+          - pattern: |
+              try { ... } catch ($E) { ... return $RET; ... } finally { ... }
+          - pattern: |
+              try { ... } catch { ... return $RET; ... } finally { ... }
+      - metavariable-regex:
+          metavariable: $RET
+          regex: ^(null|undefined|\[\s*\]|\{\s*\}|""|''|``)$
+      - focus-metavariable: $RET
+
+  - id: py-silent-success-masking
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: correctness
+      confidence: MEDIUM
+      abca-finding: AI004
+      references:
+        - https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/257
+    message: >-
+      This except block swallows the error and returns an empty default, so
+      the caller cannot distinguish failure from a genuinely empty result
+      (silent-success masking, AI004). Fix: re-raise (`raise`), raise a typed
+      error that adds context (`raise XError(...) from exc`), or return a
+      result shape that encodes the failure. Logging alone is not enough —
+      the failure must reach the caller. If this fallback is intentional
+      degraded-mode behavior, keep it and add on the return line
+      "# nosemgrep: py-silent-success-masking -- <why callers may safely
+      treat this failure as an empty success>".
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try:
+                ...
+              except $EXC:
+                ...
+                return $RET
+          - pattern: |
+              try:
+                ...
+              except $EXC as $E:
+                ...
+                return $RET
+          - pattern: |
+              try:
+                ...
+              except:
+                ...
+                return $RET
+          - pattern: |
+              try:
+                ...
+              except $EXC:
+                ...
+                return $RET
+              finally:
+                ...
+          - pattern: |
+              try:
+                ...
+              except $EXC as $E:
+                ...
+                return $RET
+              finally:
+                ...
+          - pattern: |
+              try:
+                ...
+              except:
+                ...
+                return $RET
+              finally:
+                ...
+      - metavariable-regex:
+          metavariable: $RET
+          regex: ^(None|\[\s*\]|\{\s*\}|""|''|\(\s*\)|set\(\s*\)|dict\(\s*\)|list\(\s*\)|tuple\(\s*\))$
+      - focus-metavariable: $RET
