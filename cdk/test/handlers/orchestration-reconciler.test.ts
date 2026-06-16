@@ -35,9 +35,16 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 }));
 
 const postIssueCommentMock = jest.fn();
+const upsertStatusCommentMock = jest.fn();
+const swapIssueReactionMock = jest.fn();
+const transitionIssueStateMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
-  upsertStatusComment: jest.fn(),
+  upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
+  swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
+  transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
+  EMOJI_SUCCESS: 'white_check_mark',
+  EMOJI_FAILURE: 'x',
 }));
 
 jest.mock('../../src/handlers/shared/logger', () => ({
@@ -263,6 +270,8 @@ function mockCascade(children: Array<{
   const meta = {
     sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
     linear_workspace_id: 'WS', repo: 'o/r', child_count: children.length, platform_user_id: 'user-1',
+    // A panel comment exists → the cascade EDITS it (UX.2), rather than posting fresh.
+    status_comment_id: 'panel-cmt-1',
   };
   const rows = children.map((c) => ({
     orchestration_id: 'orch_1', sub_issue_id: c.sub_issue_id, depends_on: c.depends_on ?? [],
@@ -275,8 +284,12 @@ function mockCascade(children: Array<{
     if (cmd._type === 'Query') return { Items: [meta, ...rows] }; // loadOrchestration
     if (cmd._type === 'Get') { // resolvePrNumber for a dependent task
       const tid = (cmd.input.Key as { task_id: string }).task_id;
-      // task-<sub> → PR url .../pull/<n> where n derived from the sub letter.
       return { Item: { task_id: tid, pr_url: `https://github.com/o/r/pull/${tid.length}` } };
+    }
+    if (cmd._type === 'BatchGet') { // resolveChildPrUrls for the panel
+      const keys = (cmd.input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>);
+      const tbl = Object.keys(keys)[0];
+      return { Responses: { [tbl]: keys[tbl].Keys.map((k) => ({ task_id: k.task_id, pr_url: `https://github.com/o/r/pull/${k.task_id.length}` })) } };
     }
     return {};
   });
@@ -366,11 +379,14 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
   });
 });
 
-describe('orchestration-reconciler handler — A6 cascade surfacing (#34/#35)', () => {
+describe('orchestration-reconciler handler — A6 cascade surfacing via the panel (#247 UX.2)', () => {
   beforeEach(() => {
     ddbSend.mockReset();
     createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
     postIssueCommentMock.mockReset().mockResolvedValue(true);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
   });
 
   const iterEvent = (sub: string) => ({
@@ -380,61 +396,55 @@ describe('orchestration-reconciler handler — A6 cascade surfacing (#34/#35)', 
     })],
   }) as never;
 
-  test('posts a re-stack note on the dependent sub-issue AND a cascade note on the parent', async () => {
+  test('refreshes the panel with the impacted row as "updating per comment" — NO standalone parent/sub-issue comments', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
     await handler(iterEvent('A'));
-
-    // Two comments: one on dependent B's sub-issue, one on the parent.
-    expect(postIssueCommentMock).toHaveBeenCalledTimes(2);
-    const targets = postIssueCommentMock.mock.calls.map((c) => c[1]);
-    expect(targets).toContain('B');        // dependent sub-issue
-    expect(targets).toContain('PARENT');   // parent epic
-    // Dependent note names the changed predecessor by its Linear identifier.
-    const depCall = postIssueCommentMock.mock.calls.find((c) => c[1] === 'B');
-    expect(depCall[2]).toMatch(/Re-stacked/i);
-    expect(depCall[2]).toContain('ENG-1');
-    // Parent note summarizes which dependents were re-stacked.
-    const parentCall = postIssueCommentMock.mock.calls.find((c) => c[1] === 'PARENT');
-    expect(parentCall[2]).toMatch(/revised/i);
-    expect(parentCall[2]).toContain('ENG-2');
+    // The panel is edited (upsertStatusComment), NOT a stream of new comments.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    // Impacted dependent B shows '🔄 … updating per ENG-1's comment'.
+    expect(body).toMatch(/ENG-2.*updating per ENG-1's comment/);
+    // The retired standalone '🔄 Re-stacked' / 'revised' parent comments are GONE.
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 
-  test('idempotent replay (200, NOT 201) does NOT post duplicate comments', async () => {
-    // The cascade source's stream record is redelivered → createTaskCore
-    // returns 200 (task already exists). Surfacing must NOT fire again.
+  test('idempotent replay (200, NOT 201) does NOT re-mark the panel as updating', async () => {
     createTaskCoreMock.mockResolvedValue({ statusCode: 200, body: '{}' });
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
     await handler(iterEvent('A'));
-    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    // No NEW restack task created → no panel "updating" refresh from the cascade.
+    expect(upsertStatusCommentMock).not.toHaveBeenCalled();
   });
 
-  test('does NOT comment on a synthetic integration node dependent (no Linear issue)', async () => {
-    // A's only direct dependent is the synthetic integration node → no
-    // sub-issue comment for it, but the parent note still posts.
+  test('integration-node dependent renders friendly in the panel (never raw id)', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
       { sub_issue_id: 'orch_1__integration', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-int', child_branch_name: 'branch-int' },
     ]);
     await handler(iterEvent('A'));
-    const targets = postIssueCommentMock.mock.calls.map((c) => c[1]);
-    expect(targets).not.toContain('orch_1__integration'); // synthetic → skipped
-    expect(targets).toContain('PARENT');                   // parent note still posts
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toContain('Integration — combined result');
+    expect(body).not.toContain('orch_1__integration');
   });
 
-  test('a comment failure on the dependent does not block the parent note (best-effort)', async () => {
-    postIssueCommentMock.mockRejectedValueOnce(new Error('linear 500')); // first (dependent) throws
+  test('a restack from a PREDECESSOR change (not a comment) says "updating to include … change"', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
-    await handler(iterEvent('A'));
-    // Both attempted (dependent threw, parent still attempted) — no crash.
-    expect(postIssueCommentMock).toHaveBeenCalledTimes(2);
+    // restack source (carries restack_predecessor, NOT orchestration_iteration).
+    await handler({ Records: [taskRecord({
+      task_id: 'restack-1', status: 'COMPLETED', orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A', restack_predecessor_sub_issue_id: 'Z',
+    })] } as never);
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toMatch(/ENG-2.*updating to include ENG-1's change/);
   });
 });
