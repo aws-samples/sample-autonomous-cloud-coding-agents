@@ -148,18 +148,76 @@ def ensure_pushed(repo_dir: str, branch: str) -> bool:
     return True
 
 
+_UNPUSHED_COMMITS_NOTE = (
+    "⚠️ **bgagent could not push its follow-up commits to this branch.** "
+    "The `git push` during the `push_resolve` step failed, so the latest "
+    "agent changes are committed locally but are NOT reflected in this PR. "
+    "A maintainer may need to re-run the task or push manually."
+)
+
+
+def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> None:
+    """Post a PR comment warning that follow-up commits failed to push.
+
+    Best-effort surface for the ``push_resolve`` push-failure path: the PR URL
+    is still returned (the PR exists) but it no longer reflects the agent's
+    latest work, so the reviewer must be told. Failure to post the comment is
+    logged but not fatal — the WARN log line emitted by the caller is the
+    fallback signal.
+
+    ``check=False`` means ``run_cmd`` does NOT raise on a non-zero ``gh``
+    exit, so the returncode is inspected explicitly — otherwise a failed
+    ``gh pr comment`` (missing scope, rate limit, not-a-PR) is a silent
+    no-op and the reviewer never learns the PR is stale. The ``except``
+    below only covers OS-level failures (gh missing, timeout).
+    """
+    try:
+        result = run_cmd(
+            [
+                "gh",
+                "pr",
+                "comment",
+                branch,
+                "--repo",
+                config.repo_url,
+                "--body",
+                _UNPUSHED_COMMITS_NOTE,
+            ],
+            label="note-unpushed-commits",
+            cwd=repo_dir,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr_msg = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
+            log(
+                "WARN",
+                "Failed to post un-pushed-commits note "
+                f"(gh exit {result.returncode}): {stderr_msg} — the PR does not "
+                "reflect the agent's latest commits and the reviewer has NOT "
+                "been notified.",
+            )
+    except Exception as e:
+        log("WARN", f"Failed to post un-pushed-commits note: {type(e).__name__}: {e}")
+
+
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
     build_passed: bool,
     lint_passed: bool,
     agent_result: AgentResult | None = None,
+    strategy: str = "create",
 ) -> str | None:
-    """Check if a PR exists for the branch; if not, create one.
+    """Realize the PR per the workflow's ``ensure_pr`` strategy.
 
-    For ``new_task``: creates a new PR if needed.
-    For ``pr_iteration``: pushes commits, then resolves the existing PR URL.
-    For ``pr_review``: resolves the existing PR URL without pushing (read-only).
+    Strategy (provider-neutral, from the workflow step — replaces the former
+    ``task_type`` self-inspection, #248):
+
+    - ``create``: create a new PR if one doesn't exist (the new_task path).
+    - ``push_resolve``: push follow-up commits, then resolve the existing PR URL
+      (the pr_iteration path).
+    - ``resolve``: resolve the existing PR URL without pushing (read-only;
+      the pr_review path).
 
     Returns the PR URL, or None if there are no commits beyond the default
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
@@ -169,16 +227,21 @@ def ensure_pr(
     branch = setup.branch
     default_branch = setup.default_branch
 
-    # PR iteration/review: skip PR creation — just resolve existing PR URL
-    from config import PR_TASK_TYPES
-
-    if config.task_type in PR_TASK_TYPES:
-        if config.task_type == "pr_iteration":
+    # push_resolve / resolve: skip PR creation — just resolve the existing URL.
+    if strategy in ("push_resolve", "resolve"):
+        push_failed = False
+        if strategy == "push_resolve":
             if not ensure_pushed(repo_dir, branch):
+                # Surface the failure rather than silently returning the stale
+                # PR URL as success: the local follow-up commits never reached
+                # the remote, so the PR the caller resolves below does NOT
+                # reflect the agent's latest work. We note this on the PR
+                # itself (below) so the reviewer is not misled.
+                push_failed = True
                 log("WARN", "Failed to push commits before resolving PR URL")
         else:
-            log("POST", "pr_review task — skipping push (read-only)")
-        log("POST", f"{config.task_type} — returning existing PR URL")
+            log("POST", "resolve strategy — skipping push (read-only)")
+        log("POST", f"ensure_pr strategy={strategy} — returning existing PR URL")
         result = subprocess.run(
             [
                 "gh",
@@ -200,6 +263,8 @@ def ensure_pr(
         if result.returncode == 0 and result.stdout.strip():
             pr_url = result.stdout.strip()
             log("POST", f"Existing PR: {pr_url}")
+            if push_failed:
+                _note_unpushed_commits(repo_dir, branch, config)
             return pr_url
         stderr_msg = result.stderr.strip() if result.stderr else "(no stderr)"
         log("WARN", f"Could not resolve existing PR URL (rc={result.returncode}): {stderr_msg}")
@@ -368,4 +433,5 @@ def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str 
         return None
     except Exception as e:
         log("WARN", f"Failed to extract agent notes from PR body: {type(e).__name__}: {e}")
+        # nosemgrep: py-silent-success-masking -- PR body notes optional; extraction failure logged
         return None

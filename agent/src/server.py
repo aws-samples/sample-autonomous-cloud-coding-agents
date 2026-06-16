@@ -42,15 +42,37 @@ _debug_cw_failures = 0
 _debug_cw_failures_lock = threading.Lock()
 _DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
+# Only redact secrets at least this long — replacing very short strings
+# would mangle unrelated text that happens to contain them.
+_MIN_REDACTABLE_SECRET_LEN = 12
+
 
 def _redact_cached_credentials(text: str) -> str:
     """Remove cached env secrets from debug text before stdout / CloudWatch."""
     out = text
     for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN"):
         secret = os.environ.get(env_key) or ""
-        if len(secret) >= 12:
+        if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
             out = out.replace(secret, f"<{env_key}_REDACTED>")
     return out
+
+
+def _emit_stdout_line(stamped: str) -> None:
+    """Write one line to stdout via ``os.write`` (fd 1).
+
+    Shared sink for ``_debug_cw`` / ``_warn_cw``. Using ``os.write``
+    instead of ``print``/``sys.stdout.write`` keeps lines visible in
+    local runs without tripping CodeQL's cleartext-logging sinks (which
+    model print and TextIOWrapper.write only) — callers MUST have
+    already routed content through ``_redact_cached_credentials``.
+    """
+    line = (stamped + "\n").encode("utf-8", errors="replace")
+    try:
+        while line:
+            n = os.write(1, line)
+            line = line[n:]
+    except OSError:
+        pass
 
 
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
@@ -68,16 +90,7 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """
     msg = _redact_cached_credentials(msg)
     stamped = f"[server/debug] {msg}"
-    # Emit via os.write(1, ...) instead of print/sys.stdout.write so debug lines stay
-    # visible locally without tripping CodeQL's cleartext-logging sinks (which model
-    # print and TextIOWrapper.write only). Content is still redacted above.
-    line = (stamped + "\n").encode("utf-8", errors="replace")
-    try:
-        while line:
-            n = os.write(1, line)
-            line = line[n:]
-    except OSError:
-        pass
+    _emit_stdout_line(stamped)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
@@ -115,14 +128,20 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     the ``server_warn/<task_id>`` stream so operators can alarm on
     warn traffic separately from debug noise).
 
-    The stdout ``print`` is preserved so local ``docker-compose`` runs
-    and the existing ``capsys``-based unit tests still observe the
-    line. CloudWatch delivery is fire-and-forget — failures bump the
+    The stdout emission is preserved so local ``docker-compose`` runs
+    and the ``capfd``-based unit tests still observe the line.
+    CloudWatch delivery is fire-and-forget — failures bump the
     shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
     so a silently broken writer still surfaces via that single metric.
     """
+    # Redact cached credentials and emit via the same os.write path as
+    # ``_debug_cw``: warn messages can embed payload fragments, so they
+    # get the same sanitizer + non-print sink treatment (CodeQL
+    # clear-text-logging models print/TextIOWrapper.write only; content
+    # is redacted above regardless).
+    msg = _redact_cached_credentials(msg)
     stamped = f"[server/warn] {msg}"
-    print(stamped, flush=True)
+    _emit_stdout_line(stamped)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
@@ -372,7 +391,7 @@ def _run_task_background(
     system_prompt_overrides: str = "",
     prompt_version: str = "",
     memory_id: str = "",
-    task_type: str = "new_task",
+    resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
@@ -456,7 +475,7 @@ def _run_task_background(
             system_prompt_overrides=system_prompt_overrides,
             prompt_version=prompt_version,
             memory_id=memory_id,
-            task_type=task_type,
+            resolved_workflow=resolved_workflow,
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
@@ -510,7 +529,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     hydrated_context = inp.get("hydrated_context")
     prompt_version = inp.get("prompt_version", "")
     memory_id = inp.get("memory_id") or os.environ.get("MEMORY_ID", "")
-    task_type = inp.get("task_type", "new_task")
+    resolved_workflow = inp.get("resolved_workflow")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
@@ -616,7 +635,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "system_prompt_overrides": system_prompt_overrides,
         "prompt_version": prompt_version,
         "memory_id": memory_id,
-        "task_type": task_type,
+        "resolved_workflow": resolved_workflow,
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
@@ -636,20 +655,40 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
 def _validate_required_params(params: dict) -> list[str]:
     """Check the minimum viable param set for the pipeline.
 
-    Returns the list of missing field names (empty list = valid). The
-    pipeline requires at minimum a ``repo_url`` and either an
-    ``issue_number`` or ``task_description``; ``pr_iteration`` and
-    ``pr_review`` task_types additionally require ``pr_number``.
+    Returns the list of missing field names (empty list = valid). A repo-bound
+    workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
+    #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
+    or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
+    ``coding/pr-review-v1``) additionally require ``pr_number``.
     """
     missing: list[str] = []
-    if not params.get("repo_url"):
+    workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
+
+    # Repo is mandatory only for repo-bound workflows. Resolve requires_repo from
+    # the workflow itself (authoritative, matches config.build_config); a load
+    # failure fails SAFE — assume a repo is required so a repo-bound task is never
+    # admitted without one.
+    requires_repo = True
+    try:
+        from workflow import WorkflowValidationError, load_workflow
+
+        try:
+            requires_repo = load_workflow(workflow_id).resolved_requires_repo
+        except WorkflowValidationError:
+            # Expected failure modes (missing/corrupt/schema-invalid file, or a
+            # future registry-only id) — fail SAFE (repo required). A genuine
+            # programming error is NOT caught here so it surfaces loudly.
+            _warn_cw(f"could not resolve requires_repo for {workflow_id!r}; assuming repo required")
+    except ImportError:
+        _warn_cw(f"workflow loader unavailable for {workflow_id!r}; assuming repo required")
+    if requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
-    task_type = params.get("task_type") or "new_task"
-    if task_type in ("pr_iteration", "pr_review"):
+
+    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1"):
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:
-        # new_task: need EITHER issue_number or task_description.
+        # Non-PR workflow: need EITHER issue_number or task_description.
         has_issue = bool(params.get("issue_number"))
         has_desc = bool(params.get("task_description"))
         if not (has_issue or has_desc):

@@ -46,7 +46,7 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 - Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.
 - Running raw **`jest`/`tsc`/`cdk`** from muscle memory — prefer **`mise //cdk:test`**, **`mise //cdk:compile`**, **`mise //cdk:synth`** (see [Commands you can use](#commands-you-can-use)).
 - **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
-- **`mise run build`** runs **`//agent:quality`** before CDK — the deployed image bundles **`agent/`**; agent changes belong in that tree.
+- **`mise run build`** builds **`//agent:quality`** alongside **`//cdk:build`** (the deployed image bundles **`agent/`**, so agent quality is part of the build) — these run as parallel `depends`, not in a fixed order; agent changes belong in the **`agent/`** tree.
 - **`prek install`** fails if Git **`core.hooksPath`** is set — another hook manager owns hooks; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 - **Editing on `main` directly** — ALWAYS create a worktree with a feature branch for changes, even trivial ones. Main should stay clean; all work flows through worktree → branch → PR → merge.
 - **Git worktrees** — Always **`git fetch origin main`** before creating a new worktree to ensure you branch from the latest remote state. `node_modules/` and `agent/.venv/` are per-tree (not shared). Run **`mise run install`** in each new worktree before building. All CDK path references (`__dirname`-relative) and mise `config_roots` resolve correctly without extra setup. Run **`mise run worktree:sync`** periodically to rebase clean linked worktrees onto **`origin/main`** so they don't drift behind merged PRs.
@@ -64,7 +64,7 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 
 - **`mise.toml`** (root) — Monorepo mise config: **`config_roots`** `cdk`, `agent`, `cli`, `docs`; tasks **`install`**, **`build`**, etc. Package-level **`mise.toml`** files live under those directories.
 - **`scripts/`** (root) — Optional cross-package helpers; **`scripts/ci-build.sh`** runs the full monorepo build (same as CI).
-- **`cdk/`** — CDK app package (`@abca/cdk`): `cdk/src/`, `cdk/test/`, `cdk/cdk.json`, `cdk/tsconfig.json`, `cdk/tsconfig.dev.json`, and `cdk/.eslintrc.json`.
+- **`cdk/`** — CDK app package (`@abca/cdk`): `cdk/src/`, `cdk/test/`, `cdk/cdk.json`, `cdk/tsconfig.json`, `cdk/tsconfig.dev.json`, and `cdk/eslint.config.mjs` (ESLint flat config; `cli/` uses `cli/eslint.config.mjs`).
 - **`cli/`** — `@backgroundagent/cli` — CLI tool for interacting with the deployed REST API (see below).
 - **`agent/`** — Python code that runs inside the agent compute environment (entrypoint, server, system prompt, Dockerfile, requirements). The system prompt is refactored into `agent/prompts/` with a shared base template and per-task-type workflow variants (`new_task`, `pr_iteration`, `pr_review`).
 - **`docs/`** — Authoritative Markdown in `guides/` (developer, user, roadmap, prompt) and `design/`; assets in `diagrams/`, `imgs/`. The Starlight docs site lives here (`astro.config.mjs`, `package.json`); `src/content/docs/` is refreshed via `docs/scripts/sync-starlight.mjs`.
@@ -82,7 +82,7 @@ The `@backgroundagent/cli` package provides the `bgagent` executable for submitt
 - `src/api-client.ts` — HTTP client wrapping `fetch` with auth header injection
 - `src/auth.ts` — Cognito login, token caching (`~/.bgagent/credentials.json`), auto-refresh
 - `src/config.ts` — Read/write `~/.bgagent/config.json`
-- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`), including `TaskType` (`new_task` | `pr_iteration` | `pr_review`)
+- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`), including `workflow_ref` / `ResolvedWorkflow` (workflow ids like `coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`; replaced the former `TaskType` enum, #248)
 - `src/format.ts` — Output formatting (table, detail view, JSON)
 - `src/debug.ts` — Verbose/debug logging (`--verbose` flag)
 - `src/errors.ts` — `CliError` and `ApiError` classes
@@ -100,7 +100,7 @@ The `@backgroundagent/cli` package provides the `bgagent` executable for submitt
 Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common commands:
 
 - **`mise run install`** — One **`yarn install`** at the repo root for all Yarn workspaces (**`cdk`**, **`cli`**, **`docs`**), then **`mise run install`** in **`agent/`** for Python (uv).
-- **`mise run build`** — Runs **`//agent:quality`** first (agent is bundled by CDK), then **`//cdk:build`**, **`//cli:build`**, and **`//docs:build`** in order.
+- **`mise run build`** — Runs **`//agent:quality`** (agent is bundled by CDK), **`//cdk:build`**, **`//cli:build`**, and **`//docs:build`** as parallel `depends` (DAG-scheduled, no fixed order), plus the drift-prevention checks.
 - **`mise //cdk:compile`** — Compile CDK TypeScript.
 - **`mise //cdk:test`** — Run CDK Jest tests.
 - **`mise //cdk:synth`** — Synthesize CDK app to `cdk/cdk.out/`.
@@ -111,8 +111,9 @@ Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common co
 - **`mise //docs:build`** — Sync and build docs site.
 - **`mise run security:secrets`** — Gitleaks at repo root.
 - **`mise run security:sast`** — Semgrep on the repo (root; includes **`agent/`** Python among paths).
+- **`mise run security:sast:masking`** — Custom semgrep rules for silent-success masking (`catch`/`except` returning empty defaults, AI004). Blocking; emits SARIF to `test-reports/`. Allowlist intentional fallbacks with an inline justified `nosemgrep: <rule-id> -- <reason>` comment.
 - **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
-- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
+- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:sast:masking`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
 - **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.
 - **`mise run security:gh-actions`** — Static analysis of GitHub Actions under **`.github/`** ([zizmor](https://github.com/zizmorcore/zizmor)).
 - **`mise run hooks:install`** — Re-install **[prek](https://github.com/j178/prek)** git hooks (also run automatically at the end of **`mise run install`** inside a Git checkout). See [CONTRIBUTING.md](./CONTRIBUTING.md) if `core.hooksPath` blocks install.

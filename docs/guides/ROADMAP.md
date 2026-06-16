@@ -16,9 +16,11 @@ What's shipped and what's coming next.
 
 ### Task types
 
-- [x] **`new_task`** - Branch, implement, build/test, open PR
-- [x] **`pr_iteration`** - Check out PR branch, read review feedback, address it, push
-- [x] **`pr_review`** - Read-only structured code review via GitHub Reviews API (no Write/Edit tools)
+- [x] **Workflow-driven tasks** - Task types are declarative, versioned **workflow** files (`agent/workflows/**`) interpreted by an agent-side step runner, not hardcoded `task_type` branches. Selected via `workflow_ref` (the `task_type` enum is removed). New task types are authored as YAML + registered step handlers, not core-code changes ([ADR-014](../decisions/ADR-014-workflow-driven-tasks.md), [WORKFLOWS.md](../design/WORKFLOWS.md))
+- [x] **`coding/new-task-v1`** - Branch, implement, build/test, open PR
+- [x] **`coding/pr-iteration-v1`** - Check out PR branch, read review feedback, address it, push
+- [x] **`coding/pr-review-v1`** - Read-only structured code review via GitHub Reviews API (no Write/Edit tools)
+- [x] **Repo-less (knowledge) workflows** - `requires_repo:false` workflows run end-to-end with no GitHub repo: `hydrate_context → run_agent → deliver_artifact`, delivering the agent's result to S3 (`artifacts/{task_id}/`) surfaced on `TaskDetail.artifact_uri`. Ships a reference `knowledge/web-research-v1` workflow; memory keys on `user:{user_id}`
 
 ### Onboarding and customization
 
@@ -76,6 +78,7 @@ What's shipped and what's coming next.
 - [x] **GitHub edit-in-place** - Single status comment per task on the target PR, edited in place as progress events fire (phase, milestone, cost, link)
 - [x] **Routable agent milestones** - Named checkpoints (`pr_created`, `nudge_acknowledged`) unwrapped against allowlist for channel filter matching
 - [x] **Slack notification dispatcher** - FanOut Block Kit messages for Slack-origin tasks (lifecycle events, threaded replies, terminal dedup, in-thread cancel). Generic fallback text for unmapped event types (e.g. some milestones); richer milestone and approval-gate rendering is follow-up work
+- [x] **Deploy-preview screenshots** - Listens for GitHub `deployment_status: success` events from any provider (Vercel, Amplify Hosting, Netlify, GitHub Actions); captures the preview URL via AgentCore Browser; posts a markdown image comment on the open PR (and on the linked Linear issue if Linear is configured). Lambda-only, deterministic, ~10–15 s post-deploy. See [Deploy preview screenshots guide](./DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 - [ ] **Email dispatcher** - Log-only stub; pending SES integration
 
 ### Channels
@@ -221,6 +224,7 @@ Planned capabilities, grouped by theme. Items are independent and may ship in an
 
 | Capability | Description |
 |------------|-------------|
+| **Deployed runtime E2E verification** | **Phase 0 landed:** `@aws-cdk/integ-tests-alpha` + `integ-runner` deploy a trimmed Task API stack to a real account, assert the create-and-persist happy path (task persists at `SUBMITTED`), then tear it down (`mise //cdk:integ`). In CI it runs per-PR via `workflow_run` when the diff touches `cdk/**` or `agent/**`, behind the `integ` environment's admin-approval gate, and posts a required `integ-smoke` status that blocks merge (`workflow_dispatch` retained for manual runs). Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) follow. See [ADR-013](../decisions/ADR-013-tiered-validation-pyramid.md). |
 | **Admission backlog observability** | Metric and alarm when `SUBMITTED` task depth exceeds an operator threshold (capacity and admission health). |
 | **Admission queue with deferred pickup** | When admission is at capacity, persist tasks in a durable queue instead of failing them. Automatically re-attempt admission and continue processing in FIFO order (with optional priority lanes) as concurrency becomes available. Preserve cancel/idempotency semantics and expose queue position/ETA in task status. |
 | **Safe orchestrator deploys** | Pre-deploy checks for active tasks (drain or warn); blue-green or canary Lambda deploy for the durable orchestrator with rollback on error regressions (`OBSERVABILITY.md`). |

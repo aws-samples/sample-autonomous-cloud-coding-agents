@@ -117,15 +117,33 @@ describe('AgentSessionRole construct', () => {
     )![1];
     const statements = sessionPolicy.Properties.PolicyDocument.Statement;
 
-    const putObject = statements.find((s: { Action: string | string[] }) => {
+    // There are two s3:PutObject statements (traces + artifacts, #248 Phase 3);
+    // pick the one whose resource embeds the traces/user_id prefix.
+    const putObjects = statements.filter((s: { Action: string | string[] }) => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.includes('s3:PutObject');
     });
-    expect(putObject).toBeDefined();
-    // The resource ARN embeds the user_id principal tag as the key prefix.
-    expect(JSON.stringify(putObject.Resource)).toContain(
-      '/traces/${aws:PrincipalTag/user_id}/*',
+    const tracePut = putObjects.find((s: { Resource: unknown }) =>
+      JSON.stringify(s.Resource).includes('/traces/${aws:PrincipalTag/user_id}/*'),
     );
+    expect(tracePut).toBeDefined();
+  });
+
+  test('S3 artifact writes are scoped to the per-task_id prefix (#248 Phase 3)', () => {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const sessionPolicy = Object.entries(policies).find(([id]) =>
+      id.includes('AgentSessionRole'),
+    )![1];
+    const statements = sessionPolicy.Properties.PolicyDocument.Statement;
+
+    const putObjects = statements.filter((s: { Action: string | string[] }) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes('s3:PutObject');
+    });
+    const artifactPut = putObjects.find((s: { Resource: unknown }) =>
+      JSON.stringify(s.Resource).includes('/artifacts/${aws:PrincipalTag/task_id}/*'),
+    );
+    expect(artifactPut).toBeDefined();
   });
 
   test('S3 attachment reads are scoped to the per-user prefix', () => {

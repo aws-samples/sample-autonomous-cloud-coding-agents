@@ -3,7 +3,7 @@
 import os
 import subprocess
 
-from config import AGENT_WORKSPACE, PR_TASK_TYPES
+from config import AGENT_WORKSPACE
 from models import RepoSetup, TaskConfig
 from shell import log, run_cmd, slugify
 
@@ -17,7 +17,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     repo_dir = f"{AGENT_WORKSPACE}/{config.task_id}"
     notes: list[str] = []
 
-    if config.task_type in PR_TASK_TYPES and config.branch_name:
+    if config.is_pr_workflow and config.branch_name:
         branch = config.branch_name
     else:
         # Derive branch slug from issue title or task description
@@ -44,23 +44,33 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         label="clone",
     )
 
-    # Configure remote URL with embedded token so git push works without
-    # credential helpers or extra auth setup inside the agent.
-    token = config.github_token
+    # Pin the remote to the plain https URL (no embedded credentials) and
+    # authenticate git push via gh's credential helper. Embedding the token
+    # in the remote URL would persist it in .git/config inside the workspace
+    # the agent (and any code it runs) fully controls — readable by a
+    # prompt-injected step, `git remote -v`, or anything that copies the
+    # tree. The helper resolves credentials at call time from the
+    # GH_TOKEN/GITHUB_TOKEN env vars the caller exports before setup_repo(),
+    # so the token never touches disk.
     run_cmd(
         [
             "git",
             "remote",
             "set-url",
             "origin",
-            f"https://x-access-token:{token}@github.com/{config.repo_url}.git",
+            f"https://github.com/{config.repo_url}.git",
         ],
         label="set-remote-url",
         cwd=repo_dir,
     )
+    run_cmd(
+        ["git", "config", "--local", "credential.helper", "!gh auth git-credential"],
+        label="configure-git-credential-helper",
+        cwd=repo_dir,
+    )
 
     # Branch setup
-    if config.task_type in PR_TASK_TYPES and config.branch_name:
+    if config.is_pr_workflow and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
         run_cmd(
             ["git", "fetch", "origin", branch],
@@ -132,7 +142,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
 
     # Detect default branch
     # For PR tasks (pr_iteration, pr_review): use base_branch from orchestrator if available
-    if config.task_type in PR_TASK_TYPES and config.base_branch:
+    if config.is_pr_workflow and config.base_branch:
         default_branch = config.base_branch
     else:
         default_branch = detect_default_branch(config.repo_url, repo_dir)
@@ -200,6 +210,17 @@ def detect_default_branch(repo_url: str, repo_dir: str) -> str:
         )
     except subprocess.TimeoutExpired:
         log("WARN", "Default branch detection timed out — defaulting to 'main'")
+        return "main"
+    except (OSError, subprocess.SubprocessError) as exc:
+        # gh missing from PATH (FileNotFoundError is an OSError), a permission
+        # error spawning it, or any other subprocess failure. The docstring
+        # promises a fallback to 'main'; without this the exception would
+        # escape and fail the whole task. (TimeoutExpired is a
+        # SubprocessError too but is handled above for its distinct message.)
+        log(
+            "WARN",
+            f"Default branch detection failed ({type(exc).__name__}) — defaulting to 'main'",
+        )
         return "main"
 
     if result.returncode == 0 and result.stdout.strip():

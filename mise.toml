@@ -18,6 +18,12 @@ experimental = true
 node = "22"
 prek = "latest"
 gitleaks = "latest"
+# uv must be declared so it is on PATH before semgrep installs: mise's
+# `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
+# present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
+# that breaks under the mise 2026.6.x default `minimum_release_age`
+# (jdx/mise#10279; see #320).
+uv = "latest"
 semgrep = "latest"
 osv-scanner = "latest"
 "grype" = "latest"
@@ -39,6 +45,24 @@ run = [
   "cd agent && mise run install",
   # Install prek shims only in a real checkout (skip tarballs / no-.git environments).
   "bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; prek install --prepare-hooks'",
+]
+
+# Dependency upgrades for the scheduled upgrade-main workflow (and local use).
+# Upgrades stay WITHIN the ranges/pins declared in each manifest — no
+# range-widening flags (e.g. `yarn upgrade --latest`) — so exact pins are never
+# rewritten. This is what keeps the Cedar engine parity contract intact:
+# cedarpy (agent/pyproject.toml) and @cedar-policy/cedar-wasm (cdk/package.json)
+# are exact pins that must only ever move together, by hand, with refreshed
+# contracts/cedar-parity/ fixtures (CEDAR_HITL_GATES.md §15.6, decision #23).
+[tasks.upgrade]
+description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
+run = [
+  # Regenerate the lockfile rather than `yarn upgrade`: Yarn 1 has a known bug
+  # where `yarn upgrade` copies `resolutions` entries into `dependencies` in
+  # package.json. A fresh resolve upgrades within declared ranges (and honors
+  # resolutions) without mutating any manifest.
+  "rm -f yarn.lock && yarn install",
+  "cd agent && mise run upgrade",
 ]
 
 ##################
@@ -84,16 +108,38 @@ run = [
 ##################
 
 [tasks."security:secrets"]
-description = "Scan for secrets with gitleaks"
-run = "gitleaks detect --source . --no-banner"
+description = "Scan all git history for secrets with gitleaks (full-history sweep)"
+# `gitleaks git` (history-aware) replaces the deprecated `gitleaks detect`
+# (removed from --help in v8.19.0). With no --log-opts this scans the full
+# history reachable from the checkout, matching the previous behaviour.
+run = "gitleaks git . --no-banner --redact"
+
+[tasks."security:secrets:range"]
+description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
+# Range-scoped scan: only the commits a branch/PR introduces, not full history.
+# Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
+# to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
+run = 'gitleaks git . --no-banner --redact --log-opts="${GITLEAKS_RANGE:-}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
-run = "gitleaks protect --staged --no-banner"
+# `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
+run = "gitleaks git . --staged --no-banner --redact"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+
+[tasks."security:sast:masking"]
+description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
+# `semgrep test` validates the rules against their .semgrep/ fixtures first.
+# The scan excludes those fixtures (they trigger by design) and writes SARIF
+# to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
+run = [
+  "semgrep test .semgrep/",
+  "mkdir -p test-reports",
+  "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --sarif-output=test-reports/semgrep-silent-success-masking.sarif --error --quiet .",
+]
 
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
@@ -123,6 +169,7 @@ run = [
     { task = "security:secrets" },
     { task = "security:deps" },
     { task = "security:sast" },
+    { task = "security:sast:masking" },
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },

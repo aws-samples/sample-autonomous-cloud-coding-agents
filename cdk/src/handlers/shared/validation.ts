@@ -19,13 +19,15 @@
 
 import {
   type CreateTaskRequest,
-  type TaskType,
   type AttachmentType,
   type ValidatedAttachment,
   type InlineAttachment,
   type PresignedAttachment,
   type UrlAttachment,
+  MAX_BUDGET_USD_MIN,
+  MAX_BUDGET_USD_MAX,
 } from './types';
+import { type WorkflowRequiredInputs } from './workflows';
 import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
@@ -36,16 +38,16 @@ export const MIN_MAX_TURNS = 1;
 export const MAX_MAX_TURNS = 500;
 /** Maximum allowed length for task_description. */
 export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
-/** Minimum allowed value for max_budget_usd (1 cent). */
-export const MIN_MAX_BUDGET_USD = 0.01;
-/** Maximum allowed value for max_budget_usd ($100). */
-export const MAX_MAX_BUDGET_USD = 100;
 
-const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
+// Dots are legal inside segments (`vercel/next.js`) but a segment of ONLY
+// dots (`owner/..`, `./repo`) is a path token, not a repo name — the
+// lookaheads reject those so URL/key interpolation never sees `.`/`..`.
+const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
 // ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
 // Matches the ``_generate_ulid`` output in ``agent/src/progress_writer.py``.
+export const ULID_LENGTH = 26;
 const ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const ALL_STATUSES = new Set(Object.values(TaskStatus));
 
@@ -59,7 +61,7 @@ export function parseBody<T>(body: string | null): T | null {
   try {
     return JSON.parse(body) as T;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- parseBody contract: invalid JSON yields null, same as a missing body
   }
 }
 
@@ -73,17 +75,44 @@ export function isValidRepo(repo: string): boolean {
 }
 
 /**
- * Validate that a create task request has at least one task specification.
- * @param req - the parsed create task request.
- * @returns true if the request has a sufficient task specification:
- *   issue_number or task_description for new_task; pr_number for pr_iteration or pr_review.
+ * Whether a single workflow input is satisfied by the request body.
  */
-export function hasTaskSpec(req: CreateTaskRequest): boolean {
-  if ((req.task_type === 'pr_iteration' || req.task_type === 'pr_review') && req.pr_number !== undefined && req.pr_number !== null) {
-    return true;
+function inputSatisfied(req: CreateTaskRequest, input: string): boolean {
+  switch (input) {
+    case 'issue_number':
+      return req.issue_number !== undefined && req.issue_number !== null;
+    case 'pr_number':
+      return req.pr_number !== undefined && req.pr_number !== null;
+    case 'task_description':
+      return req.task_description !== undefined
+        && req.task_description !== null
+        && req.task_description.trim().length > 0;
+    default:
+      // Unknown inputs are not CDK-validatable; treat as satisfied so the
+      // agent-side validator remains the authority for novel inputs.
+      return true;
   }
-  return (req.issue_number !== undefined && req.issue_number !== null) ||
-    (req.task_description !== undefined && req.task_description !== null && req.task_description.trim().length > 0);
+}
+
+/**
+ * Validate that a create task request satisfies the resolved workflow's
+ * required-input contract (replaces the former ``task_type``-keyed check).
+ * @param req - the parsed create task request.
+ * @param requiredInputs - the resolved workflow's ``required_inputs`` (CDK mirror).
+ * @returns true if the request supplies the inputs the workflow needs.
+ */
+export function hasTaskSpec(req: CreateTaskRequest, requiredInputs: WorkflowRequiredInputs): boolean {
+  const allOf = requiredInputs.allOf ?? [];
+  if (!allOf.every((input) => inputSatisfied(req, input))) {
+    return false;
+  }
+  const oneOf = requiredInputs.oneOf ?? [];
+  if (oneOf.length > 0 && !oneOf.some((input) => inputSatisfied(req, input))) {
+    return false;
+  }
+  // A workflow that declares neither all_of nor one_of has no input contract
+  // CDK must enforce (the agent-side validator still governs); accept.
+  return true;
 }
 
 /**
@@ -136,7 +165,7 @@ export function decodePaginationToken(token: string | undefined): Record<string,
     const json = Buffer.from(token, 'base64').toString('utf-8');
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- invalid pagination token is rejected; undefined is the decode contract, not masked infra failure
   }
 }
 
@@ -160,7 +189,7 @@ export function encodePaginationToken(lastKey: Record<string, unknown> | undefin
  * @returns true if the value matches the ULID shape.
  */
 export function isValidUlid(value: string): boolean {
-  if (typeof value !== 'string' || value.length !== 26) return false;
+  if (typeof value !== 'string' || value.length !== ULID_LENGTH) return false;
   return ULID_PATTERN.test(value.toUpperCase());
 }
 
@@ -196,7 +225,11 @@ export function validateMaxTurns(value: unknown): number | null | undefined {
 export function validateMaxBudgetUsd(value: unknown): number | null | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number') return null;
-  if (value < MIN_MAX_BUDGET_USD || value > MAX_MAX_BUDGET_USD) return null;
+  // NaN passes the typeof check and both range comparisons below are false
+  // for it — guard explicitly (JSON.parse can't produce NaN, but non-JSON
+  // callers can).
+  if (!Number.isFinite(value)) return null;
+  if (value < MAX_BUDGET_USD_MIN || value > MAX_BUDGET_USD_MAX) return null;
   return value;
 }
 
@@ -216,23 +249,6 @@ export function isValidTaskDescriptionLength(description: string): boolean {
  */
 export function computeTtlEpoch(retentionDays: number): number {
   return Math.floor(Date.now() / 1000) + retentionDays * 86400;
-}
-
-/** Valid task type values. Compile-time check ensures this stays in sync with TaskType. */
-const TASK_TYPE_LIST = ['new_task', 'pr_iteration', 'pr_review'] as const satisfies readonly TaskType[];
-type _AssertExhaustive = Exclude<TaskType, (typeof TASK_TYPE_LIST)[number]> extends never ? true : never;
-const _exhaustiveCheck: _AssertExhaustive = true;
-export const VALID_TASK_TYPES = new Set<string>(TASK_TYPE_LIST);
-
-/**
- * Validate a task_type value from a request body.
- * @param value - the raw value from the request.
- * @returns true if the value is a valid task type or undefined/null (defaults to 'new_task').
- */
-export function isValidTaskType(value: unknown): boolean {
-  if (value === undefined || value === null) return true;
-  if (typeof value !== 'string') return false;
-  return VALID_TASK_TYPES.has(value);
 }
 
 /**
@@ -256,12 +272,16 @@ export function validatePrNumber(value: unknown): number | null | undefined {
 export const MAX_ATTACHMENTS_PER_TASK = 10;
 /** Maximum decoded size for inline attachments. */
 export const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
+/** Maximum total decoded inline size per request (MiB). */
+const MAX_TOTAL_INLINE_SIZE_MB = 3;
 /** Maximum total decoded inline size per request. */
-export const MAX_TOTAL_INLINE_SIZE_BYTES = 3 * 1024 * 1024;
+export const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+/** Maximum total attachment size per task (MiB). */
+const MAX_TOTAL_ATTACHMENT_SIZE_MB = 50;
 /** Maximum size per attachment (inline or presigned, decoded). */
 export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 /** Maximum total attachment size per task. */
-export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = MAX_TOTAL_ATTACHMENT_SIZE_MB * 1024 * 1024;
 
 /** Compile-time exhaustiveness check for AttachmentType. */
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
@@ -289,11 +309,23 @@ const ALLOWED_FILE_MIME_TYPES = new Set([
  * Magic byte signatures for content type validation.
  * Prevents polyglot files from bypassing screening.
  */
+/* eslint-disable @typescript-eslint/no-magic-numbers -- file format magic-byte signatures */
 const MAGIC_BYTES: ReadonlyArray<{ readonly mime: string; readonly bytes: readonly number[]; readonly offset?: number }> = [
   { mime: 'image/png', bytes: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
   { mime: 'image/jpeg', bytes: [0xFF, 0xD8, 0xFF] },
   { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2D] }, // %PDF-
 ];
+/* eslint-enable @typescript-eslint/no-magic-numbers */
+
+/** Bytes scanned when validating text/JSON content for embedded nulls. */
+const TEXT_MAGIC_BYTE_CHECK_BYTES = 8192;
+
+/** First-byte markers that suggest JSON content. */
+const JSON_OBJECT_START_BYTE = 0x7B;
+const JSON_ARRAY_START_BYTE = 0x5B;
+
+/** Maximum filename length (bytes). */
+const MAX_FILENAME_LENGTH = 255;
 
 /**
  * Validate content against declared MIME type using magic bytes.
@@ -310,7 +342,7 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
 
   // Text types: valid UTF-8, no null bytes in first 8 KB
   if (contentType.startsWith('text/') || contentType === 'application/json') {
-    const check = data.subarray(0, 8192);
+    const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
     for (let i = 0; i < check.length; i++) {
       if (check[i] === 0) return false;
     }
@@ -332,7 +364,7 @@ export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
     }
   }
   // Try text detection
-  const check = data.subarray(0, 8192);
+  const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
   let hasNullByte = false;
   for (let i = 0; i < check.length; i++) {
     if (check[i] === 0) { hasNullByte = true; break; }
@@ -340,7 +372,7 @@ export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   if (!hasNullByte && data.length > 0) {
     // Guess JSON if it starts with { or [
     const first = data[0];
-    if (first === 0x7B || first === 0x5B) return 'application/json';
+    if (first === JSON_OBJECT_START_BYTE || first === JSON_ARRAY_START_BYTE) return 'application/json';
     return 'text/plain';
   }
   return null;
@@ -368,7 +400,7 @@ function isValidHttpsUrl(urlStr: string): boolean {
 
 /** Reject filenames with path traversal, null bytes, or unusual characters. */
 export function isValidFilename(filename: string): boolean {
-  if (filename.length === 0 || filename.length > 255) return false;
+  if (filename.length === 0 || filename.length > MAX_FILENAME_LENGTH) return false;
   if (filename.includes('/') || filename.includes('\\')) return false;
   if (filename.includes('\0')) return false;
   if (filename.startsWith('.') || filename.startsWith('-')) return false;
@@ -389,7 +421,7 @@ function filenameFromUrl(url: string, index: number): string {
   try {
     const parsed = new URL(url);
     const lastSegment = parsed.pathname.split('/').filter(Boolean).pop();
-    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= 255) {
+    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= MAX_FILENAME_LENGTH) {
       // Decode percent-encoding (e.g., %20 → space) then sanitize
       let decoded: string;
       try {

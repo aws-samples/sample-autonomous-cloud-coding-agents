@@ -18,10 +18,9 @@
  */
 
 import * as path from 'path';
-import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -42,6 +41,7 @@ import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
+import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
@@ -57,6 +57,15 @@ import { TaskTable } from '../constructs/task-table';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
+
+/** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
+const GUARDRAIL_NAME_MAX_LENGTH = 50;
+
+/** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
+const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
+
+/** Index of the stage segment in a split API Gateway URL. */
+const API_URL_STAGE_SEGMENT_INDEX = 3;
 
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
@@ -206,7 +215,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, GUARDRAIL_NAME_MAX_LENGTH),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
@@ -321,6 +330,9 @@ export class AgentStack extends Stack {
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
       // terminal state when the submit payload enabled ``trace``.
       TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
+      // Repo-less deliverable artifacts (#248 Phase 3): a deliver_artifact step
+      // uploads its product to ``artifacts/<task_id>/`` in the same bucket.
+      ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
       MAX_TURNS: '100',
@@ -349,8 +361,8 @@ export class AgentStack extends Stack {
     // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
     // long-running tasks (approval waits, heavy builds) are not evicted.
     const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
-      idleRuntimeSessionTimeout: Duration.hours(8),
-      maxLifetime: Duration.hours(8),
+      idleRuntimeSessionTimeout: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
+      maxLifetime: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
     };
 
     // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
@@ -362,6 +374,16 @@ export class AgentStack extends Stack {
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
       lifecycleConfiguration: lifecycleConfiguration,
+      loggingConfigs: [
+        {
+          logType: agentcore.LogType.APPLICATION_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(applicationLogGroup),
+        },
+        {
+          logType: agentcore.LogType.USAGE_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(usageLogGroup),
+        },
+      ],
     });
 
     runtimeArnHolder = runtime.agentRuntimeArn;
@@ -458,11 +480,9 @@ export class AgentStack extends Stack {
     agentSessionRole.grantAssumeToComputeRole(runtime.role);
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
-    // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
-    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
+    // which needs CloudWatch Logs resource policy propagation. Re-enable via
+    // tracingEnabled: true once resolved.
 
     NagSuppressions.addResourceSuppressions(runtime, [
       {
@@ -647,28 +667,8 @@ export class AgentStack extends Stack {
       attachmentsBucket: attachmentsBucket.bucket,
     });
 
-    // --- Fan-out plane consumer ---
-    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher edits a single issue comment in place; Slack
-    // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
-    new FanOutConsumer(this, 'FanOutConsumer', {
-      taskEventsTable: taskEventsTable.table,
-      taskTable: taskTable.table,
-      repoTable: repoTable.table,
-      githubTokenSecret,
-      // Slack bot-token grant is guarded on this prop — pass the
-      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
-      // workspace tokens. Same scope SlackIntegration uses for its
-      // own writers (PR #79 review #2).
-      slackSecretArnPattern: Stack.of(this).formatArn({
-        service: 'secretsmanager',
-        resource: 'secret',
-        resourceName: 'bgagent/slack/*',
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      }),
-    });
+    // FanOutConsumer is constructed below LinearIntegration so the
+    // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
     // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
@@ -703,7 +703,7 @@ export class AgentStack extends Stack {
     // Pre-filled manifest URL: opens Slack's "Create New App" page with all
     // URLs, scopes, and events pre-configured. User just clicks Create.
     const apiHost = Fn.select(2, Fn.split('/', taskApi.api.url));
-    const apiStage = Fn.select(3, Fn.split('/', taskApi.api.url));
+    const apiStage = Fn.select(API_URL_STAGE_SEGMENT_INDEX, Fn.split('/', taskApi.api.url));
     const apiBase = Fn.join('', ['https://', apiHost, '/', apiStage]);
 
     // Build the YAML manifest as a string using Fn.join (API URL tokens resolve at deploy time).
@@ -832,6 +832,80 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
       value: linearIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    // --- Fan-out plane consumer ---
+    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
+    // Slack / GitHub / Linear / email per per-channel default filters.
+    // GitHub dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
+    // deterministic final-status comment with cost/turns/duration.
+    // Email remains a log-only stub until SES wires.
+    new FanOutConsumer(this, 'FanOutConsumer', {
+      taskEventsTable: taskEventsTable.table,
+      taskTable: taskTable.table,
+      repoTable: repoTable.table,
+      githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Linear dispatcher reads workspace registry rows + per-workspace
+      // OAuth-secret JSON. Same scope `bgagent-linear-oauth-*` as the
+      // orchestrator and webhook processor — Lambdas in this stack share
+      // the rotated-token write path; the agent runtime gets read-only.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      linearOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+    });
+
+    // --- GitHub deployment-status → screenshot pipeline ---
+    // Listens for GitHub deployment_status events from any provider
+    // (Vercel, Amplify Hosting, Netlify, GitHub Actions custom CD),
+    // screenshots the `deployment.environment_url` via AgentCore
+    // Browser, posts the image into a fresh PR comment. Default-on:
+    // any repo whose GitHub webhook is configured will get
+    // screenshotted on successful preview deploys; no opt-in flag.
+    const githubScreenshot = new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
+      api: taskApi.api,
+      githubTokenSecret,
+      // When the screenshot lands on a PR linked to a Linear issue
+      // (identifier in the PR title/body), also post the screenshot
+      // as a comment on that Linear issue. Wired through the existing
+      // workspace registry so token resolution reuses the per-workspace
+      // OAuth secrets created by `bgagent linear setup`.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+    });
+
+    new CfnOutput(this, 'GitHubWebhookUrl', {
+      value: `${taskApi.api.url}github/webhook`,
+      description: 'URL to configure as the GitHub webhook target on demo repos (deployment_status events)',
+    });
+
+    new CfnOutput(this, 'GitHubWebhookSecretArn', {
+      value: githubScreenshot.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the GitHub webhook signing secret — paste GitHub\'s value here after configuring the webhook',
+    });
+
+    new CfnOutput(this, 'ScreenshotBucketName', {
+      value: githubScreenshot.screenshotBucket.bucket.bucketName,
+      description: 'Private S3 bucket hosting preview-deploy screenshots (served via CloudFront)',
+    });
+
+    new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
+      value: githubScreenshot.screenshotBucket.distribution.domainName,
+      description: 'CloudFront domain that serves the screenshot bucket anonymously to GitHub PR / Linear renders',
     });
 
     // --- Bedrock model invocation logging (account-level) ---

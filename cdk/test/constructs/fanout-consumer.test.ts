@@ -131,6 +131,40 @@ describe('FanOutConsumer', () => {
     });
   });
 
+  test('alarms on the first record landing in the DLQ', () => {
+    // The DLQ is the ONLY persistent signal of a fan-out outage —
+    // notifications are best-effort, so every Slack/GitHub/Linear
+    // delivery failing would otherwise accumulate unseen for the
+    // queue's 14-day retention. Pin the alarm's metric binding and
+    // threshold so a refactor can't silently drop or loosen it.
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    new FanOutConsumer(stack, 'FanOut', {
+      taskEventsTable: makeTaskEventsTable(stack),
+    });
+    const template = Template.fromStack(stack);
+
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Namespace: 'AWS/SQS',
+      Statistic: 'Maximum',
+      Period: 300,
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      TreatMissingData: 'notBreaching',
+      // The alarm must watch THIS construct's DLQ, not some other queue.
+      Dimensions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'QueueName',
+          Value: Match.objectLike({
+            'Fn::GetAtt': Match.arrayWith([Match.stringLikeRegexp('FanOutDlq')]),
+          }),
+        }),
+      ]),
+    });
+  });
+
   test('passes TASK_TABLE_NAME env var when taskTable is provided', () => {
     // The Slack dispatcher requires this env var (review #3); the
     // construct must wire it from the prop. Its absence triggers the

@@ -205,7 +205,12 @@ def test_invocations_rejects_missing_required_params_with_400(client, monkeypatc
 
     response = client.post(
         "/invocations",
-        json={"input": {"task_id": "t-missing", "task_type": "pr_review"}},
+        json={
+            "input": {
+                "task_id": "t-missing",
+                "resolved_workflow": {"id": "coding/pr-review-v1", "version": "1.0.0"},
+            }
+        },
     )
 
     assert response.status_code == 400
@@ -283,12 +288,12 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
     assert heartbeat_calls[0] == "t-heartbeat"
 
 
-def test_validate_required_params_pr_types_require_pr_number():
-    """PR-iteration and PR-review task_types need a pr_number regardless."""
+def test_validate_required_params_pr_workflows_require_pr_number():
+    """PR-iteration and PR-review workflows need a pr_number regardless."""
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "pr_iteration",
+            "resolved_workflow": {"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             "pr_number": "",
         }
     )
@@ -297,17 +302,17 @@ def test_validate_required_params_pr_types_require_pr_number():
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "pr_review",
+            "resolved_workflow": {"id": "coding/pr-review-v1", "version": "1.0.0"},
             "pr_number": "42",
         }
     )
     assert missing == []
 
-    # new_task needs issue OR description.
+    # A non-PR workflow needs issue OR description.
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "new_task",
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
         }
     )
     assert missing == ["issue_number_or_task_description"]
@@ -315,11 +320,36 @@ def test_validate_required_params_pr_types_require_pr_number():
     missing = server._validate_required_params(
         {
             "repo_url": "o/r",
-            "task_type": "new_task",
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
             "task_description": "do the thing",
         }
     )
     assert missing == []
+
+
+def test_validate_required_params_repoless_workflow_does_not_require_repo():
+    """#248 Phase 3: a repo-less workflow is accepted at the /invocations boundary
+    with no repo_url (the AgentCore-backend admission path).
+
+    Regression guard: repo_url was previously required unconditionally here, which
+    rejected every repo-less task on the AgentCore backend before the pipeline ran.
+    """
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "default/agent-v1", "version": "1.0.0"},
+            "task_description": "Summarise these papers",
+        }
+    )
+    assert missing == []
+
+    # A repo-bound workflow still requires repo_url.
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "coding/new-task-v1", "version": "1.0.0"},
+            "task_description": "do the thing",
+        }
+    )
+    assert missing == ["repo_url"]
 
 
 def test_drain_threads_joins_active_threads():
@@ -389,16 +419,19 @@ def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch
 # container stdout to APPLICATION_LOGS).
 
 
-def test_warn_cw_prints_stamped_line_to_stdout(monkeypatch, capsys):
+def test_warn_cw_prints_stamped_line_to_stdout(monkeypatch, capfd):
     """stdout must still carry the ``[server/warn]`` prefix.
 
-    Local ``docker-compose`` runs rely on stdout; the existing
-    ``capsys``-based tests on ``_extract_invocation_params`` also rely
-    on the prefix so CloudWatch routing must NOT replace the local print.
+    Local ``docker-compose`` runs rely on stdout; the ``capfd``-based
+    tests on ``_extract_invocation_params`` also rely on the prefix so
+    CloudWatch routing must NOT replace the local emission. ``capfd``
+    (not ``capsys``) because ``_warn_cw`` writes via ``os.write(1, ...)``
+    — the same non-print sink as ``_debug_cw`` — so the line only
+    appears at the file-descriptor level.
     """
     monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
     server._warn_cw("something went wrong", task_id="t-1")
-    captured = capsys.readouterr()
+    captured = capfd.readouterr()
     assert "[server/warn] something went wrong" in captured.out
 
 
@@ -610,7 +643,7 @@ class TestExtractUserId:
         )
         assert params["user_id"] == ""
 
-    def test_user_id_non_string_logs_warn(self, capsys):
+    def test_user_id_non_string_logs_warn(self, capfd):
         # Silent coercion is a documented anti-pattern in project
         # guidelines — if Stage 4 later skips the S3 upload because
         # ``user_id`` is empty, a user investigating "my trace never
@@ -619,7 +652,7 @@ class TestExtractUserId:
             self._base_payload(user_id=12345, task_id="t-warn"),
             self._fake_req(),
         )
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "[server/warn]" in captured.out
         assert "user_id payload field is not a string" in captured.out
         assert "type=int" in captured.out
@@ -668,13 +701,13 @@ class TestExtractInitialApprovalGateCount:
         )
         assert params["initial_approval_gate_count"] == 12
 
-    def test_non_numeric_string_coerces_to_zero_and_warns(self, capsys):
+    def test_non_numeric_string_coerces_to_zero_and_warns(self, capfd):
         params = server._extract_invocation_params(
             self._base_payload(initial_approval_gate_count="not-a-number", task_id="t-warn"),
             self._fake_req(),
         )
         assert params["initial_approval_gate_count"] == 0
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "[server/warn]" in captured.out
         assert "initial_approval_gate_count payload field is not an int" in captured.out
 
@@ -725,13 +758,13 @@ class TestExtractApprovalGateCap:
         )
         assert params["approval_gate_cap"] == 50
 
-    def test_non_numeric_string_coerces_to_none_and_warns(self, capsys):
+    def test_non_numeric_string_coerces_to_none_and_warns(self, capfd):
         params = server._extract_invocation_params(
             self._base_payload(approval_gate_cap="not-a-number", task_id="t-warn"),
             self._fake_req(),
         )
         assert params["approval_gate_cap"] is None
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "[server/warn]" in captured.out
         assert "approval_gate_cap payload field is not an int" in captured.out
 
