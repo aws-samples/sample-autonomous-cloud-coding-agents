@@ -26,7 +26,7 @@ The policies are split into five IAM managed policies (each under the 6,144-char
 | Policy Name | Scope | When applied |
 |-------------|-------|--------------|
 | `IaCRole-ABCA-Infrastructure` | CloudFormation, IAM, VPC networking, Route 53 Resolver DNS Firewall | Always |
-| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, Secrets Manager | Always |
+| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, Secrets Manager | Always |
 | `IaCRole-ABCA-Observability` | Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS | Always |
 | `IaCRole-ABCA-Compute-Agentcore` | Bedrock AgentCore (`bedrock-agentcore:*`) | Always (default compute backend) |
 | `IaCRole-ABCA-Compute-ECS` | ECS cluster + task-definition operations | Only when `ecs` is in `ComputeTypes` |
@@ -265,7 +265,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
 
 ### IaCRole-ABCA-Application
 
-DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and Secrets Manager. When ECS Fargate compute is enabled, add the ECS statement below to this policy.
+DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, and Secrets Manager. When ECS Fargate compute is enabled, add the ECS statement below to this policy.
 
 ```json
 {
@@ -325,12 +325,27 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
         "lambda:GetProvisionedConcurrencyConfig",
         "lambda:GetRuntimeManagementConfig",
         "lambda:ListVersionsByFunction",
-        "lambda:InvokeFunction"
+        "lambda:InvokeFunction",
+        "lambda:PublishLayerVersion",
+        "lambda:DeleteLayerVersion",
+        "lambda:GetLayerVersion"
       ],
       "Resource": [
         "arn:aws:lambda:*:*:function:backgroundagent-dev-*",
-        "arn:aws:lambda:*:*:function:backgroundagent-dev-AWS*"
+        "arn:aws:lambda:*:*:function:backgroundagent-dev-AWS*",
+        "arn:aws:lambda:*:*:layer:*"
       ]
+    },
+    {
+      "Sid": "LambdaEventSourceMappings",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping",
+        "lambda:UpdateEventSourceMapping",
+        "lambda:GetEventSourceMapping"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "APIGateway",
@@ -409,6 +424,39 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
       "Resource": "arn:aws:events:*:*:rule/backgroundagent-dev-*"
     },
     {
+      "Sid": "SQS",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:DeleteQueue",
+        "sqs:GetQueueAttributes",
+        "sqs:SetQueueAttributes",
+        "sqs:TagQueue",
+        "sqs:UntagQueue",
+        "sqs:GetQueueUrl",
+        "sqs:ListQueueTags"
+      ],
+      "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*"
+    },
+    {
+      "Sid": "CloudFront",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateDistribution",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:GetDistribution",
+        "cloudfront:TagResource",
+        "cloudfront:UntagResource",
+        "cloudfront:ListTagsForResource",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:UpdateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:GetOriginAccessControl"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SecretsManager",
       "Effect": "Allow",
       "Action": [
@@ -426,7 +474,11 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, and
       ],
       "Resource": [
         "arn:aws:secretsmanager:*:*:secret:backgroundagent-*",
-        "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*"
+        "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*",
+        "arn:aws:secretsmanager:*:*:secret:SlackIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:LinearIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*",
+        "arn:aws:secretsmanager:*:*:secret:bgagent/*"
       ]
     },
     {
@@ -535,6 +587,28 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
       "Resource": [
         "arn:aws:s3:::cdk-hnb659fds-assets-*",
         "arn:aws:s3:::cdk-hnb659fds-assets-*/*"
+      ]
+    },
+    {
+      "Sid": "S3ApplicationBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:PutBucketTagging",
+        "s3:GetBucketTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::backgroundagent-dev-*",
+        "arn:aws:s3:::backgroundagent-dev-*/*"
       ]
     },
     {

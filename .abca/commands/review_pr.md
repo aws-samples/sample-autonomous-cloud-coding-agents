@@ -71,6 +71,28 @@ Then apply principal-architect judgment over the diff:
   together and parity fixtures were refreshed.
 - **Security & least privilege** — IAM scoping, Cedar HITL gates, secrets handling, path-
   traversal guards, input validation. Fail closed.
+- **Bootstrap policy coverage (CDK deploy IAM)** — When the PR adds or changes constructs,
+  stacks, or handlers that introduce new CloudFormation resource types (new AWS services,
+  `AWS::SQS::Queue`, `AWS::CloudFront::*`, `AWS::SecretsManager::Secret`, Lambda layers,
+  application S3 buckets, etc.), verify the least-privilege bootstrap bundle was updated in
+  the **same PR**:
+  1. `cdk/src/bootstrap/policies/*.ts` — new actions and resource ARN patterns on the
+     CloudFormation execution role.
+  2. `cdk/src/bootstrap/resource-action-map.ts` — entry for each new CFN type (minimum
+     create-time IAM actions).
+  3. `BOOTSTRAP_VERSION` bumped in `cdk/src/bootstrap/version.ts` (minor when adding
+     permissions) and artifacts regenerated (`mise //cdk:bootstrap:generate` → committed
+     `cdk/bootstrap/policies/*.json`, `bootstrap-template.yaml`, `BOOTSTRAP_HASH`).
+  4. `docs/design/DEPLOYMENT_ROLES.md` golden baseline updated (required by
+     `cdk/test/bootstrap/golden-baseline.test.ts`).
+  5. `cdk/test/bootstrap/synth-coverage.test.ts` passes — run
+     `mise //cdk:test -- test/bootstrap/synth-coverage` or the full bootstrap suite.
+     **Flag as blocking** if constructs changed but bootstrap policies, the action map, or
+     version/artifacts were not updated. Missing ARN patterns (action present but resource
+     too narrow) are a common gap — check secret/queue/bucket naming against the patterns
+     in `application.ts` / `observability.ts`, not just action presence.
+  See [ADR-002](../../docs/decisions/ADR-002-least-privilege-bootstrap-policies.md) and
+  issue #350 for the failure mode this prevents.
 - **AWS / CDK quality** — Prefer L2 constructs, sane removal policies, no hardcoded ARNs/account
   IDs, cdk-nag clean. Watch for cost and operational footguns.
 - **Tests** — Are unit tests added/updated under the matching `*/test/` tree? Do they cover the
@@ -126,7 +148,8 @@ Summarize as a principal architect would in a PR review. Structure the output:
 3. **Blocking issues** — Numbered, each with `file:line`, the risk, and a suggested fix.
 4. **Non-blocking suggestions / nits** — Clearly separated.
 5. **Documentation** — What was updated, what is missing, mirror-sync status.
-6. **Tests & CI** — Coverage assessment and check status.
+6. **Tests & CI** — Coverage assessment and check status. For CDK construct/stack changes,
+   explicitly note bootstrap synth-coverage status (pass / not applicable / missing updates).
 7. **Review agents run** — List each plugin/agent you invoked (Stage 3) and, for any in-scope
    agent you omitted, the one-line reason. This section is required — its absence means the
    mandatory plugin step was skipped.
