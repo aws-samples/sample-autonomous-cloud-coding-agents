@@ -284,6 +284,133 @@ export function rollupKindFromChildren(children: readonly RollupChildView[]): Ro
   return anyBad ? 'partial_failure' : 'complete';
 }
 
+/**
+ * Build the {@link EpicPanelRow}s for a snapshot's children (#247 UX.2). Maps
+ * the persisted child rows + a ``sub_issue_id → pr_url`` map + an optional
+ * ``sub_issue_id → updatingReason`` map (rows a cascade is rebuilding) into the
+ * panel view. Pure.
+ */
+export function buildPanelRows(
+  children: readonly OrchestrationChildRow[],
+  prUrls: Readonly<Record<string, string>> = {},
+  updating: Readonly<Record<string, string>> = {},
+): EpicPanelRow[] {
+  return children.map((c) => ({
+    sub_issue_id: c.sub_issue_id,
+    ...(c.linear_identifier !== undefined && { linear_identifier: c.linear_identifier }),
+    ...(c.title !== undefined && { title: c.title }),
+    child_status: c.child_status,
+    ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
+    ...(updating[c.sub_issue_id] !== undefined && { updatingReason: updating[c.sub_issue_id] }),
+  }));
+}
+
+export interface UpsertEpicPanelParams {
+  readonly ctx: LinearFeedbackContext;
+  readonly parentLinearIssueId: string;
+  /** Existing panel comment id (status_comment_id). When absent, a fresh comment is posted + the id returned. */
+  readonly statusCommentId?: string;
+  readonly children: readonly OrchestrationChildRow[];
+  readonly prUrls?: Readonly<Record<string, string>>;
+  /** sub_issue_id → human reason, for rows a cascade is currently rebuilding. */
+  readonly updating?: Readonly<Record<string, string>>;
+  readonly combinedPrUrl?: string;
+  readonly combinedScreenshotUrl?: string;
+  /**
+   * Whether the epic is in progress. When omitted, derived: in progress iff any
+   * child is non-terminal OR any row has an updating reason. Pass explicitly to
+   * force (e.g. a revision just started → still in progress even if all
+   * persisted statuses are terminal).
+   */
+  readonly inProgress?: boolean;
+  /**
+   * When true AND the epic is settled, mirror the outcome on the PARENT issue:
+   * advance state In Review (complete) / leave (failures) + swap reaction to
+   * ✅/❌. When in progress, revert: state → In Progress + reaction → 👀. Only
+   * for the Linear channel. Default true.
+   */
+  readonly mirrorParentState?: boolean;
+  /** Trigger channel; non-'linear' makes this a logged no-op (other planes unwired). */
+  readonly channelSource?: ChannelSource;
+}
+
+/**
+ * Render + upsert the single maturing epic panel, and (optionally) mirror the
+ * outcome on the parent issue's state + reaction (#247 UX.2). The ONE place
+ * the parent panel is written — replaces the old renderStatusBlock-edit +
+ * postRollup + standalone notes. Returns the panel comment id (new or existing),
+ * or null on a non-linear channel / failure.
+ *
+ * - Edits ``statusCommentId`` in place when given; else posts a fresh comment.
+ * - Header/rows via {@link renderEpicPanel}; ``inProgress`` derived if omitted.
+ * - On settle (not in progress): advance parent state→In Review (clean) + ✅;
+ *   on failures, leave state + ❌. On in-progress (a revision re-opened it):
+ *   revert state→In Progress + reaction→👀. Sequential calls (each fans out
+ *   into multiple Linear reads) to avoid self-throttling the 5s timeout.
+ * Best-effort: a Linear hiccup never throws out of the reconcile.
+ */
+export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<string | null> {
+  const channelSource = params.channelSource ?? 'linear';
+  if (channelSource !== 'linear') {
+    logger.info('Epic panel skipped — channel has no wired plane', {
+      parent_linear_issue_id: params.parentLinearIssueId, channel_source: channelSource,
+    });
+    return null;
+  }
+  const rows = buildPanelRows(params.children, params.prUrls ?? {}, params.updating ?? {});
+  const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
+  const inProgress = params.inProgress
+    ?? rows.some((r) => !terminal(r.child_status) || r.updatingReason !== undefined);
+  const body = renderEpicPanel({
+    rows,
+    inProgress,
+    ...(params.combinedPrUrl !== undefined && { combinedPrUrl: params.combinedPrUrl }),
+    ...(params.combinedScreenshotUrl !== undefined && { combinedScreenshotUrl: params.combinedScreenshotUrl }),
+  });
+
+  let commentId: string | null;
+  try {
+    if (params.statusCommentId) {
+      commentId = await upsertStatusComment(params.ctx, params.parentLinearIssueId, body, params.statusCommentId);
+    } else {
+      // Post a fresh comment and capture its id (upsertStatusComment with no id creates + returns it).
+      commentId = await upsertStatusComment(params.ctx, params.parentLinearIssueId, body);
+    }
+  } catch (err) {
+    logger.warn('Epic panel upsert threw (non-fatal)', {
+      parent_linear_issue_id: params.parentLinearIssueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+
+  // Mirror parent state + reaction. Sequential (each fans out into several
+  // Linear graphql reads; firing together self-throttles the 5s timeout).
+  if (params.mirrorParentState !== false) {
+    const anyBad = rows.some((r) => r.child_status === 'failed' || r.child_status === 'skipped');
+    try {
+      if (inProgress) {
+        // Re-opened (or running): back to In Progress + 👀.
+        await transitionIssueState(params.ctx, params.parentLinearIssueId, 'started', ['In Progress']);
+        await swapIssueReaction(params.ctx, params.parentLinearIssueId, 'eyes');
+      } else if (!anyBad) {
+        // Clean completion: work done, awaiting human merge → In Review + ✅.
+        await transitionIssueState(params.ctx, params.parentLinearIssueId, 'started', ['In Review']);
+        await swapIssueReaction(params.ctx, params.parentLinearIssueId, EMOJI_SUCCESS);
+      } else {
+        // Finished with failures: leave state; ❌ reaction conveys it.
+        await swapIssueReaction(params.ctx, params.parentLinearIssueId, EMOJI_FAILURE);
+      }
+    } catch (err) {
+      logger.warn('Epic panel parent-state mirror failed (non-fatal)', {
+        parent_linear_issue_id: params.parentLinearIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return commentId;
+}
+
 export interface PostRollupParams {
   readonly ctx: LinearFeedbackContext;
   readonly orchestrationId: string;
