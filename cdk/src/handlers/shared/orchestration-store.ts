@@ -434,6 +434,30 @@ export async function claimRollup(
   }
 }
 
+/**
+ * Release the once-only rollup claim so a RE-COMPLETING epic can re-settle its
+ * parent state (#247 — stress-caught). When an already-completed epic re-opens
+ * (a cascade/iteration revives it), the ``rollup_posted_at`` stamp from the
+ * FIRST completion would otherwise make {@link claimRollup} fail forever — so
+ * the panel body re-settles to ✅ but the parent reaction/state never re-mirror
+ * (stuck on 👀/In Progress). ``extendOrchestration`` already clears it on the
+ * extend path; the cascade re-open path must too. Best-effort; unconditional
+ * REMOVE (idempotent — a no-op when already absent).
+ */
+export async function clearRollupClaim(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  now: string,
+): Promise<void> {
+  await ddb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
+    UpdateExpression: 'SET updated_at = :now REMOVE rollup_posted_at',
+    ExpressionAttributeValues: { ':now': now },
+  }));
+}
+
 /** Sort-key of the parent-meta row. Exported so the reconciler can
  *  separate it from child rows after a Query. */
 export const ORCHESTRATION_META_SK = PARENT_META_SK;
