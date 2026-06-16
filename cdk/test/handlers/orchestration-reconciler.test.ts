@@ -74,11 +74,14 @@ function taskRecord(fields: {
   orchestration_iteration?: boolean;
   // #247 UX.3: the human comment that triggered an iteration.
   trigger_comment_id?: string;
+  // #247 UX.5: raw agent error_message (drives the failure-reply detail).
+  error_message?: string;
 }): DynamoDBRecord {
   const img: Record<string, unknown> = {};
   if (fields.task_id) img.task_id = { S: fields.task_id };
   if (fields.status) img.status = { S: fields.status };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
+  if (fields.error_message) img.error_message = { S: fields.error_message };
   // PRODUCTION SHAPE: createTaskCore persists orchestration_id INSIDE the
   // nested channel_metadata MAP, not as a top-level attribute. The stream
   // image must mirror that or the reconciler skips every orchestration
@@ -466,12 +469,13 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
   });
 
   /** An iteration event carrying the human comment id that triggered it. */
-  const iterEventWithComment = (status: string, commentId = 'human-cmt-1', buildPassed?: boolean) => ({
+  const iterEventWithComment = (status: string, commentId = 'human-cmt-1', buildPassed?: boolean, errorMessage?: string) => ({
     Records: [taskRecord({
       task_id: 'iter-task-1', status, orchestration_id: 'orch_1',
       orchestration_sub_issue_id: 'A', orchestration_iteration: true,
       trigger_comment_id: commentId,
       ...(buildPassed !== undefined && { build_passed: buildPassed }),
+      ...(errorMessage !== undefined && { error_message: errorMessage }),
     })],
   }) as never;
 
@@ -487,17 +491,35 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(body).toMatch(/^✅ Updated — PR #\d+\./);
   });
 
-  test('FAILED iteration → ❌ threaded reply inviting a retry (still replies)', async () => {
+  test('FAILED iteration (agent crash) → ❌ reply with classified reason + CloudWatch task id (UX.5)', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
     ]);
-    await handler(iterEventWithComment('FAILED'));
+    await handler(iterEventWithComment('FAILED', 'human-cmt-1', undefined, 'agent_status="error_max_turns"'));
 
     expect(replyToCommentMock).toHaveBeenCalledTimes(1);
     const [, , body] = replyToCommentMock.mock.calls[0];
     expect(body).toMatch(/^❌/);
+    expect(body).toMatch(/Exceeded max turns/i); // classified
+    expect(body).toMatch(/CloudWatch for task `iter-task-1`/);
     expect(body).toMatch(/reply with guidance/i);
     // A failed iteration still does not cascade onto dependents.
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('COMPLETED-but-build-failed iteration → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    // COMPLETED, build_passed=false, NO error_message → build/test failure shape.
+    await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
+
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    const [, , body] = replyToCommentMock.mock.calls[0];
+    expect(body).toMatch(/build\/tests didn't pass/i);
+    expect(body).toMatch(/PR's checks/i);
+    expect(body).not.toMatch(/CloudWatch/i); // build-fail copy omits the log pointer
+    // build_passed=false ⇒ not a success ⇒ no cascade onto dependents.
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 

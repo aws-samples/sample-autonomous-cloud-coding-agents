@@ -1569,12 +1569,23 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
     });
 
-    test('task_failed → ❌ threaded reply inviting a retry', async () => {
-      mockGet({ ...STANDALONE, error_message: 'crash' });
+    test('task_failed (agent crash) → ❌ reply with classified reason + CloudWatch task id (UX.5)', async () => {
+      mockGet({ ...STANDALONE, error_message: 'agent_status="error_max_turns"' });
       await handler({ Records: [mkEvent('task_failed', 't-lin')] });
       const [, , body] = mockReplyToComment.mock.calls[0];
       expect(body).toMatch(/^❌/);
+      expect(body).toMatch(/Exceeded max turns/i); // classified
+      expect(body).toMatch(/CloudWatch for task `t-lin`/);
       expect(body).toMatch(/reply with guidance/i);
+    });
+
+    test('task_completed but build_passed=false → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
+      mockGet({ ...STANDALONE, build_passed: false, error_message: undefined });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      const [, , body] = mockReplyToComment.mock.calls[0];
+      expect(body).toMatch(/build\/tests didn't pass/i);
+      expect(body).toMatch(/PR's checks/i);
+      expect(body).not.toMatch(/CloudWatch/i);
     });
 
     test('an ORCHESTRATION iteration (orchestration_iteration=true) is NOT replied here (reconciler owns it)', async () => {
