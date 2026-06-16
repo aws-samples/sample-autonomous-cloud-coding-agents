@@ -21,6 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './jira-oauth-resolver';
 import { logger } from './logger';
 
@@ -71,7 +72,12 @@ export async function getJiraSecret(secretId: string, forceRefresh = false): Pro
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    if (!result.SecretString) {
+    // Treat empty / whitespace-only SecretString as null — an empty secret
+    // must never be used for HMAC, or HMAC('', body) becomes forgeable.
+    if (!isUsableHmacSecret(result.SecretString)) {
+      logger.error('Jira webhook secret is empty — refusing to use for HMAC', {
+        secret_id: secretId,
+      });
       secretCache.delete(secretId);
       return null;
     }
@@ -82,7 +88,7 @@ export async function getJiraSecret(secretId: string, forceRefresh = false): Pro
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Jira secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing Jira signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Jira secret from Secrets Manager', {
       secret_id: secretId,
@@ -110,6 +116,14 @@ export function verifyJiraSignature(
   signature: string,
   body: string,
 ): boolean {
+  // Defense-in-depth: getJiraSecret already filters empty secrets, but
+  // callers like verifyJiraRequestForTenant pass secrets from other sources
+  // (per-tenant OAuth bundles where the operator pastes the signing secret
+  // by hand) — HMAC('') must always be rejected or an attacker can forge
+  // signatures against a misconfigured empty/whitespace secret.
+  if (!isUsableHmacSecret(webhookSecret)) {
+    return false;
+  }
   // Strip the algorithm prefix Atlassian (and most webhook providers using
   // X-Hub-Signature) prepend. Be tolerant of operators who paste just the
   // hex digest.

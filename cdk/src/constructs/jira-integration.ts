@@ -39,6 +39,14 @@ const DEFAULT_TASK_RETENTION_DAYS = 90;
 const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
 
 /**
+ * Webhook-processor Lambda memory (MB). Matches the Linear processor — the
+ * same attachment-screening path bundles pdf-parse + the URL resolver, and
+ * the ADF→markdown walker adds a small working set. Keeps p99 cold-start
+ * under the API Gateway 30s deadline.
+ */
+const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
+
+/**
  * Properties for JiraIntegration construct.
  */
 export interface JiraIntegrationProps {
@@ -86,9 +94,10 @@ export interface JiraIntegrationProps {
  * - JiraProjectMappingTable (`{cloudId}#{projectKey}` → GitHub repo)
  * - JiraUserMappingTable (`{cloudId}#{accountId}` → platform user; with
  *   GSI for reverse lookup and `pending#{code}` link rows)
- * - JiraWorkspaceRegistryTable (`cloudId` → AgentCore credential provider).
- *   Webhook receiver and processor look up the per-tenant signing/OAuth
- *   secret here from the inbound webhook's `cloudId`.
+ * - JiraWorkspaceRegistryTable (`cloudId` → per-tenant OAuth secret ARN).
+ *   Webhook receiver and processor look up the tenant's `oauth_secret_arn`
+ *   here from the inbound webhook's `cloudId`, then read the per-tenant
+ *   signing/OAuth secret from Secrets Manager (see jira-oauth-resolver.ts).
  * - JiraWebhookDedupTable (8h TTL dedup for webhook retries)
  * - Lambda handlers for the webhook receiver, async processor, and account linking
  * - API Gateway routes under /jira/*
@@ -103,8 +112,8 @@ export class JiraIntegration extends Construct {
 
   /**
    * Registry of Jira tenants that have completed OAuth onboarding.
-   * Lookup `provider_name` (AgentCore credential provider) by `cloudId`
-   * from the inbound webhook.
+   * Look up the per-tenant `oauth_secret_arn` by `cloudId` from the inbound
+   * webhook, then fetch the OAuth/signing secret from Secrets Manager.
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
@@ -193,11 +202,7 @@ export class JiraIntegration extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(WEBHOOK_PROCESSOR_TIMEOUT_SECONDS),
-      // 512 MB matches the Linear processor — same attachment-screening
-      // path bundles the same pdf-parse + URL-resolver libs alongside the
-      // SDK, and Atlassian's ADF→markdown walker adds a small additional
-      // working set. Keeps p99 cold-start under the API Gateway 30s deadline.
-      memorySize: 512,
+      memorySize: WEBHOOK_PROCESSOR_MEMORY_MB,
       environment: {
         ...createTaskEnv,
         JIRA_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,

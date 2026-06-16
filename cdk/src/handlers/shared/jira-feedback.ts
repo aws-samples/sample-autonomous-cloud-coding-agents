@@ -74,8 +74,11 @@ async function postComment(
 ): Promise<boolean> {
   // The 3LO token (audience=api.atlassian.com) is only valid against the
   // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
-  // site host (`*.atlassian.net`) would 401.
-  const url = `${JIRA_API_BASE}/${cloudId}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
+  // site host (`*.atlassian.net`) would 401. Both path segments are
+  // URL-encoded for defense-in-depth: cloudId is registry-sourced (a stored
+  // tenant UUID), but encoding it keeps a malformed/compromised row from
+  // injecting extra path segments into the gateway URL.
+  const url = `${JIRA_API_BASE}/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {

@@ -345,7 +345,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Stash the resolved OAuth secret ARN on the task so the agent runtime
   // doesn't have to re-do the registry lookup. Also blocks tasks from
   // tenants that only verified via the stack-wide fallback (workspace
-  // unknown to the registry) — we'd burn agent quota with no MCP token.
+  // unknown to the registry) — we'd burn agent quota with no resolvable
+  // Jira OAuth token for the outbound REST progress comments.
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {

@@ -239,7 +239,7 @@ export async function getRegistryRow(
       jira_cloud_id: cloudId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- transient DDB throttle degrades to "tenant not in registry"; the verify path uses getRegistryRowStrict which rethrows
   }
 
   return parseRegistryRow(result.Item, cloudId);
@@ -297,7 +297,7 @@ export async function getOauthSecret(
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- lenient OAuth fetch for task hydration; strict variant getOauthSecretStrict rethrows SM errors
   }
 }
 
@@ -324,7 +324,7 @@ function parseOauthSecret(secretString: string, secretArn: string): StoredOauthT
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- corrupt secret JSON is logged ERROR; null triggers re-onboard path, not a masked infra failure
   }
   const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
     (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
@@ -483,10 +483,18 @@ async function tryRefreshOnce(
       SecretString: JSON.stringify(next),
     }));
   } catch (err) {
-    logger.error('Failed to persist refreshed Jira OAuth token', {
+    // Atlassian has already rotated the refresh_token server-side, but the
+    // new bundle didn't reach Secrets Manager. Do NOT cache `next`: caching
+    // would mask the breakage for SECRET_CACHE_TTL_MS while SM still holds a
+    // now-dead refresh_token. Invalidate so the next caller re-reads the
+    // (stale) secret and surfaces invalid_grant promptly rather than later.
+    logger.error('Failed to persist refreshed Jira OAuth token — SM holds a stale refresh_token; tenant will require re-onboarding if this recurs', {
       secret_arn: secretArn,
+      cloud_id: next.cloud_id,
       error: err instanceof Error ? err.message : String(err),
     });
+    invalidateJiraOauthCache(next.cloud_id, secretArn);
+    return { kind: 'success', token: next };
   }
 
   logger.info('Jira OAuth token refreshed', {

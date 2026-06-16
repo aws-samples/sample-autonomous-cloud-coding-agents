@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import threading
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -108,7 +109,14 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
         log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping comment")
         return False
 
-    url = f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}/comment"
+    # URL-encode both path segments. cloud_id and issue_key originate from the
+    # verified webhook payload (stamped into channel_metadata by the
+    # processor), but encoding them keeps an unexpected value from injecting
+    # extra path segments into the gateway URL. `safe=""` so even "/" encodes.
+    url = (
+        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+        f"/rest/api/3/issue/{quote(issue_key, safe='')}/comment"
+    )
     try:
         resp = requests.post(
             url,
@@ -122,6 +130,7 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
         )
     except requests.RequestException as e:
         log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
+        # nosemgrep: py-silent-success-masking -- Jira comments are best-effort on network blips
         return False
 
     if resp.status_code in (401, 403):

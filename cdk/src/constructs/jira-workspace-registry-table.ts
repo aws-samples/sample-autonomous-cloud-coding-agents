@@ -55,19 +55,21 @@ export interface JiraWorkspaceRegistryTableProps {
  *   valid REST base for the 3LO token, which is minted with
  *   `audience=api.atlassian.com` and must call the
  *   `https://api.atlassian.com/ex/jira/<cloudId>` gateway base instead)
- * - provider_name — full AgentCore credential provider name
- *   (`bgagent-jira-oauth-<cloudId>`), the lookup key for resolving the
- *   tenant's OAuth token via AgentCore Identity
+ * - oauth_secret_arn — full ARN of the per-tenant Secrets Manager secret
+ *   (`bgagent-jira-oauth-<cloudId>`) holding the OAuth bundle (access/refresh
+ *   tokens, client credentials, and the webhook signing secret). Created by
+ *   `bgagent jira setup`, not by CDK.
  * - installed_by_platform_user_id — Cognito sub of the admin who ran
  *   `bgagent jira setup` (audit only; runtime callers do not need this)
  * - installed_at, updated_at — ISO timestamps
  * - status — 'active' | 'revoked'
  *
- * The webhook processor and orchestrator look up `provider_name` here from
- * the inbound webhook's `cloudId`, then call AgentCore Identity with
- * `userId='jira-tenant-<cloudId>'` to retrieve the tenant's OAuth token.
- * Token sharing is intentional — one bgagent[bot] identity per tenant,
- * used for all members' triggered tasks (parity with the Linear adapter).
+ * The webhook receiver, processor, and orchestrator look up `oauth_secret_arn`
+ * here from the inbound webhook's `cloudId`, then fetch (and, on the Lambda
+ * paths, refresh) the tenant's OAuth/signing secret from Secrets Manager —
+ * see `jira-oauth-resolver.ts`. Token sharing is intentional: one
+ * bgagent[bot] identity per tenant, used for all members' triggered tasks
+ * (parity with the Linear adapter).
  */
 export class JiraWorkspaceRegistryTable extends Construct {
   /**
