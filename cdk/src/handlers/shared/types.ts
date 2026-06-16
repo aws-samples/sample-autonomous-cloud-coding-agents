@@ -59,13 +59,14 @@ export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions (see SlackIntegration)
  * - ``linear``: Linear label-triggered submissions (see LinearIntegration)
+ * - ``jira``: Jira Cloud label-triggered submissions (see JiraIntegration)
  *
  * Narrowed from ``string`` so switches and predicates that read
  * ``channel_source`` get exhaustiveness checking at compile time; matches the
  * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
  * Keep in sync with ``cli/src/types.ts::ChannelSource``.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /**
  * Full task record as stored in DynamoDB.

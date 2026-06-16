@@ -330,6 +330,123 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     return access
 
 
+def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
+    """Resolve the Jira Cloud OAuth access token from Secrets Manager.
+
+    The orchestrator stamps ``jira_oauth_secret_arn`` into the task
+    record's ``channel_metadata`` at task-creation time. We fetch the
+    per-tenant secret, parse the token JSON, and cache the access_token in
+    ``JIRA_API_TOKEN`` so the agent-side Jira REST calls
+    (``jira_reactions``) can authorize.
+
+    **The agent never refreshes the token.** Unlike Linear, Atlassian
+    *rotates the refresh_token on every use* — a successful refresh
+    invalidates the stored refresh_token and returns a new one. The agent
+    runtime has ``secretsmanager:GetSecretValue`` ONLY (no ``PutSecretValue``;
+    a compromised agent must not be able to overwrite any tenant's OAuth
+    bundle), so it cannot persist the rotated token. If the agent refreshed,
+    it would consume the stored refresh_token, keep the replacement only in
+    memory for this one task, and leave Secrets Manager holding a dead
+    refresh_token — the next Lambda/agent resolve would get ``invalid_grant``
+    and the tenant would require re-onboarding. So we deliberately do NOT
+    refresh here: the trusted Lambda path (``jira-oauth-resolver.ts``, which
+    has ``PutSecretValue``) owns all refreshes, and the agent uses whatever
+    access_token the Lambdas have most-recently written.
+
+    If the stored token is already expiring/expired, we fail closed — return
+    an empty string and let the advisory Jira comments no-op. The
+    orchestrator resolves (and refreshes) the token just before starting the
+    session, so in practice the agent reads a freshly-written token with a
+    full lifetime ahead of it.
+
+    For local development, a pre-set ``JIRA_API_TOKEN`` env var
+    short-circuits the lookup so the agent can run outside the runtime.
+
+    This function is only called when ``channel_source == 'jira'``.
+    """
+    cached = os.environ.get("JIRA_API_TOKEN", "")
+    if cached:
+        return cached
+
+    secret_arn = ""
+    if channel_metadata:
+        secret_arn = channel_metadata.get("jira_oauth_secret_arn", "")
+    if not secret_arn:
+        secret_arn = os.environ.get("JIRA_OAUTH_SECRET_ARN", "")
+    if not secret_arn:
+        return ""
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        log("WARN", "resolve_jira_oauth_token: AWS_REGION not set; cannot resolve token")
+        return ""
+
+    try:
+        import json
+        from datetime import datetime
+
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:
+        log("WARN", f"resolve_jira_oauth_token: boto3 unavailable ({e}); skipping")
+        return ""
+
+    sm = boto3.client("secretsmanager", region_name=region)
+
+    def _fetch_token() -> dict | None:
+        resp = sm.get_secret_value(SecretId=secret_arn)
+        try:
+            return json.loads(resp["SecretString"])
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            log(
+                "ERROR",
+                f"resolve_jira_oauth_token: secret '{secret_arn}' is not valid JSON "
+                f"({type(e).__name__}: {e}); tenant requires re-onboarding",
+            )
+            return None
+
+    def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
+        try:
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+        except ValueError:
+            log(
+                "WARN",
+                f"_is_expiring: malformed expires_at '{expires_at_iso}'; treating as expiring",
+            )
+            return True
+        return (expiry - datetime.now(UTC)).total_seconds() < threshold_seconds
+
+    try:
+        token_obj = _fetch_token()
+    except (ClientError, BotoCoreError) as e:
+        code = ""
+        if hasattr(e, "response"):
+            code = getattr(e, "response", {}).get("Error", {}).get("Code", "") or ""
+        is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
+        severity = "ERROR" if is_hard_failure else "WARN"
+        log(severity, f"resolve_jira_oauth_token failed: {type(e).__name__}: {e}")
+        return ""
+    if token_obj is None:
+        return ""
+
+    # Fail closed if the stored token is expiring — the agent cannot refresh
+    # without burning Atlassian's rotating refresh_token (see docstring). The
+    # Lambda path owns refresh; advisory Jira comments simply no-op here.
+    if _is_expiring(token_obj.get("expires_at", "")):
+        log(
+            "WARN",
+            "resolve_jira_oauth_token: stored token is expiring and the agent does not "
+            "refresh (Atlassian rotates refresh_tokens; agent lacks PutSecretValue). "
+            "Failing closed — Jira comments will be skipped for this task.",
+        )
+        return ""
+
+    access = token_obj.get("access_token", "")
+    if access:
+        os.environ["JIRA_API_TOKEN"] = access
+    return access
+
+
 def build_config(
     repo_url: str = "",
     task_description: str = "",

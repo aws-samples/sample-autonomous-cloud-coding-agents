@@ -15,8 +15,15 @@ from pydantic import ValidationError
 import memory as agent_memory
 import task_state
 from channel_mcp import configure_channel_mcp
-from config import AGENT_WORKSPACE, build_config, get_config, resolve_linear_api_token
+from config import (
+    AGENT_WORKSPACE,
+    build_config,
+    get_config,
+    resolve_jira_oauth_token,
+    resolve_linear_api_token,
+)
 from context import assemble_prompt, fetch_github_issue
+from jira_reactions import comment_task_finished, comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import task_span
@@ -796,13 +803,16 @@ def run_task(
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
-            # Channel-specific MCP wiring (Linear only, for v1). Must happen
-            # before discover_project_config so the scan picks up the file we
-            # just wrote. Resolve the API token from Secrets Manager *before*
-            # writing .mcp.json so the child SDK process inherits the env var
-            # that the MCP server entry references via ${LINEAR_API_TOKEN}.
+            # Channel-specific MCP wiring. Must happen before
+            # discover_project_config so the scan picks up the file we just
+            # wrote. Resolve the per-channel access token from Secrets
+            # Manager *before* writing .mcp.json so the child SDK process
+            # inherits the env var that the MCP server entry references
+            # (${LINEAR_API_TOKEN} / ${JIRA_API_TOKEN}).
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
+            elif config.channel_source == "jira":
+                resolve_jira_oauth_token(config.channel_metadata)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
@@ -810,6 +820,14 @@ def run_task(
             # but do not block the pipeline. Capture the reaction id so we
             # can delete it at terminal status (👀 → ✅/❌).
             linear_eyes_reaction_id = react_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # "Starting" comment on the Jira issue (REST shim — the Atlassian
+            # Remote MCP can't be used from a headless agent). No-op for
+            # non-Jira tasks. Best-effort; failures are logged, never block.
+            comment_task_started(
                 config.channel_source,
                 config.channel_metadata,
             )
@@ -1058,6 +1076,15 @@ def run_task(
                 started_reaction_id=linear_eyes_reaction_id,
             )
 
+            # Terminal status comment on the Jira issue (REST shim, with the
+            # PR link when one was opened). No-op for non-Jira tasks.
+            comment_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=(overall_status == "success"),
+                pr_url=pr_url,
+            )
+
             # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
             # ``trace_s3_uri`` can be persisted atomically with the
@@ -1178,6 +1205,14 @@ def run_task(
                 config.channel_metadata,
                 success=False,
                 started_reaction_id=linear_eyes_reaction_id,
+            )
+            # Best-effort failure comment on the Jira issue. No-op for
+            # non-Jira tasks; network failures are swallowed.
+            comment_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=False,
+                pr_url=None,
             )
             raise
 
