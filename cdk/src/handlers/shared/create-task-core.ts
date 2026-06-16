@@ -624,6 +624,12 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
+    // #247 UX.3: hoist linear_issue_id to the top level so the sparse
+    // LinearIssueIndex GSI can resolve an issue → its newest task + PR (a GSI
+    // cannot key off the nested channel_metadata map). Linear-origin only.
+    ...(context.channelMetadata?.linear_issue_id && {
+      linear_issue_id: context.channelMetadata.linear_issue_id,
+    }),
     ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${initialStatus}#${now}`,
     created_at: now,

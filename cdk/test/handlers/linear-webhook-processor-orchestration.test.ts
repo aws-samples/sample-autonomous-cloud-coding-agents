@@ -302,8 +302,12 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     };
   }
 
-  /** Mock loadOrchestration (Query) → snapshot with the sub-issue as a started child, and GetCommand → its PR url. */
-  function mockOrchWithChild(opts: { subIssueId: string; childTaskId?: string; prUrl?: string }): void {
+  /** Mock loadOrchestration (Query) → snapshot with the sub-issue as a started child, and GetCommand → its PR url.
+   *  The standalone LinearIssueIndex GSI query (Query w/ IndexName) returns empty unless `standalone` is given. */
+  function mockOrchWithChild(opts: {
+    subIssueId: string; childTaskId?: string; prUrl?: string;
+    standalone?: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number };
+  }): void {
     const meta = {
       sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'PARENT',
       linear_workspace_id: 'WS', repo: 'o/r', child_count: 1, platform_user_id: 'release-user',
@@ -314,8 +318,22 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     };
     if (opts.childTaskId) child.child_task_id = opts.childTaskId;
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
+        return { Items: opts.standalone ? [opts.standalone] : [] }; // resolveTaskByLinearIssue
+      }
       if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
       if (cmd._type === 'Get') return { Item: opts.prUrl ? { pr_url: opts.prUrl } : {} };
+      return {};
+    });
+  }
+
+  /** Mock for a PLAIN (non-orchestration) issue: no parent, no orchestration snapshot, only the GSI hit. */
+  function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number } | null): void {
+    fetchIssueParentIdMock.mockResolvedValue(null); // no parent ⇒ not a sub-issue
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
+        return { Items: standalone ? [standalone] : [] };
+      }
       return {};
     });
   }
@@ -375,21 +393,25 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     expect(fetchIssueParentIdMock).not.toHaveBeenCalled();
   });
 
-  test('@bgagent on an issue with no parent → not an orchestrated sub-issue → no task', async () => {
-    fetchIssueParentIdMock.mockResolvedValue(null);
+  test('@bgagent on an issue with no parent AND no ABCA task → clean no-op (not an ABCA issue)', async () => {
+    mockStandaloneOnly(null); // no parent, GSI miss
     await handler(eventWith(comment()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reactToCommentMock).not.toHaveBeenCalled(); // no premature ack
   });
 
-  test('@bgagent on a sub-issue whose parent is not an orchestration → no task', async () => {
+  test('@bgagent on a sub-issue whose parent is not an orchestration AND no ABCA task → no task', async () => {
     fetchIssueParentIdMock.mockResolvedValue('PARENT');
-    ddbSend.mockResolvedValue({ Items: [] }); // loadOrchestration → no snapshot
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
+      return { Items: [] }; // loadOrchestration → no snapshot
+    });
     await handler(eventWith(comment()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('@bgagent on an un-started sub-issue (no child_task_id) → no task', async () => {
-    mockOrchWithChild({ subIssueId: 'sub-issue-1' }); // no childTaskId
+  test('@bgagent on an un-started sub-issue (no child_task_id) AND no ABCA task → no task', async () => {
+    mockOrchWithChild({ subIssueId: 'sub-issue-1' }); // no childTaskId, no standalone
     await handler(eventWith(comment()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
@@ -399,5 +421,47 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     await handler(eventWith(comment({ data: { id: 'c3', body: '@bgagent', issueId: 'sub-issue-1' } })));
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
     expect(createTaskCoreMock.mock.calls[0][0].task_description).toMatch(/latest review feedback/i);
+  });
+
+  // #247 UX.3: the GENERALIZED trigger — a plain (non-orchestration) issue
+  // that ABCA opened a PR for, resolved via the LinearIssueIndex GSI.
+  describe('standalone (non-orchestration) @bgagent trigger', () => {
+    test('plain issue with an ABCA PR → pr-iteration task, 👀 ack, trigger_comment_id but NO orchestration markers', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [body, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(body.workflow_ref).toBe('coding/pr-iteration-v1');
+      expect(body.pr_number).toBe(99);
+      expect(body.repo).toBe('o/r');
+      expect(ctx.userId).toBe('u-solo'); // attributed to the original task's user
+      expect(ctx.channelMetadata.trigger_comment_id).toBe('comment-1');
+      expect(ctx.channelMetadata.linear_issue_id).toBe('sub-issue-1');
+      // NOT an orchestration iteration — the reconciler must ignore it (fanout replies).
+      expect(ctx.channelMetadata.orchestration_id).toBeUndefined();
+      expect(ctx.channelMetadata.orchestration_iteration).toBeUndefined();
+      // 👀 ack on the comment.
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    test('plain issue resolves PR from pr_url when pr_number absent', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_url: 'https://github.com/o/r/pull/123' });
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(123);
+    });
+
+    test('plain issue whose ABCA task opened NO PR → no task, no ack', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r' }); // no pr
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reactToCommentMock).not.toHaveBeenCalled();
+    });
+
+    test('plain issue task missing user_id → cannot attribute → no task', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', repo: 'o/r', pr_number: 5 }); // no user_id
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
   });
 });

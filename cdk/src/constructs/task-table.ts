@@ -54,6 +54,9 @@ export interface TaskTableProps {
  * - UserStatusIndex (PK: user_id, SK: status_created_at) — "my tasks" queries
  * - StatusIndex (PK: status, SK: created_at) — queue processing, monitoring
  * - IdempotencyIndex (PK: idempotency_key) — sparse index for dedup
+ * - LinearIssueIndex (PK: linear_issue_id, SK: created_at) — sparse; resolve a
+ *   Linear issue back to its newest ABCA task + PR (#247 UX.3 standalone
+ *   comment trigger)
  */
 export class TaskTable extends Construct {
   /**
@@ -73,6 +76,16 @@ export class TaskTable extends Construct {
    * PK: idempotency_key. Sparse index — only items with the key are projected.
    */
   public static readonly IDEMPOTENCY_INDEX = 'IdempotencyIndex';
+
+  /**
+   * GSI name for resolving a Linear issue → its newest ABCA task + PR (#247
+   * UX.3). PK: linear_issue_id, SK: created_at (newest task wins). Sparse —
+   * only Linear-origin tasks (which write the top-level ``linear_issue_id``
+   * attribute) are projected; GitHub/Slack/API tasks are absent. Powers the
+   * standalone ``@bgagent`` comment trigger on a plain (non-orchestration)
+   * issue, where no orchestration row records the issue→PR link.
+   */
+  public static readonly LINEAR_ISSUE_INDEX = 'LinearIssueIndex';
 
   /**
    * The underlying DynamoDB table. Use this to grant access or read the table name.
@@ -128,6 +141,18 @@ export class TaskTable extends Construct {
       indexName: TaskTable.IDEMPOTENCY_INDEX,
       partitionKey: { name: 'idempotency_key', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+
+    // GSI: Linear issue → newest ABCA task + PR (sparse — only Linear-origin
+    // tasks carry the top-level linear_issue_id). #247 UX.3 standalone
+    // comment trigger. INCLUDE-projects just the fields the trigger reads, so
+    // the index stays lean (no full-item copy on every task write).
+    this.table.addGlobalSecondaryIndex({
+      indexName: TaskTable.LINEAR_ISSUE_INDEX,
+      partitionKey: { name: 'linear_issue_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
     });
   }
 }

@@ -48,7 +48,7 @@ import type {
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
-import { postIssueComment } from './shared/linear-feedback';
+import { postIssueComment, replyToComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -989,6 +989,65 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       posted: false,
     });
   }
+
+  // #247 UX.3: a STANDALONE comment-triggered iteration (carries
+  // trigger_comment_id but NOT orchestration_iteration — those get the
+  // reconciler's reply) closes the human's @bgagent conversation with a
+  // THREADED ✅/❌ reply beneath their comment, on top of the metrics comment
+  // above. Orchestration iterations are skipped here to avoid a double-reply.
+  await replyToStandaloneTrigger(event, task, registryTableName, workspaceId);
+}
+
+/**
+ * #247 UX.3 — post the threaded ✅/❌ reply for a standalone comment-triggered
+ * iteration. Idempotent: claims the one reply by conditionally stamping
+ * ``ack_replied_at`` on the task record, so a redelivered terminal stream
+ * record never double-replies (mirrors the reconciler's orchestration-iteration
+ * ack). Best-effort — never throws into the dispatcher.
+ */
+async function replyToStandaloneTrigger(
+  event: FanOutEvent,
+  task: TaskRecord,
+  registryTableName: string,
+  workspaceId: string,
+): Promise<void> {
+  const cm = task.channel_metadata;
+  const triggerCommentId = cm?.trigger_comment_id;
+  // Only standalone iterations: must have a trigger comment AND must NOT be an
+  // orchestration iteration (the reconciler owns that reply).
+  if (!triggerCommentId || cm?.orchestration_iteration === 'true') return;
+
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return;
+
+  // Claim the single reply for this task (dedup redelivered terminal events).
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { task_id: task.task_id },
+      UpdateExpression: 'SET ack_replied_at = :now',
+      ConditionExpression: 'attribute_not_exists(ack_replied_at)',
+      ExpressionAttributeValues: { ':now': event.timestamp },
+    }));
+  } catch (err) {
+    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
+      logger.warn('[fanout/linear] UX.3 ack claim failed — skipping reply', {
+        task_id: task.task_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return; // lost the claim (replay) or errored → don't double-reply
+  }
+
+  const succeeded = event.event_type === 'task_completed';
+  const prNumber = typeof task.pr_number === 'number'
+    ? task.pr_number
+    : (typeof task.pr_url === 'string' ? Number(task.pr_url.match(/\/pull\/(\d+)\b/)?.[1]) || null : null);
+  const body = succeeded
+    ? (prNumber !== null ? `✅ Updated — PR #${prNumber}.` : '✅ Updated.')
+    : '❌ I hit a problem applying that — see the comment above for details. Reply with guidance and I\'ll try again.';
+
+  await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, triggerCommentId, body);
 }
 
 /** Exposed for testing: the per-channel dispatcher callable by the
