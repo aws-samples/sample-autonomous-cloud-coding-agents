@@ -21,8 +21,19 @@ import { renderFailureReply } from '../../../src/handlers/shared/failure-reply';
 import { TaskStatus } from '../../../src/constructs/task-status';
 
 describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
-  describe('build/test failure (agent completed, PR exists, checks red)', () => {
-    const body = renderFailureReply({ status: TaskStatus.COMPLETED, buildPassed: false, taskId: 't1' });
+  describe('build/test failure — the REAL live-verified gating shape', () => {
+    // Live-verified 2026-06-16: a build/test regression persists as
+    // status=FAILED, build_passed=null, error_message="Task did not succeed
+    // (agent_status='success', build_ok=False)". The agent finished fine; only
+    // the build gate failed. (The previous COMPLETED+build_passed===false
+    // assumption NEVER occurs live — that bug shipped to dev and was caught by
+    // forcing a regression in UX.6.)
+    const body = renderFailureReply({
+      status: TaskStatus.FAILED,
+      buildPassed: null,
+      errorMessage: "Task did not succeed (agent_status='success', build_ok=False)",
+      taskId: 't1',
+    });
 
     test('points at the PR checks, not a raw dump', () => {
       expect(body).toMatch(/^❌/);
@@ -36,6 +47,21 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
 
     test('does NOT surface a CloudWatch task pointer (that is for agent failures)', () => {
       expect(body).not.toMatch(/CloudWatch/i);
+    });
+
+    test('also matches the end_turn variant of the gating message', () => {
+      const b = renderFailureReply({
+        status: TaskStatus.FAILED,
+        errorMessage: "Task did not succeed (agent_status='end_turn', build_ok=False)",
+        taskId: 't1b',
+      });
+      expect(b).toMatch(/build\/tests didn't pass/i);
+      expect(b).not.toMatch(/CloudWatch/i);
+    });
+
+    test('defensive: explicit build_passed=false with no error_message still reads as build failure', () => {
+      const b = renderFailureReply({ status: TaskStatus.FAILED, buildPassed: false, taskId: 't1c' });
+      expect(b).toMatch(/build\/tests didn't pass/i);
     });
   });
 
@@ -73,13 +99,13 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
       expect(body).toMatch(/CloudWatch for task `t4`/);
     });
 
-    test('COMPLETED with build_passed=false BUT an error_message present → agent failure (not build)', () => {
-      // A crash that also left build_passed false should read as the crash,
-      // with the CloudWatch pointer — not the softer build-fail copy.
+    test('a genuine agent crash (agent_status=error_*) reads as agent failure, NOT build', () => {
+      // An agent crash mid-execution — distinct from the build-gate-failed
+      // shape (which carries agent_status='success'). Must get the CloudWatch
+      // pointer, not the softer "PR's checks" build copy.
       const body = renderFailureReply({
-        status: TaskStatus.COMPLETED,
-        buildPassed: false,
-        errorMessage: 'agent_status="error_during_execution"',
+        status: TaskStatus.FAILED,
+        errorMessage: 'Task did not succeed (agent_status=\'error_during_execution\', build_ok=False)',
         taskId: 't5',
       });
       expect(body).toMatch(/CloudWatch for task `t5`/);
