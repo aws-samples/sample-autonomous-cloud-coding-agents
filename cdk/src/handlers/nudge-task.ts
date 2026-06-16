@@ -39,8 +39,9 @@ if (!TASK_TABLE_NAME || !NUDGES_TABLE_NAME) {
   );
 }
 const RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? '10');
-/** TTL for stored nudge rows (~30 days). */
-const NUDGE_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+/** TTL for stored nudge rows (days). */
+const NUDGE_RETENTION_DAYS = 30;
+const NUDGE_RETENTION_SECONDS = NUDGE_RETENTION_DAYS * 86400;
 /** TTL for rate-limit counter rows (~2 minutes — only need the current minute bucket). */
 const RATE_LIMIT_ROW_TTL_SECONDS = 120;
 

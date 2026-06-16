@@ -63,6 +63,9 @@ const BEDROCK_MODEL_IDS = [
   'anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 
+/** HTTPS port — the only egress allowed from the agent task ENIs. */
+const HTTPS_PORT = 443;
+
 export class EcsAgentCluster extends Construct {
   public readonly cluster: ecs.Cluster;
   public readonly taskDefinition: ecs.FargateTaskDefinition;
@@ -91,7 +94,7 @@ export class EcsAgentCluster extends Construct {
 
     this.securityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
+      ec2.Port.tcp(HTTPS_PORT),
       'Allow HTTPS egress (GitHub API, AWS services)',
     );
 

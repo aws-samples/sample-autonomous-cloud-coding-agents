@@ -30,6 +30,37 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { CEDAR_WASM_MIN_LAMBDA_MEMORY_MB } from './cedar-wasm-layer';
+
+/** Default task-record retention used for TTL computation (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/** Default webhook-record retention used for TTL computation (days). */
+const DEFAULT_WEBHOOK_RETENTION_DAYS = 30;
+
+/**
+ * Standard API-handler Lambda timeout (seconds). Lambda's 3s default is
+ * not enough once cold-start TLS handshakes / SDK loads are added; 15s
+ * gives comfortable headroom while staying well under API Gateway's 29s
+ * integration cap.
+ */
+const API_HANDLER_TIMEOUT_SECONDS = 15;
+
+/**
+ * Confirm-uploads Lambda timeout (seconds). Downloads + screens up to
+ * five attachments (Guardrail image scan, PDF text extraction) in one
+ * invocation, so it gets a much larger budget than the standard handlers.
+ */
+const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
+
+/** Standard API-handler Lambda memory (MB). */
+const API_HANDLER_MEMORY_MB = 256;
+
+/** Memory for handlers with attachment screening or heavy SDK init (MB). */
+const SCREENING_HANDLER_MEMORY_MB = 512;
+
+/** Memory for confirm-uploads / webhook-create attachment path (MB). */
+const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
 
 /**
  * Properties for TaskApi construct.
@@ -442,7 +473,7 @@ export class TaskApi extends Construct {
     const commonEnv = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
       // Solution-attribution component label (#319): the `md/` segment for the
       // REST API surface. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
       // set separately by the stack-level SolutionUaAspect.
@@ -497,8 +528,8 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: createTaskEnv,
       bundling: attachmentScreeningBundling,
-      memorySize: 512,
-      timeout: Duration.seconds(15),
+      memorySize: SCREENING_HANDLER_MEMORY_MB,
+      timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
 
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
@@ -539,8 +570,8 @@ export class TaskApi extends Construct {
       // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
       // is not enough once cold-start TLS handshakes for bedrock-agentcore
       // are added.  15s gives comfortable headroom.
-      timeout: Duration.seconds(15),
-      memorySize: 256,
+      timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+      memorySize: API_HANDLER_MEMORY_MB,
     });
 
     const getTaskEventsFn = new lambda.NodejsFunction(this, 'GetTaskEventsFn', {
@@ -638,8 +669,8 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: confirmUploadsEnv,
         bundling: attachmentScreeningBundling,
-        memorySize: 1024,
-        timeout: Duration.seconds(180),
+        memorySize: HEAVY_ATTACHMENT_HANDLER_MEMORY_MB,
+        timeout: Duration.seconds(CONFIRM_UPLOADS_TIMEOUT_SECONDS),
       });
 
       // Grants: DDB read-write, S3 read-write-delete, orchestrator invoke, guardrail
@@ -721,8 +752,8 @@ export class TaskApi extends Construct {
         },
         // Cold-start SDK load (s3-client + s3-request-presigner + lib-dynamodb)
         // exceeds Lambda's 3s default, causing INIT timeout → 502 Bad Gateway.
-        timeout: Duration.seconds(15),
-        memorySize: 512,
+        timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+        memorySize: SCREENING_HANDLER_MEMORY_MB,
       });
 
       props.taskTable.grantReadData(getTraceUrlFn);
@@ -806,8 +837,8 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
         bundling: commonBundling,
-        timeout: Duration.seconds(15),
-        memorySize: 256,
+        timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+        memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(approveTaskFn);
       props.taskApprovalsTable.grantReadWriteData(approveTaskFn);
@@ -821,8 +852,8 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
         bundling: commonBundling,
-        timeout: Duration.seconds(15),
-        memorySize: 256,
+        timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+        memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
@@ -837,7 +868,7 @@ export class TaskApi extends Construct {
         environment: approvalEnv,
         bundling: commonBundling,
         timeout: Duration.seconds(10),
-        memorySize: 256,
+        memorySize: API_HANDLER_MEMORY_MB,
       });
       // Least-privilege: GetPendingFn only reads (Query on
       // user_id-status-index for the user's pending rows) and writes
@@ -910,8 +941,8 @@ export class TaskApi extends Construct {
           layers: [props.cedarWasmLayer],
           // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
           // the wasm binary is ~4 MB which pushes init time.
-          memorySize: 512,
-          timeout: Duration.seconds(15),
+          memorySize: CEDAR_WASM_MIN_LAMBDA_MEMORY_MB,
+          timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         });
         props.taskApprovalsTable.grantReadData(getPoliciesFn);
         props.repoTable.grantReadData(getPoliciesFn);
@@ -934,7 +965,7 @@ export class TaskApi extends Construct {
     if (props.webhookTable) {
       const webhookEnv: Record<string, string> = {
         WEBHOOK_TABLE_NAME: props.webhookTable.tableName,
-        WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? 30),
+        WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
         // Solution-attribution component label (#319): webhook ingest surface.
         // (webhookEnv does NOT spread commonEnv, so set it explicitly here.)
         ABCA_COMPONENT: 'webhook',
@@ -986,8 +1017,8 @@ export class TaskApi extends Construct {
         architecture: Architecture.ARM_64,
         environment: createTaskEnv,
         bundling: attachmentScreeningBundling,
-        memorySize: 1024,
-        timeout: Duration.seconds(15),
+        memorySize: HEAVY_ATTACHMENT_HANDLER_MEMORY_MB,
+        timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       });
 
       // --- IAM grants for webhook Lambdas ---

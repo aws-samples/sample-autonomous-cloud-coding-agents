@@ -31,6 +31,7 @@ import {
   encodePaginationToken,
   isValidUlid,
   parseLimit,
+  ULID_LENGTH,
 } from './shared/validation';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
@@ -38,6 +39,12 @@ const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'INFO').toUpperCase();
 const DEBUG_ENABLED = LOG_LEVEL === 'DEBUG';
+
+/** Default page size when the caller omits ``?limit=``. */
+const DEFAULT_PAGE_LIMIT = 50;
+
+/** Hard page-size ceiling. */
+const MAX_PAGE_LIMIT = 100;
 
 /** Query mode resolved from query parameters for structured logging. */
 type QueryMode = 'from_beginning' | 'next_token' | 'after' | 'desc';
@@ -86,7 +93,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 3. Parse pagination parameters
     const params = event.queryStringParameters ?? {};
-    const limit = parseLimit(params.limit, 50, 100);
+    const limit = parseLimit(params.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const afterRaw = params.after;
     const nextTokenRaw = params.next_token;
     const descRaw = params.desc;
@@ -112,7 +119,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    const afterValid = typeof afterRaw === 'string' && afterRaw.length === 26 ? afterRaw : undefined;
+    const afterValid = typeof afterRaw === 'string' && afterRaw.length === ULID_LENGTH ? afterRaw : undefined;
 
     // 3b. ``desc`` combined with ``after`` makes no semantic sense: ``after``
     // is a forward-walking ULID cursor. Reject the combination rather than

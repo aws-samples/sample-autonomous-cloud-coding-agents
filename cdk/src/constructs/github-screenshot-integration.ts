@@ -32,6 +32,18 @@ import { Construct } from 'constructs';
 import { ScreenshotBucket } from './screenshot-bucket';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
+/** Async screenshot-processor Lambda timeout (seconds). */
+const PROCESSOR_TIMEOUT_SECONDS = 120;
+
+/** Async-invoke DLQ message retention (days). */
+const PROCESSOR_DLQ_RETENTION_DAYS = 14;
+
+/** DLQ-depth alarm metric period (minutes). */
+const DLQ_ALARM_PERIOD_MINUTES = 5;
+
+/** Async screenshot-processor Lambda memory (MB). */
+const PROCESSOR_MEMORY_MB = 512;
+
 /**
  * Properties for GitHubScreenshotIntegration construct.
  */
@@ -168,7 +180,7 @@ export class GitHubScreenshotIntegration extends Construct {
     // would otherwise vanish after Lambda's built-in async retries. The
     // DLQ keeps the failed invocation payload for operator inspection.
     const processorDlq = new sqs.Queue(this, 'WebhookProcessorDlq', {
-      retentionPeriod: Duration.days(14),
+      retentionPeriod: Duration.days(PROCESSOR_DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
@@ -177,8 +189,8 @@ export class GitHubScreenshotIntegration extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(120),
-      memorySize: 512,
+      timeout: Duration.seconds(PROCESSOR_TIMEOUT_SECONDS),
+      memorySize: PROCESSOR_MEMORY_MB,
       deadLetterQueue: processorDlq,
       environment: {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
@@ -204,7 +216,7 @@ export class GitHubScreenshotIntegration extends Construct {
     // threshold-1 shape as FanOutConsumer.dlqDepthAlarm.
     this.processorDlqDepthAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorDlqDepthAlarm', {
       metric: processorDlq.metricApproximateNumberOfMessagesVisible({
-        period: Duration.minutes(5),
+        period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
         statistic: 'Maximum',
       }),
       threshold: 1,

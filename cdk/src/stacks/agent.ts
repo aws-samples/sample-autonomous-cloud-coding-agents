@@ -59,6 +59,15 @@ import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
 
+/** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
+const GUARDRAIL_NAME_MAX_LENGTH = 50;
+
+/** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
+const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
+
+/** Index of the stage segment in a split API Gateway URL. */
+const API_URL_STAGE_SEGMENT_INDEX = 3;
+
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
@@ -207,7 +216,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, GUARDRAIL_NAME_MAX_LENGTH),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
@@ -366,8 +375,8 @@ export class AgentStack extends Stack {
     // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
     // long-running tasks (approval waits, heavy builds) are not evicted.
     const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
-      idleRuntimeSessionTimeout: Duration.hours(8),
-      maxLifetime: Duration.hours(8),
+      idleRuntimeSessionTimeout: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
+      maxLifetime: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
     };
 
     // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
@@ -708,7 +717,7 @@ export class AgentStack extends Stack {
     // Pre-filled manifest URL: opens Slack's "Create New App" page with all
     // URLs, scopes, and events pre-configured. User just clicks Create.
     const apiHost = Fn.select(2, Fn.split('/', taskApi.api.url));
-    const apiStage = Fn.select(3, Fn.split('/', taskApi.api.url));
+    const apiStage = Fn.select(API_URL_STAGE_SEGMENT_INDEX, Fn.split('/', taskApi.api.url));
     const apiBase = Fn.join('', ['https://', apiHost, '/', apiStage]);
 
     // Build the YAML manifest as a string using Fn.join (API URL tokens resolve at deploy time).

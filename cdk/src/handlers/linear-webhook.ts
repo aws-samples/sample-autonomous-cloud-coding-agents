@@ -49,7 +49,8 @@ const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAM
  * skew, without making stale rows live meaningfully longer (DDB TTL is
  * async best-effort anyway).
  */
-const DEDUP_TTL_SECONDS = 8 * 60 * 60;
+const DEDUP_TTL_HOURS = 8;
+const DEDUP_TTL_SECONDS = DEDUP_TTL_HOURS * 3600;
 
 /**
  * Shape of the top-level Linear webhook payload we care about for dedup + routing.

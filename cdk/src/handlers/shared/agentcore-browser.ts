@@ -47,6 +47,15 @@ const AWS_BROWSER_IDENTIFIER = 'aws.browser.v1';
  */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
+/** Post-load settle wait (ms) before screenshot — lets SPA fetches finish. */
+const PAGE_SETTLE_WAIT_MS = 2000;
+
+/** Inclusive lower bound for a successful HTTP status (2xx). */
+const HTTP_STATUS_SUCCESS_MIN = 200;
+
+/** Exclusive upper bound for a successful HTTP status (first non-2xx). */
+const HTTP_STATUS_REDIRECT_MIN = 300;
+
 interface CdpMessage {
   readonly id?: number;
   readonly method?: string;
@@ -333,7 +342,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     //    typical preview URLs (Vercel/Netlify/Amplify CDN edges) this
     //    is enough.
     await waitForEvent('Page.loadEventFired');
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, PAGE_SETTLE_WAIT_MS));
 
     // 6. Reject non-2xx main-document statuses before screenshotting.
     //    A 404 / 503 / auth wall renders a "successful" page from CDP's
@@ -355,7 +364,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     } else if (documentStatusByFrame.size === 1) {
       mainDocumentStatus = documentStatusByFrame.values().next().value ?? null;
     }
-    if (mainDocumentStatus !== null && (mainDocumentStatus < 200 || mainDocumentStatus >= 300)) {
+    if (mainDocumentStatus !== null && (mainDocumentStatus < HTTP_STATUS_SUCCESS_MIN || mainDocumentStatus >= HTTP_STATUS_REDIRECT_MIN)) {
       throw new Error(`Preview URL returned HTTP ${mainDocumentStatus}; skipping screenshot`);
     }
 

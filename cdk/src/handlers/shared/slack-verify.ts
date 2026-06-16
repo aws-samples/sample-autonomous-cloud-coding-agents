@@ -30,10 +30,12 @@ export const SLACK_SECRET_PREFIX = 'bgagent/slack/';
 
 // In-memory secret cache with 5-minute TTL (same pattern as webhook handler).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /** Maximum age of a Slack request timestamp before it is rejected (replay protection). */
-const MAX_TIMESTAMP_AGE_S = 5 * 60;
+const MAX_TIMESTAMP_AGE_MINUTES = 5;
+const MAX_TIMESTAMP_AGE_S = MAX_TIMESTAMP_AGE_MINUTES * 60;
 
 /**
  * Fetch a secret from Secrets Manager with in-memory caching.

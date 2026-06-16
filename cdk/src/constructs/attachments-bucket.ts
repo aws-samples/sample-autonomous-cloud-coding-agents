@@ -24,6 +24,9 @@ import { Construct } from 'constructs';
 /** Lifecycle expiry for task attachments — matches task record retention. */
 export const ATTACHMENT_TTL_DAYS = 90;
 
+/** Noncurrent version expiry — covers the longest-running tasks. */
+const NONCURRENT_VERSION_TTL_DAYS = 7;
+
 /** S3 key prefix for all attachments. Layout: attachments/<user_id>/<task_id>/<attachment_id>/<filename> */
 export const ATTACHMENT_OBJECT_KEY_PREFIX = 'attachments/';
 
@@ -77,7 +80,7 @@ export class AttachmentsBucket extends Construct {
           id: 'attachments-ttl',
           enabled: true,
           expiration: Duration.days(ATTACHMENT_TTL_DAYS),
-          noncurrentVersionExpiration: Duration.days(7),
+          noncurrentVersionExpiration: Duration.days(NONCURRENT_VERSION_TTL_DAYS),
           abortIncompleteMultipartUploadAfter: Duration.days(1),
         },
       ],

@@ -23,7 +23,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
+import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPendingResponse, PendingApprovalSummary, Severity } from './shared/types';
 import { abcaUserAgent } from './shared/ua';
@@ -85,7 +85,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ExpressionAttributeValues: {
           ':one': 1,
           ':max': PENDING_RATE_LIMIT_PER_MINUTE,
-          ':ttl': nowEpoch + 120,
+          ':ttl': nowEpoch + RATE_LIMIT_ROW_TTL_SECONDS,
         },
       }));
     } catch (err: unknown) {

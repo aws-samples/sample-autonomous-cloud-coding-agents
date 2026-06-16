@@ -27,6 +27,15 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+/** Reconciler Lambda timeout (minutes). */
+const RECONCILER_TIMEOUT_MINUTES = 5;
+
+/** Default reconciliation schedule interval (minutes). */
+const DEFAULT_SCHEDULE_MINUTES = 15;
+
+/** Reconciler Lambda memory (MB). */
+const RECONCILER_MEMORY_MB = 256;
+
 /**
  * Properties for ConcurrencyReconciler construct.
  */
@@ -66,8 +75,8 @@ export class ConcurrencyReconciler extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.minutes(5),
-      memorySize: 256,
+      timeout: Duration.minutes(RECONCILER_TIMEOUT_MINUTES),
+      memorySize: RECONCILER_MEMORY_MB,
       environment: {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
@@ -82,7 +91,7 @@ export class ConcurrencyReconciler extends Construct {
     props.taskTable.grantReadData(this.fn);
     props.userConcurrencyTable.grantReadWriteData(this.fn);
 
-    const schedule = props.schedule ?? Duration.minutes(15);
+    const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);
     const rule = new events.Rule(this, 'ReconcilerSchedule', {
       schedule: events.Schedule.rate(schedule),
     });

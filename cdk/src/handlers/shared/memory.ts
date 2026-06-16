@@ -59,8 +59,17 @@ const MEMORY_READ_TIMEOUT_MS = 5_000;
 const MEMORY_TOKEN_BUDGET = 2_000;
 
 /** Rough token estimate: ~4 chars per token. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
+/** Schema version at which content_sha256 became mandatory on write. */
+const MIN_SCHEMA_VERSION_WITH_CONTENT_HASH = 3;
+
+/** Decimal places when rendering USD cost in minimal memory episodes. */
+const COST_USD_DECIMAL_PLACES = 4;
+
+/** Rough token estimate: ~4 chars per token. */
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 /** Compute SHA-256 hash of text content (UTF-8 encoded; must match agent/src/memory.py). */
@@ -89,7 +98,7 @@ function checkContentIntegrity(
     // v3+ records should always have a hash — missing hash signals a
     // corrupted write or a write-path regression that stopped emitting hashes.
     const schemaVersion = metadata?.schema_version?.stringValue;
-    if (schemaVersion && parseInt(schemaVersion, 10) >= 3) {
+    if (schemaVersion && parseInt(schemaVersion, 10) >= MIN_SCHEMA_VERSION_WITH_CONTENT_HASH) {
       logger.warn('Schema v3+ record missing content_sha256 — possible corrupted write', {
         schema_version: schemaVersion,
         source_type: metadata?.source_type?.stringValue ?? '(unknown)',
@@ -325,7 +334,7 @@ export async function writeMinimalEpisode(
     const episodeText = [
       `Task ${taskId} completed with status: ${status}.`,
       durationS !== undefined ? `Duration: ${durationS}s.` : '',
-      costUsd !== undefined ? `Cost: $${costUsd.toFixed(4)}.` : '',
+      costUsd !== undefined ? `Cost: $${costUsd.toFixed(COST_USD_DECIMAL_PLACES)}.` : '',
       'Note: This is a minimal episode written by the orchestrator because the agent did not write memory.',
     ].filter(Boolean).join(' ');
 
