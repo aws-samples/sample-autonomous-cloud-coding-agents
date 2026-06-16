@@ -4,15 +4,16 @@
 
 ABCA is a platform for running autonomous background coding agents on AWS. You submit a task (a GitHub repository + a task description or issue number), an agent works autonomously in an isolated environment, and delivers a pull request when done. This guide covers how to submit coding tasks, monitor their progress, and get the most out of the platform.
 
-There are five ways to interact with the platform. You can use them independently or combine them for different workflows:
+There are six ways to interact with the platform. You can use them independently or combine them for different workflows:
 
 1. **CLI** (recommended) - The `bgagent` CLI authenticates via Cognito and calls the Task API. Best for individual developers submitting tasks from the terminal. Handles login, token caching, and output formatting.
 2. **REST API** (direct) - Call the Task API endpoints directly with a JWT token. Best for building custom integrations, dashboards, or internal tools on top of the platform. Full validation, audit logging, and idempotency support.
 3. **Webhook** - External systems (CI pipelines, GitHub Actions) can create tasks via HMAC-authenticated HTTP requests. Best for automated workflows where tasks should be triggered by events (e.g., a new issue is labeled, a PR needs review). No Cognito credentials needed; uses a shared secret per integration.
 4. **Slack** - Submit tasks by @mentioning the bot and receive threaded progress notifications with reaction-based status. See the [Slack setup guide](./SLACK_SETUP_GUIDE.md).
 5. **Linear** - Apply a label to a Linear issue to trigger a task; the agent posts progress comments back on the issue via Linear's MCP server. See the [Linear setup guide](./LINEAR_SETUP_GUIDE.md).
+6. **Jira** - Add a label to a Jira Cloud issue to trigger a task; the agent posts progress comments back on the issue via the Jira REST v3 API. See the [Jira setup guide](./JIRA_SETUP_GUIDE.md).
 
-For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
+For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** or **Jira** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
 ## Roles
 
@@ -120,7 +121,7 @@ Three steps:
 
 You're in. `bgagent submit`, `bgagent list`, `bgagent status` work against the shared stack. Tasks you submit are attributed to your Cognito user; concurrency caps and budgets are scoped to you.
 
-**You do not run** `bgagent linear setup` or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#step-6-link-your-linear-account).
+**You do not run** `bgagent linear setup`, `bgagent jira setup`, or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear- or Jira-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity or Jira account to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#inviting-teammates) or [Jira user linking](./JIRA_SETUP_GUIDE.md#5-link-your-jira-identity).
 
 If something looks broken (commands fail with `Not configured` or `401 Unauthorized`), re-paste the bundle and re-run `bgagent login`. The bundle holds no secrets — your password (separate) is the credential.
 
