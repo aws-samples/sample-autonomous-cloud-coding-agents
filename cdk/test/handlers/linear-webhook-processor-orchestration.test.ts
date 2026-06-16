@@ -58,6 +58,8 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   EMOJI_STARTED: 'eyes',
+  EMOJI_SUCCESS: 'white_check_mark',
+  EMOJI_FAILURE: 'x',
 }));
 
 const resolveLinearOauthTokenMock = jest.fn();
@@ -125,6 +127,8 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
   beforeEach(() => {
     ddbSend.mockReset();
     createTaskCoreMock.mockReset();
+    // Default: release path (now exercised in the seed test) returns a created task.
+    createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'child-task' } }) });
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
     resolveLinearOauthTokenMock.mockReset();
@@ -144,19 +148,29 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
       rootSubIssueIds: ['A'],
       alreadyExisted: false,
     });
-    // After seeding, the handler loads the orchestration (Query) to
-    // release root children. Return an empty snapshot so the load is a
-    // no-op (this test only asserts the parent spawns no task; root
-    // release is covered by the reconciler/release tests).
-    ddbSend.mockResolvedValueOnce({ Items: [] });
+    // After seeding, the handler loads the orchestration (Query) to release
+    // roots + post the initial panel. Return a real snapshot so the panel path
+    // runs (mirrors the parent start signal). All Query calls return it.
+    ddbSend.mockResolvedValue({ Items: [
+      { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1',
+        linear_workspace_id: 'org-1', repo: 'owner/repo', platform_user_id: 'u1' },
+      { sub_issue_id: 'A', orchestration_id: 'orch_abc', depends_on: [], child_status: 'ready',
+        parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo' },
+    ] });
 
     await handler(eventWith(issue()));
 
     expect(discoverOrchestrationMock).toHaveBeenCalledTimes(1);
-    // Parent issue must NOT spawn a task.
-    expect(createTaskCoreMock).not.toHaveBeenCalled();
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
-    // #10: parent epic gets the start signal — 👀 reaction + In Progress.
+    // The parent issue itself spawns no task FROM the single-task path — but
+    // releasing root A does call createTaskCore once (for the child). It must
+    // NOT be called with the parent's task_description (the single-task body).
+    const calledWithParentBody = createTaskCoreMock.mock.calls.some(
+      (c) => (c[0] as { task_description?: string }).task_description?.includes('Epic: ship the thing'));
+    expect(calledWithParentBody).toBe(false);
+    // #247 UX.2: the initial panel is posted (upsertStatusComment) and the
+    // parent start signal mirrored — 👀 reaction + In Progress — via upsertEpicPanel.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
     expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'eyes');
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
       expect.anything(), expect.any(String), 'started', ['In Progress'],

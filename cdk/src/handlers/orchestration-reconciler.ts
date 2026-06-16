@@ -55,12 +55,13 @@ import {
 } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
-import { postRollup, renderStatusBlock, rollupKindFromChildren } from './shared/orchestration-rollup';
-import { postIssueComment, upsertStatusComment } from './shared/linear-feedback';
+import { upsertEpicPanel } from './shared/orchestration-rollup';
+import { postIssueComment } from './shared/linear-feedback';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   claimRollup,
   loadOrchestration,
+  setStatusCommentId,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
 import type { ChannelSource } from './shared/types';
@@ -103,6 +104,12 @@ interface TerminalTaskEvent {
    * completion cascades the next hop).
    */
   readonly cascadeSubIssueId?: string;
+  /**
+   * True when the cascade source was an ITERATION (a human @bgagent comment),
+   * vs a restack (a predecessor-change ripple). Drives the panel's "updating
+   * per <X>'s comment" vs "updating to include <X>'s change" phrasing.
+   */
+  readonly cascadeIsIteration?: boolean;
 }
 
 /**
@@ -145,9 +152,9 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
   // in the handler (a child-row task drives normal gating; a non-child-row
   // task with this marker drives the cascade).
   const cm = img.channel_metadata?.M;
+  const isIteration = cm?.orchestration_iteration?.S === 'true';
   const isCascadeSource =
-    cm?.restack_predecessor_sub_issue_id?.S !== undefined
-    || cm?.orchestration_iteration?.S === 'true';
+    cm?.restack_predecessor_sub_issue_id?.S !== undefined || isIteration;
   const cascadeSubIssueId = isCascadeSource ? cm?.orchestration_sub_issue_id?.S : undefined;
 
   return {
@@ -156,6 +163,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(buildPassed !== undefined && { buildPassed }),
     orchestrationId,
     ...(cascadeSubIssueId !== undefined && { cascadeSubIssueId }),
+    ...(cascadeSubIssueId !== undefined && { cascadeIsIteration: isIteration }),
   };
 }
 
@@ -335,82 +343,61 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
   );
 
-  // #247 #3: while the orchestration is still in flight, edit the live
-  // status block on the parent so "where are we" stays current on every
-  // child transition. Skipped when all-terminal (the final rollup below
-  // replaces the body with the completion view). Best-effort; only when a
-  // status comment was created at seed.
-  if (!allTerminal && WORKSPACE_REGISTRY_TABLE) {
-    const liveMeta = (fresh ?? snapshot).meta;
-    if (liveMeta.status_comment_id) {
-      // #323: link each child's PR in the live block as soon as it is known.
-      const prUrls = await resolveChildPrUrls(freshChildren);
-      const childViews = freshChildren.map((c) => ({
-        sub_issue_id: c.sub_issue_id,
-        ...(c.linear_identifier !== undefined && { linear_identifier: c.linear_identifier }),
-        ...(c.title !== undefined && { title: c.title }),
-        child_status: c.child_status,
-        ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
-      }));
-      await upsertStatusComment(
-        { linearWorkspaceId: liveMeta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
-        liveMeta.parent_linear_issue_id,
-        renderStatusBlock(childViews),
-        liveMeta.status_comment_id,
-      );
-    }
-  }
-
-  if (allTerminal) {
+  // #247 UX.2: maintain the SINGLE maturing epic panel — one comment, edited
+  // in place on every event (this fires per terminal child). The panel shows
+  // the full DAG + current PR links and matures from in-progress → complete /
+  // failures (and reverts to in-progress on an extend/revision, handled where
+  // those fire). upsertEpicPanel renders + edits the comment AND mirrors the
+  // parent state/reaction. Best-effort; only when a panel comment exists.
+  if (WORKSPACE_REGISTRY_TABLE) {
     const meta = (fresh ?? snapshot).meta;
-    const counts = {
-      succeeded: freshChildren.filter((c) => c.child_status === 'succeeded').length,
-      failed: freshChildren.filter((c) => c.child_status === 'failed').length,
-      skipped: freshChildren.filter((c) => c.child_status === 'skipped').length,
-    };
-    logger.info('Orchestration complete', {
-      event: ORCH_LOG.orchestrationComplete,
-      orchestration_id: orchestrationId,
-      parent_linear_issue_id: meta.parent_linear_issue_id,
-      ...counts,
+    const prUrls = await resolveChildPrUrls(freshChildren);
+    const integration = freshChildren.find((c) => isIntegrationNode(c.sub_issue_id));
+    const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
+
+    if (allTerminal) {
+      const counts = {
+        succeeded: freshChildren.filter((c) => c.child_status === 'succeeded').length,
+        failed: freshChildren.filter((c) => c.child_status === 'failed').length,
+        skipped: freshChildren.filter((c) => c.child_status === 'skipped').length,
+      };
+      logger.info('Orchestration complete', {
+        event: ORCH_LOG.orchestrationComplete,
+        orchestration_id: orchestrationId,
+        parent_linear_issue_id: meta.parent_linear_issue_id,
+        ...counts,
+      });
+    }
+
+    // Idempotency for the PARENT-STATE mirror (state transition + reaction
+    // swap): the orchestration can reach "all terminal" on more than one stream
+    // event (the last child's record often gets two MODIFYs). Mirror only once,
+    // on the first all-terminal caller. The panel BODY edit is naturally
+    // idempotent (editing to the same body is a no-op), so it always runs.
+    const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+    const newId = await upsertEpicPanel({
+      ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
+      parentLinearIssueId: meta.parent_linear_issue_id,
+      ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+      children: freshChildren,
+      prUrls,
+      ...(combinedPrUrl !== undefined && { combinedPrUrl }),
+      inProgress: !allTerminal,
+      // Only mirror parent state on the first all-terminal event (else every
+      // in-flight edit would re-transition). In-flight edits just refresh body.
+      mirrorParentState: allTerminal ? won : false,
+      ...(meta.release_context.channel_source !== undefined && {
+        channelSource: meta.release_context.channel_source as ChannelSource,
+      }),
     });
-    // A5: post the aggregate rollup comment on the PARENT issue (the
-    // fan-out plane only comments per-child sub-issue). Best-effort.
-    //
-    // Idempotency: the orchestration can reach "all terminal" on more
-    // than one stream event (the last child's record often gets two
-    // MODIFYs), which posted the rollup twice. claimRollup conditionally
-    // stamps the meta row — only the first caller posts.
-    if (WORKSPACE_REGISTRY_TABLE) {
-      const won = await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
-      if (won) {
-        // #323: resolve each child's PR url so the rollup links every
-        // sub-issue's PR + the integration node's combined PR.
-        const prUrls = await resolveChildPrUrls(freshChildren);
-        await postRollup({
-          ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
-          orchestrationId,
-          parentLinearIssueId: meta.parent_linear_issue_id,
-          kind: rollupKindFromChildren(freshChildren),
-          children: freshChildren,
-          prUrls,
-          // #247 trigger-agnostic: dispatch the rollup to the channel that
-          // seeded the orchestration (defaults to 'linear' inside postRollup).
-          ...(meta.release_context.channel_source !== undefined && {
-            channelSource: meta.release_context.channel_source as ChannelSource,
-          }),
-          // #247 #3: edit the live status block in place into the final
-          // rollup (one comment for the whole run, no stream). Falls back to
-          // a fresh comment inside postRollup when no id was stamped at seed.
-          ...(meta.status_comment_id !== undefined && {
-            statusCommentId: meta.status_comment_id,
-          }),
-        });
-      } else {
-        logger.info('Rollup already claimed — skipping duplicate', {
-          event: ORCH_LOG.orchestrationComplete,
-          orchestration_id: orchestrationId,
-          duplicate_suppressed: true,
+    // Persist a freshly-created panel comment id so later edits reuse it.
+    if (newId && !meta.status_comment_id) {
+      try {
+        await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newId);
+      } catch (err) {
+        logger.warn('Failed to persist panel comment id (non-fatal)', {
+          orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
         });
       }
     }
@@ -475,56 +462,43 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     ? { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE }
     : undefined;
 
-  const restackedLabels: string[] = [];
+  const updatingIds: string[] = [];
   for (const step of steps) {
     const created = await spawnRestackTask(step, meta.release_context.platform_user_id, evt.taskId, changedSubIssueId);
     // Surface ONLY on a genuinely NEW restack task (201). A 200 means an
     // idempotent replay (the cascade source's stream record is redelivered
-    // multiple times — observed 3× live), and surfacing on those would post
-    // duplicate comments. ``false`` means the spawn failed/was skipped.
+    // multiple times — observed 3× live), so don't re-mark. 'failed' = skip.
     if (created !== 'created') continue;
-    const dep = step.child;
-    restackedLabels.push(dep.linear_identifier ?? dep.sub_issue_id);
-    // A6 surfacing (#34): tell the DEPENDENT's sub-issue it was re-stacked, so
-    // a reviewer watching that issue sees its PR was updated to pick up the
-    // predecessor's change. Skip synthetic integration nodes (no Linear issue).
-    if (feedbackCtx && !isIntegrationNode(dep.sub_issue_id)) {
-      try {
-        await postIssueComment(
-          feedbackCtx,
-          dep.sub_issue_id,
-          `🔄 **Re-stacked** — picked up changes from ${changedLabel} and updated this PR. `
-          + 'No action needed; review the refreshed PR when ready.',
-        );
-      } catch (err) {
-        logger.warn('A6 cascade: dependent re-stack comment failed (non-fatal)', {
-          orchestration_id: orchestrationId, sub_issue_id: dep.sub_issue_id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    updatingIds.push(step.child.sub_issue_id);
   }
 
-  // A6 surfacing (#35): the parent rollup is frozen from the original run, so a
-  // post-completion comment-triggered change is otherwise invisible at the
-  // epic level. Post a concise cascade note on the PARENT so the
-  // comment-to-change loop is visible there. Best-effort; Linear plane only.
-  if (feedbackCtx && restackedLabels.length > 0) {
-    try {
-      const list = restackedLabels.join(', ');
-      await postIssueComment(
-        feedbackCtx,
-        meta.parent_linear_issue_id,
-        `🔄 **${changedLabel} was revised** (via a comment) → re-stacked `
-        + `${restackedLabels.length} dependent${restackedLabels.length === 1 ? '' : 's'}: ${list}. `
-        + 'Their PRs were updated to include the change.',
-      );
-    } catch (err) {
-      logger.warn('A6 cascade: parent cascade note failed (non-fatal)', {
-        orchestration_id: orchestrationId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+  // #247 UX.2: instead of standalone '🔄 Re-stacked' / 'revised' comments,
+  // refresh the SINGLE epic panel so the impacted rows show '🔄 updating per
+  // <reason>' and the header reverts to in-progress. The dependent's own
+  // sub-issue gets the react/reply ack (UX.3), not a status comment here. The
+  // 'updating' rows settle back to ✅ when their restack tasks complete (which
+  // re-fire reconcileTerminalChild → panel refresh with no updating reason).
+  if (feedbackCtx && updatingIds.length > 0) {
+    const reason = evt.cascadeIsIteration
+      ? `per ${changedLabel}'s comment`
+      : `to include ${changedLabel}'s change`;
+    const updating: Record<string, string> = {};
+    for (const id of updatingIds) updating[id] = reason;
+    const prUrls = await resolveChildPrUrls(snapshot.children);
+    const integration = snapshot.children.find((c) => isIntegrationNode(c.sub_issue_id));
+    await upsertEpicPanel({
+      ctx: feedbackCtx,
+      parentLinearIssueId: meta.parent_linear_issue_id,
+      ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+      children: snapshot.children,
+      prUrls,
+      updating,
+      ...(integration && prUrls[integration.sub_issue_id] !== undefined
+        && { combinedPrUrl: prUrls[integration.sub_issue_id] }),
+      inProgress: true, // a cascade re-opened the epic
+      ...(meta.release_context.channel_source !== undefined
+        && { channelSource: meta.release_context.channel_source as ChannelSource }),
+    });
   }
 }
 

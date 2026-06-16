@@ -21,8 +21,8 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { EMOJI_STARTED, postIssueComment, reportIssueFailure, swapIssueReaction, transitionIssueState, upsertStatusComment } from './shared/linear-feedback';
-import { renderStatusBlock } from './shared/orchestration-rollup';
+import { reportIssueFailure } from './shared/linear-feedback';
+import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
@@ -439,39 +439,34 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         released_roots: releasedRoots,
         already_existed: discovery.alreadyExisted,
       });
-      // Mirror the child sub-issues' status signal on the PARENT epic at
-      // start: 👀 reaction + advance to In Progress (the parent spawns no
-      // task, so Linear's GitHub automation never moves it; the reconciler
-      // advances it to In Review on completion via postRollup). Only on the
-      // first seed — a replay (alreadyExisted) already did this, and
-      // transitionIssueState is a no-op once past the target anyway. All
-      // best-effort; gated on the registry table like every other feedback.
+      // #247 UX.2: post the initial epic panel + mirror the parent start
+      // signal (👀 reaction + In Progress) in one upsertEpicPanel call. The
+      // reconciler edits this same panel on every later event and advances the
+      // parent to In Review on completion. Only on the first seed — a replay
+      // (alreadyExisted) routes to the 'extended' branch instead. Best-effort;
+      // gated on the registry table like every other feedback.
       if (WORKSPACE_REGISTRY_TABLE && !discovery.alreadyExisted) {
         const parentCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
-        // Sequential, not concurrent: each call fans out into multiple Linear
-        // graphql reads/writes with a 5s timeout; firing them together
-        // self-throttles and can abort one (see the completion path in
-        // orchestration-rollup). Both best-effort.
-        // swap (not add) so a re-seed never leaves two markers; at seed
-        // there's nothing to clear, so this just posts 👀.
-        await swapIssueReaction(parentCtx, issue.id, EMOJI_STARTED);
-        await transitionIssueState(parentCtx, issue.id, 'started', ['In Progress']);
-        // #247 #3: post the live status block ('where are we' at a glance) and
-        // stamp its comment id on the meta row so the reconciler edits it
-        // in place on each child transition. Re-load post-release so roots
-        // show 'running'. Best-effort: a failed create just means the
-        // reconciler posts a fresh final rollup instead of editing.
+        // #247 UX.2: post the initial maturing panel (in-progress) and mirror
+        // the parent start signal (👀 + In Progress) in one call. Re-load
+        // post-release so roots show 'running'. Stamp the comment id so the
+        // reconciler edits this same panel on every later event. Best-effort.
         try {
           const postReleaseSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
           if (postReleaseSnapshot) {
-            const body = renderStatusBlock(postReleaseSnapshot.children);
-            const commentId = await upsertStatusComment(parentCtx, issue.id, body);
+            const commentId = await upsertEpicPanel({
+              ctx: parentCtx,
+              parentLinearIssueId: issue.id,
+              children: postReleaseSnapshot.children,
+              inProgress: true,
+              mirrorParentState: true,
+            });
             if (commentId) {
               await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
             }
           }
         } catch (err) {
-          logger.warn('Failed to post orchestration status block (non-fatal)', {
+          logger.warn('Failed to post orchestration panel at seed (non-fatal)', {
             issue_id: issue.id,
             orchestration_id: discovery.orchestrationId,
             error: err instanceof Error ? err.message : String(err),
@@ -528,23 +523,28 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         added: discovery.addedSubIssueIds.length,
         released_now: releasedAdded,
       });
-      // Surface the addition on the parent epic so it's visible the graph grew.
-      if (WORKSPACE_REGISTRY_TABLE) {
+      // #247 UX.2: no standalone '➕ Added' comment — the new row appearing in
+      // the maturing panel IS the signal (the user just added the sub-issue in
+      // Linear, so they don't need a ping). Refresh the panel so it shows the
+      // new row(s) + reverts the header to in-progress. Re-load post-release so
+      // a just-released added node shows 'running'. Best-effort.
+      if (WORKSPACE_REGISTRY_TABLE && snapshot) {
         try {
-          const addedLabels = (snapshot?.children ?? [])
-            .filter((c) => discovery.addedSubIssueIds.includes(c.sub_issue_id))
-            .map((c) => c.linear_identifier ?? c.sub_issue_id);
-          await postIssueComment(
-            { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-            issue.id,
-            `➕ **Added ${discovery.addedSubIssueIds.length} sub-issue`
-            + `${discovery.addedSubIssueIds.length === 1 ? '' : 's'}** to this orchestration: `
-            + `${addedLabels.join(', ')}. `
-            + `${releasedAdded > 0 ? `${releasedAdded} started now (predecessors already done); ` : ''}`
-            + 'the rest start as their predecessors finish.',
-          );
+          const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+          const children = fresh?.children ?? snapshot.children;
+          const meta = (fresh ?? snapshot).meta;
+          const newId = await upsertEpicPanel({
+            ctx: { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+            parentLinearIssueId: issue.id,
+            ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+            children,
+            inProgress: true, // the extend re-opened the epic
+          });
+          if (newId && meta.status_comment_id === undefined) {
+            await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, newId);
+          }
         } catch (err) {
-          logger.warn('Failed to post orchestration-extend note (non-fatal)', {
+          logger.warn('Failed to refresh panel on extend (non-fatal)', {
             issue_id: issue.id, orchestration_id: discovery.orchestrationId,
             error: err instanceof Error ? err.message : String(err),
           });
