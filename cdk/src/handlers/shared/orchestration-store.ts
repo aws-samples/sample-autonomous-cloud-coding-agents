@@ -45,6 +45,7 @@ import {
 import { logger } from './logger';
 import type { SubIssueNode } from './linear-subissue-fetch';
 import { validateDag } from './orchestration-dag';
+import { resolveEpicTip } from './orchestration-epic-tip';
 
 /** Orchestration-local lifecycle marker on each sub-issue row. */
 export type ChildStatus =
@@ -324,6 +325,21 @@ export async function extendOrchestration(params: {
     };
   }
 
+  // #247 UX.4: a new node with NO declared dependency must NOT branch off bare
+  // main — it inherits the epic's accumulated unmerged work by stacking on the
+  // epic TIP (the existing leaf frontier). We inject that as a synthetic
+  // ``depends_on`` so the existing A4 gating + base-branch stacking treat it
+  // like any other dependent; "fall back to main only when merged" is handled
+  // downstream by the agent's base-fetch fallback. Nodes that DECLARED a
+  // dependency keep their explicit edges (user intent wins over the tip).
+  const epicTip = resolveEpicTip(snapshot.children);
+  const withImplicitDeps = newNodes.map((n) => ({
+    node: n,
+    // Only unconstrained new nodes inherit the tip; and never self-depend
+    // (the tip is computed from EXISTING nodes, so a new id can't appear).
+    depends_on: n.depends_on.length > 0 ? n.depends_on : epicTip,
+  }));
+
   // A node is immediately releasable iff every predecessor is already
   // ``succeeded`` (or it has none). Predecessors may be existing (check their
   // persisted status) or other new nodes (not succeeded yet → blocked).
@@ -331,8 +347,8 @@ export async function extendOrchestration(params: {
     snapshot.children.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
   );
   const releasable = new Set<string>();
-  const newRows: OrchestrationChildRow[] = newNodes.map((n) => {
-    const allDepsSucceeded = n.depends_on.every((d) => succeeded.has(d));
+  const newRows: OrchestrationChildRow[] = withImplicitDeps.map(({ node: n, depends_on }) => {
+    const allDepsSucceeded = depends_on.every((d) => succeeded.has(d));
     if (allDepsSucceeded) releasable.add(n.id);
     return {
       orchestration_id: orchestrationId,
@@ -340,7 +356,7 @@ export async function extendOrchestration(params: {
       parent_linear_issue_id: parentLinearIssueId,
       linear_workspace_id: linearWorkspaceId,
       repo,
-      depends_on: n.depends_on,
+      depends_on,
       child_status: allDepsSucceeded ? 'ready' : 'blocked',
       ...(n.identifier !== undefined && { linear_identifier: n.identifier }),
       ...(n.title !== undefined && { title: n.title }),
@@ -357,10 +373,16 @@ export async function extendOrchestration(params: {
       RequestItems: { [tableName]: chunk.map((Item) => ({ PutRequest: { Item } })) },
     }));
   }
+  // Bump child_count AND clear rollup_posted_at: if this epic had ALREADY
+  // reached all-terminal and posted its rollup, adding a node re-opens it.
+  // Clearing the claim lets the reconciler re-settle the parent state to
+  // complete (re-claim) once the new node finishes — without this, a
+  // post-completion addition would leave the epic stuck "in progress" forever
+  // (#247 UX.4 concurrency: mid-flight additions to a finished epic).
   await ddb.send(new UpdateCommand({
     TableName: tableName,
     Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
-    UpdateExpression: 'SET child_count = :n, updated_at = :now',
+    UpdateExpression: 'SET child_count = :n, updated_at = :now REMOVE rollup_posted_at',
     ExpressionAttributeValues: { ':n': snapshot.children.length + newRows.length, ':now': now },
   }));
 
