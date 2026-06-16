@@ -371,6 +371,36 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  test('UX.15 regression: a re-stack of a NO-DEPENDENTS node still refreshes the panel + settles (not stuck)', async () => {
+    // The stress-caught hang: a cascade source with no dependents returned
+    // early without refreshing → the node's '🔄 updating' row never cleared and
+    // the epic never re-settled to ✅. Here every child is already terminal, so
+    // the completion settle must fire: panel edited + parent state mirrored.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      // B is a leaf (nothing depends on it) AND has no dependents → planDirectRestack=0.
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    // A re-stack of B (the no-dependents leaf) completes.
+    await handler({ Records: [taskRecord({
+      task_id: 'restack-B', status: 'COMPLETED', orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'B', restack_predecessor_sub_issue_id: 'A',
+    })] } as never);
+
+    // No further restack (B has no dependents).
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // But the panel WAS refreshed (settle) — and since all children are
+    // terminal, it shows complete + mirrors parent state.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toMatch(/complete/i);
+    expect(body).not.toMatch(/updating/i); // the stale updating row is gone
+    expect(transitionIssueStateMock).toHaveBeenCalled(); // parent settled
+  });
+
   test('a cascade source does NOT run normal child gating (no GSI sub-issue lookup)', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
