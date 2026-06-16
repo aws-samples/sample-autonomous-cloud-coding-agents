@@ -71,9 +71,38 @@ mutation UpdateComment($id: String!, $body: String!) {
 }
 `.trim();
 
+/**
+ * Post a THREADED REPLY beneath an existing comment (#247 UX.3 ack trail).
+ * ``parentId`` is the comment being replied to; the reply notifies and reads
+ * as a conversation turn under it. Returns the new reply's id (for a possible
+ * later edit), distinct from a top-level comment. (Verified: the ``commentCreate``
+ * input accepts ``parentId`` for threaded replies.)
+ */
+const COMMENT_REPLY_RETURNING_ID_MUTATION = `
+mutation ReplyToComment($parentId: String!, $body: String!) {
+  commentCreate(input: { parentId: $parentId, body: $body }) {
+    success
+    comment { id }
+  }
+}
+`.trim();
+
 const REACTION_CREATE_MUTATION = `
 mutation ReactIssue($issueId: String!, $emoji: String!) {
   reactionCreate(input: { issueId: $issueId, emoji: $emoji }) {
+    success
+  }
+}
+`.trim();
+
+/**
+ * React to a specific COMMENT (not the issue) — the instant "on it" ack on an
+ * ``@bgagent`` comment (#247 UX.3). (Verified: ``reactionCreate`` input accepts
+ * ``commentId``.)
+ */
+const REACTION_CREATE_ON_COMMENT_MUTATION = `
+mutation ReactComment($commentId: String!, $emoji: String!) {
+  reactionCreate(input: { commentId: $commentId, emoji: $emoji }) {
     success
   }
 }
@@ -284,6 +313,43 @@ export async function addIssueReaction(
   const token = await resolveToken(ctx);
   if (!token) return false;
   return graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji });
+}
+
+/**
+ * React to a specific Linear COMMENT (#247 UX.3 ack model). Used as the
+ * instant "on it" acknowledgement when a human ``@bgagent``s a comment —
+ * 👀 ({@link EMOJI_STARTED}) lands immediately, before the iteration task is
+ * even created, so the human knows the agent saw their request with zero
+ * comment clutter. Best-effort; returns true on success.
+ */
+export async function reactToComment(
+  ctx: LinearFeedbackContext,
+  commentId: string,
+  emoji: string = EMOJI_STARTED,
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+  return graphqlRequest(token, REACTION_CREATE_ON_COMMENT_MUTATION, { commentId, emoji });
+}
+
+/**
+ * Post a THREADED REPLY beneath a Linear comment (#247 UX.3 ack model). Used
+ * when the agent's work on an ``@bgagent`` comment lands ("✅ Updated — PR #178")
+ * or fails ("❌ …"). Unlike an edit, a reply NOTIFIES and reads as a
+ * conversation turn under the original request, keeping the thread contextual.
+ * Returns the new reply's comment id (for a possible later edit) or null on any
+ * failure. Best-effort — never throws.
+ */
+export async function replyToComment(
+  ctx: LinearFeedbackContext,
+  parentCommentId: string,
+  body: string,
+): Promise<string | null> {
+  const token = await resolveToken(ctx);
+  if (!token) return null;
+  const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, { parentId: parentCommentId, body });
+  const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
+  return created?.success && created.comment?.id ? created.comment.id : null;
 }
 
 /**
