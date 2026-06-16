@@ -59,6 +59,48 @@ These constraints are easy to miss and expensive to get wrong:
 
 - **Runner sizing is one line (#4).** `build.yml` already resolves the runner from `vars.DEFAULT_RUNNER_LABEL` and PR labels (`self-hosted`, `ubuntu-latest-4-cores`). Jest workers scale with cores (`maxWorkers` defaults to cores−1) and synth is CPU-bound, so more cores helps both — weighed against the recurring per-run cost.
 
+## Item #2 — sharding the CDK suite (design)
+
+This is the next lever and the focus of active work under [#363](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/363). Because `//cdk:test` (~298s after item #1) is the long pole that the mise DAG cannot overlap, the only way to cut it further is to run the suite across multiple workers in parallel and aggregate the results.
+
+### Mechanism
+
+Jest 30 supports `--shard=<index>/<total>`, which deterministically partitions the test files into `total` groups and runs only group `index`. Running N shards as N parallel CI jobs turns a single ~298s task into N jobs of roughly `298/N + fixed_overhead` seconds, where `fixed_overhead` is the per-job checkout + install + cache-restore (~90–100s today).
+
+| Shards | Ideal test slice | + fixed overhead (~95s) | Approx. wall |
+|---|---|---|---|
+| 1 (today) | 298s | n/a | ~298s |
+| 2 | ~149s | ~95s | ~245s |
+| 4 | ~75s | ~95s | ~170s |
+| 6 | ~50s | ~95s | ~145s |
+
+> **Insight — overhead dominates past ~4 shards.** With ~119 test suites, the test slice shrinks linearly but the ~95s fixed per-job overhead does not. Beyond ~4 shards the overhead is the majority of each job's wall time, so returns diminish fast. **4-way is the recommended starting point**; measure before going higher, and invest in cache hit-rate (node_modules, agent venv, jest transform cache) before adding shards.
+
+### Required-check wiring (the part that's easy to get wrong)
+
+`build` is a **required** status check and must report on the `merge_group` event (see the comment block atop `build.yml` and #327). A naive matrix (`shard: [1,2,3,4]`) creates **four separate check runs** — `build (1)`, `build (2)`, … — none of which is the single `build` context that branch protection requires. Marking all four required is fragile (renaming/recount changes contexts); marking none required defeats the gate.
+
+The robust pattern is **fan-out + aggregate gate**:
+
+```
+build-shard (matrix: shard ∈ [1..N])   # parallel; NOT individually required
+        │
+        ▼
+build (needs: build-shard)             # single required context; succeeds
+                                       # only if every shard succeeded
+```
+
+- The matrix job (`build-shard`) runs `jest --shard=${{ matrix.shard }}/N` and uploads its `cdk.out` / coverage artifacts.
+- A single aggregate job named **`build`** `needs: [build-shard]` and fails if any shard failed (`if: ${{ contains(needs.*.result, 'failure') }}`). **This** job is the required context — one stable name regardless of shard count.
+- Coverage must be **merged across shards** before the threshold gate runs (each shard only sees its slice). Collect per-shard `coverage-final.json`, merge (e.g. `nyc merge` / `istanbul-merge`), then enforce `coverageThreshold` once on the merged report — otherwise every shard fails its own threshold.
+- The **self-mutation check** (drift detection) should run once in the aggregate job (or a dedicated single job), not per-shard, to avoid N redundant `git diff` runs and racy artifact uploads.
+
+### Open design questions for the implementer
+
+- **Synth + non-test tasks:** `//cdk:synth:quiet`, `//cli:*`, `//docs:build`, `//agent:quality` are not sharded and finish in the first ~90s. Decide whether they run in the aggregate job, a separate job, or shard 1 only — keep them off the critical path.
+- **Artifact strategy:** the deploy pipeline consumes `cdk-agentcore-out`. Sharding test execution should not change synth output; ensure exactly one job still produces the deploy artifact.
+- **Shard balance:** `--shard` partitions by file count, not by runtime. A few heavy suites (full `App` + cdk-nag synth) can skew one shard. If imbalance is material, consider ordering/grouping heavy suites or a runtime-aware splitter; measure first.
+
 ## Measurement protocol
 
-Every change here must report a real **4-core CI** before/after (the apples-to-apples gate), not just a local figure. Local machines have more cores and will understate the CI win; the CI number is the one that matters for the merge-queue experience. Read the `build` step duration and the per-task `Time:` line from the run log.
+Every change here must report a real **4-core CI** before/after (the apples-to-apples gate), not just a local figure. Local machines have more cores and will understate the CI win; the CI number is the one that matters for the merge-queue experience. Read the `build` step duration and the per-task `Time:` line from the run log. For sharding specifically, report **wall-clock of the slowest shard + aggregate job**, not the sum of shard times.
