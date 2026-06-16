@@ -56,9 +56,15 @@ function renderText(pending: readonly PendingApprovalSummary[]): void {
   }
   console.log(`${pending.length} pending approval(s):\n`);
   for (const p of pending) {
+    const triggerLabel = p.source === 'event'
+      ? (p.checkpoint ?? p.event_type ?? p.tool_name)
+      : p.tool_name;
     console.log(`  task_id:    ${p.task_id}`);
     console.log(`  request_id: ${p.request_id}`);
-    console.log(`  tool:       ${p.tool_name}    severity: ${p.severity}`);
+    console.log(`  trigger:    ${triggerLabel}    severity: ${p.severity}`);
+    if (p.source === 'event') {
+      console.log(`  source:     event${p.rule_id ? ` (rule ${p.rule_id})` : ''}`);
+    }
     console.log(`  reason:     ${p.reason}`);
     if (p.matching_rule_ids !== undefined && p.matching_rule_ids.length > 0) {
       console.log(`  rules:      ${p.matching_rule_ids.join(', ')}`);

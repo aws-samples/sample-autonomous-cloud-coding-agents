@@ -97,6 +97,7 @@ export function makeSubmitCommand(): Command {
       [] as readonly string[],
     )
     .option('--wait', 'Wait for task to complete')
+    .option('--governance-preview', 'Print resolved event governance rules before submitting')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
       if (opts.pr !== undefined && isNaN(opts.pr)) {
@@ -213,6 +214,27 @@ export function makeSubmitCommand(): Command {
       const prNumber = opts.pr ?? opts.reviewPr;
 
       const client = new ApiClient();
+
+      if (opts.governancePreview && opts.repo) {
+        const gov = await client.listEventRules(opts.repo, workflowRef);
+        process.stderr.write(`Governance preview for ${gov.repo_id}:\n`);
+        if (gov.event_rule_pack) {
+          process.stderr.write(`  pack: ${gov.event_rule_pack.id}@${gov.event_rule_pack.version}\n`);
+        }
+        const syncGates = gov.rules.filter(r => r.evaluation === 'sync' && r.action === 'require_approval');
+        const asyncRules = gov.rules.filter(r => r.evaluation === 'async');
+        process.stderr.write(`  sync approval gates: ${syncGates.length}\n`);
+        for (const r of syncGates) {
+          const tag = r.mode === 'observe_only' ? '[observe] ' : '';
+          process.stderr.write(`    - ${tag}${r.rule_id} @ ${r.on}\n`);
+        }
+        process.stderr.write(`  async rules: ${asyncRules.length}\n`);
+        for (const r of asyncRules) {
+          process.stderr.write(`    - ${r.rule_id}: ${r.action} on ${r.on}\n`);
+        }
+        process.stderr.write('\n');
+      }
+
       const body: CreateTaskRequest = {
         // Omitted entirely for a repo-less workflow (#248 Phase 3) — sending
         // ``repo: undefined`` would serialize as an explicit null on some paths.

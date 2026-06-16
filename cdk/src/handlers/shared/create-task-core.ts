@@ -31,6 +31,7 @@ import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
+import { resolveEventRules } from './event-rule-pack-resolver';
 import { generateBranchName } from './gateway';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
@@ -156,6 +157,9 @@ export async function createTaskCore(
   //     shift the cap beneath a running task). A repo-less task takes the
   //     platform default cap.
   let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
+  let resolvedEventRules: ReturnType<typeof resolveEventRules> = [];
+  let eventRulePackId: string | undefined;
+  let eventRulePackVersion: string | undefined;
   // Whether the cap came from a blueprint (vs the platform default) — surfaced
   // in the "Task created" log. A repo-less submission has no blueprint, so it
   // stays false.
@@ -207,6 +211,23 @@ export async function createTaskCore(
       }
       resolvedApprovalGateCap = blueprintCap;
       capFromBlueprint = true;
+    }
+    resolvedEventRules = resolveEventRules({
+      inlineRules: repoConfig?.event_rules,
+      packRef: repoConfig?.event_rule_pack ?? workflow.eventRulePack,
+    });
+    const packRef = repoConfig?.event_rule_pack ?? workflow.eventRulePack;
+    if (packRef) {
+      eventRulePackId = packRef.id;
+      eventRulePackVersion = packRef.version;
+    }
+  } else {
+    resolvedEventRules = resolveEventRules({
+      packRef: workflow.eventRulePack,
+    });
+    if (workflow.eventRulePack) {
+      eventRulePackId = workflow.eventRulePack.id;
+      eventRulePackVersion = workflow.eventRulePack.version;
     }
   }
 
@@ -647,6 +668,9 @@ export async function createTaskCore(
     // platform default of 50. Persisted so a container restart or a
     // mid-task blueprint edit cannot shift the cap beneath the task.
     approval_gate_cap: resolvedApprovalGateCap,
+    ...(resolvedEventRules.length > 0 && { event_rules: resolvedEventRules }),
+    ...(eventRulePackId && { event_rule_pack_id: eventRulePackId }),
+    ...(eventRulePackVersion && { event_rule_pack_version: eventRulePackVersion }),
   };
 
   // 6. Write task record

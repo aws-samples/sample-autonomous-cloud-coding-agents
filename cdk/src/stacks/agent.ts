@@ -920,6 +920,8 @@ export class AgentStack extends Stack {
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
+      taskNudgesTable: taskNudgesTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
       // Slack bot-token grant is guarded on this prop — pass the

@@ -1,0 +1,27 @@
+{
+  "description": "Sync observe-only rule fires on repo_setup_complete",
+  "event": {
+    "event_type": "agent_milestone",
+    "metadata": {
+      "milestone": "repo_setup_complete",
+      "workflow_ref": "coding/new-task-v1"
+    }
+  },
+  "rules": [
+    {
+      "id": "plan-review-before-code",
+      "on": "repo_setup_complete",
+      "when": {
+        "fields": {
+          "workflow_ref": "coding/new-task-v1"
+        }
+      },
+      "action": "require_approval",
+      "mode": "observe_only",
+      "evaluation": "sync",
+      "reason": "Plan review before execution",
+      "severity": "medium"
+    }
+  ],
+  "expected_matches": ["plan-review-before-code"]
+}

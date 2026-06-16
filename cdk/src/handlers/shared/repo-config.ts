@@ -19,6 +19,8 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import type { EventRule, EventRulePackRef } from './event-governance-types';
+import { parseEventRules } from './event-rule-evaluator';
 import { logger } from './logger';
 
 /**
@@ -52,6 +54,8 @@ export interface RepoConfig {
    * path falls back to the platform default of 50.
    */
   readonly approval_gate_cap?: number;
+  readonly event_rules?: readonly EventRule[];
+  readonly event_rule_pack?: EventRulePackRef;
 }
 
 /**
@@ -77,9 +81,37 @@ export interface BlueprintConfig {
    * field is informational for the runtime path.
    */
   readonly approval_gate_cap?: number;
+  readonly event_rules?: readonly EventRule[];
+  readonly event_rule_pack?: EventRulePackRef;
 }
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+function normalizeRepoConfig(raw: Record<string, unknown>): RepoConfig {
+  const config = raw as unknown as RepoConfig;
+  let eventRules = config.event_rules;
+  if (typeof raw.event_rules === 'string') {
+    try {
+      eventRules = parseEventRules(JSON.parse(raw.event_rules));
+    } catch {
+      eventRules = [];
+    }
+  } else if (Array.isArray(raw.event_rules)) {
+    eventRules = parseEventRules(raw.event_rules);
+  }
+  let eventRulePack = config.event_rule_pack;
+  if (raw.event_rule_pack_id && raw.event_rule_pack_version) {
+    eventRulePack = {
+      id: String(raw.event_rule_pack_id),
+      version: String(raw.event_rule_pack_version),
+    };
+  }
+  return {
+    ...config,
+    ...(eventRules !== undefined && { event_rules: eventRules }),
+    ...(eventRulePack !== undefined && { event_rule_pack: eventRulePack }),
+  };
+}
 
 /**
  * Combined result of a single RepoTable GetItem used by the submit
@@ -136,7 +168,7 @@ export async function lookupRepo(repo: string): Promise<RepoLookupResult> {
       return { onboarded: false, config: null };
     }
 
-    return { onboarded: true, config };
+    return { onboarded: true, config: normalizeRepoConfig(result.Item as Record<string, unknown>) };
   } catch (err) {
     logger.error('Failed to look up repo config', {
       repo,

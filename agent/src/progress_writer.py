@@ -663,6 +663,17 @@ class _ProgressWriter:
             },
         )
 
+    def write_checkpoint(self, checkpoint: str, details: str = "") -> None:
+        """Emit a pipeline-owned governance checkpoint (#230)."""
+        self._put_event(
+            "agent_milestone",
+            {
+                "milestone": checkpoint,
+                "checkpoint": checkpoint,
+                "details": self._preview(details),
+            },
+        )
+
     def write_agent_cost_update(
         self,
         cost_usd: float | None,
@@ -1019,3 +1030,7 @@ class _ProgressWriter:
                 "original_decision_ts": original_decision_ts,
             },
         )
+
+    def write_policy_decision_event(self, metadata: dict) -> None:
+        """Emit unified ``policy_decision`` event (issue #230)."""
+        self._put_event("policy_decision", metadata)

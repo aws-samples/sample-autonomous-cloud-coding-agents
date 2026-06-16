@@ -1,0 +1,23 @@
+{
+  "pack_id": "platform-default",
+  "pack_version": "1.0.0",
+  "rules": [
+    {
+      "id": "observe-repo-setup",
+      "on": "repo_setup_complete",
+      "action": "require_approval",
+      "mode": "observe_only",
+      "evaluation": "sync",
+      "reason": "Plan review before execution (platform default — observe)",
+      "severity": "medium"
+    },
+    {
+      "id": "notify-on-pr",
+      "on": "pr_created",
+      "action": "notify",
+      "mode": "enforce",
+      "evaluation": "async",
+      "notify_channels": ["slack"]
+    }
+  ]
+}

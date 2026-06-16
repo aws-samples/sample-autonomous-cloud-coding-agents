@@ -54,6 +54,67 @@ _SDK_NO_RESULT_MESSAGE = (
 )
 
 
+class EventGovernanceBlocked(Exception):
+    """Raised when an enforce-mode event rule blocks pipeline progression."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _workflow_ref(config: TaskConfig) -> str | None:
+    wf = config.resolved_workflow
+    if isinstance(wf, dict) and wf.get("id"):
+        return str(wf["id"])
+    return None
+
+
+def _run_event_governance(
+    config: TaskConfig,
+    progress: _ProgressWriter,
+    *,
+    event_type: str,
+    metadata: dict,
+    engine=None,
+) -> None:
+    from event_governance.coordinator import evaluate_sync_event
+
+    meta = dict(metadata)
+    wf = _workflow_ref(config)
+    if wf:
+        meta.setdefault("workflow_ref", wf)
+    result = evaluate_sync_event(
+        rules_raw=config.event_rules,
+        event_type=event_type,
+        metadata=meta,
+        progress=progress,
+        rule_pack_id=config.event_rule_pack_id,
+        config=config,
+        engine=engine,
+        task_id=config.task_id,
+        user_id=config.user_id,
+    )
+    if result is not None and not result.allowed:
+        raise EventGovernanceBlocked(result.reason)
+
+
+def _emit_checkpoint_and_evaluate(
+    config: TaskConfig,
+    progress: _ProgressWriter,
+    checkpoint: str,
+    details: str = "",
+    engine=None,
+) -> None:
+    progress.write_checkpoint(checkpoint, details)
+    _run_event_governance(
+        config,
+        progress,
+        event_type="agent_milestone",
+        metadata={"milestone": checkpoint, "checkpoint": checkpoint, "details": details},
+        engine=engine,
+    )
+
+
 def _chain_prior_agent_error(agent_result: AgentResult | None, exc: BaseException) -> str:
     """Preserve agent-layer failures when a later pipeline stage raises."""
     tail = f"{type(exc).__name__}: {exc}"
@@ -601,6 +662,8 @@ def run_task(
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
+    event_rules: list[dict] | None = None,
+    event_rule_pack_id: str | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
@@ -646,6 +709,11 @@ def run_task(
         approval_gate_cap=approval_gate_cap,
         attachments=attachments,
     )
+
+    if event_rules:
+        config.event_rules = event_rules
+    if event_rule_pack_id:
+        config.event_rule_pack_id = event_rule_pack_id
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
     if cedar_policies:
@@ -829,6 +897,22 @@ def run_task(
             progress.write_agent_milestone(
                 "repo_setup_complete",
                 f"branch={setup.branch} build_before={setup.build_before}",
+            )
+            _run_event_governance(
+                config,
+                progress,
+                event_type="agent_milestone",
+                metadata={
+                    "milestone": "repo_setup_complete",
+                    "details": f"branch={setup.branch} build_before={setup.build_before}",
+                    "workflow_ref": _workflow_ref(config),
+                },
+            )
+            _emit_checkpoint_and_evaluate(
+                config,
+                progress,
+                "checkpoint:before_execution",
+                "repo setup complete",
             )
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
@@ -1044,6 +1128,12 @@ def run_task(
 
                 build_passed = verify_build(setup.repo_dir)
                 lint_passed = verify_lint(setup.repo_dir)
+                _emit_checkpoint_and_evaluate(
+                    config,
+                    progress,
+                    "checkpoint:before_open_pr",
+                    "pre-PR verification complete",
+                )
                 pr_url = ensure_pr(
                     config,
                     setup,
@@ -1198,6 +1288,22 @@ def run_task(
             task_state.write_terminal(config.task_id, terminal_status, result_dict)
 
             return result_dict
+
+        except EventGovernanceBlocked as e:
+            crash_result = TaskResult(
+                status="error",
+                error=f"Event governance denied: {e}",
+                task_id=config.task_id,
+                agent_status=agent_result.status if agent_result else "unknown",
+            )
+            task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
+            react_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=False,
+                started_reaction_id=linear_eyes_reaction_id,
+            )
+            return crash_result.model_dump()
 
         except Exception as e:
             # Ensure the task is marked FAILED in DynamoDB even if the pipeline
