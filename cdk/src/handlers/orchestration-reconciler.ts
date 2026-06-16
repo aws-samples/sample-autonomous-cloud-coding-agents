@@ -353,69 +353,79 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     });
   }
 
-  // Completion check against the fresh view: every child terminal
-  // (succeeded/failed/skipped — released is NOT terminal).
-  const allTerminal = freshChildren.every((c) =>
+  // Refresh the panel + settle the parent state against the fresh view.
+  await refreshPanelAndSettle(orchestrationId, freshChildren, (fresh ?? snapshot).meta, now);
+}
+
+/**
+ * #247 UX.2: maintain the SINGLE maturing epic panel — one comment, edited in
+ * place — and settle the parent state when the epic reaches all-terminal.
+ * Shared by the normal child-gating path (``reconcileTerminalChild``) AND the
+ * cascade path (``cascadeRestack``): a re-stack/iteration task completing must
+ * ALSO clear its node's ``🔄 updating`` row and re-run the completion check, or
+ * an epic whose only remaining activity is a cascade hangs forever at
+ * "🔄 N/M" with a stale updating row (live-caught under the UX.6 stress test —
+ * a re-stack of a no-dependents node returned early and never refreshed).
+ *
+ * Best-effort; only when the workspace registry is configured. The panel BODY
+ * edit is idempotent (same body = no-op), so it always runs; the parent-STATE
+ * mirror is claimed once via ``claimRollup`` on the first all-terminal caller.
+ */
+async function refreshPanelAndSettle(
+  orchestrationId: string,
+  children: readonly OrchestrationChildRow[],
+  meta: { linear_workspace_id: string; parent_linear_issue_id: string; status_comment_id?: string; release_context: { channel_source?: string } },
+  now: string,
+): Promise<void> {
+  if (!WORKSPACE_REGISTRY_TABLE) return;
+
+  // Completion check: every child terminal (succeeded/failed/skipped —
+  // released is NOT terminal).
+  const allTerminal = children.every((c) =>
     c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
   );
 
-  // #247 UX.2: maintain the SINGLE maturing epic panel — one comment, edited
-  // in place on every event (this fires per terminal child). The panel shows
-  // the full DAG + current PR links and matures from in-progress → complete /
-  // failures (and reverts to in-progress on an extend/revision, handled where
-  // those fire). upsertEpicPanel renders + edits the comment AND mirrors the
-  // parent state/reaction. Best-effort; only when a panel comment exists.
-  if (WORKSPACE_REGISTRY_TABLE) {
-    const meta = (fresh ?? snapshot).meta;
-    const prUrls = await resolveChildPrUrls(freshChildren);
-    const integration = freshChildren.find((c) => isIntegrationNode(c.sub_issue_id));
-    const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
+  const prUrls = await resolveChildPrUrls(children);
+  const integration = children.find((c) => isIntegrationNode(c.sub_issue_id));
+  const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
 
-    if (allTerminal) {
-      const counts = {
-        succeeded: freshChildren.filter((c) => c.child_status === 'succeeded').length,
-        failed: freshChildren.filter((c) => c.child_status === 'failed').length,
-        skipped: freshChildren.filter((c) => c.child_status === 'skipped').length,
-      };
-      logger.info('Orchestration complete', {
-        event: ORCH_LOG.orchestrationComplete,
-        orchestration_id: orchestrationId,
-        parent_linear_issue_id: meta.parent_linear_issue_id,
-        ...counts,
-      });
-    }
-
-    // Idempotency for the PARENT-STATE mirror (state transition + reaction
-    // swap): the orchestration can reach "all terminal" on more than one stream
-    // event (the last child's record often gets two MODIFYs). Mirror only once,
-    // on the first all-terminal caller. The panel BODY edit is naturally
-    // idempotent (editing to the same body is a no-op), so it always runs.
-    const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
-
-    const newId = await upsertEpicPanel({
-      ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
-      parentLinearIssueId: meta.parent_linear_issue_id,
-      ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
-      children: freshChildren,
-      prUrls,
-      ...(combinedPrUrl !== undefined && { combinedPrUrl }),
-      inProgress: !allTerminal,
-      // Only mirror parent state on the first all-terminal event (else every
-      // in-flight edit would re-transition). In-flight edits just refresh body.
-      mirrorParentState: allTerminal ? won : false,
-      ...(meta.release_context.channel_source !== undefined && {
-        channelSource: meta.release_context.channel_source as ChannelSource,
-      }),
+  if (allTerminal) {
+    logger.info('Orchestration complete', {
+      event: ORCH_LOG.orchestrationComplete,
+      orchestration_id: orchestrationId,
+      parent_linear_issue_id: meta.parent_linear_issue_id,
+      succeeded: children.filter((c) => c.child_status === 'succeeded').length,
+      failed: children.filter((c) => c.child_status === 'failed').length,
+      skipped: children.filter((c) => c.child_status === 'skipped').length,
     });
-    // Persist a freshly-created panel comment id so later edits reuse it.
-    if (newId && !meta.status_comment_id) {
-      try {
-        await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newId);
-      } catch (err) {
-        logger.warn('Failed to persist panel comment id (non-fatal)', {
-          orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
-        });
-      }
+  }
+
+  // Idempotency for the PARENT-STATE mirror: the orchestration can reach "all
+  // terminal" on more than one stream event. Mirror only once, on the first
+  // all-terminal caller. The panel BODY edit is naturally idempotent.
+  const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+  const newId = await upsertEpicPanel({
+    ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
+    parentLinearIssueId: meta.parent_linear_issue_id,
+    ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+    children,
+    prUrls,
+    ...(combinedPrUrl !== undefined && { combinedPrUrl }),
+    inProgress: !allTerminal,
+    mirrorParentState: allTerminal ? won : false,
+    ...(meta.release_context.channel_source !== undefined && {
+      channelSource: meta.release_context.channel_source as ChannelSource,
+    }),
+  });
+  // Persist a freshly-created panel comment id so later edits reuse it.
+  if (newId && !meta.status_comment_id) {
+    try {
+      await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newId);
+    } catch (err) {
+      logger.warn('Failed to persist panel comment id (non-fatal)', {
+        orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }
@@ -436,6 +446,7 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
   const changedSubIssueId = evt.cascadeSubIssueId!;
   const succeeded = evt.status === TaskStatus.COMPLETED && evt.buildPassed !== false;
+  const now = new Date().toISOString();
 
   // #247 UX.3: an ITERATION carries the human comment that triggered it. When
   // it lands — success OR failure — reply ✅/❌ in a thread beneath that
@@ -468,6 +479,16 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
       orchestration_id: orchestrationId,
       changed_sub_issue_id: changedSubIssueId,
     });
+    // The cascade source (this re-stack/iteration) itself just completed and
+    // carried a '🔄 updating' row on the panel. With no dependents to ripple
+    // to, NOTHING else will fire for this node — so we MUST refresh here to
+    // clear its updating row and re-run the completion check. Without this, an
+    // epic whose only remaining activity is a leaf-node re-stack hangs forever
+    // at "🔄 N/M" with a stale updating row (live-caught, UX.6 stress test).
+    // Re-load so the panel reflects this node's freshly-persisted terminal
+    // status, then settle.
+    const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+    await refreshPanelAndSettle(orchestrationId, (fresh ?? snapshot).children, (fresh ?? snapshot).meta, now);
     return;
   }
 
