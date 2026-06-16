@@ -997,7 +997,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   // reconciler's reply) closes the human's @bgagent conversation with a
   // THREADED ✅/❌ reply beneath their comment, on top of the metrics comment
   // above. Orchestration iterations are skipped here to avoid a double-reply.
-  await replyToStandaloneTrigger(event, task, registryTableName, workspaceId);
+  await replyToStandaloneTrigger(event, task, registryTableName, workspaceId, issueId);
 }
 
 /**
@@ -1012,6 +1012,7 @@ async function replyToStandaloneTrigger(
   task: TaskRecord,
   registryTableName: string,
   workspaceId: string,
+  issueId: string,
 ): Promise<void> {
   const cm = task.channel_metadata;
   const triggerCommentId = cm?.trigger_comment_id;
@@ -1061,7 +1062,7 @@ async function replyToStandaloneTrigger(
       taskId: task.task_id,
     });
 
-  await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, triggerCommentId, body);
+  await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, issueId, triggerCommentId, body);
 }
 
 /** Exposed for testing: the per-channel dispatcher callable by the
