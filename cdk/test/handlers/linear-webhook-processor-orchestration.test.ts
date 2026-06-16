@@ -52,11 +52,13 @@ const reportIssueFailureMock = jest.fn();
 const swapIssueReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
+const reactToCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
+  reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
   EMOJI_FAILURE: 'x',
@@ -325,6 +327,7 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       .mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme' });
     fetchIssueParentIdMock.mockReset().mockResolvedValue('PARENT');
     discoverOrchestrationMock.mockReset();
+    reactToCommentMock.mockReset().mockResolvedValue(true);
   });
 
   test('@bgagent on a started sub-issue → pr-iteration task on its PR with cascade marker', async () => {
@@ -341,6 +344,28 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('sub-issue-1');
     expect(ctx.channelMetadata.linear_issue_id).toBe('sub-issue-1');
     expect(ctx.idempotencyKey).toContain('comment-1');
+    // #247 UX.3: the triggering comment id is threaded so the reconciler can
+    // reply ✅/❌ beneath it when the iteration lands.
+    expect(ctx.channelMetadata.trigger_comment_id).toBe('comment-1');
+  });
+
+  test('@bgagent on a started sub-issue → instant 👀 ack on the TRIGGERING comment (#247 UX.3)', async () => {
+    mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+    await handler(eventWith(comment()));
+
+    // 👀 lands on the comment (commentId 'comment-1'), not the issue, with EMOJI_STARTED.
+    expect(reactToCommentMock).toHaveBeenCalledTimes(1);
+    const [, commentId, emoji] = reactToCommentMock.mock.calls[0];
+    expect(commentId).toBe('comment-1');
+    expect(emoji).toBe('eyes');
+  });
+
+  test('@bgagent that does NOT resolve to an actionable iteration → no premature 👀 ack', async () => {
+    // No childTaskId ⇒ un-started sub-issue ⇒ we bail before acting; don't ack.
+    mockOrchWithChild({ subIssueId: 'sub-issue-1' });
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reactToCommentMock).not.toHaveBeenCalled();
   });
 
   test('comment WITHOUT @bgagent → no task (ordinary discussion / agent progress comment)', async () => {
