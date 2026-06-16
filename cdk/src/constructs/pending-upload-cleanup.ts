@@ -28,6 +28,21 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+/** Default age before a PENDING_UPLOADS task is auto-cancelled (seconds; 30 minutes). */
+const DEFAULT_PENDING_UPLOAD_TIMEOUT_SECONDS = 1800;
+
+/** Default task-record retention used for event TTL (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/** Cleanup Lambda timeout (seconds). */
+const CLEANUP_TIMEOUT_SECONDS = 30;
+
+/** Default cleanup schedule interval (minutes). */
+const DEFAULT_SCHEDULE_MINUTES = 5;
+
+/** Cleanup Lambda memory (MB). */
+const CLEANUP_MEMORY_MB = 256;
+
 /**
  * Properties for PendingUploadCleanup construct.
  */
@@ -77,16 +92,16 @@ export class PendingUploadCleanup extends Construct {
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
 
-    const timeoutSeconds = props.pendingUploadTimeoutSeconds ?? 1800;
-    const retentionDays = props.taskRetentionDays ?? 90;
+    const timeoutSeconds = props.pendingUploadTimeoutSeconds ?? DEFAULT_PENDING_UPLOAD_TIMEOUT_SECONDS;
+    const retentionDays = props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS;
 
     this.fn = new lambda.NodejsFunction(this, 'CleanupFn', {
       entry: path.join(handlersDir, 'cleanup-pending-uploads.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(30),
-      memorySize: 256,
+      timeout: Duration.seconds(CLEANUP_TIMEOUT_SECONDS),
+      memorySize: CLEANUP_MEMORY_MB,
       environment: {
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
@@ -107,7 +122,7 @@ export class PendingUploadCleanup extends Construct {
     props.attachmentsBucket.grantRead(this.fn);
     props.attachmentsBucket.grantDelete(this.fn);
 
-    const schedule = props.schedule ?? Duration.minutes(5);
+    const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);
     const rule = new events.Rule(this, 'CleanupSchedule', {
       schedule: events.Schedule.rate(schedule),
     });

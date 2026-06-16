@@ -18,13 +18,15 @@
  */
 
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { Command } from 'commander';
-import { loadConfig } from '../config';
+import { getConfigDir, loadConfig, SECRET_FILE_MODE } from '../config';
 import { CliError } from '../errors';
 import { CliConfig } from '../types';
 
@@ -210,20 +212,42 @@ function isLikelyEmail(value: string): boolean {
 }
 
 function printInviteSummary(email: string, tempPassword: string, bundle: string): void {
+  // The password never touches stdout: terminal scrollback, tmux logs, and
+  // CI capture all outlive the "share once" intent. Write the share-block
+  // to a 0600 file under the config dir instead and print its path —
+  // the admin copies it to the teammate over a secure channel, then
+  // deletes it.
+  const inviteDir = path.join(getConfigDir(), 'invites');
+  fs.mkdirSync(inviteDir, { recursive: true, mode: 0o700 });
+  const invitePath = path.join(inviteDir, `${email.replace(/[^a-zA-Z0-9.@_-]/g, '_')}.txt`);
+  const shareBlock = [
+    `email:    ${email}`,
+    `password: ${tempPassword}`,
+    `bundle:   ${bundle}`,
+    '',
+    'Run:',
+    `  bgagent configure --from-bundle ${bundle}`,
+    `  bgagent login --username ${email}`,
+    '',
+  ].join('\n');
+  fs.writeFileSync(invitePath, shareBlock, { mode: SECRET_FILE_MODE });
+  // writeFileSync only honors `mode` on create — a re-invite into a
+  // pre-existing loose-permissions file would keep its old bits. chmod
+  // makes the 0600 intent durable.
+  fs.chmodSync(invitePath, SECRET_FILE_MODE);
+
   const SUMMARY_BAR_WIDTH = 64;
   const bar = '─'.repeat(SUMMARY_BAR_WIDTH);
   console.log();
   console.log(`✓ Created Cognito user ${email}`);
   console.log('✓ Set permanent password (no first-login change required)');
   console.log();
-  console.log('Share with the new teammate:');
+  console.log('Credentials written to (owner-readable only):');
   console.log(bar);
-  console.log(`  email:    ${email}`);
-  console.log(`  password: ${tempPassword}`);
-  console.log(`  bundle:   ${bundle}`);
+  console.log(`  ${invitePath}`);
   console.log(bar);
   console.log();
-  console.log('They run:');
-  console.log(`  bgagent configure --from-bundle ${bundle}`);
-  console.log(`  bgagent login --username ${email}`);
+  console.log('Share that file\'s contents with the new teammate over a secure');
+  console.log('channel (1Password, encrypted DM), then delete it:');
+  console.log(`  rm ${invitePath}`);
 }

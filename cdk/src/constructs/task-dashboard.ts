@@ -22,6 +22,9 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 
+/** Metric aggregation period for the Cedar-HITL approval widgets (minutes). */
+const HITL_METRIC_PERIOD_MINUTES = 15;
+
 /**
  * Properties for the TaskDashboard construct.
  */
@@ -361,16 +364,16 @@ export class TaskDashboard extends Construct {
                 metricName: 'ClippedApprovalCount',
                 dimensionsMap: { reason: 'rule_annotation' },
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
               requested: new cloudwatch.Metric({
                 namespace: HITL_NAMESPACE,
                 metricName: 'ApprovalRequestCount',
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
             },
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
           }),
           new cloudwatch.MathExpression({
             label: 'maxLifetime_ceiling',
@@ -381,16 +384,16 @@ export class TaskDashboard extends Construct {
                 metricName: 'ClippedApprovalCount',
                 dimensionsMap: { reason: 'maxLifetime_ceiling' },
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
               requested: new cloudwatch.Metric({
                 namespace: HITL_NAMESPACE,
                 metricName: 'ApprovalRequestCount',
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
             },
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
           }),
           new cloudwatch.MathExpression({
             label: 'runtime_jwt_ceiling',
@@ -401,16 +404,16 @@ export class TaskDashboard extends Construct {
                 metricName: 'ClippedApprovalCount',
                 dimensionsMap: { reason: 'runtime_jwt_ceiling' },
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
               requested: new cloudwatch.Metric({
                 namespace: HITL_NAMESPACE,
                 metricName: 'ApprovalRequestCount',
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
             },
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
           }),
           // ``unknown`` surfaces when the publisher Lambda received a
           // clip event with a reason value the normalizer didn't
@@ -432,16 +435,16 @@ export class TaskDashboard extends Construct {
                 metricName: 'ClippedApprovalCount',
                 dimensionsMap: { reason: 'unknown' },
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
               requested: new cloudwatch.Metric({
                 namespace: HITL_NAMESPACE,
                 metricName: 'ApprovalRequestCount',
                 statistic: 'Sum',
-                period: Duration.minutes(15),
+                period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
               }),
             },
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
           }),
         ],
         width: 12,
@@ -462,21 +465,21 @@ export class TaskDashboard extends Construct {
             namespace: HITL_NAMESPACE,
             metricName: 'TimedOutEffectiveTimeout',
             statistic: 'p50',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'p50',
           }),
           new cloudwatch.Metric({
             namespace: HITL_NAMESPACE,
             metricName: 'TimedOutEffectiveTimeout',
             statistic: 'p90',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'p90',
           }),
           new cloudwatch.Metric({
             namespace: HITL_NAMESPACE,
             metricName: 'TimedOutEffectiveTimeout',
             statistic: 'p99',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'p99',
           }),
         ],
@@ -500,7 +503,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'approved' },
             statistic: 'p50',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'approved p50',
           }),
           new cloudwatch.Metric({
@@ -508,7 +511,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'approved' },
             statistic: 'p90',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'approved p90',
           }),
           new cloudwatch.Metric({
@@ -516,7 +519,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'approved' },
             statistic: 'p99',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'approved p99',
           }),
           // Denied outcome
@@ -525,7 +528,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'denied' },
             statistic: 'p50',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'denied p50',
           }),
           new cloudwatch.Metric({
@@ -533,7 +536,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'denied' },
             statistic: 'p90',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'denied p90',
           }),
           new cloudwatch.Metric({
@@ -541,7 +544,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'denied' },
             statistic: 'p99',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'denied p99',
           }),
           // Timed-out outcome
@@ -550,7 +553,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'timed_out' },
             statistic: 'p50',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'timed_out p50',
           }),
           new cloudwatch.Metric({
@@ -558,7 +561,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'timed_out' },
             statistic: 'p90',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'timed_out p90',
           }),
           new cloudwatch.Metric({
@@ -566,7 +569,7 @@ export class TaskDashboard extends Construct {
             metricName: 'ApprovalDecisionLatencyMs',
             dimensionsMap: { outcome: 'timed_out' },
             statistic: 'p99',
-            period: Duration.minutes(15),
+            period: Duration.minutes(HITL_METRIC_PERIOD_MINUTES),
             label: 'timed_out p99',
           }),
         ],

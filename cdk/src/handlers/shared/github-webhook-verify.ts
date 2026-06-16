@@ -19,6 +19,7 @@
 
 import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { isUsableHmacSecret } from './hmac-secret';
 import { logger } from './logger';
 
 const sm = new SecretsManagerClient({});
@@ -30,7 +31,8 @@ const sm = new SecretsManagerClient({});
  * timeout. After rotation, the verifier transparently re-fetches once.
  */
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /**
  * Fetch a GitHub webhook secret from Secrets Manager with caching.
@@ -56,7 +58,7 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
     // isn't reachable on the default config — but matching the
     // fail-closed-on-risk tenet is cheap. (theagenticguy PR-241 review B2.)
     const value = result.SecretString;
-    if (!value || value.trim() === '') {
+    if (!isUsableHmacSecret(value)) {
       logger.error('GitHub webhook secret is empty — refusing to use for HMAC', {
         secret_id: secretId,
       });
@@ -70,7 +72,7 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
     if (errorName === 'ResourceNotFoundException') {
       logger.error('GitHub webhook secret not found', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing webhook secret means "cannot verify"; ResourceNotFound is an expected config state
     }
     logger.error('Failed to fetch GitHub webhook secret', {
       secret_id: secretId,
@@ -104,7 +106,7 @@ export function verifyGitHubSignature(webhookSecret: string, header: string, bod
   // Defense-in-depth: getGitHubWebhookSecret already filters empty
   // secrets, but if a future caller wires a different secret source we
   // still want HMAC('') rejected. (theagenticguy PR-241 review B2.)
-  if (!webhookSecret || webhookSecret.trim() === '') {
+  if (!isUsableHmacSecret(webhookSecret)) {
     return false;
   }
   if (!header.startsWith('sha256=')) {
