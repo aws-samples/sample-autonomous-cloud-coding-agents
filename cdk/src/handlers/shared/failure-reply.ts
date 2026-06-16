@@ -38,13 +38,13 @@
  */
 
 import { classifyError } from './error-classifier';
-import { TaskStatus, type TaskStatusType } from '../../constructs/task-status';
+import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Max chars of the raw agent error surfaced inline (the rest is in CloudWatch). */
 const EXCERPT_MAX = 200;
 
 export interface FailureReplyInput {
-  /** Terminal task status (COMPLETED with build_passed=false is a build fail). */
+  /** Terminal task status. */
   readonly status: TaskStatusType | string;
   /** Whether the post-change build/tests passed. false ⇒ build/test failure. */
   readonly buildPassed?: boolean | null;
@@ -55,17 +55,34 @@ export interface FailureReplyInput {
 }
 
 /**
- * True when the failure is a BUILD/TEST failure (agent completed, PR exists,
- * but the verification gate is red) vs an agent-itself failure. A COMPLETED
- * status with ``build_passed === false`` and NO crash error_message is the
- * build-fail case; anything else terminal-but-not-clean is an agent failure.
+ * The agent pipeline's signature for "the AGENT finished fine, but the build
+ * verification GATE failed" (a build/test regression). Live-verified
+ * (2026-06-16): the pipeline gates this to ``status=FAILED`` with
+ * ``error_message="Task did not succeed (agent_status='success', build_ok=False)"``
+ * and leaves the separate ``build_passed`` attribute null — so the previous
+ * ``COMPLETED && build_passed===false`` check NEVER matched a real regression
+ * and every build failure fell through to the (wrong) agent-crash copy. We
+ * key off the real persisted signal instead. See
+ * ``agent/src/pipeline.py`` ``_resolve_overall_task_status`` /
+ * ``_apply_post_hook_gates``.
+ */
+const BUILD_GATE_FAILED_RE = /agent_status=['"]?(success|end_turn)['"]?.*build_ok\s*=\s*False/i;
+
+/**
+ * True when the failure is a BUILD/TEST failure (the agent completed and a PR
+ * exists, but the verification gate is red) vs an agent-itself failure
+ * (crash / cap / timeout). Two shapes are accepted:
+ *  - the live gating shape: ``error_message`` says ``agent_status='success' …
+ *    build_ok=False`` (the agent succeeded; only the build gate failed); OR
+ *  - the explicit field shape: a terminal task with ``build_passed === false``
+ *    and no crash error_message (defensive — e.g. an informational-gate path
+ *    that surfaces build_passed directly).
  */
 function isBuildFailure(input: FailureReplyInput): boolean {
-  return (
-    input.status === TaskStatus.COMPLETED
-    && input.buildPassed === false
-    && !input.errorMessage
-  );
+  if (input.errorMessage && BUILD_GATE_FAILED_RE.test(input.errorMessage)) {
+    return true;
+  }
+  return input.buildPassed === false && !input.errorMessage;
 }
 
 /** Collapse whitespace + clip to EXCERPT_MAX chars with an ellipsis. */
