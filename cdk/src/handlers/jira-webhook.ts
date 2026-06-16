@@ -43,7 +43,8 @@ const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
  * aggressively than Linear, but we keep an 8-hour window to cover
  * delayed retries on transient outages and clock skew.
  */
-const DEDUP_TTL_SECONDS = 8 * 60 * 60;
+const DEDUP_TTL_HOURS = 8;
+const DEDUP_TTL_SECONDS = DEDUP_TTL_HOURS * 3600;
 
 /**
  * Top-level shape of the Jira webhook envelope we care about for dedup +

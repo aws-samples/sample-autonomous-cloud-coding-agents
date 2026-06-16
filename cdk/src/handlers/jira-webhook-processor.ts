@@ -33,6 +33,9 @@ const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
+/** Deepest markdown heading level (`######`) ADF heading nodes are clamped to. */
+const MAX_MARKDOWN_HEADING_LEVEL = 6;
+
 /**
  * Post a Jira comment without ever propagating an error. Mirrors the
  * Linear `safeReportIssueFailure` contract — feedback is best-effort,
@@ -545,7 +548,7 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
     }
     case 'heading': {
       const level = node.attrs?.level ?? 1;
-      const prefix = '#'.repeat(Math.max(1, Math.min(6, level)));
+      const prefix = '#'.repeat(Math.max(1, Math.min(MAX_MARKDOWN_HEADING_LEVEL, level)));
       const text = (node.content ?? []).map(textOf).join('');
       if (text) {
         out.push(`${prefix} ${text}`);

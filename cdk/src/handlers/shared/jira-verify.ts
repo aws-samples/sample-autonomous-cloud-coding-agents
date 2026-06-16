@@ -31,7 +31,8 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 export const JIRA_SECRET_PREFIX = 'bgagent/jira/';
 
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /**
  * Maximum age of a Jira webhook event timestamp (ms) before it is rejected.
@@ -53,7 +54,8 @@ export const MAX_WEBHOOK_EVENT_AGE_MS = 60 * 60 * 1000;
  * relative to this Lambda's clock (sender/receiver skew). Beyond this, a
  * future-dated timestamp is rejected rather than accepted.
  */
-export const CLOCK_SKEW_ALLOWANCE_MS = 5 * 60 * 1000;
+const CLOCK_SKEW_ALLOWANCE_MINUTES = 5;
+export const CLOCK_SKEW_ALLOWANCE_MS = CLOCK_SKEW_ALLOWANCE_MINUTES * 60 * 1000;
 
 /**
  * Fetch a secret from Secrets Manager with in-memory caching.

@@ -32,6 +32,12 @@ import { JiraProjectMappingTable } from './jira-project-mapping-table';
 import { JiraUserMappingTable } from './jira-user-mapping-table';
 import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
 
+/** Default task-record retention used for TTL computation (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/** Webhook-processor Lambda timeout (seconds). */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
+
 /**
  * Properties for JiraIntegration construct.
  */
@@ -151,7 +157,7 @@ export class JiraIntegration extends Construct {
     const createTaskEnv: Record<string, string> = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
@@ -186,7 +192,7 @@ export class JiraIntegration extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(30),
+      timeout: Duration.seconds(WEBHOOK_PROCESSOR_TIMEOUT_SECONDS),
       // 512 MB matches the Linear processor — same attachment-screening
       // path bundles the same pdf-parse + URL-resolver libs alongside the
       // SDK, and Atlassian's ADF→markdown walker adds a small additional
