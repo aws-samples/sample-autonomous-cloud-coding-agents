@@ -75,12 +75,17 @@ mutation UpdateComment($id: String!, $body: String!) {
  * Post a THREADED REPLY beneath an existing comment (#247 UX.3 ack trail).
  * ``parentId`` is the comment being replied to; the reply notifies and reads
  * as a conversation turn under it. Returns the new reply's id (for a possible
- * later edit), distinct from a top-level comment. (Verified: the ``commentCreate``
- * input accepts ``parentId`` for threaded replies.)
+ * later edit), distinct from a top-level comment.
+ *
+ * IMPORTANT (live-verified 2026-06-16): Linear's ``commentCreate`` requires
+ * ``issueId`` to be present EVEN for a threaded reply — ``parentId`` alone
+ * fails ``commentCreate`` argument validation ("Exactly one of …issueId must
+ * be defined"). So the reply carries BOTH the parent comment id and its
+ * issue id.
  */
 const COMMENT_REPLY_RETURNING_ID_MUTATION = `
-mutation ReplyToComment($parentId: String!, $body: String!) {
-  commentCreate(input: { parentId: $parentId, body: $body }) {
+mutation ReplyToComment($issueId: String!, $parentId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, parentId: $parentId, body: $body }) {
     success
     comment { id }
   }
@@ -339,15 +344,21 @@ export async function reactToComment(
  * conversation turn under the original request, keeping the thread contextual.
  * Returns the new reply's comment id (for a possible later edit) or null on any
  * failure. Best-effort — never throws.
+ *
+ * ``issueId`` is the issue the parent comment lives on — Linear requires it on
+ * ``commentCreate`` even for a reply (see {@link COMMENT_REPLY_RETURNING_ID_MUTATION}).
  */
 export async function replyToComment(
   ctx: LinearFeedbackContext,
+  issueId: string,
   parentCommentId: string,
   body: string,
 ): Promise<string | null> {
   const token = await resolveToken(ctx);
   if (!token) return null;
-  const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, { parentId: parentCommentId, body });
+  const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
+    issueId, parentId: parentCommentId, body,
+  });
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
 }
