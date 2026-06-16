@@ -486,7 +486,9 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     await handler(iterEventWithComment('COMPLETED'));
 
     expect(replyToCommentMock).toHaveBeenCalledTimes(1);
-    const [, parentCommentId, body] = replyToCommentMock.mock.calls[0];
+    // Signature: replyToComment(ctx, issueId, parentCommentId, body).
+    const [, issueId, parentCommentId, body] = replyToCommentMock.mock.calls[0];
+    expect(issueId).toBe('A'); // the sub-issue the comment lives on
     expect(parentCommentId).toBe('human-cmt-1');
     expect(body).toMatch(/^✅ Updated — PR #\d+\./);
   });
@@ -498,7 +500,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     await handler(iterEventWithComment('FAILED', 'human-cmt-1', undefined, 'agent_status="error_max_turns"'));
 
     expect(replyToCommentMock).toHaveBeenCalledTimes(1);
-    const [, , body] = replyToCommentMock.mock.calls[0];
+    const [, , , body] = replyToCommentMock.mock.calls[0];
     expect(body).toMatch(/^❌/);
     expect(body).toMatch(/Exceeded max turns/i); // classified
     expect(body).toMatch(/CloudWatch for task `iter-task-1`/);
@@ -515,7 +517,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
 
     expect(replyToCommentMock).toHaveBeenCalledTimes(1);
-    const [, , body] = replyToCommentMock.mock.calls[0];
+    const [, , , body] = replyToCommentMock.mock.calls[0];
     expect(body).toMatch(/build\/tests didn't pass/i);
     expect(body).toMatch(/PR's checks/i);
     expect(body).not.toMatch(/CloudWatch/i); // build-fail copy omits the log pointer
@@ -528,7 +530,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
     ]);
     await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
-    const [, , body] = replyToCommentMock.mock.calls[0];
+    const [, , , body] = replyToCommentMock.mock.calls[0];
     expect(body).toMatch(/^❌/);
   });
 

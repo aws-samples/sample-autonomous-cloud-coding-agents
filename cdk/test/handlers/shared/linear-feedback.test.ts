@@ -185,35 +185,48 @@ describe('linear-feedback', () => {
   });
 
   describe('replyToComment (#247 UX.3 — threaded reply that notifies)', () => {
-    test('POSTs commentCreate with parentId and returns the new reply id', async () => {
+    test('POSTs commentCreate with BOTH issueId and parentId, returns the new reply id', async () => {
       fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'reply-99' } } } }));
 
-      const replyId = await replyToComment(CTX, 'comment-77', '✅ Updated — PR #178');
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', '✅ Updated — PR #178');
 
       expect(replyId).toBe('reply-99');
       const init = fetchMock.mock.calls[0][1];
-      const body = JSON.parse(init.body as string) as { query: string; variables: { parentId: string; body: string } };
+      const body = JSON.parse(init.body as string) as { query: string; variables: { issueId: string; parentId: string; body: string } };
       expect(body.query).toContain('commentCreate');
-      // Threaded reply: the variable is parentId (not a top-level issue comment).
+      // CONTRACT (live-verified 2026-06-16): Linear's commentCreate REQUIRES
+      // issueId even for a threaded reply — parentId alone fails argument
+      // validation. Pin BOTH so the missing-issueId regression can't return.
+      expect(body.variables.issueId).toBe(ISSUE_ID);
       expect(body.variables.parentId).toBe('comment-77');
       expect(body.variables.body).toBe('✅ Updated — PR #178');
     });
 
+    test('the mutation declares issueId as a required argument (regression guard)', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'r' } } } }));
+      await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
+      const init = fetchMock.mock.calls[0][1];
+      const query = (JSON.parse(init.body as string) as { query: string }).query;
+      // The GraphQL op must pass issueId INTO commentCreate's input — not just
+      // accept it as a variable. Catches a half-fix that drops it from input.
+      expect(query).toMatch(/commentCreate\(\s*input:\s*\{[^}]*issueId:\s*\$issueId/);
+    });
+
     test('returns null when commentCreate did not succeed', async () => {
       fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: false } } }));
-      const replyId = await replyToComment(CTX, 'comment-77', 'body');
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
       expect(replyId).toBeNull();
     });
 
     test('returns null on GraphQL errors (no throw)', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'parent not found' }] }));
-      const replyId = await replyToComment(CTX, 'comment-77', 'body');
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
       expect(replyId).toBeNull();
     });
 
     test('returns null when the token cannot be resolved (no fetch)', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
-      const replyId = await replyToComment(CTX, 'comment-77', 'body');
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
       expect(replyId).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
     });

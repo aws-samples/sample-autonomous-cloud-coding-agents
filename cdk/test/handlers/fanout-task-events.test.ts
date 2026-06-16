@@ -110,9 +110,10 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   ) => mockPostIssueComment(ctx, issueId, body),
   replyToComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
+    issueId: string,
     parentCommentId: string,
     body: string,
-  ) => mockReplyToComment(ctx, parentCommentId, body),
+  ) => mockReplyToComment(ctx, issueId, parentCommentId, body),
 }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
@@ -1562,7 +1563,9 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
 
       expect(mockReplyToComment).toHaveBeenCalledTimes(1);
-      const [, parentCommentId, body] = mockReplyToComment.mock.calls[0];
+      // Signature: replyToComment(ctx, issueId, parentCommentId, body).
+      const [, issueId, parentCommentId, body] = mockReplyToComment.mock.calls[0];
+      expect(issueId).toBe('issue-uuid-42'); // the issue the comment lives on
       expect(parentCommentId).toBe('human-cmt-7');
       expect(body).toMatch(/^✅ Updated — PR #13\./);
       // The metrics comment is still posted too.
@@ -1572,7 +1575,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     test('task_failed (agent crash) → ❌ reply with classified reason + CloudWatch task id (UX.5)', async () => {
       mockGet({ ...STANDALONE, error_message: 'agent_status="error_max_turns"' });
       await handler({ Records: [mkEvent('task_failed', 't-lin')] });
-      const [, , body] = mockReplyToComment.mock.calls[0];
+      const [, , , body] = mockReplyToComment.mock.calls[0];
       expect(body).toMatch(/^❌/);
       expect(body).toMatch(/Exceeded max turns/i); // classified
       expect(body).toMatch(/CloudWatch for task `t-lin`/);
@@ -1582,7 +1585,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     test('task_completed but build_passed=false → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
       mockGet({ ...STANDALONE, build_passed: false, error_message: undefined });
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
-      const [, , body] = mockReplyToComment.mock.calls[0];
+      const [, , , body] = mockReplyToComment.mock.calls[0];
       expect(body).toMatch(/build\/tests didn't pass/i);
       expect(body).toMatch(/PR's checks/i);
       expect(body).not.toMatch(/CloudWatch/i);

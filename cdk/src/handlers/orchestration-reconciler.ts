@@ -588,7 +588,10 @@ async function replyToIterationComment(
       ...(evt.errorMessage !== undefined && { errorMessage: evt.errorMessage }),
       taskId: evt.taskId,
     });
-  await replyToComment(ctx, commentId, body);
+  // The triggering comment lives on the sub-issue (changedSubIssueId is its
+  // Linear issue id) — Linear requires issueId on commentCreate even for a
+  // threaded reply.
+  await replyToComment(ctx, changedSubIssueId, commentId, body);
 }
 
 /** Build the ✅ ack reply, linking the (re-pushed) PR when resolvable. */
