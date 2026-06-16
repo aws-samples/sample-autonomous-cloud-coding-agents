@@ -55,7 +55,7 @@ import {
 } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
-import { upsertEpicPanel } from './shared/orchestration-rollup';
+import { cascadeNodeLabel, upsertEpicPanel } from './shared/orchestration-rollup';
 import { postIssueComment, replyToComment } from './shared/linear-feedback';
 import { renderFailureReply } from './shared/failure-reply';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
@@ -482,7 +482,10 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   // revised), used in the surfacing comments. Prefer its Linear identifier.
   const meta = snapshot.meta;
   const changedRow = snapshot.children.find((c) => c.sub_issue_id === changedSubIssueId);
-  const changedLabel = changedRow?.linear_identifier ?? changedRow?.title ?? 'a predecessor';
+  // Friendly short name — for the integration node this is "the integration",
+  // NOT its raw synthetic title (which read clumsily in the possessive cascade
+  // reason "…'s change"; live-caught under the UX.6 stress test).
+  const changedLabel = cascadeNodeLabel(changedSubIssueId, changedRow?.linear_identifier, changedRow?.title);
 
   const feedbackCtx = WORKSPACE_REGISTRY_TABLE
     ? { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE }
