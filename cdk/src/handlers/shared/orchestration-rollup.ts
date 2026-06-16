@@ -161,6 +161,118 @@ export function renderStatusBlock(children: readonly RollupChildView[]): string 
   return [heading, '', ...lines, '', '_Updates live as sub-issues progress._'].join('\n');
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #247 UX redesign: the single MATURING panel comment. Supersedes the
+// separate renderStatusBlock + renderRollupComment — ONE comment, edited in
+// place, that shows the full DAG and matures from in-progress → complete and
+// back to in-progress on an extend/revision. See project_247_ux_redesign.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Per-sub-issue view for the maturing panel — adds the 'updating' context the rollup/block can't express. */
+export interface EpicPanelRow {
+  readonly sub_issue_id: string;
+  readonly linear_identifier?: string;
+  readonly title?: string;
+  /** Persisted orchestration status: blocked | ready | released | succeeded | failed | skipped. */
+  readonly child_status: string;
+  /** The sub-issue's current PR url, when one exists yet (omitted for a not-yet-PR'd first run). */
+  readonly pr_url?: string;
+  /**
+   * When this row is being re-built by an in-flight cascade/iteration (its
+   * persisted status is still 'succeeded' but a new task is updating its PR),
+   * the human-readable reason — e.g. `per ABCA-289's "button doesn't work"` or
+   * `to include ABCA-289's change`. Present → the row renders as 🔄 updating.
+   */
+  readonly updatingReason?: string;
+}
+
+export interface EpicPanelParams {
+  readonly rows: readonly EpicPanelRow[];
+  /**
+   * True when any sub-issue is non-terminal OR any row is mid-update
+   * (cascade in flight). Drives the in-progress header even when every
+   * persisted status is terminal (a revision re-opens the epic).
+   */
+  readonly inProgress: boolean;
+  /** Combined/integration PR url (the fan-out's merged deliverable), when one exists. */
+  readonly combinedPrUrl?: string;
+  /** Combined preview screenshot url, embedded in the panel (auto-refreshes; no separate comment). */
+  readonly combinedScreenshotUrl?: string;
+}
+
+const PANEL_FOOTER = '_One live panel — updates in place as the epic progresses; no comment stream._';
+
+/**
+ * Truncate a quoted comment for the "updating per …" row, keeping it short.
+ * Exported so the caller (reconciler) builds the ``updatingReason`` string —
+ * e.g. ``per ABCA-289's "${truncateQuote(commentBody)}"``.
+ */
+export function truncateQuote(s: string, max = 40): string {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
+}
+
+/** Friendly label for a row — Linear identifier + title, or 'Integration — combined result' for the synthetic node. */
+function panelLabel(row: EpicPanelRow): string {
+  if (isIntegrationNode(row.sub_issue_id)) return 'Integration — combined result';
+  if (row.linear_identifier) return row.title ? `${row.linear_identifier}: ${row.title}` : row.linear_identifier;
+  return row.title ?? row.sub_issue_id;
+}
+
+/**
+ * Render the single maturing epic panel (pure). Edited in place on every event
+ * (seed/run/extend/revision/complete). Rules:
+ *  - PR link shown ONLY when a PR exists (a first run mid-flight has none).
+ *  - A row with ``updatingReason`` renders as `🔄 … — updating <reason> — [PR]`
+ *    even though its persisted status is still succeeded.
+ *  - Header: in-progress → `🔄 N/M complete`; all settled → `✅ complete` or
+ *    `⚠️ finished with failures`. ``inProgress`` forces 🔄 (a revision re-opens).
+ *  - Integration node renders friendly; never a raw id.
+ *  - Combined PR callout + embedded combined screenshot when present.
+ */
+export function renderEpicPanel(params: EpicPanelParams): string {
+  const { rows, inProgress, combinedPrUrl, combinedScreenshotUrl } = params;
+  const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
+  // "done" counts settled rows that are NOT mid-update (an updating row is back in flight).
+  const done = rows.filter((r) => terminal(r.child_status) && !r.updatingReason).length;
+  const anyBad = rows.some((r) => r.child_status === 'failed' || r.child_status === 'skipped');
+
+  let heading: string;
+  if (inProgress) {
+    heading = `🔄 **ABCA orchestration** · ${done}/${rows.length} complete`;
+  } else if (anyBad) {
+    heading = '⚠️ **ABCA orchestration finished with failures**';
+  } else {
+    heading = '✅ **ABCA orchestration complete**';
+  }
+
+  const lines = [...rows]
+    .sort((a, b) => (a.linear_identifier ?? a.sub_issue_id).localeCompare(b.linear_identifier ?? b.sub_issue_id))
+    .map((r) => {
+      const label = panelLabel(r);
+      const pr = r.pr_url ? ` — [PR](${r.pr_url})` : '';
+      // A mid-update row: 🔄 + the reason, regardless of persisted status.
+      if (r.updatingReason) {
+        return `- 🔄 ${label} — updating ${r.updatingReason}${pr}`;
+      }
+      const icon = STATUS_ICON[r.child_status] ?? '•';
+      const word =
+        r.child_status === 'released' || r.child_status === 'ready' ? 'running'
+          : r.child_status === 'blocked' ? 'blocked'
+            : r.child_status;
+      return `- ${icon} ${label} — ${word}${pr}`;
+    });
+
+  const callout = combinedPrUrl
+    ? ['', `🔗 **Combined PR (all sub-issues merged):** [${combinedPrUrl}](${combinedPrUrl})`]
+    : [];
+  const shot = combinedScreenshotUrl
+    ? ['', `🖼️ **Combined preview**`, '', `![combined preview](${combinedScreenshotUrl})`]
+    : [];
+
+  return [heading, '', ...lines, ...callout, ...shot, '', PANEL_FOOTER].join('\n');
+}
+
 /**
  * Decide the rollup kind from the (terminal) child statuses.
  * - any failed/skipped → partial_failure

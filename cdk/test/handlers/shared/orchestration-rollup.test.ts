@@ -35,9 +35,12 @@ jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }))
 import {
   renderRollupComment,
   renderStatusBlock,
+  renderEpicPanel,
+  truncateQuote,
   rollupKindFromChildren,
   postRollup,
   type RollupChildView,
+  type EpicPanelRow,
 } from '../../../src/handlers/shared/orchestration-rollup';
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
@@ -344,5 +347,95 @@ describe('postRollup', () => {
     });
     expect(ok).toBe(false);
     expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
+  });
+});
+
+describe('truncateQuote', () => {
+  test('short text passes through, trimmed + whitespace-collapsed', () => {
+    expect(truncateQuote('  the button   doesnt work ')).toBe('the button doesnt work');
+  });
+  test('long text is truncated with an ellipsis', () => {
+    const out = truncateQuote('a'.repeat(60), 40);
+    expect(out.length).toBe(40);
+    expect(out.endsWith('…')).toBe(true);
+  });
+});
+
+describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
+  const row = (sub: string, status: string, opts: Partial<EpicPanelRow> = {}): EpicPanelRow => ({
+    sub_issue_id: sub, child_status: status, ...opts,
+  });
+
+  test('in-progress header shows N/M complete', () => {
+    const body = renderEpicPanel({ inProgress: true, rows: [
+      row('a', 'succeeded', { linear_identifier: 'ENG-1', title: 'A' }),
+      row('b', 'released', { linear_identifier: 'ENG-2', title: 'B' }),
+      row('c', 'blocked', { linear_identifier: 'ENG-3', title: 'C' }),
+    ] });
+    expect(body).toContain('🔄 **ABCA orchestration** · 1/3 complete');
+    expect(body).toContain('✅ ENG-1: A — succeeded');
+    expect(body).toContain('🔄 ENG-2: B — running');
+    expect(body).toContain('⏳ ENG-3: C — blocked');
+  });
+
+  test('all settled + ok → complete header; failures → ⚠️', () => {
+    expect(renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded')] }))
+      .toContain('✅ **ABCA orchestration complete**');
+    expect(renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded'), row('b', 'failed')] }))
+      .toContain('⚠️ **ABCA orchestration finished with failures**');
+  });
+
+  test('PR link shown ONLY when a PR exists (first run mid-flight has none)', () => {
+    const body = renderEpicPanel({ inProgress: true, rows: [
+      row('a', 'released', { linear_identifier: 'ENG-1', title: 'A' }), // running, no PR yet
+      row('b', 'succeeded', { linear_identifier: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
+    ] });
+    expect(body).toContain('🔄 ENG-1: A — running\n'); // no — [PR] suffix
+    expect(body).not.toContain('ENG-1: A — running — [PR]');
+    expect(body).toContain('✅ ENG-2: B — succeeded — [PR](https://github.com/o/r/pull/9)');
+  });
+
+  test('a row with updatingReason renders 🔄 updating <reason>, even when status is succeeded', () => {
+    const body = renderEpicPanel({ inProgress: true, rows: [
+      row('a', 'succeeded', { linear_identifier: 'ENG-1', title: 'UI',
+        pr_url: 'https://github.com/o/r/pull/7',
+        updatingReason: 'per ENG-2\'s "button doesnt work"' }),
+    ] });
+    expect(body).toContain('🔄 ENG-1: UI — updating per ENG-2\'s "button doesnt work" — [PR](https://github.com/o/r/pull/7)');
+  });
+
+  test('a mid-update row keeps the header in-progress (does NOT count as done)', () => {
+    // inProgress is passed true by the caller when any row is updating; the
+    // updating row is excluded from the done count.
+    const body = renderEpicPanel({ inProgress: true, rows: [
+      row('a', 'succeeded', { updatingReason: 'to include ENG-3\'s change' }),
+      row('b', 'succeeded'),
+    ] });
+    expect(body).toContain('· 1/2 complete'); // only b counts as done
+  });
+
+  test('integration node renders friendly, never its raw id', () => {
+    const body = renderEpicPanel({ inProgress: false, rows: [
+      row('a', 'succeeded', { linear_identifier: 'ENG-1' }),
+      row('orch_x__integration', 'succeeded', { pr_url: 'https://github.com/o/r/pull/9' }),
+    ], combinedPrUrl: 'https://github.com/o/r/pull/9' });
+    expect(body).toContain('Integration — combined result');
+    expect(body).not.toContain('orch_x__integration');
+    expect(body).toContain('🔗 **Combined PR (all sub-issues merged):**');
+  });
+
+  test('embeds the combined preview screenshot when present', () => {
+    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded')],
+      combinedScreenshotUrl: 'https://cdn/x.png' });
+    expect(body).toContain('🖼️ **Combined preview**');
+    expect(body).toContain('![combined preview](https://cdn/x.png)');
+  });
+
+  test('rows are sorted by identifier for a stable edited body', () => {
+    const body = renderEpicPanel({ inProgress: true, rows: [
+      row('z', 'released', { linear_identifier: 'ENG-9' }),
+      row('a', 'released', { linear_identifier: 'ENG-1' }),
+    ] });
+    expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
   });
 });
