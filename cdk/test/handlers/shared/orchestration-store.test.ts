@@ -366,6 +366,89 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
     expect(result.releasableSubIssueIds).toEqual([]); // A not succeeded → B blocked
   });
 
+  // #247 UX.4: a new node with NO declared dependency stacks on the epic TIP
+  // (the leaf frontier of existing nodes), not bare main.
+  test('new UNCONSTRAINED node → implicit depends_on = epic tip (linear chain → its leaf)', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([
+        { id: 'A', status: 'succeeded' },
+        { id: 'B', deps: ['A'], status: 'succeeded' }, // B is the leaf / tip
+      ]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    // New node C declares NO dependency.
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', ['A']), child('C', [], { title: 'New step' })]),
+    });
+    expect(result.addedSubIssueIds).toEqual(['C']);
+    const bw = ddb.send.mock.calls.find((c) => c[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: { sub_issue_id: string; depends_on: string[]; child_status: string } } }>)[0].PutRequest.Item;
+    expect(written.sub_issue_id).toBe('C');
+    // Stacked on the tip B (not []), and B succeeded so C is releasable.
+    expect(written.depends_on).toEqual(['B']);
+    expect(written.child_status).toBe('ready');
+    expect(result.releasableSubIssueIds).toEqual(['C']);
+  });
+
+  test('new unconstrained node, tip NOT done → blocked on the tip (stacks, waits)', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([{ id: 'A', status: 'released' }])) // tip A still running
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', [])]),
+    });
+    const bw = ddb.send.mock.calls.find((c) => c[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: { depends_on: string[]; child_status: string } } }>)[0].PutRequest.Item;
+    expect(written.depends_on).toEqual(['A']); // stacked on the tip
+    expect(written.child_status).toBe('blocked');
+    expect(result.releasableSubIssueIds).toEqual([]);
+  });
+
+  test('new unconstrained node on a fan-out epic → diamond implicit deps (all leaves)', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([
+        { id: 'R', status: 'succeeded' },
+        { id: 'B', deps: ['R'], status: 'succeeded' },
+        { id: 'C', deps: ['R'], status: 'succeeded' }, // B and C are both leaves
+      ]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('R'), child('B', ['R']), child('C', ['R']), child('D', [])]),
+    });
+    const bw = ddb.send.mock.calls.find((c) => c[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: { sub_issue_id: string; depends_on: string[] } } }>)[0].PutRequest.Item;
+    expect(written.depends_on).toEqual(['B', 'C']); // diamond over both leaves
+    expect(result.releasableSubIssueIds).toEqual(['D']); // both succeeded
+  });
+
+  test('new node WITH an explicit dependency keeps it (user intent wins over the tip)', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([
+        { id: 'A', status: 'succeeded' },
+        { id: 'B', deps: ['A'], status: 'succeeded' }, // tip would be B
+      ]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    // New node C explicitly depends on A (not the tip B).
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', ['A']), child('C', ['A'])]),
+    });
+    const bw = ddb.send.mock.calls.find((c) => c[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: { depends_on: string[] } } }>)[0].PutRequest.Item;
+    expect(written.depends_on).toEqual(['A']); // explicit edge preserved, NOT overridden to ['B']
+    expect(result.addedSubIssueIds).toEqual(['C']);
+  });
+
   test('no new nodes (graph unchanged) → no-op, no writes', async () => {
     const ddb = makeDdb();
     ddb.send.mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }]));
@@ -417,5 +500,21 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
     const upd = ddb.send.mock.calls.find((c) => c[0] instanceof UpdateCommand)![0];
     // 2 existing + 2 new (C, D) = 4.
     expect(upd.input.ExpressionAttributeValues[':n']).toBe(4);
+  });
+
+  test('clears rollup_posted_at so a re-completed (post-completion) epic can rollup again (#247 UX.4)', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B', [])]),
+    });
+    const upd = ddb.send.mock.calls.find((c) => c[0] instanceof UpdateCommand)![0];
+    // The meta update REMOVEs rollup_posted_at so the reconciler can re-claim
+    // and re-settle the parent state when the added node finishes.
+    expect(upd.input.UpdateExpression).toContain('REMOVE rollup_posted_at');
   });
 });
