@@ -84,6 +84,12 @@ const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 /** Link code TTL. */
 const LINK_CODE_TTL_S = 10 * 60; // 10 minutes
 
+/** Random bytes for slash-command account-link codes (→ 6 hex chars). */
+const LINK_CODE_ENTROPY_BYTES = 3;
+
+/** Prefix length when logging Slack response_url values (avoid leaking tokens). */
+const RESPONSE_URL_LOG_PREFIX_LEN = 80;
+
 /**
  * Async processor for Slack slash commands and @mention triggers.
  *
@@ -277,7 +283,7 @@ function parseRepoArg(arg: string): { repo: string | null; issueNumber?: number 
 
 async function handleLink(event: CommandProcessorEvent, reply: ReplyFn): Promise<void> {
   // Generate a 6-character alphanumeric code.
-  const code = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const code = crypto.randomBytes(LINK_CODE_ENTROPY_BYTES).toString('hex').toUpperCase();
   const now = new Date().toISOString();
   const ttl = Math.floor(Date.now() / 1000) + LINK_CODE_TTL_S;
 
@@ -518,7 +524,7 @@ async function lookupPlatformUser(teamId: string, userId: string): Promise<strin
 
 async function postToSlack(responseUrl: string, text: string): Promise<void> {
   logger.info('Posting to Slack response_url', {
-    response_url: responseUrl.substring(0, 80),
+    response_url: responseUrl.substring(0, RESPONSE_URL_LOG_PREFIX_LEN),
     text_length: text.length,
   });
   try {
@@ -531,7 +537,7 @@ async function postToSlack(responseUrl: string, text: string): Promise<void> {
       const body = await response.text().catch(() => '');
       logger.warn('Failed to post to Slack response_url', {
         status: response.status,
-        response_url: responseUrl.substring(0, 80),
+        response_url: responseUrl.substring(0, RESPONSE_URL_LOG_PREFIX_LEN),
         body,
       });
     } else {
