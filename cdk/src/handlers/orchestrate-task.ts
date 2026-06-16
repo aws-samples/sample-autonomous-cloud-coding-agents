@@ -20,6 +20,7 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
+import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import {
@@ -78,12 +79,20 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     if (!result) {
       await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false);
       await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' });
-      // Linear feedback is non-fatal: a throw here would re-run failTask +
+      // Channel feedback is non-fatal: a throw here would re-run failTask +
       // emitTaskEvent on the durable-execution retry, producing duplicate events.
       try {
         await notifyLinearOnConcurrencyCap(task);
       } catch (err) {
         logger.warn('Linear concurrency-cap feedback failed (non-fatal)', {
+          task_id: taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      try {
+        await notifyJiraOnConcurrencyCap(task);
+      } catch (err) {
+        logger.warn('Jira concurrency-cap feedback failed (non-fatal)', {
           task_id: taskId,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -340,6 +349,49 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
       task_id: task.task_id,
       linear_workspace_id: linearWorkspaceId,
       issue_id: issueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Post a Jira issue comment when admission control rejects a task for the
+ * user concurrency cap. Jira-only; silently no-ops for other channels.
+ *
+ * Parity with {@link notifyLinearOnConcurrencyCap}: the webhook processor
+ * covers pre-`createTaskCore` rejections (unmapped project, unlinked actor,
+ * guardrail), while this hook covers the post-201 case where the orchestrator
+ * rejects on admission. Without it, a Jira user who hits the cap sees the
+ * integration silently drop the request (the agent — which would otherwise
+ * comment — never starts).
+ *
+ * Best-effort: `reportIssueFailure` swallows its own errors; we wrap in
+ * try/catch anyway because a transient throw during the registry lookup must
+ * never block the rejection path. Exported for unit testing.
+ */
+export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void> {
+  if (task.channel_source !== 'jira') return;
+  const cloudId = task.channel_metadata?.jira_cloud_id;
+  const issueKey = task.channel_metadata?.jira_issue_key;
+  if (!cloudId || !issueKey) return;
+  const registryTableName = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (!registryTableName) {
+    logger.warn('Skipping Jira concurrency-cap feedback: JIRA_WORKSPACE_REGISTRY_TABLE_NAME not set', {
+      task_id: task.task_id,
+    });
+    return;
+  }
+  try {
+    await reportJiraIssueFailure(
+      { cloudId, registryTableName },
+      issueKey,
+      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+    );
+  } catch (err) {
+    logger.warn('Jira concurrency-cap feedback failed (non-fatal)', {
+      task_id: task.task_id,
+      jira_cloud_id: cloudId,
+      issue_key: issueKey,
       error: err instanceof Error ? err.message : String(err),
     });
   }
