@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import PR_WORKFLOW_IDS, build_config, resolve_linear_api_token
+from config import (
+    PR_WORKFLOW_IDS,
+    build_config,
+    resolve_jira_oauth_token,
+    resolve_linear_api_token,
+)
 from models import TaskConfig
 
 
@@ -488,3 +493,240 @@ class TestResolveLinearApiTokenRefreshPaths:
         with patch("boto3.client", return_value=mock_sm):
             assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == ""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+
+
+class TestResolveJiraOauthToken:
+    """Jira Cloud OAuth token resolves from per-tenant Secrets Manager.
+
+    The orchestrator stamps `jira_oauth_secret_arn` into the task's
+    channel_metadata at creation time. resolve_jira_oauth_token reads the
+    secret JSON via boto3 and caches the access_token in `JIRA_API_TOKEN`
+    for the agent-side Jira REST calls (jira_reactions).
+
+    Unlike the Linear resolver, the agent NEVER refreshes the Jira token:
+    Atlassian rotates the refresh_token on every use and the agent role has
+    GetSecretValue only (no Put), so a refresh would burn the stored
+    refresh_token and brick the tenant. See TestResolveJiraOauthTokenNoRefresh.
+    """
+
+    def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
+        """Fast-path: if JIRA_API_TOKEN is already set, no SDK call fires."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_oauth_cached")
+        with patch("boto3.client") as mock_boto:
+            assert resolve_jira_oauth_token() == "jira_oauth_cached"
+            mock_boto.assert_not_called()
+
+    def test_returns_empty_when_secret_arn_missing(self, monkeypatch):
+        """Without channel_metadata.jira_oauth_secret_arn or env, no source — empty."""
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.delenv("JIRA_OAUTH_SECRET_ARN", raising=False)
+        with patch("boto3.client") as mock_boto:
+            assert resolve_jira_oauth_token() == ""
+            mock_boto.assert_not_called()
+
+    def test_returns_empty_when_region_missing(self, monkeypatch):
+        """No region → can't construct boto3 client → empty + WARN, no SDK call."""
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        with patch("boto3.client") as mock_boto:
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"}) == ""
+            mock_boto.assert_not_called()
+
+    def test_resolves_from_secrets_manager_and_caches_in_env(self, monkeypatch):
+        """Happy path: channel_metadata carries the ARN, secret has access_token + future expiry."""
+        from datetime import datetime, timedelta
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        token_payload = {
+            "access_token": "jira_oauth_fresh",
+            "refresh_token": "jira_refresh_xyz",
+            "expires_at": future,
+            "scope": "read:jira-work write:jira-work offline_access",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "cloud_id": "cloud-uuid",
+            "site_url": "https://acme.atlassian.net",
+            "installed_at": "2026-05-19T08:00:00Z",
+            "updated_at": "2026-05-19T08:00:00Z",
+            "installed_by_platform_user_id": "cog-sub",
+        }
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(token_payload),
+        }
+        with patch("boto3.client", return_value=mock_sm):
+            resolved = resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"})
+            assert resolved == "jira_oauth_fresh"
+
+        # Cached for subsequent reads.
+        import os as _os
+
+        assert _os.environ.get("JIRA_API_TOKEN") == "jira_oauth_fresh"
+        # Reset for other tests.
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_returns_empty_on_secrets_manager_access_denied(self, monkeypatch):
+        """ClientError surfaces as empty + ERROR log, never crashes the agent."""
+        from botocore.exceptions import ClientError
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no perms"}},
+            "GetSecretValue",
+        )
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"}) == ""
+
+    def test_falls_back_to_env_var_when_channel_metadata_omits_arn(self, monkeypatch):
+        """JIRA_OAUTH_SECRET_ARN env var is the back-compat fallback."""
+        from datetime import datetime, timedelta
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("JIRA_OAUTH_SECRET_ARN", "arn:from-env")
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "jira_oauth_envpath",
+                    "refresh_token": "rt",
+                    "expires_at": future,
+                    "scope": "read:jira-work",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "cloud_id": "cl",
+                    "site_url": "https://x.atlassian.net",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_jira_oauth_token() == "jira_oauth_envpath"
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+
+class TestResolveJiraOauthTokenNoRefresh:
+    """The agent NEVER refreshes the Jira OAuth token.
+
+    Atlassian rotates the refresh_token on every use, and the agent role has
+    `secretsmanager:GetSecretValue` only (no Put). If the agent refreshed it
+    would consume the stored refresh_token, keep the rotated replacement only
+    in memory for this task, and leave Secrets Manager holding a dead
+    refresh_token — bricking the tenant on the next resolve. So the resolver
+    uses a still-valid stored token verbatim and fails CLOSED (empty string,
+    advisory comments no-op) when the stored token is expiring. The trusted
+    Lambda path (jira-oauth-resolver.ts, which has PutSecretValue) owns all
+    refreshes.
+    """
+
+    @staticmethod
+    def _stored(**overrides):
+        from datetime import datetime, timedelta
+
+        # Default: token expires in 30s so _is_expiring returns True.
+        soon = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+        base = {
+            "access_token": "jira_old",
+            "refresh_token": "rt-old",
+            "expires_at": soon,
+            "scope": "read:jira-work write:jira-work",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "cloud_id": "cloud-uuid",
+            "site_url": "https://acme.atlassian.net",
+            "installed_at": "2026-05-19T08:00:00Z",
+            "updated_at": "2026-05-19T08:00:00Z",
+            "installed_by_platform_user_id": "cog",
+        }
+        base.update(overrides)
+        return base
+
+    def test_expiring_token_fails_closed_without_network_call(self, monkeypatch):
+        """Expiring stored token → empty string, and NO /oauth/token POST.
+
+        This is the regression guard for the rotating-refresh-token bug: the
+        agent must not consume the stored refresh_token.
+        """
+        import json
+        from unittest.mock import patch as upatch
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(self._stored())}
+
+        with (
+            patch("boto3.client", return_value=mock_sm),
+            upatch("urllib.request.urlopen") as urlopen_mock,
+        ):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
+            urlopen_mock.assert_not_called()
+        # Nothing cached on the fail-closed path.
+        import os as _os
+
+        assert _os.environ.get("JIRA_API_TOKEN") in (None, "")
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_valid_token_used_verbatim_without_network_call(self, monkeypatch):
+        """A still-valid stored token is returned as-is, with no refresh POST."""
+        import json
+        from datetime import datetime, timedelta
+        from unittest.mock import patch as upatch
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        valid = self._stored(access_token="jira_valid", expires_at=future)
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(valid)}
+
+        with (
+            patch("boto3.client", return_value=mock_sm),
+            upatch("urllib.request.urlopen") as urlopen_mock,
+        ):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == "jira_valid"
+            urlopen_mock.assert_not_called()
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_malformed_expires_at_fails_closed(self, monkeypatch):
+        """Unparseable expires_at is treated as expiring → fail closed, no network call."""
+        import json
+        from unittest.mock import patch as upatch
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        bad = self._stored(expires_at="this is not a date")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(bad)}
+
+        with (
+            patch("boto3.client", return_value=mock_sm),
+            upatch("urllib.request.urlopen") as urlopen_mock,
+        ):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
+            urlopen_mock.assert_not_called()
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):
+        """Corrupted SM payload → empty string return, no traceback."""
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": "this is { not } valid json",
+        }
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)

@@ -57,12 +57,13 @@ export type TaskStatusType =
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions
  * - ``linear``: Linear label-triggered submissions
+ * - ``jira``: Jira Cloud label-triggered submissions
  *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
 export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
@@ -363,6 +364,22 @@ export interface LinearLinkResponse {
   readonly linear_user_id: string;
   readonly linear_user_name?: string;
   readonly linear_user_email?: string;
+  readonly linked_at?: string;
+}
+
+/** Jira link response from POST /v1/jira/link.
+ *
+ * Mirrors LinearLinkResponse semantics: `dry_run: true` returns the
+ * identity attached to the code without writing. The CLI uses dry-run
+ * to render a preview before the user confirms. `linked_at` is omitted
+ * from the dry-run response. */
+export interface JiraLinkResponse {
+  readonly dry_run?: boolean;
+  readonly jira_cloud_id: string;
+  readonly jira_site_url?: string;
+  readonly jira_account_id: string;
+  readonly jira_user_name?: string;
+  readonly jira_user_email?: string;
   readonly linked_at?: string;
 }
 
