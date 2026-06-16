@@ -1,0 +1,21 @@
+{
+  "description": "Async notify on pr_created",
+  "event": {
+    "event_type": "agent_milestone",
+    "metadata": {
+      "milestone": "pr_created",
+      "pr_url": "https://github.com/org/repo/pull/1"
+    }
+  },
+  "rules": [
+    {
+      "id": "notify-on-pr",
+      "on": "pr_created",
+      "action": "notify",
+      "mode": "enforce",
+      "evaluation": "async",
+      "notify_channels": ["slack"]
+    }
+  ],
+  "expected_matches": ["notify-on-pr"]
+}

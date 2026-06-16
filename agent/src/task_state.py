@@ -7,7 +7,7 @@ operations are no-ops.
 
 import os
 import time
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from shell import log, log_error_cw
 
@@ -38,6 +38,10 @@ class ApprovalRow(TypedDict):
     ttl: int
     user_id: str
     repo: str
+    source: NotRequired[str]
+    event_type: NotRequired[str]
+    checkpoint: NotRequired[str]
+    rule_id: NotRequired[str]
 
 
 _table = None

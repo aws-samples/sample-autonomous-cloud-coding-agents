@@ -107,6 +107,17 @@ export interface FanOutConsumerProps {
   readonly linearOauthSecretArnPattern?: string;
 
   /**
+   * TaskApprovalsTable — async event governance may create post-hoc
+   * approval rows (issue #230).
+   */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
+  /**
+   * TaskNudgesTable — async ``inject_nudge`` actions write steering rows.
+   */
+  readonly taskNudgesTable?: dynamodb.ITable;
+
+  /**
    * Maximum batch size delivered to the Lambda per invocation.
    *
    * @default 100 (DynamoDB Stream default)
@@ -183,6 +194,17 @@ export class FanOutConsumer extends Construct {
     if (props.taskTable) {
       props.taskTable.grantReadWriteData(this.fn);
       this.fn.addEnvironment('TASK_TABLE_NAME', props.taskTable.tableName);
+    }
+    props.taskEventsTable.grantReadWriteData(this.fn);
+    this.fn.addEnvironment('TASK_EVENTS_TABLE_NAME', props.taskEventsTable.tableName);
+    this.fn.addEnvironment('EVENT_GOVERNANCE_ENABLED', 'true');
+    if (props.taskApprovalsTable) {
+      props.taskApprovalsTable.grantReadWriteData(this.fn);
+      this.fn.addEnvironment('TASK_APPROVALS_TABLE_NAME', props.taskApprovalsTable.tableName);
+    }
+    if (props.taskNudgesTable) {
+      props.taskNudgesTable.grantWriteData(this.fn);
+      this.fn.addEnvironment('NUDGES_TABLE_NAME', props.taskNudgesTable.tableName);
     }
     if (props.repoTable) {
       props.repoTable.grantReadData(this.fn);

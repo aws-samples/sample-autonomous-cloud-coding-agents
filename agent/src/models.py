@@ -234,6 +234,9 @@ class TaskConfig(BaseModel):
     # orchestrator payload did not include the field (legacy tasks);
     # PolicyEngine falls back to its own default of 50 in that case.
     approval_gate_cap: int | None = None
+    # Event governance (#230): frozen rules from orchestrator payload.
+    event_rules: list[dict] = Field(default_factory=list)
+    event_rule_pack_id: str | None = None
     issue: GitHubIssue | None = None
     base_branch: str | None = None
     # Attachments from the orchestrator payload (Phase 3). Validated as

@@ -33,7 +33,7 @@
  * asserts the ids/versions match the YAML.
  */
 
-import { ResolvedWorkflow } from './types';
+import type { EventRulePackRef, ResolvedWorkflow } from './types';
 
 /** The required-input contract a workflow declares (mirrors the YAML). */
 export interface WorkflowRequiredInputs {
@@ -64,6 +64,8 @@ export interface WorkflowDescriptor {
    * silent downgrade). Keep in lockstep with the YAML's `agent_config.model.id`.
    */
   readonly modelId?: string;
+  /** Optional event-rule-pack pin from workflow YAML (issue #230). */
+  readonly eventRulePack?: EventRulePackRef;
 }
 
 /**
@@ -107,6 +109,7 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     requiresRepo: true,
     readOnly: false,
     requiredInputs: { oneOf: ['issue_number', 'task_description'] },
+    eventRulePack: { id: 'platform-default', version: '1.0.0' },
   },
   'coding/pr-iteration-v1': {
     id: 'coding/pr-iteration-v1',

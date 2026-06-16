@@ -159,6 +159,23 @@ describe('renderEvent', () => {
     expect(output).toContain('rules=deny-net');
   });
 
+  test('renders top-level policy_decision event (event governance #230)', () => {
+    const event = makeEvent({
+      event_type: 'policy_decision',
+      metadata: {
+        rule_id: 'plan-review',
+        action: 'require_approval',
+        enforcement_mode: 'observe_only',
+        checkpoint: 'checkpoint:before_execution',
+        would_block: true,
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('[observe]');
+    expect(output).toContain('plan-review');
+    expect(output).toContain('would block');
+  });
+
   test('falls back to a compact JSON dump for unrecognized milestone metadata', () => {
     const event = makeEvent({
       event_type: 'agent_milestone',

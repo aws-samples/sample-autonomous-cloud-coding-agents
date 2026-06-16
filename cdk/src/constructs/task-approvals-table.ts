@@ -154,6 +154,10 @@ export class TaskApprovalsTable extends Construct {
         // backfill). Chunks that extend TaskApprovalsTable should
         // audit this list before shipping.
         'matching_rule_ids',
+        'source',
+        'event_type',
+        'checkpoint',
+        'rule_id',
       ],
     });
   }

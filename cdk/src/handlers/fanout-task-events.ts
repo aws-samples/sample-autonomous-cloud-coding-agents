@@ -47,6 +47,7 @@ import type {
 } from 'aws-lambda';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
+import { evaluateAsyncEventRules, loadTaskForGovernance } from './shared/event-governance-async';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { postIssueComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -250,6 +251,7 @@ function unionSubscribedTypes(overrides?: TaskNotificationsConfig): ReadonlySet<
  *  to each channel per stream poll (~1 s). A future follow-up can
  *  promote this to a DDB-backed rate limiter if needed. */
 const MAX_EVENTS_PER_TASK_PER_INVOCATION = 20;
+const EVENT_GOVERNANCE_ENABLED = process.env.EVENT_GOVERNANCE_ENABLED !== 'false';
 
 export interface FanOutEvent {
   readonly task_id: string;
@@ -1150,16 +1152,15 @@ export interface RouteOutcome {
 export async function routeEvent(
   ev: FanOutEvent,
   overrides?: TaskNotificationsConfig,
+  options?: { readonly forcedChannels?: readonly NotificationChannel[] },
 ): Promise<RouteOutcome> {
   const attempted: NotificationChannel[] = [];
   const tasks: Promise<unknown>[] = [];
-  // Match against the effective type so ``agent_milestone`` carriers
-  // (``pr_created``, ``nudge_acknowledged``, …) reach the channels
-  // subscribed to those milestone names.
   const effective = effectiveEventType(ev);
+  const forced = new Set(options?.forcedChannels ?? []);
   for (const ch of CHANNELS) {
     const filter = resolveChannelFilter(ch, overrides);
-    if (!filter.has(effective)) continue;
+    if (!filter.has(effective) && !forced.has(ch)) continue;
     attempted.push(ch);
     tasks.push(DISPATCHERS[ch](ev));
   }
@@ -1263,7 +1264,46 @@ export const handler = async (
         dropped++;
         continue;
       }
-      if (!shouldFanOut(ev, overrides)) {
+
+      let governanceForcedChannels: NotificationChannel[] = [];
+      let governanceForceFanOut = false;
+
+      try {
+        if (EVENT_GOVERNANCE_ENABLED) {
+          const taskForGov = await loadTaskForGovernance(ev.task_id);
+          const rawCost = ev.metadata?.cumulative_cost_usd ?? ev.metadata?.cost_usd;
+          const parsedCost = typeof rawCost === 'number' ? rawCost : Number(rawCost);
+          const rawTurns = ev.metadata?.turn_count;
+          const parsedTurns = typeof rawTurns === 'number' ? rawTurns : Number(rawTurns);
+          const aggregateState = ev.event_type === 'agent_cost_update'
+            || ev.event_type === 'agent_turn'
+            ? {
+              ...(ev.event_type === 'agent_cost_update' && {
+                cumulative_cost_usd: Number.isFinite(parsedCost) ? parsedCost : taskForGov?.cost_usd,
+              }),
+              ...(ev.event_type === 'agent_turn' && Number.isFinite(parsedTurns) && {
+                turn_count: parsedTurns,
+              }),
+            }
+            : undefined;
+          const govResult = await evaluateAsyncEventRules(
+            { ...ev, metadata: ev.metadata ?? {} },
+            { task: taskForGov, aggregateState },
+          );
+          governanceForcedChannels = govResult.notifyChannels.filter(
+            (ch): ch is NotificationChannel => ch in DISPATCHERS,
+          );
+          governanceForceFanOut = govResult.forceFanOut || governanceForcedChannels.length > 0;
+        }
+      } catch (govErr) {
+        logger.warn('[fanout] event governance evaluation failed — continuing fanout', {
+          task_id: ev.task_id,
+          event_id: ev.event_id,
+          error: govErr instanceof Error ? govErr.message : String(govErr),
+        });
+      }
+
+      if (!shouldFanOut(ev, overrides) && !governanceForceFanOut) {
         dropped++;
         continue;
       }
@@ -1283,7 +1323,9 @@ export const handler = async (
       }
       perTaskCounts.set(ev.task_id, seen + 1);
 
-      const outcome = await routeEvent(ev, overrides);
+      const outcome = await routeEvent(ev, overrides, {
+        forcedChannels: governanceForcedChannels,
+      });
       if (outcome.dispatched.length > 0) dispatched++;
       // Per-channel infra rejections (DDB throttle, Secrets Manager
       // 5xx, transient Slack 5xx) escalate to the partial-batch retry

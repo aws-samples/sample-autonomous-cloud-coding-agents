@@ -250,6 +250,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
+    event_rules: repoConfig?.event_rules,
+    event_rule_pack: repoConfig?.event_rule_pack,
   };
 }
 
@@ -555,6 +557,9 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     // with the engine default and leaves an operator-visible warning.
     ...(isValidApprovalGateCap(task.approval_gate_cap)
       && { approval_gate_cap: task.approval_gate_cap }),
+    ...(task.event_rules && task.event_rules.length > 0 && { event_rules: task.event_rules }),
+    ...(task.event_rule_pack_id && { event_rule_pack_id: task.event_rule_pack_id }),
+    ...(task.event_rule_pack_version && { event_rule_pack_version: task.event_rule_pack_version }),
     prompt_version: promptVersion,
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,

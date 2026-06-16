@@ -18,6 +18,12 @@
  */
 
 import { classifyError, type ErrorClassification } from './error-classifier';
+import type {
+  ApprovalSource,
+  EventRule,
+  EventRulePackRef,
+  PolicyDecisionMetadata,
+} from './event-governance-types';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
@@ -26,6 +32,17 @@ import type { ComputeType } from './repo-config';
 // into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+
+export type {
+  ApprovalSource,
+  EventRule,
+  EventRuleAction,
+  EventRuleEvaluation,
+  EventRuleMode,
+  EventRulePackRef,
+  EventRuleWhen,
+  PolicyDecisionMetadata,
+} from './event-governance-types';
 
 /**
  * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
@@ -205,6 +222,13 @@ export interface TaskRecord {
    * atomically on resume (§10.2, §9).
    */
   readonly awaiting_approval_request_id?: string;
+  /**
+   * Event governance (#230): rules frozen at submit-time from blueprint
+   * inline config and/or resolved registry pack.
+   */
+  readonly event_rules?: readonly EventRule[];
+  readonly event_rule_pack_id?: string;
+  readonly event_rule_pack_version?: string;
 }
 
 /** Per-channel override for one notification channel. See
@@ -863,6 +887,12 @@ interface ApprovalRecordBase {
   readonly ttl: number;
   readonly user_id: string;
   readonly repo: string;
+  /** Event governance (#230): ``tool`` (default) or ``event``. */
+  readonly source?: ApprovalSource;
+  readonly event_type?: string;
+  readonly checkpoint?: string;
+  readonly rule_pack_id?: string;
+  readonly rule_id?: string;
 }
 
 /** PENDING approval row — no decision recorded yet. */
@@ -934,6 +964,10 @@ export interface PendingApprovalSummary {
    *  so `bgagent pending` can show _why_ a gate fired without the user
    *  spelunking TaskEventsTable. Empty array on pre-Cedar-HITL rows. */
   readonly matching_rule_ids: readonly string[];
+  readonly source?: ApprovalSource;
+  readonly event_type?: string;
+  readonly checkpoint?: string;
+  readonly rule_id?: string;
 }
 
 /**
@@ -1014,6 +1048,28 @@ export interface GetPoliciesResponse {
     readonly hard: readonly PolicyRuleSummary[];
     readonly soft: readonly PolicyRuleSummary[];
   };
+}
+
+/** Summary row for GET /v1/repos/{repo_id}/event-rules (issue #230). */
+export interface EventRuleSummary {
+  readonly rule_id: string;
+  readonly on: string;
+  readonly action: string;
+  readonly mode: string;
+  readonly evaluation: string;
+  readonly reason?: string;
+}
+
+/** GET /v1/repos/{repo_id}/event-rules response body. */
+export interface GetEventRulesResponse {
+  readonly repo_id: string;
+  readonly event_rule_pack?: EventRulePackRef;
+  readonly rules: readonly EventRuleSummary[];
+  readonly registry_packs: readonly {
+    readonly id: string;
+    readonly version: string;
+    readonly rule_count: number;
+  }[];
 }
 
 /**

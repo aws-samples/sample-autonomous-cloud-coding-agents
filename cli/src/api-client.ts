@@ -35,6 +35,7 @@ import {
   ErrorResponse,
   GetPendingResponse,
   GetPoliciesResponse,
+  GetEventRulesResponse,
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
@@ -279,6 +280,18 @@ export class ApiClient {
     const res = await this.request<SuccessResponse<GetPoliciesResponse>>(
       'GET',
       `/repos/${encodeURIComponent(repoId)}/policies`,
+    );
+    return res.data;
+  }
+
+  /** GET /repos/{repo_id}/event-rules — resolved event governance rules. */
+  async listEventRules(repoId: string, workflowRef?: string): Promise<GetEventRulesResponse> {
+    const query = workflowRef
+      ? `?workflow_ref=${encodeURIComponent(workflowRef)}`
+      : '';
+    const res = await this.request<SuccessResponse<GetEventRulesResponse>>(
+      'GET',
+      `/repos/${encodeURIComponent(repoId)}/event-rules${query}`,
     );
     return res.data;
   }

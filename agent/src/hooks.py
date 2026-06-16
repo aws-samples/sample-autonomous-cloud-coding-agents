@@ -240,6 +240,10 @@ async def _handle_require_approval(
     user_id: str | None,
     progress: Any,
     ts: Any,
+    approval_source: str = "tool",
+    event_type: str | None = None,
+    event_checkpoint: str | None = None,
+    rule_id: str | None = None,
 ) -> dict:
     """REQUIRE_APPROVAL branch of ``pre_tool_use_hook``.
 
@@ -348,6 +352,14 @@ async def _handle_require_approval(
         "user_id": user_id or "",
         "repo": engine.repo,
     }
+    if approval_source != "tool":
+        row["source"] = approval_source
+    if event_type:
+        row["event_type"] = event_type
+    if event_checkpoint:
+        row["checkpoint"] = event_checkpoint
+    if rule_id:
+        row["rule_id"] = rule_id
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on
     # subsequent gates reflect the attempt even if the DDB write itself

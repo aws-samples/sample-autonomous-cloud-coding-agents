@@ -399,6 +399,8 @@ def _run_task_background(
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
+    event_rules: list[dict] | None = None,
+    event_rule_pack_id: str | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
@@ -483,6 +485,8 @@ def _run_task_background(
             initial_approvals=initial_approvals,
             initial_approval_gate_count=initial_approval_gate_count,
             approval_gate_cap=approval_gate_cap,
+            event_rules=event_rules,
+            event_rule_pack_id=event_rule_pack_id,
             channel_source=channel_source,
             channel_metadata=channel_metadata,
             trace=trace,
@@ -573,6 +577,11 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
                 task_id=inp.get("task_id"),
             )
             approval_gate_cap = None
+    event_rules = inp.get("event_rules") or []
+    if not isinstance(event_rules, list):
+        event_rules = []
+    raw_event_rule_pack_id = inp.get("event_rule_pack_id")
+    event_rule_pack_id = str(raw_event_rule_pack_id) if raw_event_rule_pack_id else None
     channel_source = inp.get("channel_source", "") or ""
     channel_metadata = inp.get("channel_metadata") or {}
     attachments = inp.get("attachments") or []
@@ -643,6 +652,8 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "initial_approvals": initial_approvals,
         "initial_approval_gate_count": initial_approval_gate_count,
         "approval_gate_cap": approval_gate_cap,
+        "event_rules": event_rules,
+        "event_rule_pack_id": event_rule_pack_id,
         "channel_source": channel_source,
         "channel_metadata": channel_metadata,
         "trace": trace,
