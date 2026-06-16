@@ -23,6 +23,7 @@ import {
   extendOrchestration,
   deriveOrchestrationId,
   claimRollup,
+  clearRollupClaim,
   findOrchestrationChildByBranch,
 } from '../../../src/handlers/shared/orchestration-store';
 import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
@@ -273,6 +274,19 @@ describe('claimRollup — exactly-once parent rollup', () => {
     const ddb = makeDdb();
     ddb.send.mockRejectedValueOnce(new Error('throttle'));
     await expect(claimRollup(ddb as never, TABLE, 'orch_1', NOW)).rejects.toThrow('throttle');
+  });
+});
+
+describe('clearRollupClaim — release the claim so a re-completing epic re-settles', () => {
+  test('REMOVEs rollup_posted_at on the meta row (unconditional, idempotent)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValueOnce({}) };
+    await clearRollupClaim(ddb as never, TABLE, 'orch_1', NOW);
+    const cmd = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(cmd).toBeInstanceOf(UpdateCommand);
+    expect(cmd.input.UpdateExpression).toContain('REMOVE rollup_posted_at');
+    expect(cmd.input.Key).toMatchObject({ sub_issue_id: '#meta', orchestration_id: 'orch_1' });
+    // No conditional — a no-op when already absent.
+    expect(cmd.input.ConditionExpression).toBeUndefined();
   });
 });
 

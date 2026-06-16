@@ -347,6 +347,27 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
     expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.orchestration_sub_issue_id).toBe('B');
   });
 
+  test('UX.15: a cascade that RE-OPENS the epic clears rollup_posted_at (so parent state can re-settle)', async () => {
+    // A comment on an already-completed epic re-opens it. The first
+    // completion's rollup_posted_at stamp must be cleared, or claimRollup stays
+    // failed forever and the parent reaction/state never re-mirror (👀→✅).
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler({ Records: [taskRecord({
+      task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
+    })] } as never);
+    // An Update issued a `REMOVE rollup_posted_at` on the meta row.
+    const clears = ddbSend.mock.calls
+      .map((c) => c[0])
+      .filter((cmd) => cmd?._type === 'Update'
+        && typeof cmd.input?.UpdateExpression === 'string'
+        && cmd.input.UpdateExpression.includes('REMOVE rollup_posted_at'));
+    expect(clears.length).toBeGreaterThan(0);
+  });
+
   test('FAILED iteration → no cascade', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },

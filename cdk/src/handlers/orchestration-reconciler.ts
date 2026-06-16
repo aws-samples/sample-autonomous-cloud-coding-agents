@@ -61,6 +61,7 @@ import { renderFailureReply } from './shared/failure-reply';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   claimRollup,
+  clearRollupClaim,
   loadOrchestration,
   setStatusCommentId,
   type OrchestrationChildRow,
@@ -526,9 +527,15 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   // refresh the SINGLE epic panel so the impacted rows show '🔄 updating per
   // <reason>' and the header reverts to in-progress. The dependent's own
   // sub-issue gets the react/reply ack (UX.3), not a status comment here. The
-  // 'updating' rows settle back to ✅ when their restack tasks complete (which
-  // re-fire reconcileTerminalChild → panel refresh with no updating reason).
+  // 'updating' rows settle back to ✅ when their restack tasks complete — those
+  // completions route to cascadeRestack (NOT reconcileTerminalChild) and clear
+  // the row via refreshPanelAndSettle (the no-dependents path), per UX.15.
   if (feedbackCtx && updatingIds.length > 0) {
+    // A cascade re-opened an epic that may have ALREADY completed (a comment on
+    // a finished epic). Release the once-only rollup claim so the parent state
+    // can re-settle (👀→✅) when the re-stacks finish — else claimRollup stays
+    // failed forever and the reaction never re-mirrors (#247 UX.15 stress-caught).
+    await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
     const reason = evt.cascadeIsIteration
       ? `per ${changedLabel}'s comment`
       : `to include ${changedLabel}'s change`;
