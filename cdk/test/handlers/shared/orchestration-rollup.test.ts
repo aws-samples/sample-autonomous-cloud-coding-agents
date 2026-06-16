@@ -37,6 +37,7 @@ import {
   renderStatusBlock,
   renderEpicPanel,
   truncateQuote,
+  cascadeNodeLabel,
   rollupKindFromChildren,
   postRollup,
   type RollupChildView,
@@ -358,6 +359,26 @@ describe('truncateQuote', () => {
     const out = truncateQuote('a'.repeat(60), 40);
     expect(out.length).toBe(40);
     expect(out.endsWith('…')).toBe(true);
+  });
+});
+
+describe('cascadeNodeLabel (#247 — short name inside the cascade reason)', () => {
+  test('integration node → "the integration" (not its raw synthetic title)', () => {
+    // Live-caught under UX.6 stress: the integration node title read clumsily
+    // in the possessive reason "Integration — combine sub-issue results's change".
+    const label = cascadeNodeLabel('orch_abc__integration', undefined, 'Integration — combine sub-issue results');
+    expect(label).toBe('the integration');
+    // Reads cleanly in the possessive: "the integration's change".
+    expect(`updating to include ${label}'s change`).toBe("updating to include the integration's change");
+  });
+
+  test('real node prefers the Linear identifier', () => {
+    expect(cascadeNodeLabel('uuid-1', 'ABCA-42', 'Some title')).toBe('ABCA-42');
+  });
+
+  test('real node with no identifier falls back to title, then a generic name', () => {
+    expect(cascadeNodeLabel('uuid-1', undefined, 'Some title')).toBe('Some title');
+    expect(cascadeNodeLabel('uuid-1')).toBe('a predecessor');
   });
 });
 

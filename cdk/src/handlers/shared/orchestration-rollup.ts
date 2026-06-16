@@ -212,6 +212,23 @@ export function truncateQuote(s: string, max = 40): string {
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }
 
+/**
+ * SHORT friendly name for a node, used where a node is NAMED inside prose (e.g.
+ * the cascade reason "updating to include <X>'s change"). The integration node
+ * gets the friendly "the integration" rather than its raw stored title, so a
+ * possessive reads cleanly ("the integration's change") instead of leaking the
+ * clumsy synthetic title. Prefers the Linear identifier (ABCA-42) for real
+ * nodes. (#247 — live-caught under the UX.6 stress test.)
+ */
+export function cascadeNodeLabel(
+  subIssueId: string,
+  linearIdentifier?: string,
+  title?: string,
+): string {
+  if (isIntegrationNode(subIssueId)) return 'the integration';
+  return linearIdentifier ?? title ?? 'a predecessor';
+}
+
 /** Friendly label for a row — Linear identifier + title, or 'Integration — combined result' for the synthetic node. */
 function panelLabel(row: EpicPanelRow): string {
   if (isIntegrationNode(row.sub_issue_id)) return 'Integration — combined result';
