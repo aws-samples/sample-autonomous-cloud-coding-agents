@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.dev.json",
+  "compilerOptions": {
+    "isolatedModules": true,
+    "module": "CommonJS",
+    "moduleResolution": "Node"
+  }
+}
