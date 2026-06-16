@@ -42,6 +42,7 @@ import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
+import { JiraIntegration } from '../constructs/jira-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
@@ -832,6 +833,88 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
       value: linearIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    // --- Jira Cloud integration (inbound webhook + agent-side REST outbound) ---
+    const jiraIntegration = new JiraIntegration(this, 'JiraIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    // Agent runtime reads the per-tenant Jira OAuth token directly from
+    // Secrets Manager. The CLI (`bgagent jira setup`) creates
+    // `bgagent-jira-oauth-<cloudId>` secrets at install time; the secret
+    // JSON contains access_token, refresh_token, expires_at, and the
+    // OAuth client_id/client_secret. The orchestrator passes
+    // `jira_oauth_secret_arn` to the agent via task.channel_metadata,
+    // so the agent looks up the exact ARN — no discovery needed.
+    //
+    // Agent has GetSecretValue ONLY — no Put. Same trust model as the
+    // Linear adapter: a compromised agent must not be able to overwrite
+    // any tenant's OAuth bundle. Lambdas (trusted code in this stack)
+    // own the in-place refresh path; the agent proceeds with whatever
+    // token Lambdas have most-recently written.
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
+    // grant into the orchestrator so the concurrency-cap rejection path
+    // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
+    // comment. The orchestrator only resolves a token when
+    // `task.channel_source === 'jira'`, but the IAM grant is unconditional
+    // (per-tenant secrets are created lazily by setup). Put is needed because
+    // resolving an expiring token refreshes it in place (the orchestrator is
+    // a trusted Lambda; unlike the agent it owns the rotated-token write-back).
+    jiraIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
+    orchestrator.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    new CfnOutput(this, 'JiraWebhookSecretArn', {
+      value: jiraIntegration.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the Jira webhook signing secret — populate via `bgagent jira setup`',
+    });
+
+    new CfnOutput(this, 'JiraProjectMappingTableName', {
+      value: jiraIntegration.projectMappingTable.tableName,
+      description: 'Name of the DynamoDB Jira project → repo mapping table',
+    });
+
+    new CfnOutput(this, 'JiraUserMappingTableName', {
+      value: jiraIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Jira user mapping table',
+    });
+
+    new CfnOutput(this, 'JiraWorkspaceRegistryTableName', {
+      value: jiraIntegration.workspaceRegistryTable.tableName,
+      description: 'Name of the DynamoDB Jira workspace registry — `bgagent jira setup` writes a row per OAuth-installed tenant',
     });
 
     // --- Fan-out plane consumer ---
