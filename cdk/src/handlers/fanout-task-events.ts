@@ -47,6 +47,7 @@ import type {
 } from 'aws-lambda';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
+import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { postIssueComment, replyToComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -54,6 +55,7 @@ import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
+import { TaskStatus } from '../constructs/task-status';
 
 // Re-export the shared types so existing test imports (and any future
 // caller that only imports from the handler module) continue to work.
@@ -1039,13 +1041,25 @@ async function replyToStandaloneTrigger(
     return; // lost the claim (replay) or errored → don't double-reply
   }
 
-  const succeeded = event.event_type === 'task_completed';
+  // A clean success = completed AND the build/tests passed. A completed task
+  // whose build is red is NOT a clean ack — it gets the build/test failure
+  // reply (consistent with the reconciler's success gate).
+  const completed = event.event_type === 'task_completed';
+  const succeeded = completed && task.build_passed !== false;
   const prNumber = typeof task.pr_number === 'number'
     ? task.pr_number
     : (typeof task.pr_url === 'string' ? Number(task.pr_url.match(/\/pull\/(\d+)\b/)?.[1]) || null : null);
   const body = succeeded
     ? (prNumber !== null ? `✅ Updated — PR #${prNumber}.` : '✅ Updated.')
-    : '❌ I hit a problem applying that — see the comment above for details. Reply with guidance and I\'ll try again.';
+    : renderFailureReply({
+      // Preserve COMPLETED (so a completed-but-build-failed task reads as a
+      // build/test failure, not an agent crash); a non-completed terminal
+      // (failed/cancelled/stranded/timed_out) is an agent-itself failure.
+      status: completed ? TaskStatus.COMPLETED : TaskStatus.FAILED,
+      buildPassed: typeof task.build_passed === 'boolean' ? task.build_passed : null,
+      ...(typeof task.error_message === 'string' && { errorMessage: task.error_message }),
+      taskId: task.task_id,
+    });
 
   await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, triggerCommentId, body);
 }

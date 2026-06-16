@@ -57,6 +57,7 @@ import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestrat
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { postIssueComment, replyToComment } from './shared/linear-feedback';
+import { renderFailureReply } from './shared/failure-reply';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   claimRollup,
@@ -93,6 +94,8 @@ interface TerminalTaskEvent {
   readonly taskId: string;
   readonly status: TaskStatusType;
   readonly buildPassed?: boolean;
+  /** Raw agent error_message, if any — drives the UX.5 failure-reply detail. */
+  readonly errorMessage?: string;
   readonly orchestrationId?: string;
   /**
    * A6 cascade (#247 redesign): set when this terminal task is an
@@ -150,6 +153,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
   if (!orchestrationId) return null;
 
   const buildPassed = img.build_passed?.BOOL;
+  const errorMessage = img.error_message?.S;
 
   // A6 cascade marker: an iteration/restack task names the node it acted on
   // via channel_metadata. A restack task also carries
@@ -171,6 +175,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     taskId,
     status,
     ...(buildPassed !== undefined && { buildPassed }),
+    ...(errorMessage !== undefined && { errorMessage }),
     orchestrationId,
     ...(cascadeSubIssueId !== undefined && { cascadeSubIssueId }),
     ...(cascadeSubIssueId !== undefined && { cascadeIsIteration: isIteration }),
@@ -577,7 +582,12 @@ async function replyToIterationComment(
 
   const body = succeeded
     ? await buildIterationAckSuccess(evt)
-    : '❌ I hit a problem applying that — see the sub-issue for details. Reply with guidance and I\'ll try again.';
+    : renderFailureReply({
+      status: evt.status,
+      buildPassed: evt.buildPassed,
+      ...(evt.errorMessage !== undefined && { errorMessage: evt.errorMessage }),
+      taskId: evt.taskId,
+    });
   await replyToComment(ctx, commentId, body);
 }
 
