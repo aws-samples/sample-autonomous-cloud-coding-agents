@@ -56,7 +56,7 @@ import {
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { postIssueComment } from './shared/linear-feedback';
+import { postIssueComment, replyToComment } from './shared/linear-feedback';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   claimRollup,
@@ -110,6 +110,14 @@ interface TerminalTaskEvent {
    * per <X>'s comment" vs "updating to include <X>'s change" phrasing.
    */
   readonly cascadeIsIteration?: boolean;
+  /**
+   * #247 UX.3: the Linear comment id that triggered this iteration (set only
+   * for iterations — a human @bgagent comment). When the iteration task lands,
+   * the reconciler posts a threaded ✅/❌ reply BENEATH this comment, closing
+   * the conversation the human opened. Absent on restack cascades (no human
+   * comment to reply to).
+   */
+  readonly triggerCommentId?: string;
 }
 
 /**
@@ -156,6 +164,8 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
   const isCascadeSource =
     cm?.restack_predecessor_sub_issue_id?.S !== undefined || isIteration;
   const cascadeSubIssueId = isCascadeSource ? cm?.orchestration_sub_issue_id?.S : undefined;
+  // #247 UX.3: the human comment that triggered this iteration, if any.
+  const triggerCommentId = isIteration ? cm?.trigger_comment_id?.S : undefined;
 
   return {
     taskId,
@@ -164,6 +174,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     orchestrationId,
     ...(cascadeSubIssueId !== undefined && { cascadeSubIssueId }),
     ...(cascadeSubIssueId !== undefined && { cascadeIsIteration: isIteration }),
+    ...(triggerCommentId !== undefined && { triggerCommentId }),
   };
 }
 
@@ -419,9 +430,19 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
 async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
   const changedSubIssueId = evt.cascadeSubIssueId!;
+  const succeeded = evt.status === TaskStatus.COMPLETED && evt.buildPassed !== false;
+
+  // #247 UX.3: an ITERATION carries the human comment that triggered it. When
+  // it lands — success OR failure — reply ✅/❌ in a thread beneath that
+  // comment, closing the conversation the human opened. This runs regardless
+  // of whether there are dependents to re-stack (a leaf node has none) and
+  // before the success-gate below (a failed iteration still gets its ❌ reply).
+  if (evt.triggerCommentId) {
+    await replyToIterationComment(evt, changedSubIssueId, succeeded);
+  }
 
   // Only a successful change should cascade onto dependents.
-  if (evt.status !== TaskStatus.COMPLETED || evt.buildPassed === false) {
+  if (!succeeded) {
     logger.info('A6 cascade: source task not successful — not cascading', {
       orchestration_id: orchestrationId,
       changed_sub_issue_id: changedSubIssueId,
@@ -500,6 +521,72 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
         && { channelSource: meta.release_context.channel_source as ChannelSource }),
     });
   }
+}
+
+/**
+ * #247 UX.3: post the threaded ✅/❌ reply beneath the human ``@bgagent``
+ * comment that triggered this iteration. The 👀 reaction already landed (the
+ * processor's instant ack); this reply closes the loop when the work lands.
+ *
+ * Idempotent: the cascade source's stream record is redelivered multiple times
+ * (observed 3× live), so we claim the right to reply exactly once by
+ * conditionally stamping ``ack_replied_at`` on the iteration task's own
+ * TaskTable record (its ``task_id`` is the per-iteration unit). The first
+ * caller wins and posts; redeliveries lose the conditional write and skip.
+ * Best-effort throughout — a Linear or DDB hiccup never blocks the cascade.
+ */
+async function replyToIterationComment(
+  evt: TerminalTaskEvent,
+  changedSubIssueId: string,
+  succeeded: boolean,
+): Promise<void> {
+  if (!WORKSPACE_REGISTRY_TABLE) return;
+  const commentId = evt.triggerCommentId!;
+
+  // Resolve the workspace for the reply. The iteration task carries it in
+  // channel_metadata; rather than re-read the record, load the orchestration
+  // meta (already cached-cheap) for the workspace id.
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, evt.orchestrationId!);
+  if (!snapshot) return;
+  const ctx = {
+    linearWorkspaceId: snapshot.meta.linear_workspace_id,
+    registryTableName: WORKSPACE_REGISTRY_TABLE,
+  };
+
+  // Claim the one reply for this iteration task.
+  let won = false;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: evt.taskId },
+      UpdateExpression: 'SET ack_replied_at = :now',
+      ConditionExpression: 'attribute_not_exists(ack_replied_at)',
+      ExpressionAttributeValues: { ':now': new Date().toISOString() },
+    }));
+    won = true;
+  } catch (err) {
+    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
+      logger.warn('UX.3 ack: claim write failed (skipping reply)', {
+        task_id: evt.taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return; // lost the claim (replay) or errored → don't double-reply
+  }
+  if (!won) return;
+
+  const body = succeeded
+    ? await buildIterationAckSuccess(evt)
+    : '❌ I hit a problem applying that — see the sub-issue for details. Reply with guidance and I\'ll try again.';
+  await replyToComment(ctx, commentId, body);
+}
+
+/** Build the ✅ ack reply, linking the (re-pushed) PR when resolvable. */
+async function buildIterationAckSuccess(evt: TerminalTaskEvent): Promise<string> {
+  const prNumber = await resolvePrNumber(evt.taskId);
+  return prNumber !== null
+    ? `✅ Updated — PR #${prNumber}.`
+    : '✅ Updated.';
 }
 
 /**

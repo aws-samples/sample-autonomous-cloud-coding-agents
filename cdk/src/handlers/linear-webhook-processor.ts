@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { reportIssueFailure } from './shared/linear-feedback';
+import { reactToComment, reportIssueFailure, EMOJI_STARTED } from './shared/linear-feedback';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
@@ -671,9 +671,17 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // be a linked platform user; the orchestration already ran under this id).
   const platformUserId = snapshot.meta.release_context.platform_user_id;
 
+  // #247 UX.3: ACK the request the instant we commit to acting on it. 👀 on
+  // the TRIGGERING comment (not the issue) is the zero-clutter "on it" signal;
+  // the matching ✅/❌ threaded reply lands from the reconciler when the
+  // iteration task completes (it reads trigger_comment_id off channel_metadata).
+  const commentId = payload.data.id;
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
-  const idempotencyKey = `iterate_${subIssueId}_${payload.data.id}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+  const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
 
   const channelMetadata: Record<string, string> = {
     orchestration_id: orchestrationId,
@@ -681,6 +689,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
     // when the iteration completes (A6.2 reads this flag).
     orchestration_iteration: 'true',
+    // #247 UX.3: the reconciler replies ✅/❌ to THIS comment when the
+    // iteration lands (threaded ack — closes the conversation the human opened).
+    trigger_comment_id: commentId,
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
