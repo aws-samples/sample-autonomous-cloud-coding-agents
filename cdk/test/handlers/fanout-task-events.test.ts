@@ -99,12 +99,20 @@ jest.mock('../../src/handlers/slack-notify', () => {
 // + GraphQL path. Default ``true`` so a test that forgets to script
 // the mock still drives the happy path.
 const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue(true);
+// #247 UX.3: standalone comment-triggered iterations get a threaded reply to
+// the human's @bgagent comment, on top of the metrics comment.
+const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
     issueId: string,
     body: string,
   ) => mockPostIssueComment(ctx, issueId, body),
+  replyToComment: (
+    ctx: { linearWorkspaceId: string; registryTableName: string },
+    parentCommentId: string,
+    body: string,
+  ) => mockReplyToComment(ctx, parentCommentId, body),
 }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
@@ -1341,6 +1349,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
     mockPostIssueComment.mockReset().mockResolvedValue(true);
+    mockReplyToComment.mockReset().mockResolvedValue('reply-id');
     // Slack/GitHub mocks aren't asserted here but leaving them
     // un-reset would let prior-test rejections bleed in.
     mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
@@ -1532,6 +1541,71 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     // Classifier title still appears on the ❌ frame. The actual title
     // for max-turns errors is "Exceeded max turns" (see error-classifier.ts).
     expect(body).toContain('Exceeded max turns');
+  });
+
+  // #247 UX.3: a STANDALONE comment-triggered iteration (trigger_comment_id but
+  // no orchestration_iteration) gets a threaded ✅/❌ reply to the human's
+  // comment, on top of the metrics comment. Idempotent via the ack claim.
+  describe('UX.3 standalone iteration threaded reply', () => {
+    const STANDALONE = {
+      ...TASK_RECORD_LINEAR,
+      channel_metadata: {
+        linear_issue_id: 'issue-uuid-42',
+        linear_workspace_id: 'org-uuid-acme',
+        trigger_comment_id: 'human-cmt-7',
+      },
+      pr_url: 'https://github.com/owner/repo/pull/13',
+    };
+
+    test('task_completed → ✅ threaded reply to the triggering comment, linking the PR', async () => {
+      mockGet(STANDALONE);
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      expect(mockReplyToComment).toHaveBeenCalledTimes(1);
+      const [, parentCommentId, body] = mockReplyToComment.mock.calls[0];
+      expect(parentCommentId).toBe('human-cmt-7');
+      expect(body).toMatch(/^✅ Updated — PR #13\./);
+      // The metrics comment is still posted too.
+      expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    });
+
+    test('task_failed → ❌ threaded reply inviting a retry', async () => {
+      mockGet({ ...STANDALONE, error_message: 'crash' });
+      await handler({ Records: [mkEvent('task_failed', 't-lin')] });
+      const [, , body] = mockReplyToComment.mock.calls[0];
+      expect(body).toMatch(/^❌/);
+      expect(body).toMatch(/reply with guidance/i);
+    });
+
+    test('an ORCHESTRATION iteration (orchestration_iteration=true) is NOT replied here (reconciler owns it)', async () => {
+      mockGet({
+        ...STANDALONE,
+        channel_metadata: { ...STANDALONE.channel_metadata, orchestration_iteration: 'true' },
+      });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      expect(mockReplyToComment).not.toHaveBeenCalled();
+    });
+
+    test('a plain Linear task WITHOUT trigger_comment_id gets no threaded reply', async () => {
+      mockGet(TASK_RECORD_LINEAR); // no trigger_comment_id
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      expect(mockReplyToComment).not.toHaveBeenCalled();
+    });
+
+    test('idempotent: a redelivered terminal event that loses the ack claim does not double-reply', async () => {
+      // Get returns the record; the ack-claim Update throws ConditionalCheckFailed.
+      mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { UpdateExpression?: string } }) => {
+        if (cmd?._type === 'Get') return Promise.resolve({ Item: STANDALONE });
+        if (cmd?._type === 'Update' && cmd.input?.UpdateExpression?.includes('ack_replied_at')) {
+          const err = new Error('conditional');
+          (err as { name?: string }).name = 'ConditionalCheckFailedException';
+          return Promise.reject(err);
+        }
+        return Promise.resolve({});
+      });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      expect(mockReplyToComment).not.toHaveBeenCalled();
+    });
   });
 });
 

@@ -28,8 +28,9 @@ import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
-import { buildIterationInstruction, parseCommentTrigger } from './shared/orchestration-comment-trigger';
+import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
+import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -633,25 +634,21 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     return;
   }
 
-  // Sub-issue → parent → orchestration.
+  // Sub-issue → parent → orchestration. When ANY of these don't hold (no
+  // parent, parent isn't an orchestration, or this isn't a STARTED child),
+  // the issue may still be a plain (non-orchestration) issue that ABCA opened
+  // a PR for — fall through to the standalone path (#247 UX.3), which iterates
+  // on that PR with the same 👀/reply ack but no dependency cascade.
   const parentId = await fetchIssueParentId(resolved.accessToken, subIssueId);
-  if (!parentId) {
-    logger.info('A6 comment: commented issue has no parent — not an orchestrated sub-issue', {
-      sub_issue_id: subIssueId,
-    });
-    return;
-  }
-  const orchestrationId = deriveOrchestrationId(parentId);
-  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
-  if (!snapshot) {
-    logger.info('A6 comment: parent is not an orchestration — ignoring', { parent_id: parentId });
-    return;
-  }
-  const child = snapshot.children.find((c) => c.sub_issue_id === subIssueId);
-  if (!child || !child.child_task_id) {
-    logger.info('A6 comment: sub-issue not a started orchestration child — ignoring', {
-      orchestration_id: orchestrationId,
-      sub_issue_id: subIssueId,
+  const orchestrationId = parentId ? deriveOrchestrationId(parentId) : null;
+  const snapshot = orchestrationId
+    ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
+    : null;
+  const child = snapshot?.children.find((c) => c.sub_issue_id === subIssueId);
+  if (!snapshot || !child || !child.child_task_id) {
+    await handleStandaloneCommentTrigger({
+      subIssueId, workspaceId, commentId: payload.data.id, trigger, resolved,
+      registryTableName: WORKSPACE_REGISTRY_TABLE,
     });
     return;
   }
@@ -666,6 +663,10 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     });
     return;
   }
+
+  // Past the fall-through guard, this is a started orchestration child:
+  // orchestrationId is non-null. Bind it so the channel metadata types check.
+  const orchId = orchestrationId!;
 
   // Attribute to the orchestration's release user (the comment author may not
   // be a linked platform user; the orchestration already ran under this id).
@@ -684,7 +685,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
 
   const channelMetadata: Record<string, string> = {
-    orchestration_id: orchestrationId,
+    orchestration_id: orchId,
     orchestration_sub_issue_id: subIssueId,
     // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
     // when the iteration completes (A6.2 reads this flag).
@@ -720,6 +721,87 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     logger.error('A6 comment: createTaskCore threw for iteration', {
       orchestration_id: orchestrationId,
       sub_issue_id: subIssueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * #247 UX.3 — the GENERALIZED comment trigger. An ``@bgagent`` comment on a
+ * PLAIN Linear issue (no orchestration epic) that ABCA already opened a PR for
+ * runs a ``coding/pr-iteration-v1`` task on that PR, with the same 👀-on-receipt
+ * / threaded-reply-on-completion ack as the orchestration path — but NO
+ * dependency cascade (there are no dependents). The issue → newest-task → PR
+ * link comes from the ``LinearIssueIndex`` GSI (orchestration sub-issues use
+ * the orchestration table instead; this is the everything-else case).
+ *
+ * The completion reply is posted by the fanout dispatcher (``dispatchToLinear``)
+ * — a standalone iteration carries ``trigger_comment_id`` but NO
+ * ``orchestration_iteration`` marker, so the reconciler ignores it and fanout
+ * owns the ✅/❌ reply. A clean no-op when the issue was never run by ABCA
+ * (GSI miss) or its task opened no PR.
+ */
+async function handleStandaloneCommentTrigger(args: {
+  subIssueId: string;
+  workspaceId: string;
+  commentId: string;
+  trigger: CommentTrigger;
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  registryTableName: string;
+}): Promise<void> {
+  const { subIssueId: issueId, workspaceId, commentId, trigger, resolved, registryTableName } = args;
+
+  const task = await resolveTaskByLinearIssue(ddb, process.env.TASK_TABLE_NAME!, issueId);
+  if (!task) {
+    logger.info('A6 comment (standalone): issue has no ABCA task — ignoring', { linear_issue_id: issueId });
+    return;
+  }
+  const prNumber = prNumberFromTask(task);
+  if (prNumber === null || !task.repo) {
+    logger.info('A6 comment (standalone): ABCA task has no resolvable PR/repo — cannot iterate', {
+      linear_issue_id: issueId, task_id: task.task_id, has_repo: Boolean(task.repo),
+    });
+    return;
+  }
+  if (!task.user_id) {
+    logger.warn('A6 comment (standalone): task missing user_id — cannot attribute iteration', {
+      linear_issue_id: issueId, task_id: task.task_id,
+    });
+    return;
+  }
+
+  // ACK the instant we commit (same as the orchestration path).
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+
+  const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+  const channelMetadata: Record<string, string> = {
+    // NO orchestration_id / orchestration_iteration — the reconciler skips
+    // this; the fanout dispatcher posts the ✅/❌ reply on terminal.
+    trigger_comment_id: commentId,
+    linear_issue_id: issueId,
+    linear_workspace_id: workspaceId,
+    linear_oauth_secret_arn: resolved.oauthSecretArn,
+    linear_workspace_slug: resolved.workspaceSlug,
+  };
+
+  try {
+    const result = await createTaskCore(
+      {
+        repo: task.repo,
+        workflow_ref: 'coding/pr-iteration-v1',
+        pr_number: prNumber,
+        task_description: buildIterationInstruction(trigger),
+      },
+      { userId: task.user_id, channelSource: 'linear', channelMetadata, idempotencyKey },
+      idempotencyKey,
+    );
+    logger.info('A6 comment (standalone): iteration task created for issue PR', {
+      linear_issue_id: issueId, pr_number: prNumber, status_code: result.statusCode,
+    });
+  } catch (err) {
+    logger.error('A6 comment (standalone): createTaskCore threw for iteration', {
+      linear_issue_id: issueId,
       error: err instanceof Error ? err.message : String(err),
     });
   }
