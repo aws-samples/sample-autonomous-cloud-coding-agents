@@ -2,7 +2,7 @@
 
 ## Default owners for everything in the repo
 
-*                                   @aws-samples/coding-agents-admin @aws-samples/coding-agents-coding-agents-maintainers
+*                                   @aws-samples/coding-agents-admin @aws-samples/coding-agents-maintainers
 
 .abca                               @aws-samples/coding-agents-admin
 .claude/settings.json               @aws-samples/coding-agents-admin
