@@ -30,6 +30,8 @@ import {
   addIssueReaction,
   type LinearFeedbackContext,
   postIssueComment,
+  reactToComment,
+  replyToComment,
   reportIssueFailure,
   swapIssueReaction,
   transitionIssueState,
@@ -142,6 +144,78 @@ describe('linear-feedback', () => {
       const init = fetchMock.mock.calls[0][1];
       const body = JSON.parse(init.body as string) as { variables: { emoji: string } };
       expect(body.variables.emoji).toBe('eyes');
+    });
+  });
+
+  describe('reactToComment (#247 UX.3 — instant "on it" ack on a comment)', () => {
+    test('reacts on the COMMENT (commentId), defaulting to 👀 (eyes)', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { reactionCreate: { success: true } } }));
+
+      const ok = await reactToComment(CTX, 'comment-77');
+
+      expect(ok).toBe(true);
+      const init = fetchMock.mock.calls[0][1];
+      const body = JSON.parse(init.body as string) as { query: string; variables: { commentId: string; emoji: string } };
+      expect(body.query).toContain('reactionCreate');
+      // The variable is commentId — NOT issueId (reacts on the comment, not the issue).
+      expect(body.variables.commentId).toBe('comment-77');
+      expect(body.variables.emoji).toBe('eyes');
+    });
+
+    test('honours an explicit emoji argument', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      await reactToComment(CTX, 'comment-77', 'white_check_mark');
+      const init = fetchMock.mock.calls[0][1];
+      const body = JSON.parse(init.body as string) as { variables: { emoji: string } };
+      expect(body.variables.emoji).toBe('white_check_mark');
+    });
+
+    test('returns false when the token cannot be resolved (no fetch)', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const ok = await reactToComment(CTX, 'comment-77');
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('returns false on network failure (swallowed)', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'));
+      const ok = await reactToComment(CTX, 'comment-77');
+      expect(ok).toBe(false);
+    });
+  });
+
+  describe('replyToComment (#247 UX.3 — threaded reply that notifies)', () => {
+    test('POSTs commentCreate with parentId and returns the new reply id', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'reply-99' } } } }));
+
+      const replyId = await replyToComment(CTX, 'comment-77', '✅ Updated — PR #178');
+
+      expect(replyId).toBe('reply-99');
+      const init = fetchMock.mock.calls[0][1];
+      const body = JSON.parse(init.body as string) as { query: string; variables: { parentId: string; body: string } };
+      expect(body.query).toContain('commentCreate');
+      // Threaded reply: the variable is parentId (not a top-level issue comment).
+      expect(body.variables.parentId).toBe('comment-77');
+      expect(body.variables.body).toBe('✅ Updated — PR #178');
+    });
+
+    test('returns null when commentCreate did not succeed', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: false } } }));
+      const replyId = await replyToComment(CTX, 'comment-77', 'body');
+      expect(replyId).toBeNull();
+    });
+
+    test('returns null on GraphQL errors (no throw)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'parent not found' }] }));
+      const replyId = await replyToComment(CTX, 'comment-77', 'body');
+      expect(replyId).toBeNull();
+    });
+
+    test('returns null when the token cannot be resolved (no fetch)', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const replyId = await replyToComment(CTX, 'comment-77', 'body');
+      expect(replyId).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
