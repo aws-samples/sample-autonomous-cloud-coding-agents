@@ -97,6 +97,12 @@ Then apply principal-architect judgment over the diff:
   IDs, cdk-nag clean. Watch for cost and operational footguns.
 - **Tests** — Are unit tests added/updated under the matching `*/test/` tree? Do they cover the
   new behavior and failure paths, not just the happy path?
+- **Test performance (CDK synth)** — New/changed CDK tests must not re-enable Lambda bundling at
+  synth or synthesize the same stack repeatedly. `cdk/` disables bundling globally via
+  `test/setup/disable-bundling.ts` (~15× faster synth); flag any test that turns
+  `aws:cdk:bundling-stacks` back on without asserting on a bundled asset, or that calls
+  `new App()` + `Template.fromStack()` per-test instead of once in `beforeAll`. See
+  [CI build performance](../../docs/design/CI_BUILD_PERFORMANCE.md).
 - **Routing** — Changes should land in the right package per the AGENTS.md routing table
   (agent runtime in `agent/`, API/Lambdas in `cdk/`, CLI in `cli/`).
 
