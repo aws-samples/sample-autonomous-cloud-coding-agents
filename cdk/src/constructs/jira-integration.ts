@@ -39,6 +39,19 @@ const DEFAULT_TASK_RETENTION_DAYS = 90;
 const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
 
 /**
+ * Marker key embedded in the auto-generated stack-wide webhook-secret
+ * placeholder. The CLI (`bgagent jira setup`) recognizes a secret carrying
+ * this key as "never configured" and seeds the operator's value over it.
+ *
+ * MUST stay in sync with `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY` in
+ * `cli/src/commands/jira.ts`. Unlike Linear (whose real secrets always start
+ * with `lin_wh_`), Atlassian webhook signing secrets are operator-chosen bare
+ * strings with no fixed shape, so the *placeholder* — not the real value — is
+ * the thing we make recognizable. See #368.
+ */
+const JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY = 'abca_jira_webhook_placeholder';
+
+/**
  * Webhook-processor Lambda memory (MB). Matches the Linear processor — the
  * same attachment-screening path bundles pdf-parse + the URL resolver, and
  * the ADF→markdown walker adds a small working set. Keeps p99 cold-start
@@ -151,9 +164,24 @@ export class JiraIntegration extends Construct {
     // created by the CLI at runtime — not here. This stack-wide secret is
     // a back-compat fallback for single-tenant installs predating per-
     // tenant signing.
+    //
+    // The initial value is an explicit JSON placeholder carrying
+    // `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY`. Without `generateSecretString`,
+    // CDK seeds a BARE random string — which the CLI's placeholder heuristic
+    // mistook for an already-configured secret, so `setup` never seeded the
+    // operator's value and every admin-UI webhook delivery (whose payload has
+    // no `cloudId`, forcing stack-wide verification) failed HMAC with 401,
+    // silently (#368). Making the placeholder explicit lets the CLI reliably
+    // tell "never configured" from an operator-set value.
     this.webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'Jira webhook signing secret — populate via `bgagent jira setup`',
       removalPolicy,
+      generateSecretString: {
+        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`:
+        // a JSON object (starts with `{`) with an explicit marker key.
+        secretStringTemplate: JSON.stringify({ [JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY]: true }),
+        generateStringKey: 'value',
+      },
     });
 
     // --- Shared Lambda configuration ---
