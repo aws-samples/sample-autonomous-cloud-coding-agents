@@ -122,6 +122,15 @@ interface TerminalTaskEvent {
    * comment to reply to).
    */
   readonly triggerCommentId?: string;
+  /**
+   * #247 UX.19: the Linear ISSUE the trigger comment lives on. Usually the
+   * iterated sub-issue, but for a comment left on the PARENT epic (routed to a
+   * sub-issue via UX.18) it's the PARENT issue id. The threaded ✅/❌ reply must
+   * use THIS as commentCreate's issueId — Linear rejects a reply whose parentId
+   * belongs to a different issue. Absent on older tasks → reply falls back to
+   * the sub-issue id (the prior behavior).
+   */
+  readonly triggerCommentIssueId?: string;
 }
 
 /**
@@ -171,6 +180,9 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
   const cascadeSubIssueId = isCascadeSource ? cm?.orchestration_sub_issue_id?.S : undefined;
   // #247 UX.3: the human comment that triggered this iteration, if any.
   const triggerCommentId = isIteration ? cm?.trigger_comment_id?.S : undefined;
+  // #247 UX.19: the issue that comment lives on (parent epic for a UX.18
+  // parent-routed comment; the sub-issue for a direct comment).
+  const triggerCommentIssueId = isIteration ? cm?.trigger_comment_issue_id?.S : undefined;
 
   return {
     taskId,
@@ -181,6 +193,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(cascadeSubIssueId !== undefined && { cascadeSubIssueId }),
     ...(cascadeSubIssueId !== undefined && { cascadeIsIteration: isIteration }),
     ...(triggerCommentId !== undefined && { triggerCommentId }),
+    ...(triggerCommentIssueId !== undefined && { triggerCommentIssueId }),
   };
 }
 
@@ -662,10 +675,13 @@ async function replyToIterationComment(
       ...(evt.errorMessage !== undefined && { errorMessage: evt.errorMessage }),
       taskId: evt.taskId,
     });
-  // The triggering comment lives on the sub-issue (changedSubIssueId is its
-  // Linear issue id) — Linear requires issueId on commentCreate even for a
-  // threaded reply.
-  await replyToComment(ctx, changedSubIssueId, commentId, body);
+  // The reply's issueId MUST be the issue the trigger comment lives on —
+  // Linear rejects a threaded reply whose parentId belongs to a different
+  // issue. For a comment left on the PARENT epic (UX.18 routing) that's the
+  // parent issue, NOT changedSubIssueId. Fall back to the sub-issue id for
+  // tasks created before UX.19 (no triggerCommentIssueId persisted).
+  const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
+  await replyToComment(ctx, replyIssueId, commentId, body);
 }
 
 /** Build the ✅ ack reply, linking the (re-pushed) PR when resolvable. */

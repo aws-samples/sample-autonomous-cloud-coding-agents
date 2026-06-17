@@ -538,6 +538,10 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('sub-footer');
       expect(ctx.channelMetadata.orchestration_iteration).toBe('true');
       expect(ctx.channelMetadata.linear_issue_id).toBe('sub-footer');
+      // #247 UX.19: the trigger comment lives on the PARENT epic, so the reply
+      // must target the parent issue (not the sub-issue) — else Linear rejects it.
+      expect(ctx.channelMetadata.trigger_comment_issue_id).toBe('PARENT-EPIC');
+      expect(ctx.channelMetadata.trigger_comment_id).toBe('pc-1');
       // No disambiguation reply — we acted.
       expect(replyToCommentMock).not.toHaveBeenCalled();
     });
