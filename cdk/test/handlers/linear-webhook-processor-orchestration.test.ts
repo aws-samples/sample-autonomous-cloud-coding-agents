@@ -378,6 +378,22 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     expect(emoji).toBe('eyes');
   });
 
+  test('@bgagent THREAD-REPLY trigger → 👀 on the reply, but reply target is the thread ROOT (#247 UX.11)', async () => {
+    // A trigger comment that is itself a thread-reply carries parentId = the
+    // top-level root. Linear rejects replying to a reply, so trigger_comment_id
+    // must be the ROOT — but the 👀 still goes on the actual reply the human wrote.
+    mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+    await handler(eventWith(comment({
+      data: { id: 'reply-cmt-9', parentId: 'root-cmt-1', body: '@bgagent tweak it', issueId: 'sub-issue-1' },
+    })));
+
+    // 👀 on the actual reply the human wrote.
+    expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'reply-cmt-9', 'eyes');
+    // But the ack replies to the thread ROOT, not the reply.
+    const ctx = createTaskCoreMock.mock.calls[0][1];
+    expect(ctx.channelMetadata.trigger_comment_id).toBe('root-cmt-1');
+  });
+
   test('@bgagent that does NOT resolve to an actionable iteration → no premature 👀 ack', async () => {
     // No childTaskId ⇒ un-started sub-issue ⇒ we bail before acting; don't ack.
     mockOrchWithChild({ subIssueId: 'sub-issue-1' });
