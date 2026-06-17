@@ -33,6 +33,7 @@ import {
   reactToComment,
   replyToComment,
   reportIssueFailure,
+  swapCommentReaction,
   swapIssueReaction,
   transitionIssueState,
   upsertStatusComment,
@@ -335,6 +336,60 @@ describe('linear-feedback', () => {
     test('no token → false, no fetch', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
       expect(await swapIssueReaction(CTX, ISSUE_ID, 'eyes')).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('swapCommentReaction (#247 UX.21 — settle the trigger comment 👀→✅/❌)', () => {
+    const commentReactionsResp = (rs: Array<{ id: string; emoji: string }>) =>
+      jsonResponse({ data: { comment: { reactions: rs } } });
+
+    test('👀 on the comment → deletes it and adds ✅ (on the COMMENT, not the issue)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
+      expect(ok).toBe(true);
+      // query targets the COMMENT
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual({ commentId: 'comment-77' });
+      // delete the stale 👀
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables).toEqual({ id: 'r-eyes' });
+      // create the ✅ via reactionCreate(commentId)
+      const createVars = JSON.parse(fetchMock.mock.calls[2][1].body).variables;
+      expect(createVars).toEqual({ commentId: 'comment-77', emoji: 'white_check_mark' });
+    });
+
+    test('target already present → no re-create (idempotent under redelivery)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-check', emoji: 'white_check_mark' },
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }));
+      const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // query + delete 👀; ✅ already present
+    });
+
+    test('never deletes a human reaction on the comment', async () => {
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-heart', emoji: 'heart' }, // human — must survive
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      await swapCommentReaction(CTX, 'comment-77', 'x');
+      const deletedIds = fetchMock.mock.calls
+        .filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'))
+        .map((c) => JSON.parse(c[1].body).variables.id);
+      expect(deletedIds).toEqual(['r-eyes']); // never r-heart
+    });
+
+    test('no token → false, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await swapCommentReaction(CTX, 'comment-77', 'eyes')).toBe(false);
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });

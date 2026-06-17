@@ -37,12 +37,14 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 const postIssueCommentMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const swapIssueReactionMock = jest.fn();
+const swapCommentReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
 const replyToCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
+  swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
   EMOJI_SUCCESS: 'white_check_mark',
@@ -665,6 +667,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     postIssueCommentMock.mockReset().mockResolvedValue(true);
     upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    swapCommentReactionMock.mockReset().mockResolvedValue(true);
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue('reply-1');
   });
@@ -695,6 +698,10 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(issueId).toBe('A'); // the sub-issue the comment lives on
     expect(parentCommentId).toBe('human-cmt-1');
     expect(body).toMatch(/^✅ Updated — PR #\d+\./);
+    // #247 UX.21: the trigger comment's 👀 swaps to ✅, and the sub-issue
+    // advances to In Review (platform-owned settle, not agent-flapped).
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'white_check_mark');
+    expect(transitionIssueStateMock).toHaveBeenCalledWith(expect.anything(), 'A', 'started', ['In Review']);
   });
 
   test('#247 UX.19: a PARENT-routed iteration replies on the PARENT issue, not the sub-issue', async () => {
@@ -734,6 +741,10 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(body).toMatch(/reply with guidance/i);
     // A failed iteration still does not cascade onto dependents.
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // #247 UX.21: the trigger comment's 👀 swaps to ❌, but the sub-issue state
+    // is LEFT in place on failure (the ❌ + reply convey it; never demote).
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'x');
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
   });
 
   test('COMPLETED-but-build-failed iteration → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
