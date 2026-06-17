@@ -35,8 +35,8 @@
  * discriminated ``FetchSubIssueGraphResult`` rather than a bare array.
  */
 
-import type { DagNode } from './orchestration-dag';
 import { logger } from './logger';
+import type { DagNode } from './orchestration-dag';
 
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 

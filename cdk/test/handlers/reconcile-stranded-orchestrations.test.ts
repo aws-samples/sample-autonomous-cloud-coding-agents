@@ -84,13 +84,23 @@ import { handler } from '../../src/handlers/reconcile-stranded-orchestrations';
 
 function seed(oid: string, children: Array<{ sk: string; deps?: string[]; status: string; taskId?: string }>): void {
   orch.set(`${oid} #meta`, {
-    orchestration_id: oid, sub_issue_id: '#meta', parent_linear_issue_id: 'P',
-    linear_workspace_id: 'WS', repo: 'o/r', child_count: children.length, platform_user_id: 'user-1',
+    orchestration_id: oid,
+    sub_issue_id: '#meta',
+    parent_linear_issue_id: 'P',
+    linear_workspace_id: 'WS',
+    repo: 'o/r',
+    child_count: children.length,
+    platform_user_id: 'user-1',
   });
   for (const c of children) {
     orch.set(`${oid} ${c.sk}`, {
-      orchestration_id: oid, sub_issue_id: c.sk, depends_on: c.deps ?? [],
-      child_status: c.status, repo: 'o/r', parent_linear_issue_id: 'P', linear_workspace_id: 'WS',
+      orchestration_id: oid,
+      sub_issue_id: c.sk,
+      depends_on: c.deps ?? [],
+      child_status: c.status,
+      repo: 'o/r',
+      parent_linear_issue_id: 'P',
+      linear_workspace_id: 'WS',
       ...(c.taskId && { child_task_id: c.taskId }),
     });
   }

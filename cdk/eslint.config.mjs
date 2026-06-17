@@ -242,11 +242,18 @@ export default [
     },
   },
 
-  // Override: tests legitimately use inline literals (fixtures, assertions)
+  // Override: tests legitimately use inline literals (fixtures, assertions),
+  // long fixture/assertion lines, and reuse small helper names (``row``,
+  // ``makeDdb``) across sibling describe blocks. Relax the stylistic rules that
+  // only add noise in test code; correctness rules stay on.
   {
     files: ['test/**/*.ts'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
+      '@typescript-eslint/no-shadow': 'off',
+      'no-shadow': 'off',
+      '@stylistic/max-len': 'off',
+      'max-len': 'off',
     },
   },
 ];

@@ -18,6 +18,7 @@
  */
 
 import { GetCommand, BatchWriteCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 import {
   seedOrchestration,
   extendOrchestration,
@@ -28,7 +29,6 @@ import {
   loadOrchestration,
   findOrchestrationChildByBranch,
 } from '../../../src/handlers/shared/orchestration-store';
-import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -116,9 +116,9 @@ describe('seedOrchestration — first write', () => {
 
     const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
     const byId = Object.fromEntries(puts.map((p) => [p.PutRequest.Item.sub_issue_id, p.PutRequest.Item]));
-    expect(byId['A'].child_status).toBe('ready');
-    expect(byId['B'].child_status).toBe('blocked');
-    expect(byId['B'].depends_on).toEqual(['A']);
+    expect(byId.A.child_status).toBe('ready');
+    expect(byId.B.child_status).toBe('blocked');
+    expect(byId.B.depends_on).toEqual(['A']);
   });
 
   test('persists linear_identifier and title when present', async () => {
@@ -375,22 +375,38 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
   /** A loadOrchestration Query response: meta + existing child rows. */
   function existing(children: Array<{ id: string; deps?: string[]; status: string }>) {
     const meta = {
-      orchestration_id: ORCH, sub_issue_id: '#meta', parent_linear_issue_id: PARENT,
-      linear_workspace_id: 'WS', repo: 'o/r', child_count: children.length,
-      platform_user_id: 'u1', created_at: NOW, updated_at: NOW,
+      orchestration_id: ORCH,
+      sub_issue_id: '#meta',
+      parent_linear_issue_id: PARENT,
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: children.length,
+      platform_user_id: 'u1',
+      created_at: NOW,
+      updated_at: NOW,
     };
     const rows = children.map((c) => ({
-      orchestration_id: ORCH, sub_issue_id: c.id, parent_linear_issue_id: PARENT,
-      linear_workspace_id: 'WS', repo: 'o/r', depends_on: c.deps ?? [],
-      child_status: c.status, created_at: NOW, updated_at: NOW,
+      orchestration_id: ORCH,
+      sub_issue_id: c.id,
+      parent_linear_issue_id: PARENT,
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      depends_on: c.deps ?? [],
+      child_status: c.status,
+      created_at: NOW,
+      updated_at: NOW,
     }));
     return { Items: [meta, ...rows] };
   }
 
   function extendParams(graph: SubIssueNode[]) {
     return {
-      tableName: TABLE, parentLinearIssueId: PARENT, linearWorkspaceId: 'WS',
-      repo: 'o/r', graph, now: NOW,
+      tableName: TABLE,
+      parentLinearIssueId: PARENT,
+      linearWorkspaceId: 'WS',
+      repo: 'o/r',
+      graph,
+      now: NOW,
     };
   }
 

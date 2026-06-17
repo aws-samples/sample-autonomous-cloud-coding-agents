@@ -22,16 +22,16 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { reactToComment, replyToComment, reportIssueFailure, EMOJI_STARTED } from './shared/linear-feedback';
-import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
-import { logger } from './shared/logger';
-import { discoverOrchestration } from './shared/orchestration-discovery';
-import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
-import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
-import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
-import { parseParentNodeReference, renderParentDisambiguationReply, suggestClosestNode } from './shared/orchestration-parent-comment';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
+import { logger } from './shared/logger';
+import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
+import { discoverOrchestration } from './shared/orchestration-discovery';
+import { parseParentNodeReference, renderParentDisambiguationReply, suggestClosestNode } from './shared/orchestration-parent-comment';
+import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { upsertEpicPanel } from './shared/orchestration-rollup';
+import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -48,6 +48,9 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
 // budget. Unset → release all roots (back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
+// createTaskCore rejects idempotency keys longer than this; synthesized keys
+// are sliced to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 /**
  * TTL (seconds) for the per-comment ack-claim marker (#247 UX.20). Only needs
  * to outlive Linear's webhook redelivery window (minutes), but we keep a day of
@@ -562,7 +565,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           }
         } catch (err) {
           logger.warn('Failed to refresh panel on extend (non-fatal)', {
-            issue_id: issue.id, orchestration_id: discovery.orchestrationId,
+            issue_id: issue.id,
+            orchestration_id: discovery.orchestrationId,
             error: err instanceof Error ? err.message : String(err),
           });
         }
@@ -670,7 +674,11 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     await handleParentEpicCommentTrigger({
       orchestrationId: ownOrchestrationId,
       snapshot: parentSnapshot,
-      workspaceId, commentId, replyTargetId, trigger, resolved,
+      workspaceId,
+      commentId,
+      replyTargetId,
+      trigger,
+      resolved,
       registryTableName: WORKSPACE_REGISTRY_TABLE,
     });
     return;
@@ -689,9 +697,12 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
   if (!snapshot || !child || !child.child_task_id) {
     await handleStandaloneCommentTrigger({
-      subIssueId: commentedIssueId, workspaceId, commentId,
+      subIssueId: commentedIssueId,
+      workspaceId,
+      commentId,
       replyTargetId,
-      trigger, resolved,
+      trigger,
+      resolved,
       registryTableName: WORKSPACE_REGISTRY_TABLE,
     });
     return;
@@ -699,8 +710,13 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
 
   await iterateOrchestrationChild({
     orchestrationId: orchestrationId!,
-    snapshot, child,
-    workspaceId, commentId, replyTargetId, trigger, resolved,
+    snapshot,
+    child,
+    workspaceId,
+    commentId,
+    replyTargetId,
+    trigger,
+    resolved,
     registryTableName: WORKSPACE_REGISTRY_TABLE,
   });
 }
@@ -784,8 +800,15 @@ async function handleParentEpicCommentTrigger(args: {
   // Route to the matched sub-issue exactly as if the human had commented there.
   // The 👀 is already on the parent comment; the ✅/❌ reply threads back to it.
   await iterateOrchestrationChild({
-    orchestrationId, snapshot, child: childRow,
-    workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName,
+    orchestrationId,
+    snapshot,
+    child: childRow,
+    workspaceId,
+    commentId,
+    replyTargetId,
+    trigger,
+    resolved,
+    registryTableName,
     // #247 UX.19: the trigger comment lives on the PARENT epic, not the
     // sub-issue — the reconciler must reply with the parent issue id.
     triggerCommentIssueId: snapshot.meta.parent_linear_issue_id,
@@ -854,7 +877,7 @@ async function iterateOrchestrationChild(args: {
 
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
-  const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+  const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
 
   const channelMetadata: Record<string, string> = {
     orchestration_id: orchestrationId,
@@ -892,7 +915,8 @@ async function iterateOrchestrationChild(args: {
     });
   } catch (err) {
     logger.error('A6 comment: createTaskCore threw for iteration', {
-      orchestration_id: orchestrationId, sub_issue_id: subIssueId,
+      orchestration_id: orchestrationId,
+      sub_issue_id: subIssueId,
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -948,7 +972,7 @@ async function handleStandaloneCommentTrigger(args: {
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
 
-  const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+  const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
   const channelMetadata: Record<string, string> = {
     // NO orchestration_id / orchestration_iteration — the reconciler skips
     // this; the fanout dispatcher posts the ✅/❌ reply on terminal. Reply to

@@ -88,7 +88,8 @@ describe('linearGraphSource', () => {
 
   test('no children → no_children', async () => {
     const empty = (async () => ({
-      ok: true, status: 200,
+      ok: true,
+      status: 200,
       json: async () => ({ data: { issue: { id: 'PARENT', children: { nodes: [] } } } }),
     })) as unknown as typeof fetch;
     const result = await linearGraphSource('tok', 'PARENT', { fetchImpl: empty })();

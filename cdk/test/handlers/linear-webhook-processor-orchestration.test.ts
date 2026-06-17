@@ -155,12 +155,27 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     // After seeding, the handler loads the orchestration (Query) to release
     // roots + post the initial panel. Return a real snapshot so the panel path
     // runs (mirrors the parent start signal). All Query calls return it.
-    ddbSend.mockResolvedValue({ Items: [
-      { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1',
-        linear_workspace_id: 'org-1', repo: 'owner/repo', platform_user_id: 'u1' },
-      { sub_issue_id: 'A', orchestration_id: 'orch_abc', depends_on: [], child_status: 'ready',
-        parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo' },
-    ] });
+    ddbSend.mockResolvedValue({
+      Items: [
+        {
+          sub_issue_id: '#meta',
+          orchestration_id: 'orch_abc',
+          parent_linear_issue_id: 'issue-1',
+          linear_workspace_id: 'org-1',
+          repo: 'owner/repo',
+          platform_user_id: 'u1',
+        },
+        {
+          sub_issue_id: 'A',
+          orchestration_id: 'orch_abc',
+          depends_on: [],
+          child_status: 'ready',
+          parent_linear_issue_id: 'issue-1',
+          linear_workspace_id: 'org-1',
+          repo: 'owner/repo',
+        },
+      ],
+    });
 
     await handler(eventWith(issue()));
 
@@ -307,16 +322,28 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
   /** Mock loadOrchestration (Query) → snapshot with the sub-issue as a started child, and GetCommand → its PR url.
    *  The standalone LinearIssueIndex GSI query (Query w/ IndexName) returns empty unless `standalone` is given. */
   function mockOrchWithChild(opts: {
-    subIssueId: string; childTaskId?: string; prUrl?: string;
+    subIssueId: string;
+    childTaskId?: string;
+    prUrl?: string;
     standalone?: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number };
   }): void {
     const meta = {
-      sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS', repo: 'o/r', child_count: 1, platform_user_id: 'release-user',
+      sub_issue_id: '#meta',
+      orchestration_id: 'orch_x',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: 1,
+      platform_user_id: 'release-user',
     };
     const child: Record<string, unknown> = {
-      orchestration_id: 'orch_x', sub_issue_id: opts.subIssueId, depends_on: [],
-      child_status: 'succeeded', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS',
+      orchestration_id: 'orch_x',
+      sub_issue_id: opts.subIssueId,
+      depends_on: [],
+      child_status: 'succeeded',
+      repo: 'o/r',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
     };
     if (opts.childTaskId) child.child_task_id = opts.childTaskId;
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
@@ -491,18 +518,37 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
      *  fan-out epic has two started sub-issues (footer + newsletter). */
     function mockParentEpic(parentIssueId: string): void {
       const meta = {
-        sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS', repo: 'o/r', child_count: 2, platform_user_id: 'release-user',
+        sub_issue_id: '#meta',
+        orchestration_id: 'orch_x',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        repo: 'o/r',
+        child_count: 2,
+        platform_user_id: 'release-user',
       };
       const footer = {
-        orchestration_id: 'orch_x', sub_issue_id: 'sub-footer', depends_on: [], child_status: 'succeeded',
-        repo: 'o/r', parent_linear_issue_id: parentIssueId, linear_workspace_id: 'WS',
-        linear_identifier: 'ABCA-305', title: 'Add a site-wide footer', child_task_id: 'task-footer',
+        orchestration_id: 'orch_x',
+        sub_issue_id: 'sub-footer',
+        depends_on: [],
+        child_status: 'succeeded',
+        repo: 'o/r',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ABCA-305',
+        title: 'Add a site-wide footer',
+        child_task_id: 'task-footer',
       };
       const news = {
-        orchestration_id: 'orch_x', sub_issue_id: 'sub-news', depends_on: [], child_status: 'succeeded',
-        repo: 'o/r', parent_linear_issue_id: parentIssueId, linear_workspace_id: 'WS',
-        linear_identifier: 'ABCA-306', title: 'Add a newsletter signup section', child_task_id: 'task-news',
+        orchestration_id: 'orch_x',
+        sub_issue_id: 'sub-news',
+        depends_on: [],
+        child_status: 'succeeded',
+        repo: 'o/r',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ABCA-306',
+        title: 'Add a newsletter signup section',
+        child_task_id: 'task-news',
       };
       // Stateful ack-claim (#247 UX.20): the conditional Update on ack#<comment>
       // succeeds the FIRST time and ConditionalCheckFailed on every redelivery.
@@ -532,7 +578,10 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     /** A comment ON the parent epic (issueId === the parent id). */
     function parentComment(body: string, id = 'pc-1'): Record<string, unknown> {
       return {
-        type: 'Comment', action: 'create', organizationId: 'org-1', actor: { id: 'user-9' },
+        type: 'Comment',
+        action: 'create',
+        organizationId: 'org-1',
+        actor: { id: 'user-9' },
         data: { id, body, issueId: 'PARENT-EPIC' },
       };
     }
