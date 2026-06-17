@@ -103,6 +103,38 @@ describe('jira-feedback: postIssueComment', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  test('returns false (never throws) when the initial resolve throws an infra error', async () => {
+    // The resolver can throw on DDB/SM failure (not just resolve null). The
+    // catch in resolveTenantToken must swallow it and no-op.
+    resolveJiraOauthTokenMock.mockRejectedValueOnce(new Error('DDB throttle'));
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('returns false when the forced-refresh resolve throws an infra error after a 401', async () => {
+    // First resolve succeeds; the POST 401s; the forced-refresh resolve then
+    // throws (SM unavailable). Must swallow and no-op — never throw.
+    resolveJiraOauthTokenMock
+      .mockResolvedValueOnce({ accessToken: 'stale_token', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockRejectedValueOnce(new Error('SecretsManager unavailable'));
+    const fetchMock = jest.fn().mockResolvedValueOnce(mockResponse(401));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    // Only the first POST happened; the retry never got a token.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
+    // The forced-refresh resolve carried forceRefresh: true.
+    expect(resolveJiraOauthTokenMock.mock.calls[1][2]).toEqual({ forceRefresh: true });
+  });
+
   test('returns false on a non-auth non-2xx response and does NOT refresh', async () => {
     const fetchMock = jest.fn().mockResolvedValue(mockResponse(500));
     global.fetch = fetchMock as unknown as typeof fetch;
