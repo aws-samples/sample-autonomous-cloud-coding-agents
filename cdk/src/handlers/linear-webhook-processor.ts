@@ -759,6 +759,9 @@ async function handleParentEpicCommentTrigger(args: {
   await iterateOrchestrationChild({
     orchestrationId, snapshot, child: childRow,
     workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName,
+    // #247 UX.19: the trigger comment lives on the PARENT epic, not the
+    // sub-issue — the reconciler must reply with the parent issue id.
+    triggerCommentIssueId: snapshot.meta.parent_linear_issue_id,
     // Already acked on the parent comment above.
     skipAck: true,
     prNumber,
@@ -783,6 +786,13 @@ async function iterateOrchestrationChild(args: {
   workspaceId: string;
   commentId: string;
   replyTargetId: string;
+  /**
+   * The Linear ISSUE the trigger comment lives on — the sub-issue for a direct
+   * comment, the PARENT epic for a UX.18 parent-routed comment. The reconciler
+   * replies ✅/❌ using THIS as commentCreate's issueId (#247 UX.19). Defaults to
+   * the sub-issue id.
+   */
+  triggerCommentIssueId?: string;
   trigger: CommentTrigger;
   resolved: { oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
@@ -794,6 +804,7 @@ async function iterateOrchestrationChild(args: {
     trigger, resolved, registryTableName,
   } = args;
   const subIssueId = child.sub_issue_id;
+  const triggerCommentIssueId = args.triggerCommentIssueId ?? subIssueId;
 
   const prNumber = args.prNumber ?? (child.child_task_id ? await resolveChildPrNumber(child.child_task_id) : null);
   if (prNumber === null || prNumber === undefined) {
@@ -827,6 +838,10 @@ async function iterateOrchestrationChild(args: {
     // #247 UX.3: the reconciler replies ✅/❌ to the thread ROOT when the
     // iteration lands (threaded ack — closes the conversation the human opened).
     trigger_comment_id: replyTargetId,
+    // #247 UX.19: the issue that comment lives on, so the reconciler's reply
+    // uses the right commentCreate issueId (parent epic for a routed comment;
+    // the sub-issue for a direct comment).
+    trigger_comment_issue_id: triggerCommentIssueId,
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,

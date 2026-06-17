@@ -74,6 +74,8 @@ function taskRecord(fields: {
   orchestration_iteration?: boolean;
   // #247 UX.3: the human comment that triggered an iteration.
   trigger_comment_id?: string;
+  // #247 UX.19: the issue that trigger comment lives on (parent epic when routed).
+  trigger_comment_issue_id?: string;
   // #247 UX.5: raw agent error_message (drives the failure-reply detail).
   error_message?: string;
 }): DynamoDBRecord {
@@ -96,6 +98,7 @@ function taskRecord(fields: {
   }
   if (fields.orchestration_iteration) cm.orchestration_iteration = { S: 'true' };
   if (fields.trigger_comment_id) cm.trigger_comment_id = { S: fields.trigger_comment_id };
+  if (fields.trigger_comment_issue_id) cm.trigger_comment_issue_id = { S: fields.trigger_comment_issue_id };
   if (Object.keys(cm).length > 0) img.channel_metadata = { M: cm };
   return {
     eventName: fields.eventName ?? 'MODIFY',
@@ -692,6 +695,29 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(issueId).toBe('A'); // the sub-issue the comment lives on
     expect(parentCommentId).toBe('human-cmt-1');
     expect(body).toMatch(/^✅ Updated — PR #\d+\./);
+  });
+
+  test('#247 UX.19: a PARENT-routed iteration replies on the PARENT issue, not the sub-issue', async () => {
+    // The human commented on the parent epic (UX.18 routed it to sub-issue A).
+    // The ✅/❌ reply must use the PARENT issue id as commentCreate's issueId —
+    // else Linear rejects the reply (parentId belongs to a different issue) and
+    // the human sees 👀 then silence (live-caught on ABCA-304).
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A', orchestration_iteration: true,
+        trigger_comment_id: 'parent-cmt-1',
+        trigger_comment_issue_id: 'PARENT', // comment lives on the parent epic
+      })],
+    } as never);
+
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    const [, issueId, parentCommentId] = replyToCommentMock.mock.calls[0];
+    expect(issueId).toBe('PARENT'); // NOT 'A' — the reply targets the parent comment's issue
+    expect(parentCommentId).toBe('parent-cmt-1');
   });
 
   test('FAILED iteration (agent crash) → ❌ reply with classified reason + CloudWatch task id (UX.5)', async () => {
