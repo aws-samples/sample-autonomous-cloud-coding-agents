@@ -60,6 +60,11 @@ export interface StrandedOrchestrationReconcilerProps {
  * Mirrors ``StrandedTaskReconciler``. Grants match the live reconciler
  * because it runs the same ``createTaskCore`` release path in-process.
  */
+
+/** Sweep Lambda timeout (minutes) — matches the live reconciler's createTaskCore
+ *  + Bedrock/S3 SDK bundle cold-start + release work. */
+const SWEEP_TIMEOUT_MINUTES = 5;
+
 export class StrandedOrchestrationReconciler extends Construct {
   public readonly fn: lambda.NodejsFunction;
 
@@ -73,7 +78,7 @@ export class StrandedOrchestrationReconciler extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.minutes(5),
+      timeout: Duration.minutes(SWEEP_TIMEOUT_MINUTES),
       // 512 MB to match the live reconciler — same createTaskCore +
       // Bedrock/S3 SDK bundle (see OrchestrationReconciler memory note).
       memorySize: 512,

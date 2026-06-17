@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import { renderFailureReply } from '../../../src/handlers/shared/failure-reply';
 import { TaskStatus } from '../../../src/constructs/task-status';
+import { renderFailureReply } from '../../../src/handlers/shared/failure-reply';
 
 describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
   describe('build/test failure — the REAL live-verified gating shape', () => {

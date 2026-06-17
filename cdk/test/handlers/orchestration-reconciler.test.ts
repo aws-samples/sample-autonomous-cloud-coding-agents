@@ -714,8 +714,11 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     ]);
     await handler({
       Records: [taskRecord({
-        task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-        orchestration_sub_issue_id: 'A', orchestration_iteration: true,
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
         trigger_comment_id: 'parent-cmt-1',
         trigger_comment_issue_id: 'PARENT', // comment lives on the parent epic
       })],

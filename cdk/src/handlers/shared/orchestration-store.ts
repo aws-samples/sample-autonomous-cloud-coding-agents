@@ -42,8 +42,8 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { logger } from './logger';
 import type { SubIssueNode } from './linear-subissue-fetch';
+import { logger } from './logger';
 import { validateDag } from './orchestration-dag';
 import { resolveEpicTip } from './orchestration-epic-tip';
 
@@ -143,10 +143,17 @@ export interface SeedOrchestrationResult {
  * replay idempotent. Prefixed + hashed so the id is opaque and
  * fixed-length regardless of the Linear id format.
  */
+/** Hex chars of the sha256 kept for the orchestration id (128 bits — ample to
+ *  avoid collisions across a workspace's epics). */
+const ORCH_ID_HASH_HEX_LENGTH = 32;
+
 export function deriveOrchestrationId(parentLinearIssueId: string): string {
-  const hash = crypto.createHash('sha256').update(parentLinearIssueId).digest('hex').slice(0, 32);
+  const hash = crypto.createHash('sha256').update(parentLinearIssueId).digest('hex').slice(0, ORCH_ID_HASH_HEX_LENGTH);
   return `orch_${hash}`;
 }
+
+/** DynamoDB BatchWriteItem hard limit: at most 25 put/delete requests per call. */
+const DDB_BATCH_WRITE_MAX_ITEMS = 25;
 
 /** Marker SK for the parent-meta row (sorts before any UUID sub_issue_id). */
 const PARENT_META_SK = '#meta';
@@ -230,8 +237,8 @@ export async function seedOrchestration(
     { ...metaRow },
   ];
   let rowsWritten = 0;
-  for (let i = 0; i < allRows.length; i += 25) {
-    const chunk = allRows.slice(i, i + 25);
+  for (let i = 0; i < allRows.length; i += DDB_BATCH_WRITE_MAX_ITEMS) {
+    const chunk = allRows.slice(i, i + DDB_BATCH_WRITE_MAX_ITEMS);
     await ddb.send(new BatchWriteCommand({
       RequestItems: {
         [tableName]: chunk.map((Item) => ({ PutRequest: { Item } })),
@@ -320,7 +327,9 @@ export async function extendOrchestration(params: {
       orchestration_id: orchestrationId, reason: validation.reason,
     });
     return {
-      orchestrationId, addedSubIssueIds: [], releasableSubIssueIds: [],
+      orchestrationId,
+      addedSubIssueIds: [],
+      releasableSubIssueIds: [],
       rejected: { reason: validation.reason, message: validation.message },
     };
   }
@@ -367,8 +376,8 @@ export async function extendOrchestration(params: {
   });
 
   // Persist new child rows (chunks of 25), then bump meta child_count.
-  for (let i = 0; i < newRows.length; i += 25) {
-    const chunk = newRows.slice(i, i + 25);
+  for (let i = 0; i < newRows.length; i += DDB_BATCH_WRITE_MAX_ITEMS) {
+    const chunk = newRows.slice(i, i + DDB_BATCH_WRITE_MAX_ITEMS);
     await ddb.send(new BatchWriteCommand({
       RequestItems: { [tableName]: chunk.map((Item) => ({ PutRequest: { Item } })) },
     }));

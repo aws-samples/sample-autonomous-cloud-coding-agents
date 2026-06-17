@@ -62,6 +62,11 @@ export interface OrchestrationReconcilerProps {
  * stream, so the reconciler is its first and only consumer — zero
  * contention with the fan-out plane.
  */
+
+/** DLQ message retention (days) — long enough for an operator to inspect a
+ *  poison stream record before it ages out. */
+const DLQ_RETENTION_DAYS = 14;
+
 export class OrchestrationReconciler extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
@@ -100,7 +105,7 @@ export class OrchestrationReconciler extends Construct {
     // reconcile). Fan-out uses the same pattern; without it a bad record
     // would block the shard.
     this.dlq = new sqs.Queue(this, 'ReconcilerDlq', {
-      retentionPeriod: Duration.days(14),
+      retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 

@@ -22,8 +22,8 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { OrchestrationReconciler } from '../../src/constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../../src/constructs/orchestration-table';
-import { TaskTable } from '../../src/constructs/task-table';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
+import { TaskTable } from '../../src/constructs/task-table';
 
 function synth(): Template {
   const app = new App();

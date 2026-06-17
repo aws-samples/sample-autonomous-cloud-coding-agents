@@ -44,13 +44,13 @@
  */
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import type { FetchSubIssueGraphOptions } from './linear-subissue-fetch';
 import { logger } from './logger';
+import { validateDag } from './orchestration-dag';
 import {
   linearGraphSource,
   type OrchestrationGraphSource,
 } from './orchestration-graph-source';
-import type { FetchSubIssueGraphOptions } from './linear-subissue-fetch';
-import { validateDag } from './orchestration-dag';
 import { withIntegrationNode } from './orchestration-integration-node';
 import { deriveOrchestrationId, extendOrchestration, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
@@ -88,21 +88,21 @@ export interface DiscoverOrchestrationParams {
 export type DiscoverOrchestrationResult =
   | { readonly kind: 'single_task'; readonly parentLinearIssueId: string }
   | {
-      readonly kind: 'seeded';
-      readonly orchestrationId: string;
-      readonly childCount: number;
-      readonly rootSubIssueIds: readonly string[];
-      readonly alreadyExisted: boolean;
-    }
+    readonly kind: 'seeded';
+    readonly orchestrationId: string;
+    readonly childCount: number;
+    readonly rootSubIssueIds: readonly string[];
+    readonly alreadyExisted: boolean;
+  }
   | {
-      // An already-seeded orchestration that was EXTENDED with sub-issues
-      // added to the epic after the first seed (orchestration-extend). Carries
-      // the new node ids + which are immediately releasable.
-      readonly kind: 'extended';
-      readonly orchestrationId: string;
-      readonly addedSubIssueIds: readonly string[];
-      readonly releasableSubIssueIds: readonly string[];
-    }
+    // An already-seeded orchestration that was EXTENDED with sub-issues
+    // added to the epic after the first seed (orchestration-extend). Carries
+    // the new node ids + which are immediately releasable.
+    readonly kind: 'extended';
+    readonly orchestrationId: string;
+    readonly addedSubIssueIds: readonly string[];
+    readonly releasableSubIssueIds: readonly string[];
+  }
   | { readonly kind: 'rejected'; readonly reason: string; readonly message: string }
   | { readonly kind: 'error'; readonly message: string };
 

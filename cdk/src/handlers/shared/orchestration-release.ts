@@ -47,9 +47,9 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { createTaskCore as CreateTaskCoreFn } from './create-task-core';
+import { logger } from './logger';
 import { selectBaseBranch } from './orchestration-base-branch';
 import { isIntegrationNode } from './orchestration-integration-node';
-import { logger } from './logger';
 import type {
   OrchestrationChildRow,
   OrchestrationReleaseContext,

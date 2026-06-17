@@ -76,6 +76,9 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // A5: registry table for the parent rollup comment's per-workspace OAuth
 // token. Unset → rollup is skipped (gating still works).
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+// createTaskCore rejects idempotency keys longer than this; synthesized keys
+// slice to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 // #331: throttle releases to the user's free concurrency budget so a wide
 // fan-out doesn't over-release children that admission then hard-fails. Unset
 // table → no throttle (release-all, back-compat; admission still gates).
@@ -733,7 +736,7 @@ async function spawnRestackTask(
 
   // Idempotency keyed on the SOURCE task id: this exact completion re-stacks
   // a given dependent at most once. Within [A-Za-z0-9_-], ≤128 chars.
-  const idempotencyKey = `restack_${child.sub_issue_id}_${sourceTaskId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+  const idempotencyKey = `restack_${child.sub_issue_id}_${sourceTaskId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
 
   try {
     const result = await createTaskCore(
