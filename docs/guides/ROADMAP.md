@@ -85,6 +85,7 @@ What's shipped and what's coming next.
 
 - [x] **Slack integration** - @mention task submission, `bgagent slack link` / `setup`, file attachments on submit, threaded progress notifications. See [SLACK_SETUP_GUIDE.md](./SLACK_SETUP_GUIDE.md)
 - [x] **Linear integration** - Label-triggered tasks, `bgagent linear setup` / `link`, progress comments on issues. See [LINEAR_SETUP_GUIDE.md](./LINEAR_SETUP_GUIDE.md)
+- [x] **Jira integration** - Label-triggered tasks on Jira Cloud, `bgagent jira setup` / `map` / `link`, progress comments via the Jira REST v3 API. See [JIRA_SETUP_GUIDE.md](./JIRA_SETUP_GUIDE.md) and [ADR-015](../decisions/ADR-015-jira-integration.md)
 
 ### Observability
 
