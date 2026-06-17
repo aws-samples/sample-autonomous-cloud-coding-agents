@@ -394,65 +394,30 @@ export class AgentStack extends Stack {
 
     runtimeArnHolder = runtime.agentRuntimeArn;
 
-    // --- AgentCore log-delivery: pin to the already-deployed identity ---
-    // The agentcore-alpha Runtime auto-creates AWS::Logs::DeliverySource +
-    // Delivery + DeliveryDestination for each loggingConfig. A construct-path
-    // rename across alpha builds CHURNED both the CFN logical IDs AND the
-    // account-scoped DeliverySource ``Name`` (live stack:
-    // ``RuntimeCDKSource…``/``cdk-{type}-source-…``; current synth:
-    // ``RuntimeApplicationLogsDeliverySource…``/``backgroundagentdevRuntime…``).
-    // Because a DeliverySource Name is account-unique, CFN's create-before-
-    // delete on the churned id hits ``AlreadyExists`` and rolls the whole stack
-    // back. Pin the two DeliverySources' logical IDs AND Names back to the
-    // deployed values so CFN sees them as the SAME resources (no-op update),
-    // not new ones. Log delivery is stateless routing config — no data risk.
-    // Best-effort lookup by child id; if a future alpha renames the children
-    // this silently no-ops (and a fresh stack just deploys clean).
-    // Pin ALL THREE auto-created resource kinds to their deployed logical IDs:
-    //   - DeliverySource + DeliveryDestination: also pin ``Name`` (both are
-    //     account-unique, so a churned logical id collides on create).
-    //   - Delivery: logical-id pin ONLY. A Delivery has no Name, but it IS
-    //     unique per (source, destination) pair — and since the source+dest
-    //     are now pinned, a churned Delivery logical id would create-before-
-    //     delete a SECOND link over the same pair and hit ``AlreadyExists``
-    //     ('identifier null already exists'). Pinning the logical id makes CFN
-    //     update it in place. (Pass liveName undefined for these.)
-    const pinLogResource = (childId: string, liveLogicalId: string, liveName?: string): void => {
-      const res = runtime.node.tryFindChild(childId) as CfnResource | undefined;
-      if (!res) return;
-      res.overrideLogicalId(liveLogicalId);
-      if (liveName !== undefined) res.addPropertyOverride('Name', liveName);
-    };
-    pinLogResource(
-      'ApplicationLogsDeliverySource',
-      'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
-      'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
-    );
-    pinLogResource(
-      'UsageLogsDeliverySource',
-      'RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22',
-      'cdk-usagelogs-source-backgroundagentdevRuntimeBC0AE9ED',
-    );
-    pinLogResource(
-      'ApplicationLogsDest',
-      'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8DestapplicationlogsE09F77DC',
-      'cdk-cwl-Destapplication-logs-dest-backgrounp454A95E829BF8A27',
-    );
-    pinLogResource(
-      'UsageLogsDest',
-      'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
-      'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
-    );
-    // The two Delivery links: logical-id pin only (no Name — unique per
-    // source/destination pair, which are now pinned).
-    pinLogResource(
-      'ApplicationLogsDelivery',
-      'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8Delivery92FE492C',
-    );
-    pinLogResource(
-      'UsageLogsDelivery',
-      'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Delivery40F023D7',
-    );
+    // --- AgentCore log-delivery: OPT-IN migration shim for ONE pre-existing
+    //     stack whose logical IDs churned under an agentcore-alpha bump ---
+    //
+    // Background: the agentcore-alpha Runtime auto-creates AWS::Logs::
+    // DeliverySource + Delivery + DeliveryDestination per loggingConfig. An
+    // alpha construct-path rename CHURNED both the CFN logical IDs and the
+    // account-scoped DeliverySource/DeliveryDestination ``Name`` of an
+    // ALREADY-DEPLOYED stack. Because those Names are account-unique, CFN's
+    // create-before-delete on the new ids collides with the live ones →
+    // ``AlreadyExists`` → whole-stack rollback. The fix is to re-pin the
+    // churned resources to the values CFN already has so it updates them in
+    // place instead of recreating.
+    //
+    // CRITICAL: this is needed ONLY by a stack that was deployed BEFORE the
+    // alpha bump. A fresh stack (a new env, CI, this PR on a clean account)
+    // has NO pre-existing resources to collide with and MUST synth the
+    // current alpha's natural ids — so the shim is OFF by default and is
+    // enabled per-stack via context:
+    //   cdk deploy -c pinnedLogDeliveryStack=<stackName>
+    // (or the `pinnedLogDelivery` map in cdk.json). When the running stack
+    // doesn't match, NONE of the overrides apply and synth is pristine.
+    // Once the affected stack has been migrated + a clean redeploy confirmed,
+    // this shim and its context entry can be deleted outright.
+    maybePinChurnedLogResources(this, runtime);
 
     // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
@@ -1301,5 +1266,92 @@ export class AgentStack extends Stack {
       value: taskApi.appClientId,
       description: 'Cognito App Client ID',
     });
+  }
+}
+
+/**
+ * A churned log-delivery resource to re-pin: the construct child id under the
+ * Runtime, the logical id CFN already has deployed, and (for the account-unique
+ * Source/Destination kinds) the deployed ``Name``. ``liveName`` is omitted for
+ * Delivery links, which have no Name.
+ */
+interface PinnedLogResource {
+  readonly childId: string;
+  readonly liveLogicalId: string;
+  readonly liveName?: string;
+}
+
+/**
+ * Per-stack pin tables for the agentcore-alpha log-delivery churn (#247 #58).
+ * Keyed by ``stackName``. ONLY the listed stack is migrated; every other stack
+ * (fresh deploys, CI, new envs) is absent here → synth is pristine. A stack can
+ * also be supplied at deploy time via context (see {@link maybePinChurnedLogResources}).
+ *
+ * ``backgroundagent-dev`` was deployed before an alpha bump churned its
+ * DeliverySource/Destination/Delivery logical ids + account-unique Names; these
+ * values come from `aws cloudformation list-stack-resources` on that live stack.
+ * Delete this entry once that stack is migrated + a clean redeploy is confirmed.
+ */
+const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
+  'backgroundagent-dev': [
+    {
+      childId: 'ApplicationLogsDeliverySource',
+      liveLogicalId: 'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
+      liveName: 'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
+    },
+    {
+      childId: 'UsageLogsDeliverySource',
+      liveLogicalId: 'RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22',
+      liveName: 'cdk-usagelogs-source-backgroundagentdevRuntimeBC0AE9ED',
+    },
+    {
+      childId: 'ApplicationLogsDest',
+      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8DestapplicationlogsE09F77DC',
+      liveName: 'cdk-cwl-Destapplication-logs-dest-backgrounp454A95E829BF8A27',
+    },
+    {
+      childId: 'UsageLogsDest',
+      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
+      liveName: 'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
+    },
+    // Delivery links: logical-id pin only (no Name — unique per source/dest pair).
+    {
+      childId: 'ApplicationLogsDelivery',
+      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8Delivery92FE492C',
+    },
+    {
+      childId: 'UsageLogsDelivery',
+      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Delivery40F023D7',
+    },
+  ],
+};
+
+/**
+ * OPT-IN migration shim (#247 #58): re-pin the agentcore-alpha-churned
+ * log-delivery resources of ONE already-deployed stack to the logical ids +
+ * Names CFN already has, so a stack deployed before an alpha bump updates them
+ * in place instead of hitting ``AWS::Logs::DeliverySource AlreadyExists`` on
+ * create-before-delete. NO-OP unless the running ``stackName`` is listed in
+ * {@link PINNED_LOG_DELIVERY_BY_STACK} OR named via context
+ * (`-c pinnedLogDeliveryStack=<name>`, which selects which table entry applies)
+ * — so fresh stacks, CI, and other accounts synth the current alpha's natural
+ * ids untouched. Once the affected stack is migrated, delete this helper + its
+ * table entry.
+ */
+function maybePinChurnedLogResources(stack: Stack, runtime: agentcore.Runtime): void {
+  // A deploy can override WHICH stack name to treat as the pinned one (e.g. a
+  // renamed env that inherited the churned resources); defaults to the running
+  // stack's own name, so the table is matched by stackName out of the box.
+  const targetStackName = (stack.node.tryGetContext('pinnedLogDeliveryStack') as string | undefined)
+    ?? stack.stackName;
+  if (targetStackName !== stack.stackName) return; // context names a different stack → don't touch this one
+  const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
+  if (!pins) return; // not a pre-existing churned stack → pristine synth
+
+  for (const pin of pins) {
+    const res = runtime.node.tryFindChild(pin.childId) as CfnResource | undefined;
+    if (!res) continue; // a future alpha rename → silently skip (re-derive then)
+    res.overrideLogicalId(pin.liveLogicalId);
+    if (pin.liveName !== undefined) res.addPropertyOverride('Name', pin.liveName);
   }
 }
