@@ -53,12 +53,14 @@ const swapIssueReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const reactToCommentMock = jest.fn();
+const replyToCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
+  replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
   EMOJI_FAILURE: 'x',
@@ -346,6 +348,7 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     fetchIssueParentIdMock.mockReset().mockResolvedValue('PARENT');
     discoverOrchestrationMock.mockReset();
     reactToCommentMock.mockReset().mockResolvedValue(true);
+    replyToCommentMock.mockReset().mockResolvedValue(true);
   });
 
   test('@bgagent on a started sub-issue → pr-iteration task on its PR with cascade marker', async () => {
@@ -478,6 +481,95 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       mockStandaloneOnly({ task_id: 'task-solo', repo: 'o/r', pr_number: 5 }); // no user_id
       await handler(eventWith(comment()));
       expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // #247 UX.18: an @bgagent comment left on the PARENT epic (the panel lives
+  // there) routes to the sub-issue it names — instead of the old silent drop.
+  describe('parent-epic @bgagent comment routing', () => {
+    /** Mock so the COMMENTED issue id is itself the orchestration parent. The
+     *  fan-out epic has two started sub-issues (footer + newsletter). */
+    function mockParentEpic(parentIssueId: string): void {
+      const meta = {
+        sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS', repo: 'o/r', child_count: 2, platform_user_id: 'release-user',
+      };
+      const footer = {
+        orchestration_id: 'orch_x', sub_issue_id: 'sub-footer', depends_on: [], child_status: 'succeeded',
+        repo: 'o/r', parent_linear_issue_id: parentIssueId, linear_workspace_id: 'WS',
+        linear_identifier: 'ABCA-305', title: 'Add a site-wide footer', child_task_id: 'task-footer',
+      };
+      const news = {
+        orchestration_id: 'orch_x', sub_issue_id: 'sub-news', depends_on: [], child_status: 'succeeded',
+        repo: 'o/r', parent_linear_issue_id: parentIssueId, linear_workspace_id: 'WS',
+        linear_identifier: 'ABCA-306', title: 'Add a newsletter signup section', child_task_id: 'task-news',
+      };
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
+        if (cmd._type === 'Query') return { Items: [meta, footer, news] }; // loadOrchestration (parent's own)
+        if (cmd._type === 'Get') {
+          const tid = (cmd.input.Key as { task_id: string }).task_id;
+          const pr = tid === 'task-footer' ? 193 : tid === 'task-news' ? 192 : null;
+          return { Item: pr ? { pr_number: pr } : {} };
+        }
+        return {};
+      });
+    }
+
+    /** A comment ON the parent epic (issueId === the parent id). */
+    function parentComment(body: string, id = 'pc-1'): Record<string, unknown> {
+      return {
+        type: 'Comment', action: 'create', organizationId: 'org-1', actor: { id: 'user-9' },
+        data: { id, body, issueId: 'PARENT-EPIC' },
+      };
+    }
+
+    test('the live case: "@bgagent for the footer change it" on the epic → iterates ABCA-305 PR #193', async () => {
+      mockParentEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent for the footer can you change it to "unforgettable memories await you"')));
+
+      // 👀 on the parent comment (never a silent drop).
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'eyes');
+      // Routed to the footer sub-issue's PR with the cascade marker.
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [body, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(body.workflow_ref).toBe('coding/pr-iteration-v1');
+      expect(body.pr_number).toBe(193);
+      expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('sub-footer');
+      expect(ctx.channelMetadata.orchestration_iteration).toBe('true');
+      expect(ctx.channelMetadata.linear_issue_id).toBe('sub-footer');
+      // No disambiguation reply — we acted.
+      expect(replyToCommentMock).not.toHaveBeenCalled();
+    });
+
+    test('targeting by Linear identifier on the epic → iterates that node', async () => {
+      mockParentEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent ABCA-306 tweak the newsletter copy')));
+      expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(192);
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.orchestration_sub_issue_id).toBe('sub-news');
+    });
+
+    test('ambiguous comment on the epic → 👀 + a "which sub-issue?" reply, NO task, NO new issue', async () => {
+      mockParentEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent please update the copy')));
+      // Acked, but did not act.
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'eyes');
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // Posted a disambiguation reply on the parent — never a silent drop.
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      const [, issueId, , replyBody] = replyToCommentMock.mock.calls[0];
+      expect(issueId).toBe('PARENT-EPIC');
+      expect(replyBody).toContain('ABCA-305');
+      expect(replyBody).toContain('ABCA-306');
+      expect(replyBody.toLowerCase()).toContain('new work'); // the create-a-sub-issue path
+    });
+
+    test('no-match comment on the epic → 👀 + reply (never a silent drop), no task', async () => {
+      mockParentEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent looks great, ship it')));
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'eyes');
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
     });
   });
 });
