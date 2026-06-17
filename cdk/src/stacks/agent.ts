@@ -408,15 +408,20 @@ export class AgentStack extends Stack {
     // not new ones. Log delivery is stateless routing config — no data risk.
     // Best-effort lookup by child id; if a future alpha renames the children
     // this silently no-ops (and a fresh stack just deploys clean).
-    // Pin BOTH the DeliverySources and the DeliveryDestinations (the two
-    // account-name-unique resource kinds) to their deployed logical IDs +
-    // Names, so the whole sub-tree updates in place. (The CfnDelivery links
-    // are not name-unique and Ref the pinned ids, so they follow for free.)
-    const pinLogResource = (childId: string, liveLogicalId: string, liveName: string): void => {
+    // Pin ALL THREE auto-created resource kinds to their deployed logical IDs:
+    //   - DeliverySource + DeliveryDestination: also pin ``Name`` (both are
+    //     account-unique, so a churned logical id collides on create).
+    //   - Delivery: logical-id pin ONLY. A Delivery has no Name, but it IS
+    //     unique per (source, destination) pair — and since the source+dest
+    //     are now pinned, a churned Delivery logical id would create-before-
+    //     delete a SECOND link over the same pair and hit ``AlreadyExists``
+    //     ('identifier null already exists'). Pinning the logical id makes CFN
+    //     update it in place. (Pass liveName undefined for these.)
+    const pinLogResource = (childId: string, liveLogicalId: string, liveName?: string): void => {
       const res = runtime.node.tryFindChild(childId) as CfnResource | undefined;
       if (!res) return;
       res.overrideLogicalId(liveLogicalId);
-      res.addPropertyOverride('Name', liveName);
+      if (liveName !== undefined) res.addPropertyOverride('Name', liveName);
     };
     pinLogResource(
       'ApplicationLogsDeliverySource',
@@ -437,6 +442,16 @@ export class AgentStack extends Stack {
       'UsageLogsDest',
       'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
       'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
+    );
+    // The two Delivery links: logical-id pin only (no Name — unique per
+    // source/destination pair, which are now pinned).
+    pinLogResource(
+      'ApplicationLogsDelivery',
+      'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8Delivery92FE492C',
+    );
+    pinLogResource(
+      'UsageLogsDelivery',
+      'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Delivery40F023D7',
     );
 
     // --- Session storage (preview) ---
