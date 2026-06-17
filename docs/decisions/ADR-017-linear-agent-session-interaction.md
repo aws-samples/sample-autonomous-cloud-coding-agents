@@ -126,6 +126,21 @@ it's the per-issue-session vs. cross-issue-epic-rollup gap (engine stays ours)
 plus the Preview→GA stability wait, NOT any technical blocker we found. The
 spike issues were created + deleted; no migration code written.
 
+> **⚠️ The enablement toggle is NOT a side-effect-free no-op (2026-06-17).**
+> Leaving "Agent session events" ON after the spike means **every `@bgagent`
+> mention now also spawns a native agent session** that Linear expects answered
+> via `agentActivityCreate` within 10s. Our deployed code answers on the
+> **comment** path (👀 + reply) and emits no session activity, so the session
+> gets zero activities, goes `stale`, and Linear surfaces a misleading
+> **"bgagent did not respond"** banner — even though the comment reply posted
+> fine (observed live on ABCA-310: reply at t+2s, session `stale`, activities
+> `[]`). **Consequence for phasing:** adoption is *not* "additive alongside the
+> comment path for free" — once the toggle is on, mentions route to sessions
+> and the adapter MUST emit activities or every mention looks dead. So the
+> toggle stays **OFF** until the flag-gated adapter (Phase 2 below) ships in the
+> same change that flips it. Interim action after the spike: **turn the toggle
+> off** (app owner, Settings → API → Applications).
+
 ### Why a channel, not a rewrite
 
 - The win is **real but partial**: agent sessions retire the brittle
