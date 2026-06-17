@@ -47,7 +47,7 @@ import {
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply } from './shared/failure-reply';
-import { postIssueComment, replyToComment } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
@@ -682,6 +682,21 @@ async function replyToIterationComment(
   // tasks created before UX.19 (no triggerCommentIssueId persisted).
   const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
   await replyToComment(ctx, replyIssueId, commentId, body);
+
+  // #247 UX.21: settle the comment + sub-issue so all three views agree (panel
+  // row, sub-issue state, comment reaction) — the platform owns this, not the
+  // agent (whose prompt-driven state-setting flapped In Progress/In Review).
+  //   - swap the TRIGGER comment's 👀 → ✅ (success) / ❌ (failure), so the
+  //     comment itself reads done at a glance, not just the threaded reply.
+  //   - on success, advance the SUB-ISSUE to In Review (its PR is updated &
+  //     open, awaiting human merge — same convention the epic uses). On
+  //     failure, leave the state (the ❌ + reply convey it). Never demote.
+  // Best-effort + idempotent (the ack_replied_at claim above already gates this
+  // to once per iteration; swapCommentReaction/transition re-converge anyway).
+  await swapCommentReaction(ctx, commentId, succeeded ? EMOJI_SUCCESS : EMOJI_FAILURE);
+  if (succeeded) {
+    await transitionIssueState(ctx, changedSubIssueId, 'started', ['In Review']);
+  }
 }
 
 /** Build the ✅ ack reply, linking the (re-pushed) PR when resolvable. */
