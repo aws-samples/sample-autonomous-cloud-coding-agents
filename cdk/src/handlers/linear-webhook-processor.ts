@@ -27,7 +27,7 @@ import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
-import { deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
 import { parseParentNodeReference, renderParentDisambiguationReply, suggestClosestNode } from './shared/orchestration-parent-comment';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
@@ -48,6 +48,12 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
 // budget. Unset → release all roots (back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
+/**
+ * TTL (seconds) for the per-comment ack-claim marker (#247 UX.20). Only needs
+ * to outlive Linear's webhook redelivery window (minutes), but we keep a day of
+ * slack so a delayed redelivery still dedups; the row self-expires after.
+ */
+const ACK_CLAIM_TTL_SECONDS = 86_400;
 
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
@@ -720,6 +726,27 @@ async function handleParentEpicCommentTrigger(args: {
 }): Promise<void> {
   const { orchestrationId, snapshot, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
+
+  // #247 UX.20: claim-once BEFORE any side-effect. Linear redelivers a comment
+  // webhook when the handler exceeds its ~5s ack window (this path does several
+  // Linear API calls and can run >5s), and EACH redelivery would otherwise
+  // re-react + re-post the disambiguation reply — live-caught spamming 50+
+  // duplicate replies. The conditional claim (keyed on this comment id) lets
+  // only the FIRST delivery proceed; redeliveries no-op here. The marker
+  // self-expires via the table TTL. (The iterate path also has its own
+  // createTaskCore idempotency key — this is the outer guard that also covers
+  // the 👀 + the ask-reply, which have no other dedup.)
+  const ttlEpochSeconds = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
+  const won = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE!, orchestrationId, commentId, new Date().toISOString(), ttlEpochSeconds,
+  );
+  if (!won) {
+    logger.info('A6 comment (parent epic): redelivery — already handled this comment, skipping', {
+      orchestration_id: orchestrationId, comment_id: commentId,
+    });
+    return;
+  }
+
   // ACK immediately — a parent comment is never silently dropped again.
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
 
