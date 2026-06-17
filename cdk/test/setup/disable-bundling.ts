@@ -49,8 +49,23 @@ const BUNDLING_DISABLED_CONTEXT = { 'aws:cdk:bundling-stacks': [] as string[] };
 
 const existing = process.env.CDK_CONTEXT_JSON;
 if (existing) {
-  // Preserve any context already provided; our key wins only if unset.
-  const merged = { ...BUNDLING_DISABLED_CONTEXT, ...JSON.parse(existing) };
+  // Preserve any ambient context, but let the bundling disable win
+  // unconditionally: a pre-set CDK_CONTEXT_JSON that carries
+  // `aws:cdk:bundling-stacks` must not silently re-enable bundling and defeat
+  // the speedup. The documented per-test opt-out is `postCliContext` (applied
+  // AFTER the env var regardless — see above), so spreading our key LAST keeps
+  // that escape hatch working while making the global disable robust to
+  // whatever the environment already set.
+  let ambient: Record<string, unknown>;
+  try {
+    ambient = JSON.parse(existing);
+  } catch {
+    // Without this guard a malformed pre-set var throws here, inside
+    // `setupFiles`, and fails EVERY test in EVERY file with an opaque parse
+    // error. Re-throw with the offending value so the blame is localized.
+    throw new Error(`malformed CDK_CONTEXT_JSON in environment (must be valid JSON): ${existing}`);
+  }
+  const merged = { ...ambient, ...BUNDLING_DISABLED_CONTEXT };
   process.env.CDK_CONTEXT_JSON = JSON.stringify(merged);
 } else {
   process.env.CDK_CONTEXT_JSON = JSON.stringify(BUNDLING_DISABLED_CONTEXT);
