@@ -458,6 +458,45 @@ export async function clearRollupClaim(
   }));
 }
 
+/**
+ * Claim the one-time "I responded to this comment" marker so a webhook
+ * REDELIVERY doesn't re-post (#247 UX.20 — live-caught spam). Linear redelivers
+ * a comment webhook when the handler exceeds its ~5s ack window; without a
+ * claim, the parent-epic disambiguation reply re-posted on every redelivery
+ * (50+ duplicates). Keyed on the orchestration + the triggering comment id, so
+ * the FIRST delivery wins and every redelivery is a no-op. The marker carries a
+ * TTL (the table's ``ttl`` attribute) so these rows self-expire — they're only
+ * needed for the redelivery window. Returns true only for the first caller.
+ *
+ * @param ttlEpochSeconds absolute epoch-seconds expiry for the marker row.
+ */
+export async function claimCommentAck(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  commentId: string,
+  now: string,
+  ttlEpochSeconds: number,
+): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { orchestration_id: orchestrationId, sub_issue_id: `ack#${commentId}` },
+      // attribute_not_exists on the PK is the standard "create-once" guard —
+      // a replay finds the row present and the condition fails. ``ttl`` is a
+      // DynamoDB reserved keyword → must be aliased via ExpressionAttributeNames.
+      UpdateExpression: 'SET acked_at = :now, #ttl = :ttl',
+      ConditionExpression: 'attribute_not_exists(orchestration_id)',
+      ExpressionAttributeNames: { '#ttl': 'ttl' },
+      ExpressionAttributeValues: { ':now': now, ':ttl': ttlEpochSeconds },
+    }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
 /** Sort-key of the parent-meta row. Exported so the reconciler can
  *  separate it from child rows after a Query. */
 export const ORCHESTRATION_META_SK = PARENT_META_SK;
@@ -532,7 +571,11 @@ export async function loadOrchestration(
   }
 
   const children = items
-    .filter((i) => i.sub_issue_id !== PARENT_META_SK)
+    // Exclude the meta row AND non-child marker rows (e.g. ``ack#<commentId>``
+    // dedup markers, #247 UX.20) — only real sub-issue rows are children.
+    // A real child SK is a Linear issue UUID or the ``…__integration`` synthetic
+    // id; markers use a ``<kind>#`` prefix that no real SK has.
+    .filter((i) => i.sub_issue_id !== PARENT_META_SK && !String(i.sub_issue_id).includes('#'))
     .map((i) => i as unknown as OrchestrationChildRow);
 
   const meta: OrchestrationMeta = {

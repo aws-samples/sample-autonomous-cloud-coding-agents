@@ -504,7 +504,20 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
         repo: 'o/r', parent_linear_issue_id: parentIssueId, linear_workspace_id: 'WS',
         linear_identifier: 'ABCA-306', title: 'Add a newsletter signup section', child_task_id: 'task-news',
       };
+      // Stateful ack-claim (#247 UX.20): the conditional Update on ack#<comment>
+      // succeeds the FIRST time and ConditionalCheckFailed on every redelivery.
+      const claimedAcks = new Set<string>();
       ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        if (cmd._type === 'Update') {
+          const sk = (cmd.input.Key as { sub_issue_id?: string })?.sub_issue_id ?? '';
+          if (sk.startsWith('ack#')) {
+            if (claimedAcks.has(sk)) {
+              throw Object.assign(new Error('claim exists'), { name: 'ConditionalCheckFailedException' });
+            }
+            claimedAcks.add(sk);
+          }
+          return {};
+        }
         if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
         if (cmd._type === 'Query') return { Items: [meta, footer, news] }; // loadOrchestration (parent's own)
         if (cmd._type === 'Get') {
@@ -574,6 +587,27 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'eyes');
       expect(createTaskCoreMock).not.toHaveBeenCalled();
       expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('#247 UX.20: webhook REDELIVERY of the same parent comment posts EXACTLY ONE reply (no spam)', async () => {
+      mockParentEpic('PARENT-EPIC');
+      const evt = eventWith(parentComment('@bgagent looks great, ship it', 'pc-dup'));
+      // Linear redelivers the same comment webhook 3× (handler exceeded its ack window).
+      await handler(evt);
+      await handler(evt);
+      await handler(evt);
+      // The conditional ack-claim lets only the FIRST delivery act: one 👀, one reply.
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      expect(reactToCommentMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('#247 UX.20: a matched-iteration parent comment also dedups under redelivery (one task, one ack)', async () => {
+      mockParentEpic('PARENT-EPIC');
+      const evt = eventWith(parentComment('@bgagent for the footer change the tagline', 'pc-iter'));
+      await handler(evt);
+      await handler(evt);
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1); // one iteration, not two
+      expect(reactToCommentMock).toHaveBeenCalledTimes(1);
     });
   });
 });
