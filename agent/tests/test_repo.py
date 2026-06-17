@@ -154,21 +154,25 @@ class TestPlatformBranchNameVerbatim:
         fake = _fake_run_cmd()
         _patch_common(monkeypatch, fake)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
-        setup = repo.setup_repo(_config(
-            is_pr_workflow=False,
-            branch_name="bgagent/01TESTTASKID/abca-166-add-seville-guide-html",
-            task_description="ABCA-166: Add seville-guide.html",
-        ))
+        setup = repo.setup_repo(
+            _config(
+                is_pr_workflow=False,
+                branch_name="bgagent/01TESTTASKID/abca-166-add-seville-guide-html",
+                task_description="ABCA-166: Add seville-guide.html",
+            )
+        )
         assert setup.branch == "bgagent/01TESTTASKID/abca-166-add-seville-guide-html"
 
     def test_uses_platform_branch_name_verbatim_for_pr_workflow(self, monkeypatch):
         fake = _fake_run_cmd()
         _patch_common(monkeypatch, fake)
-        setup = repo.setup_repo(_config(
-            is_pr_workflow=True,
-            branch_name="bgagent/01TESTTASKID/abca-167-stacked-child",
-            base_branch="bgagent/01PREDTASK/abca-166-predecessor",
-        ))
+        setup = repo.setup_repo(
+            _config(
+                is_pr_workflow=True,
+                branch_name="bgagent/01TESTTASKID/abca-167-stacked-child",
+                base_branch="bgagent/01PREDTASK/abca-166-predecessor",
+            )
+        )
         assert setup.branch == "bgagent/01TESTTASKID/abca-167-stacked-child"
 
     def test_falls_back_to_derived_slug_only_when_no_branch_name(self, monkeypatch):
@@ -176,8 +180,10 @@ class TestPlatformBranchNameVerbatim:
         fake = _fake_run_cmd()
         _patch_common(monkeypatch, fake)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
-        setup = repo.setup_repo(_config(
-            is_pr_workflow=False,
-            task_description="ABCA-168: derive me",
-        ))
+        setup = repo.setup_repo(
+            _config(
+                is_pr_workflow=False,
+                task_description="ABCA-168: derive me",
+            )
+        )
         assert setup.branch.startswith("bgagent/")
