@@ -147,7 +147,11 @@ describe('LinearIntegration construct — #331 seed-time root release throttle',
       })
       : undefined;
     new LinearIntegration(stack, 'LinearIntegration', {
-      api, userPool, taskTable, taskEventsTable, orchestrationTable,
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      orchestrationTable,
       ...(userConcurrencyTable && { userConcurrencyTable, maxConcurrentTasksPerUser: 7 }),
     });
     return Template.fromStack(stack);

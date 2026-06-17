@@ -17,13 +17,13 @@
  *  SOFTWARE.
  */
 
+import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 import {
   computeLeaves,
   INTEGRATION_NODE_SUFFIX,
   isIntegrationNode,
   withIntegrationNode,
 } from '../../../src/handlers/shared/orchestration-integration-node';
-import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 
 const n = (id: string, deps: string[] = []): SubIssueNode => ({ id, depends_on: deps });
 const ORCH = 'orch_abc123';
