@@ -59,12 +59,45 @@ export interface CommentTrigger {
  */
 export function parseCommentTrigger(body: string | undefined | null): CommentTrigger {
   if (!body) return { triggered: false, instruction: '' };
+  // SELF-COMMENT GUARD (#247 UX.20 — live-caught infinite loop): the bot's OWN
+  // rendered comments must NEVER trigger it, or it talks to itself forever.
+  // This bit me when the disambiguation reply embedded a literal "@bgagent
+  // ABCA-123: …" example — the reply re-matched the mention and spawned another
+  // reply, ~50 deep. The agent's progress comments are also bot-authored.
+  // Cheapest robust signal that needs no actor-identity config: a body that
+  // STARTS WITH one of our own template markers is ours, not a user
+  // instruction. (Linear strips a leading emoji to its own line sometimes, so
+  // we test the trimmed start.) Keep this list in sync with the rendered
+  // comment prefixes (panel, acks, disambiguation, agent progress).
+  if (isBotAuthoredComment(body)) return { triggered: false, instruction: '' };
   // Token-boundary match: @bgagent not immediately followed by a word char or
   // a '.' (so it won't fire on @bgagentbot or an @bgagent.io address).
   const re = /@bgagent(?![\w.])/gi;
   if (!re.test(body)) return { triggered: false, instruction: '' };
   const instruction = body.replace(/@bgagent(?![\w.])/gi, ' ').replace(/\s+/g, ' ').trim();
   return { triggered: true, instruction };
+}
+
+/**
+ * Markers that begin a comment the BOT itself rendered (panel, acks,
+ * disambiguation reply, agent progress). A comment starting with any of these
+ * is never a human instruction — used to break self-trigger loops (#247 UX.20).
+ */
+const BOT_COMMENT_PREFIXES = [
+  '👋', // disambiguation "which sub-issue?" reply
+  '✅', // "✅ Updated — PR #…" ack / "✅ **ABCA orchestration complete**" panel
+  '❌', // failure reply
+  '⚠️', // "finished with failures" panel
+  '🔄', // in-progress panel
+  '🤖', // agent progress ("🤖 Starting…")
+  '🖼️', // preview screenshot comment
+  '🔗', // "PR opened" / combined-PR
+] as const;
+
+/** True when ``body`` is one of the bot's own rendered comments (loop guard). */
+export function isBotAuthoredComment(body: string): boolean {
+  const trimmed = body.trimStart();
+  return BOT_COMMENT_PREFIXES.some((p) => trimmed.startsWith(p));
 }
 
 /**

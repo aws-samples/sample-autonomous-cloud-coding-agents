@@ -19,6 +19,7 @@
 
 import {
   buildIterationInstruction,
+  isBotAuthoredComment,
   parseCommentTrigger,
 } from '../../../src/handlers/shared/orchestration-comment-trigger';
 
@@ -69,6 +70,45 @@ describe('parseCommentTrigger', () => {
     const t = parseCommentTrigger('@bgagent do X and @bgagent also Y');
     expect(t.triggered).toBe(true);
     expect(t.instruction).toBe('do X and also Y');
+  });
+
+  // #247 UX.20 — the self-trigger infinite loop. The bot's OWN comments must
+  // never re-trigger it, even when (esp. when) they contain a literal @bgagent.
+  describe('self-comment guard (#247 UX.20 loop prevention)', () => {
+    test('the disambiguation reply does NOT trigger, even though it embeds "@bgagent ABCA-123:"', () => {
+      // This EXACT body spammed ~50 replies live: it starts with 👋 and contains
+      // a literal @bgagent example, which the old regex re-matched → loop.
+      const body = '👋 I couldn\'t tell which sub-issue that\'s about.\n\nOtherwise, comment on the '
+        + 'specific sub-issue, or name it here — e.g. `@bgagent ABCA-123: <what to change>`. The sub-issues are:';
+      expect(parseCommentTrigger(body).triggered).toBe(false);
+      expect(isBotAuthoredComment(body)).toBe(true);
+    });
+
+    test('all bot template prefixes are recognized as bot-authored (never trigger)', () => {
+      for (const body of [
+        '👋 That could apply to more than one sub-issue…',
+        '✅ Updated — PR #193.',
+        '✅ **ABCA orchestration complete**',
+        '❌ I made the change, but the build/tests didn\'t pass.',
+        '⚠️ **ABCA orchestration finished with failures**',
+        '🔄 **ABCA orchestration** · 1/3 complete',
+        '🤖 Starting on this issue…',
+        '🖼️ **Preview screenshot**',
+        '🔗 PR opened: https://github.com/o/r/pull/9',
+      ]) {
+        expect(isBotAuthoredComment(body)).toBe(true);
+        expect(parseCommentTrigger(body).triggered).toBe(false);
+      }
+    });
+
+    test('a genuine human @bgagent comment is NOT misclassified as bot-authored', () => {
+      expect(isBotAuthoredComment('@bgagent for the footer change the tagline')).toBe(false);
+      expect(parseCommentTrigger('@bgagent for the footer change the tagline').triggered).toBe(true);
+    });
+
+    test('leading whitespace before a bot marker is still caught', () => {
+      expect(isBotAuthoredComment('  \n✅ Updated — PR #193.')).toBe(true);
+    });
   });
 });
 
