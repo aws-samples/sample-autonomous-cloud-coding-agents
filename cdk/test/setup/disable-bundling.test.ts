@@ -41,3 +41,28 @@ describe('global Lambda bundling disable', () => {
     expect(stack.bundlingRequired).toBe(false);
   });
 });
+
+describe('per-test bundling opt-out (#366)', () => {
+  // The documented escape hatch for a test that needs real bundled-asset output
+  // is `postCliContext`, NOT constructor `context`. CDK's
+  // `App.loadContext(props.context, props.postCliContext)` applies
+  // `props.context` first, overwrites it with CDK_CONTEXT_JSON (which the global
+  // disable sets), then applies `postCliContext` last — so only the latter wins.
+  // These lock that precedence contract against a future CDK reordering; without
+  // them the one supported opt-out path is unguarded.
+  it('re-enables bundling via postCliContext (the documented opt-out)', () => {
+    const app = new App({ postCliContext: { 'aws:cdk:bundling-stacks': ['**'] } });
+    const stack = new Stack(app, 'OptOutProbe', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    expect(stack.bundlingRequired).toBe(true);
+  });
+
+  it('does NOT re-enable bundling via constructor context (env var clobbers it)', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': ['**'] } });
+    const stack = new Stack(app, 'ContextOptOutProbe', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    expect(stack.bundlingRequired).toBe(false);
+  });
+});
