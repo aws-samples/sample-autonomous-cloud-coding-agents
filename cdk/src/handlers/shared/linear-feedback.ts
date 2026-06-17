@@ -126,6 +126,13 @@ query IssueReactions($issueId: String!) {
 }
 `.trim();
 
+/** Read a COMMENT's reactions (id + emoji) — to swap the comment's bgagent marker (#247 UX.21). */
+const COMMENT_REACTIONS_QUERY = `
+query CommentReactions($commentId: String!) {
+  comment(id: $commentId) { reactions { id emoji } }
+}
+`.trim();
+
 /**
  * The bgagent status-marker emojis we manage on the PARENT epic. Mirrors
  * ``_BGAGENT_EMOJIS`` in ``agent/src/linear_reactions.py``. Only these are
@@ -432,6 +439,41 @@ export async function swapIssueReaction(
 
   if (targetPresent) return true; // already the only marker after the deletes above
   return (await graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji })).ok;
+}
+
+/**
+ * Swap the bgagent status marker on a COMMENT (👀 → ✅/❌), so the trigger
+ * comment shows ONE marker reflecting the outcome — mirrors
+ * {@link swapIssueReaction} but on a comment (#247 UX.21). The 👀 lands at
+ * receipt ({@link reactToComment}); when the iteration settles we swap it for
+ * ✅ (success) / ❌ (failure) so the comment itself reads done at a glance, not
+ * just the threaded reply. Queries the comment's reactions, deletes every
+ * bgagent marker except the target, adds the target if absent. Only bgagent
+ * emojis (👀/✅/❌) are removed — a human's reaction is never touched.
+ * Idempotent (a reconciler redelivery re-converges to the same single marker).
+ * Best-effort; returns true if the target marker is present afterwards.
+ */
+export async function swapCommentReaction(
+  ctx: LinearFeedbackContext,
+  commentId: string,
+  emoji: string,
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+
+  const data = await graphqlData(token, COMMENT_REACTIONS_QUERY, { commentId });
+  const reactions = ((data?.comment as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
+
+  let targetPresent = false;
+  for (const r of reactions) {
+    if (r.emoji === emoji) { targetPresent = true; continue; }
+    if (BGAGENT_EMOJIS.has(r.emoji)) {
+      await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id });
+    }
+  }
+
+  if (targetPresent) return true;
+  return (await graphqlRequest(token, REACTION_CREATE_ON_COMMENT_MUTATION, { commentId, emoji })).ok;
 }
 
 /**
