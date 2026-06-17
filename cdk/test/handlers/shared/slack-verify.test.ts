@@ -84,6 +84,25 @@ describe('verifySlackSignature', () => {
 
     expect(verifySlackSignature(signingSecret, sig, ts, 'tampered-body')).toBe(false);
   });
+
+  // Empty-secret fail-open guard, mirroring the GitHub/Linear verifiers:
+  // HMAC('', input) is computable by anyone — an empty signing secret must
+  // never produce an accepted signature.
+  test('rejects empty signingSecret even with a matching empty-key HMAC', () => {
+    const ts = currentTimestamp();
+    const body = 'token=abc&command=/bgagent&text=help';
+    const forged = 'v0=' + crypto.createHmac('sha256', '').update(`v0:${ts}:${body}`).digest('hex');
+
+    expect(verifySlackSignature('', forged, ts, body)).toBe(false);
+  });
+
+  test('rejects whitespace-only signingSecret', () => {
+    const ts = currentTimestamp();
+    const body = 'token=abc&command=/bgagent&text=help';
+    const forged = 'v0=' + crypto.createHmac('sha256', '   ').update(`v0:${ts}:${body}`).digest('hex');
+
+    expect(verifySlackSignature('   ', forged, ts, body)).toBe(false);
+  });
 });
 
 describe('verifySlackRequest', () => {

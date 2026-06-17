@@ -59,13 +59,14 @@ export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions (see SlackIntegration)
  * - ``linear``: Linear label-triggered submissions (see LinearIntegration)
+ * - ``jira``: Jira Cloud label-triggered submissions (see JiraIntegration)
  *
  * Narrowed from ``string`` so switches and predicates that read
  * ``channel_source`` get exhaustiveness checking at compile time; matches the
  * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
  * Keep in sync with ``cli/src/types.ts::ChannelSource``.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /**
  * Full task record as stored in DynamoDB.
@@ -166,6 +167,15 @@ export interface TaskRecord {
    * dispatch fires successfully.
    */
   readonly github_comment_id?: number;
+  /**
+   * Event ID of the terminal event whose Linear final-status comment
+   * was successfully posted (fan-out plane). Linear has no comment
+   * edit API, so the dispatcher is post-once: this marker makes the
+   * post idempotent across partial-batch Lambda retries (a sibling
+   * channel's infra rejection re-runs every dispatcher for the
+   * record). Absent until the first successful post.
+   */
+  readonly linear_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).

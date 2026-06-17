@@ -502,7 +502,8 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
     if (statusCommentId) {
       ok = (await upsertStatusComment(ctx, parentLinearIssueId, body, statusCommentId)) !== null;
     } else {
-      ok = await postIssueComment(ctx, parentLinearIssueId, body);
+      // postIssueComment now returns a LinearPostResult (upstream #311/#332).
+      ok = (await postIssueComment(ctx, parentLinearIssueId, body)).ok;
     }
   } catch (err) {
     logger.warn('Parent rollup comment threw (non-fatal)', {

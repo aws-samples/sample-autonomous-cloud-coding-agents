@@ -24,7 +24,7 @@ import { ulid } from 'ulid';
 import { VALID_APPROVAL_SCOPE_PREFIXES, parseApprovalScope } from './shared/approval-scope';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
+import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { ApprovalRequest, ApprovalResponse, ApprovalScope } from './shared/types';
 
@@ -142,7 +142,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ExpressionAttributeValues: {
           ':one': 1,
           ':max': APPROVE_RATE_LIMIT_PER_MINUTE,
-          ':ttl': nowEpoch + 120,
+          ':ttl': nowEpoch + RATE_LIMIT_ROW_TTL_SECONDS,
         },
       }));
     } catch (err: unknown) {

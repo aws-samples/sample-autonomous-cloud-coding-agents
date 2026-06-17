@@ -24,7 +24,7 @@ import { ulid } from 'ulid';
 import { scanDenyReason } from './shared/deny-reason-scanner';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
+import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
 
@@ -123,7 +123,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ExpressionAttributeValues: {
           ':one': 1,
           ':max': DENY_RATE_LIMIT_PER_MINUTE,
-          ':ttl': nowEpoch + 120,
+          ':ttl': nowEpoch + RATE_LIMIT_ROW_TTL_SECONDS,
         },
       }));
     } catch (err: unknown) {

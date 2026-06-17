@@ -311,7 +311,8 @@ export async function screenWithGuardrail(text: string, taskId: string): Promise
 // ---------------------------------------------------------------------------
 
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const SECRET_CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = SECRET_CACHE_TTL_MINUTES * 60 * 1000; // 5 minutes
 
 const smClient = new SecretsManagerClient({});
 
@@ -424,7 +425,7 @@ export async function fetchGitHubIssue(
     logger.warn('GitHub issue fetch error', {
       repo, issue_number: issueNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub issue fetch is optional hydration; null skips issue context without failing the task
   }
 }
 
@@ -559,7 +560,7 @@ async function fetchReviewCommentsGraphQL(
     logger.warn('GitHub GraphQL review threads fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- review-thread fetch is optional; empty list degrades PR context without failing hydration
   }
 
   return comments;
@@ -685,7 +686,7 @@ export async function fetchGitHubPullRequest(
     logger.warn('GitHub PR fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub PR fetch is optional hydration; null skips PR context without failing the task
   }
 }
 
@@ -699,8 +700,11 @@ export async function fetchGitHubPullRequest(
  * @param text - the input text.
  * @returns the estimated token count.
  */
+/** Rough token estimate: ~4 chars per token for English text. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 /**
