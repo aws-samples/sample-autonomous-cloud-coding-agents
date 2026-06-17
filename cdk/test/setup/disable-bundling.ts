@@ -36,8 +36,12 @@
 // var beats constructor `context` — `new App({ context: { 'aws:cdk:bundling-
 // stacks': ['**'] } })` does NOT re-enable bundling (the env var clobbers it).
 //
-// If a test ever needs real bundled assets (e.g. asserting on an asset hash /
-// S3 key), it must opt out via `postCliContext` (which wins over the env var),
+// This does NOT stop tests from synthesizing — `Template.fromStack()` still
+// runs a full synth; it only skips the esbuild asset-bundling step within that
+// synth. The opt-out below exists solely for the rare test that needs the
+// *bundled-asset output itself* (e.g. asserting on a real asset hash / S3 key),
+// where an unbundled synth would silently yield a placeholder value. Such a
+// test must opt out via `postCliContext` (which wins over the env var),
 // constructing its `App` with
 // `new App({ postCliContext: { 'aws:cdk:bundling-stacks': ['**'] } })`
 // (or the specific stack id).
