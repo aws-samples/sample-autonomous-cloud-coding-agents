@@ -155,6 +155,7 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
         )
     except requests.RequestException as e:
         log("WARN", f"linear_reactions: request failed ({type(e).__name__}): {e}")
+        # nosemgrep: py-silent-success-masking -- Linear reactions are best-effort on network blips
         return None
 
     if resp.status_code in (401, 403):

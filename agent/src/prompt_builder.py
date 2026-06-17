@@ -135,6 +135,12 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     For Linear-origin tasks, instruct the agent to post progress comments and
     transition state using the already-loaded Linear MCP tools. The tool names
     are stated explicitly so the agent doesn't grope for them.
+
+    Jira-origin tasks intentionally get NO addendum: Atlassian's Remote MCP
+    requires an interactive OAuth flow a headless agent can't complete, so the
+    MCP tools never load. Instructing the agent to use them just wastes turns.
+    Jira progress comments are posted out-of-band by ``jira_reactions`` (a REST
+    shim wired into the pipeline), not by the agent.
     """
     if config.channel_source != "linear":
         return ""

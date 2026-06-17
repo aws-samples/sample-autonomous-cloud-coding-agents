@@ -37,7 +37,7 @@ Before any deployment action, verify:
 
 ```bash
 export MISE_EXPERIMENTAL=1
-mise run //cdk:deploy
+mise //cdk:deploy
 ```
 
 After successful deployment, retrieve and display stack outputs:
@@ -52,7 +52,7 @@ Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `
 
 ```bash
 export MISE_EXPERIMENTAL=1
-mise run //cdk:diff
+mise //cdk:diff
 ```
 
 Summarize the changes: new resources, modified resources, removed resources. Flag any potentially destructive changes (resource replacements, security group changes).
@@ -63,14 +63,14 @@ Summarize the changes: new resources, modified resources, removed resources. Fla
 
 ```bash
 export MISE_EXPERIMENTAL=1
-mise run //cdk:destroy
+mise //cdk:destroy
 ```
 
 ## Synth Workflow
 
 ```bash
 export MISE_EXPERIMENTAL=1
-mise run //cdk:synth
+mise //cdk:synth
 ```
 
 Output goes to `cdk/cdk.out/`. Useful for reviewing generated CloudFormation templates.

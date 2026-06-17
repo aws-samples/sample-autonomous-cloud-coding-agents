@@ -88,8 +88,7 @@ constant in code; the drift check exists to catch that.
 Inline magic numbers are caught by linters in all three packages:
 
 - **TypeScript** — `@typescript-eslint/no-magic-numbers` in
-  `cdk/eslint.config.mjs` (advisory `warn` until the baseline is clean)
-  and `cli/eslint.config.mjs` (blocking `error`).
+  `cdk/eslint.config.mjs` and `cli/eslint.config.mjs` (blocking `error`).
 - **Python** — ruff `PLR2004` (magic-value-comparison) in
   `agent/pyproject.toml` (blocking).
 

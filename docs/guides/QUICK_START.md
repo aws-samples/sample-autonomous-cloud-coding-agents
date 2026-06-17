@@ -9,6 +9,7 @@ Install these before you begin:
 - **AWS account** with credentials configured (`aws configure`). If you use named profiles, set `AWS_PROFILE` before running any commands in this guide.
 - **Amazon Bedrock** — The agent invokes Claude through Bedrock. IAM `grantInvoke` in the CDK stack is required but **not sufficient**: your account must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for the model you use (including Anthropic first-time use where applicable, Marketplace subscription flow on first serverless use, and a valid payment method for Marketplace-backed models). See **Amazon Bedrock before your first task** after Step 3.
 - **Docker** - for building the agent container image
+- **Node.js** v20 or later (Node 24 is the supported maximum — see CI matrix)
 - **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
 - **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
 
@@ -73,7 +74,7 @@ const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
 });
 ```
 
-You can point that blueprint at your fork **without editing the stack** by setting one of the following before `mise run build` or `mise run //cdk:deploy` (same shell session):
+You can point that blueprint at your fork **without editing the stack** by setting one of the following before `mise run build` or `mise //cdk:deploy` (same shell session):
 
 ```bash
 export BLUEPRINT_REPO=your-username/agent-plugins
@@ -97,10 +98,10 @@ aws logs put-resource-policy \
 aws xray update-trace-segment-destination --destination CloudWatchLogs
 
 # Bootstrap CDK (first time only)
-mise run //cdk:bootstrap
+mise //cdk:bootstrap
 
 # Deploy the stack (~10 minutes)
-mise run //cdk:deploy
+mise //cdk:deploy
 ```
 
 The X-Ray commands are a one-time per-account setup. On a fresh account the `put-resource-policy` call is required first — without it, the `update-trace-segment-destination` command fails with an `AccessDeniedException` because X-Ray cannot write to the `aws/spans` log group. CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes - most of the time is spent building the Docker image and provisioning the AgentCore Runtime.

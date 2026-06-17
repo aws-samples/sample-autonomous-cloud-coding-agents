@@ -68,8 +68,8 @@ These must be run once per AWS account before first deployment. If the `put-reso
 
 Guide through:
 
-1. `mise run //cdk:bootstrap` — Bootstrap CDK (if not already done for this account/region)
-2. `mise run //cdk:deploy` — Deploy the stack (~9.5 minutes)
+1. `mise //cdk:bootstrap` — Bootstrap CDK (if not already done for this account/region)
+2. `mise //cdk:deploy` — Deploy the stack (~9.5 minutes)
 3. Retrieve stack outputs:
    ```bash
    aws cloudformation describe-stacks --stack-name backgroundagent-dev \

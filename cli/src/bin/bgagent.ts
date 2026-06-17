@@ -27,6 +27,7 @@ import { makeConfigureCommand } from '../commands/configure';
 import { makeDenyCommand } from '../commands/deny';
 import { makeEventsCommand } from '../commands/events';
 import { makeGithubCommand } from '../commands/github';
+import { makeJiraCommand } from '../commands/jira';
 import { makeLinearCommand } from '../commands/linear';
 import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
@@ -71,6 +72,7 @@ program.addCommand(makePoliciesCommand());
 program.addCommand(makeEventsCommand());
 program.addCommand(makeSlackCommand());
 program.addCommand(makeLinearCommand());
+program.addCommand(makeJiraCommand());
 program.addCommand(makeGithubCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
@@ -95,7 +97,9 @@ if (require.main === module) {
       } else {
         console.error('An unexpected error occurred.');
       }
-      process.exitCode = 1;
+      // CliError carries a per-failure-class exit code (e.g. 2 for
+      // wait-timeout) so scripts can branch on it; everything else is 1.
+      process.exitCode = err instanceof CliError ? err.exitCode : 1;
     })
     .finally(() => {
       // Node's global ``fetch`` (undici) keeps TCP sockets alive in a

@@ -105,7 +105,7 @@ async function fetchViewerPermission(repo: string, token: string): Promise<strin
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     logger.warn('GitHub GraphQL viewerPermission lookup failed', { repo, error: detail });
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- permission preflight is fail-open; undefined skips the check without blocking task creation
   }
 }
 

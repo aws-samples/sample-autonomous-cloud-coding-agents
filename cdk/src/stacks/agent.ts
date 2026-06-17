@@ -18,10 +18,9 @@
  */
 
 import * as path from 'path';
-import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -43,6 +42,7 @@ import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
+import { JiraIntegration } from '../constructs/jira-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -61,6 +61,15 @@ import { TaskTable } from '../constructs/task-table';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
+
+/** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
+const GUARDRAIL_NAME_MAX_LENGTH = 50;
+
+/** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
+const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
+
+/** Index of the stage segment in a split API Gateway URL. */
+const API_URL_STAGE_SEGMENT_INDEX = 3;
 
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
@@ -212,7 +221,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, GUARDRAIL_NAME_MAX_LENGTH),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
@@ -358,8 +367,8 @@ export class AgentStack extends Stack {
     // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
     // long-running tasks (approval waits, heavy builds) are not evicted.
     const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
-      idleRuntimeSessionTimeout: Duration.hours(8),
-      maxLifetime: Duration.hours(8),
+      idleRuntimeSessionTimeout: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
+      maxLifetime: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
     };
 
     // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
@@ -371,6 +380,16 @@ export class AgentStack extends Stack {
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
       lifecycleConfiguration: lifecycleConfiguration,
+      loggingConfigs: [
+        {
+          logType: agentcore.LogType.APPLICATION_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(applicationLogGroup),
+        },
+        {
+          logType: agentcore.LogType.USAGE_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(usageLogGroup),
+        },
+      ],
     });
 
     runtimeArnHolder = runtime.agentRuntimeArn;
@@ -467,11 +486,9 @@ export class AgentStack extends Stack {
     agentSessionRole.grantAssumeToComputeRole(runtime.role);
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
-    // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
-    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
+    // which needs CloudWatch Logs resource policy propagation. Re-enable via
+    // tracingEnabled: true once resolved.
 
     NagSuppressions.addResourceSuppressions(runtime, [
       {
@@ -698,7 +715,7 @@ export class AgentStack extends Stack {
     // Pre-filled manifest URL: opens Slack's "Create New App" page with all
     // URLs, scopes, and events pre-configured. User just clicks Create.
     const apiHost = Fn.select(2, Fn.split('/', taskApi.api.url));
-    const apiStage = Fn.select(3, Fn.split('/', taskApi.api.url));
+    const apiStage = Fn.select(API_URL_STAGE_SEGMENT_INDEX, Fn.split('/', taskApi.api.url));
     const apiBase = Fn.join('', ['https://', apiHost, '/', apiStage]);
 
     // Build the YAML manifest as a string using Fn.join (API URL tokens resolve at deploy time).
@@ -958,6 +975,88 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'LinearWorkspaceRegistryTableName', {
       value: linearIntegration.workspaceRegistryTable.tableName,
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
+    });
+
+    // --- Jira Cloud integration (inbound webhook + agent-side REST outbound) ---
+    const jiraIntegration = new JiraIntegration(this, 'JiraIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    // Agent runtime reads the per-tenant Jira OAuth token directly from
+    // Secrets Manager. The CLI (`bgagent jira setup`) creates
+    // `bgagent-jira-oauth-<cloudId>` secrets at install time; the secret
+    // JSON contains access_token, refresh_token, expires_at, and the
+    // OAuth client_id/client_secret. The orchestrator passes
+    // `jira_oauth_secret_arn` to the agent via task.channel_metadata,
+    // so the agent looks up the exact ARN — no discovery needed.
+    //
+    // Agent has GetSecretValue ONLY — no Put. Same trust model as the
+    // Linear adapter: a compromised agent must not be able to overwrite
+    // any tenant's OAuth bundle. Lambdas (trusted code in this stack)
+    // own the in-place refresh path; the agent proceeds with whatever
+    // token Lambdas have most-recently written.
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
+    // grant into the orchestrator so the concurrency-cap rejection path
+    // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
+    // comment. The orchestrator only resolves a token when
+    // `task.channel_source === 'jira'`, but the IAM grant is unconditional
+    // (per-tenant secrets are created lazily by setup). Put is needed because
+    // resolving an expiring token refreshes it in place (the orchestrator is
+    // a trusted Lambda; unlike the agent it owns the rotated-token write-back).
+    jiraIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
+    orchestrator.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    new CfnOutput(this, 'JiraWebhookSecretArn', {
+      value: jiraIntegration.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the Jira webhook signing secret — populate via `bgagent jira setup`',
+    });
+
+    new CfnOutput(this, 'JiraProjectMappingTableName', {
+      value: jiraIntegration.projectMappingTable.tableName,
+      description: 'Name of the DynamoDB Jira project → repo mapping table',
+    });
+
+    new CfnOutput(this, 'JiraUserMappingTableName', {
+      value: jiraIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Jira user mapping table',
+    });
+
+    new CfnOutput(this, 'JiraWorkspaceRegistryTableName', {
+      value: jiraIntegration.workspaceRegistryTable.tableName,
+      description: 'Name of the DynamoDB Jira workspace registry — `bgagent jira setup` writes a row per OAuth-installed tenant',
     });
 
     // --- Fan-out plane consumer ---

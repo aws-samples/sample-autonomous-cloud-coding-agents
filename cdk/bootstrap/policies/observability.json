@@ -82,6 +82,28 @@
     },
     {
       "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:PutBucketTagging",
+        "s3:GetBucketTagging"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::backgroundagent-dev-*",
+        "arn:aws:s3:::backgroundagent-dev-*/*"
+      ],
+      "Sid": "S3ApplicationBuckets"
+    },
+    {
+      "Action": [
         "kms:CreateGrant",
         "kms:Decrypt",
         "kms:DescribeKey",

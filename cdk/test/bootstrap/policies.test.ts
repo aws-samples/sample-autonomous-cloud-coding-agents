@@ -105,10 +105,13 @@ describe('IaCRole-ABCA-Application', () => {
     expect(sids).toEqual([
       'DynamoDB',
       'Lambda',
+      'LambdaEventSourceMappings',
       'APIGateway',
       'Cognito',
       'WAFv2',
       'EventBridge',
+      'SQS',
+      'CloudFront',
       'SecretsManager',
       'SecretsManagerAccountLevel',
     ]);
@@ -134,11 +137,13 @@ describe('IaCRole-ABCA-Application', () => {
     expect(prefixes).toEqual(
       new Set([
         'apigateway',
+        'cloudfront',
         'cognito-idp',
         'dynamodb',
         'events',
         'lambda',
         'secretsmanager',
+        'sqs',
         'wafv2',
       ]),
     );
@@ -169,6 +174,7 @@ describe('IaCRole-ABCA-Observability', () => {
       'BedrockGuardrailsAndLogging',
       'CloudWatchLogsAndDashboards',
       'S3CDKAssets',
+      'S3ApplicationBuckets',
       'KMSForCDKAssets',
       'ECRForDockerAssets',
       'ECRAuthToken',

@@ -266,7 +266,7 @@ export async function getRegistryRow(
       linear_workspace_id: linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- transient DDB throttle degrades to "workspace not in registry"; avoids webhook retry storm
   }
 
   return parseRegistryRow(result.Item, linearWorkspaceId);
@@ -344,7 +344,7 @@ export async function getOauthSecret(
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- lenient OAuth fetch for task hydration; strict variant getOauthSecretStrict rethrows SM errors
   }
 }
 
@@ -377,7 +377,7 @@ function parseOauthSecret(secretString: string, secretArn: string): StoredOauthT
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- corrupt secret JSON is logged ERROR; null triggers re-onboard path, not a masked infra failure
   }
   const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
     (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,

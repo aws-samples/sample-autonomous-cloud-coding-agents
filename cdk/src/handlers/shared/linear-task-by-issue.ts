@@ -17,10 +17,9 @@
  *  SOFTWARE.
  */
 
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { TaskTable } from '../../constructs/task-table';
+import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { TaskTable } from '../../constructs/task-table';
 
 /**
  * The fields the #247 UX.3 standalone comment trigger needs from the newest

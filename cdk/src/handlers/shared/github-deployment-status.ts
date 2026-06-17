@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import { isValidRepo } from './validation';
+
 /**
  * Subset of GitHub's `deployment_status` webhook payload that the
  * screenshot pipeline reads. Shared between the receiver (HMAC verify,
@@ -100,6 +102,16 @@ export function validateDeploymentStatusPayload(
     || typeof environment !== 'string' || environment.length === 0
     || typeof repoFullName !== 'string' || repoFullName.length === 0
   ) {
+    return null;
+  }
+
+  // Shape checks beyond presence: repoFullName and sha are interpolated
+  // into the GitHub API URL and the S3 object key downstream. The payload
+  // is HMAC-verified so this is defense-in-depth, not an exploit fix —
+  // but a malformed value should fail closed here rather than produce a
+  // bad URL or object key. (`isValidRepo` enforces `owner/repo`; GitHub
+  // sends full 40-char hex SHAs, accept abbreviated ones defensively.)
+  if (!isValidRepo(repoFullName) || !/^[0-9a-f]{7,40}$/i.test(sha)) {
     return null;
   }
 

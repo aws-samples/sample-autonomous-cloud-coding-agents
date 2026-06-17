@@ -57,12 +57,13 @@ export type TaskStatusType =
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions
  * - ``linear``: Linear label-triggered submissions
+ * - ``jira``: Jira Cloud label-triggered submissions
  *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
 export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
@@ -366,6 +367,22 @@ export interface LinearLinkResponse {
   readonly linked_at?: string;
 }
 
+/** Jira link response from POST /v1/jira/link.
+ *
+ * Mirrors LinearLinkResponse semantics: `dry_run: true` returns the
+ * identity attached to the code without writing. The CLI uses dry-run
+ * to render a preview before the user confirms. `linked_at` is omitted
+ * from the dry-run response. */
+export interface JiraLinkResponse {
+  readonly dry_run?: boolean;
+  readonly jira_cloud_id: string;
+  readonly jira_site_url?: string;
+  readonly jira_account_id: string;
+  readonly jira_user_name?: string;
+  readonly jira_user_email?: string;
+  readonly linked_at?: string;
+}
+
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;
@@ -388,6 +405,16 @@ export interface Credentials {
 
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+/**
+ * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
+ * (no ``--workflow``/``--pr``/``--review-pr``) maps to this workflow — the
+ * old ``new_task`` default that clones, builds, and opens a PR. Also used by
+ * the formatters to suppress a redundant "Workflow:" line when the resolved
+ * workflow is just the default. Hoisted to a single constant so the literal
+ * is not duplicated across ``submit.ts`` and ``format.ts``.
+ */
+export const DEFAULT_CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 // ---------------------------------------------------------------------------
 // Cedar HITL approval types — mirrored from

@@ -464,6 +464,11 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
  * persistence bug that risks a duplicate comment on the next event
  * (logged at ERROR with a dedicated ``FANOUT_GITHUB_PERSIST_FAILED``
  * error_id so operators can alarm).
+ *
+ * NOTE for new channels: prefer ``saveDispatchMarker`` (below), which owns
+ * the shared never-throw / benign-CCF classification. This function predates
+ * it and keeps its established log event names (``persist_benign_evicted``
+ * / ``persist_failed``) because operators may filter on them.
  */
 async function saveCommentState(
   taskId: string,
@@ -503,6 +508,77 @@ async function saveCommentState(
  *  rather than ``instanceof`` keeps the check decoupled from the
  *  specific SDK client class the DocumentClient wraps. */
 const CONDITIONAL_CHECK_FAILED = 'ConditionalCheckFailedException';
+
+/**
+ * Shared post-once / dedup marker writer for channel dispatchers. Both the
+ * GitHub comment-id persistence and the Linear post-once marker share the
+ * same load-bearing invariant: a successful external post must NEVER turn
+ * into a batch retry because the marker write failed (the retry IS the
+ * duplicate the marker exists to prevent). So this helper never throws —
+ * it classifies the failure instead:
+ *
+ *   - ConditionalCheckFailedException → benign INFO (TTL eviction, or a
+ *     sibling invocation won the race; its post is the surviving one).
+ *   - anything else → ERROR with the channel's ``error_id`` so operators
+ *     can alarm on "next event/retry may duplicate" distinctly.
+ */
+async function saveDispatchMarker(opts: {
+  readonly taskId: string;
+  readonly updateExpression: string;
+  readonly conditionExpression: string;
+  readonly values: Record<string, unknown>;
+  readonly channel: string;
+  readonly errorId: string;
+  readonly logContext?: Record<string, unknown>;
+}): Promise<void> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { task_id: opts.taskId },
+      UpdateExpression: opts.updateExpression,
+      ExpressionAttributeValues: opts.values,
+      ConditionExpression: opts.conditionExpression,
+    }));
+  } catch (err) {
+    const name = (err as Error)?.name;
+    if (name === CONDITIONAL_CHECK_FAILED) {
+      logger.info(`[fanout/${opts.channel}] marker condition failed — benign (eviction or sibling race)`, {
+        event: `fanout.${opts.channel}.marker_condition_failed`,
+        task_id: opts.taskId,
+        ...opts.logContext,
+      });
+      return;
+    }
+    logger.error(`[fanout/${opts.channel}] marker persist failed — next event/retry may duplicate`, {
+      event: `fanout.${opts.channel}.marker_persist_failed`,
+      error_id: opts.errorId,
+      task_id: opts.taskId,
+      error_name: name,
+      error: err instanceof Error ? err.message : String(err),
+      ...opts.logContext,
+    });
+  }
+}
+
+/**
+ * Persist the post-once marker after a successful Linear final-status
+ * comment (see ``dispatchToLinear``). Linear has no comment-edit API, so
+ * the marker is what makes the post idempotent across partial-batch
+ * retries.
+ */
+async function saveLinearCommentState(taskId: string, eventId: string): Promise<void> {
+  await saveDispatchMarker({
+    taskId,
+    updateExpression: 'SET linear_final_comment_event_id = :eid',
+    conditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_final_comment_event_id)',
+    values: { ':eid': eventId },
+    channel: 'linear',
+    errorId: 'FANOUT_LINEAR_PERSIST_FAILED',
+    logContext: { event_id: eventId },
+  });
+}
 
 /**
  * Resolve the GitHub comment target for this task. Prefers ``pr_number``
@@ -866,14 +942,20 @@ function formatDuration(seconds: number): string {
  *      ``channel_metadata``. Skip if either is missing — defensive,
  *      shouldn't happen for properly-admitted Linear tasks.
  *   4. Render the comment + post via the existing ``postIssueComment``
- *      helper, which itself swallows network/auth errors and returns
- *      false rather than throwing.
+ *      helper, which never throws and classifies failures as
+ *      retryable (network, timeout, 5xx/429) or terminal (auth,
+ *      GraphQL errors, unresolvable token).
  *
- * Failure handling: ``postIssueComment`` is best-effort — a Linear API
- * outage logs and returns false rather than throwing. We reflect that
- * outcome in the dispatcher log but never reject the dispatcher
- * promise: a failed Linear comment shouldn't trigger ``routeEvent``'s
- * batch-retry path because retrying won't fix Linear's API.
+ * Failure handling: terminal failures log-and-resolve — retrying won't
+ * fix a revoked workspace or a bad issue id, and burning Lambda
+ * retries on them would only delay sibling channels. Retryable
+ * failures THROW so ``routeEvent`` records an infra rejection and the
+ * record lands in ``batchItemFailures`` for a Lambda retry — without
+ * this, a 30-second Linear blip permanently loses the final-status
+ * comment, which for the agent-crash case (#239) is the user's only
+ * completion signal. The retry is idempotent: the post-once marker
+ * below is persisted only after a successful post, so a re-run either
+ * posts the missing comment or short-circuits on the marker.
  */
 async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   const registryTableName = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
@@ -921,6 +1003,21 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Idempotency across partial-batch retries: Linear has no comment
+  // edit API, so a re-run of this dispatcher (e.g. a sibling channel's
+  // infra rejection pushed the whole stream record into
+  // ``batchItemFailures``) would post a duplicate final-status comment.
+  // The marker is persisted after the first successful post below.
+  if (task.linear_final_comment_event_id) {
+    logger.info('[fanout/linear] final comment already posted — skipping (idempotent retry)', {
+      event: 'fanout.linear.already_posted',
+      task_id: task.task_id,
+      posted_event_id: task.linear_final_comment_event_id,
+      event_id: event.event_id,
+    });
+    return;
+  }
+
   // Derive an error title from `error_message` via the shared classifier.
   // Same data the API surfaces as `error_classification.title` —
   // "Hit max-turns cap", "Insufficient GitHub permissions", etc.
@@ -962,7 +1059,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     errorTitle: classification?.title ?? null,
   });
 
-  const ok = await postIssueComment(
+  const postResult = await postIssueComment(
     { linearWorkspaceId: workspaceId, registryTableName },
     issueId,
     body,
@@ -973,7 +1070,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   // on the specific failure reason (auth, network, etc.); this
   // backstop ensures a steady drip of post-failures shows up in the
   // dispatcher's own log channel for cross-channel alarms.
-  if (ok) {
+  if (postResult.ok) {
     logger.info('[fanout/linear] comment dispatched', {
       event: 'fanout.linear.dispatched',
       task_id: task.task_id,
@@ -981,15 +1078,28 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       event_type: event.event_type,
       posted: true,
     });
+    await saveLinearCommentState(task.task_id, event.event_id);
   } else {
-    logger.warn('[fanout/linear] postIssueComment returned false — Linear API path failed', {
+    logger.warn('[fanout/linear] postIssueComment failed — Linear API path failed', {
       event: 'fanout.linear.post_failed',
       error_id: 'FANOUT_LINEAR_POST_FAILED',
       task_id: task.task_id,
       issue_id: issueId,
       event_type: event.event_type,
       posted: false,
+      retryable: postResult.retryable,
     });
+    if (postResult.retryable) {
+      // Escalate to routeEvent's Promise.allSettled so the record
+      // enters batchItemFailures and Lambda retries. Safe because the
+      // marker above was NOT persisted — the retry posts the missing
+      // comment or, if a concurrent run won, short-circuits on the
+      // marker. Terminal failures stay log-only: a retry cannot fix
+      // them and would burn the event-source's bounded retryAttempts.
+      throw new Error(
+        `[fanout/linear] transient Linear post failure for task ${task.task_id} — escalating for batch retry`,
+      );
+    }
   }
 
   // #247 UX.3: a STANDALONE comment-triggered iteration (carries
