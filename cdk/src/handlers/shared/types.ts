@@ -95,6 +95,15 @@ export interface TaskRecord {
   readonly agent_heartbeat_at?: string;
   readonly execution_id?: string;
   readonly pr_url?: string;
+  /**
+   * Public CloudFront URL of the deploy-preview screenshot captured for this
+   * task's PR (#247). Persisted best-effort by the screenshot pipeline
+   * (github-webhook-processor) keyed off the taskId in the deploy branch, so
+   * the orchestration reconciler can embed the INTEGRATION node's combined
+   * preview in the parent epic panel. Absent until a preview deploys (and for
+   * tasks with no UI to screenshot).
+   */
+  readonly screenshot_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
   readonly channel_source: ChannelSource;

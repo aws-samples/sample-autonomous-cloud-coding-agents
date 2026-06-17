@@ -1111,6 +1111,10 @@ export class AgentStack extends Stack {
       // workspace registry so token resolution reuses the per-workspace
       // OAuth secrets created by `bgagent linear setup`.
       linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      // #247 (task #57): persist screenshot_url on the deploy task so the
+      // orchestration reconciler can embed the integration node's combined
+      // preview in the parent epic panel.
+      taskTable: taskTable.table,
     });
 
     // #247 A6 re-stack is NOT a GitHub-webhook path. It runs inside the
