@@ -19,7 +19,7 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
@@ -34,6 +34,7 @@ import {
   findLinearIssueByIdentifier,
 } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
+import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
 
 const s3 = new S3Client({});
@@ -262,11 +263,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   const publicUrl = `https://${SCREENSHOT_PUBLIC_HOST}/${key}`;
   const commentBody = renderCommentBody(publicUrl, previewUrl);
 
-  // #247: persist the screenshot URL on the deploy task's record (keyed by the
-  // taskId in the branch) so the orchestration reconciler can embed the
-  // integration node's combined preview in the parent epic panel. Best-effort,
-  // before the comment posts so a comment-post failure doesn't skip it.
-  await persistScreenshotUrl(pr.headRefName, publicUrl);
+  // #247: persist the screenshot + preview URLs on the deploy task's record
+  // (keyed by the taskId in the branch) so the orchestration reconciler can
+  // embed the integration node's combined preview in the parent epic panel.
+  // Best-effort, before the comment posts so a comment-post failure doesn't
+  // skip it. The return tells us whether this is the synthetic integration
+  // node — whose screenshot belongs in the panel only, never as a standalone
+  // Linear comment on the parent epic (#247 UX.16).
+  const { isIntegrationNode: isIntegrationDeploy } = await persistScreenshotUrl(
+    pr.headRefName,
+    publicUrl,
+    previewUrl,
+  );
 
   try {
     const result = await upsertTaskComment({
@@ -305,7 +313,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // load-bearing artifact; the Linear comment is bonus surface for
   // reviewers who live in Linear. Only fires when the registry table
   // is configured AND the PR carries a Linear identifier.
-  if (LINEAR_WORKSPACE_REGISTRY_TABLE) {
+  //
+  // #247 UX.16: the synthetic integration node has no Linear sub-issue of its
+  // own, so a Linear post here would resolve the parent-epic identifier from
+  // the PR title and land a "🖼️ Preview screenshot" comment ON THE PARENT —
+  // cluttering the maturing panel (which already embeds the combined preview
+  // via the persisted screenshot_url). Skip the Linear post for the integration
+  // node; the panel is the only Linear surface for the combined result.
+  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy) {
     // Branch-name first — it deterministically encodes this PR's own
     // issue (`bgagent/{taskId}/abca-151-...`). Title/body are ambiguous
     // fallbacks: in a stacked #247 orchestration the body often names a
@@ -517,19 +532,37 @@ async function findPullRequestForSha(
  * artifacts. Conditional on ``attribute_exists`` so we never resurrect a
  * TTL-reaped row.
  */
-async function persistScreenshotUrl(branchName: string, publicUrl: string): Promise<void> {
-  if (!TASK_TABLE) return;
+async function persistScreenshotUrl(
+  branchName: string,
+  publicUrl: string,
+  previewUrl: string,
+): Promise<{ isIntegrationNode: boolean }> {
+  const result = { isIntegrationNode: false };
+  if (!TASK_TABLE) return result;
   const taskId = extractTaskIdFromBranch(branchName);
-  if (!taskId) return;
+  if (!taskId) return result;
   try {
-    await ddb.send(new UpdateCommand({
+    // Persist BOTH the captured image URL and the live preview-deploy URL so
+    // the reconciler can render a clickable combined-preview deep-link in the
+    // panel (#247 UX.17). Return-on-values so we learn whether this deploy task
+    // is a synthetic integration node WITHOUT a second Get (#247 UX.16): the
+    // integration node's screenshot belongs in the PANEL only — it must NOT
+    // also post a standalone Linear comment on the parent epic.
+    const upd = await ddb.send(new UpdateCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
-      UpdateExpression: 'SET screenshot_url = :u',
+      UpdateExpression: 'SET screenshot_url = :u, screenshot_preview_url = :p',
       ConditionExpression: 'attribute_exists(task_id)',
-      ExpressionAttributeValues: { ':u': publicUrl },
+      ExpressionAttributeValues: { ':u': publicUrl, ':p': previewUrl },
+      ReturnValues: 'ALL_NEW',
     }));
-    logger.info('Persisted screenshot_url on task record', { task_id: taskId, public_url: publicUrl });
+    const subIssueId = upd.Attributes?.channel_metadata?.orchestration_sub_issue_id;
+    result.isIntegrationNode = typeof subIssueId === 'string' && isIntegrationNode(subIssueId);
+    logger.info('Persisted screenshot_url on task record', {
+      task_id: taskId,
+      public_url: publicUrl,
+      is_integration_node: result.isIntegrationNode,
+    });
   } catch (err) {
     // ConditionalCheckFailed = the task row is gone (TTL); anything else is a
     // transient DDB error. Either way the comments still posted — log + move on.
@@ -539,6 +572,7 @@ async function persistScreenshotUrl(branchName: string, publicUrl: string): Prom
       error: err instanceof Error ? err.message : String(err),
     });
   }
+  return result;
 }
 
 function renderCommentBody(publicUrl: string, previewUrl: string): string {

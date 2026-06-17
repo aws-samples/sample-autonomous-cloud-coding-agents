@@ -35,12 +35,33 @@ class TestChannelPromptAddendum:
         addendum = _channel_prompt_addendum(
             _config(
                 channel_source="linear",
-                channel_metadata={"linear_issue_identifier": "ABC-42"},
+                channel_metadata={
+                    "linear_issue_id": "issue-uuid-1",
+                    "linear_issue_identifier": "ABC-42",
+                },
             )
         )
         assert "Linear issue progress updates" in addendum
         assert "mcp__linear-server__save_comment" in addendum
         assert "ABC-42" in addendum
+
+    def test_linear_integration_node_gets_no_addendum(self):
+        # #247 UX.16: the synthetic orchestration integration node is a Linear
+        # task but has NO real sub-issue — channel_metadata omits
+        # linear_issue_id. Without a target issue the agent would grope via the
+        # MCP and post its "Starting"/"PR opened" comments onto the PARENT epic,
+        # cluttering the maturing panel. No issue id → no progress addendum.
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={
+                    "orchestration_id": "orch_abc",
+                    "orchestration_sub_issue_id": "orch_abc__integration",
+                    "parent_linear_issue_id": "parent-uuid",
+                },
+            )
+        )
+        assert addendum == ""
 
     def test_jira_channel_gets_no_addendum(self):
         # Jira comments are posted out-of-band by jira_reactions (REST shim);
