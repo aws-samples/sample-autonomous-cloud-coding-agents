@@ -394,6 +394,51 @@ export class AgentStack extends Stack {
 
     runtimeArnHolder = runtime.agentRuntimeArn;
 
+    // --- AgentCore log-delivery: pin to the already-deployed identity ---
+    // The agentcore-alpha Runtime auto-creates AWS::Logs::DeliverySource +
+    // Delivery + DeliveryDestination for each loggingConfig. A construct-path
+    // rename across alpha builds CHURNED both the CFN logical IDs AND the
+    // account-scoped DeliverySource ``Name`` (live stack:
+    // ``RuntimeCDKSource…``/``cdk-{type}-source-…``; current synth:
+    // ``RuntimeApplicationLogsDeliverySource…``/``backgroundagentdevRuntime…``).
+    // Because a DeliverySource Name is account-unique, CFN's create-before-
+    // delete on the churned id hits ``AlreadyExists`` and rolls the whole stack
+    // back. Pin the two DeliverySources' logical IDs AND Names back to the
+    // deployed values so CFN sees them as the SAME resources (no-op update),
+    // not new ones. Log delivery is stateless routing config — no data risk.
+    // Best-effort lookup by child id; if a future alpha renames the children
+    // this silently no-ops (and a fresh stack just deploys clean).
+    // Pin BOTH the DeliverySources and the DeliveryDestinations (the two
+    // account-name-unique resource kinds) to their deployed logical IDs +
+    // Names, so the whole sub-tree updates in place. (The CfnDelivery links
+    // are not name-unique and Ref the pinned ids, so they follow for free.)
+    const pinLogResource = (childId: string, liveLogicalId: string, liveName: string): void => {
+      const res = runtime.node.tryFindChild(childId) as CfnResource | undefined;
+      if (!res) return;
+      res.overrideLogicalId(liveLogicalId);
+      res.addPropertyOverride('Name', liveName);
+    };
+    pinLogResource(
+      'ApplicationLogsDeliverySource',
+      'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
+      'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
+    );
+    pinLogResource(
+      'UsageLogsDeliverySource',
+      'RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22',
+      'cdk-usagelogs-source-backgroundagentdevRuntimeBC0AE9ED',
+    );
+    pinLogResource(
+      'ApplicationLogsDest',
+      'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8DestapplicationlogsE09F77DC',
+      'cdk-cwl-Destapplication-logs-dest-backgrounp454A95E829BF8A27',
+    );
+    pinLogResource(
+      'UsageLogsDest',
+      'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
+      'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
+    );
+
     // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
     // CFN escape hatch. /mnt/workspace mount backs the persistent cache
