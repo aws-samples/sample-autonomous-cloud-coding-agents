@@ -30,7 +30,8 @@ class TestResolveVerifyArgv:
 
     def test_quoted_args_preserved(self):
         assert resolve_verify_argv('make "target with spaces"', DEFAULT_BUILD_COMMAND) == [
-            "make", "target with spaces",
+            "make",
+            "target with spaces",
         ]
 
 
@@ -84,7 +85,8 @@ class TestIsVerifyCommandInert:
 
     def test_genuine_build_failure_is_NOT_inert(self):
         # Real compiler/test output, exited non-zero → meaningful gating signal.
-        assert is_verify_command_inert(2, "TypeError: cannot read property 'x'\n1 test failed") is False
+        real_failure = "TypeError: cannot read property 'x'\n1 test failed"
+        assert is_verify_command_inert(2, real_failure) is False
 
     def test_clean_exit_is_not_inert(self):
         assert is_verify_command_inert(0, "") is False

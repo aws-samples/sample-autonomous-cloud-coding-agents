@@ -19,6 +19,10 @@ if TYPE_CHECKING:
 DEFAULT_BUILD_COMMAND = "mise run build"
 DEFAULT_LINT_COMMAND = "mise run lint"
 
+# POSIX shell exit code for "command not found" — an inert build signal (the
+# configured verify command isn't installed), not a genuine build failure.
+SHELL_COMMAND_NOT_FOUND = 127
+
 
 def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     """True when a verify command did not actually RUN (vs ran-and-failed).
@@ -34,7 +38,7 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     A repo that genuinely fails its build returns some other non-zero code with
     real compiler/test output, which this does NOT flag.
     """
-    if returncode == 127:
+    if returncode == SHELL_COMMAND_NOT_FOUND:
         return True
     s = (stderr or "").lower()
     return (
