@@ -17,7 +17,28 @@
  *  SOFTWARE.
  */
 
-import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from '../../../src/handlers/shared/screenshot-url';
+import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from '../../../src/handlers/shared/screenshot-url';
+
+describe('extractTaskIdFromBranch (#247 — screenshot → parent panel)', () => {
+  test('pulls the taskId from a standard ABCA branch (2nd segment)', () => {
+    expect(extractTaskIdFromBranch('bgagent/01TASKID123/abca-300-book-with-points'))
+      .toBe('01TASKID123');
+  });
+  test('tolerates extra trailing segments (taskId is always 2nd)', () => {
+    expect(extractTaskIdFromBranch('bgagent/01TASKID123/abca-300/extra')).toBe('01TASKID123');
+  });
+  test('null for a non-ABCA branch (human / fork default / too few segments)', () => {
+    expect(extractTaskIdFromBranch('main')).toBeNull();
+    expect(extractTaskIdFromBranch('feature/foo')).toBeNull();
+    expect(extractTaskIdFromBranch('bgagent')).toBeNull();
+    expect(extractTaskIdFromBranch('bgagent//slug')).toBeNull(); // empty taskId
+  });
+  test('null for empty / nullish', () => {
+    expect(extractTaskIdFromBranch('')).toBeNull();
+    expect(extractTaskIdFromBranch(undefined)).toBeNull();
+    expect(extractTaskIdFromBranch(null)).toBeNull();
+  });
+});
 
 describe('buildScreenshotKey', () => {
   test('produces a screenshots/<owner>_<repo>/<sha>-<id>-<suffix>.png shape', () => {

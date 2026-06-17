@@ -17,7 +17,9 @@
  *  SOFTWARE.
  */
 
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
@@ -32,9 +34,16 @@ import {
   findLinearIssueByIdentifier,
 } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
-import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
 
 const s3 = new S3Client({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+// Optional — when set, the processor persists the screenshot's public URL onto
+// the deploy task's TaskRecord (keyed by the taskId in the deploy branch) so
+// the #247 orchestration reconciler can embed the integration node's combined
+// preview in the parent epic panel. Unset → persistence is skipped (the PR +
+// Linear comments still post).
+const TASK_TABLE = process.env.TASK_TABLE_NAME;
 
 const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
 // CloudFront distribution domain — `<dist>.cloudfront.net`. Used as
@@ -252,6 +261,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 
   const publicUrl = `https://${SCREENSHOT_PUBLIC_HOST}/${key}`;
   const commentBody = renderCommentBody(publicUrl, previewUrl);
+
+  // #247: persist the screenshot URL on the deploy task's record (keyed by the
+  // taskId in the branch) so the orchestration reconciler can embed the
+  // integration node's combined preview in the parent epic panel. Best-effort,
+  // before the comment posts so a comment-post failure doesn't skip it.
+  await persistScreenshotUrl(pr.headRefName, publicUrl);
 
   try {
     const result = await upsertTaskComment({
@@ -492,6 +507,40 @@ async function findPullRequestForSha(
 }
 
 /** Render the PR comment body. */
+/**
+ * #247: persist the captured screenshot's public URL onto the deploy task's
+ * TaskRecord, so the orchestration reconciler can embed the integration node's
+ * combined preview in the parent epic panel. Keyed by the taskId encoded in
+ * the deploy branch (``bgagent/{taskId}/…``). Best-effort and never throws —
+ * a non-ABCA branch (no taskId), an unset table, or a vanished record (TTL)
+ * just skips persistence; the PR + Linear comments are the load-bearing
+ * artifacts. Conditional on ``attribute_exists`` so we never resurrect a
+ * TTL-reaped row.
+ */
+async function persistScreenshotUrl(branchName: string, publicUrl: string): Promise<void> {
+  if (!TASK_TABLE) return;
+  const taskId = extractTaskIdFromBranch(branchName);
+  if (!taskId) return;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET screenshot_url = :u',
+      ConditionExpression: 'attribute_exists(task_id)',
+      ExpressionAttributeValues: { ':u': publicUrl },
+    }));
+    logger.info('Persisted screenshot_url on task record', { task_id: taskId, public_url: publicUrl });
+  } catch (err) {
+    // ConditionalCheckFailed = the task row is gone (TTL); anything else is a
+    // transient DDB error. Either way the comments still posted — log + move on.
+    logger.warn('Failed to persist screenshot_url (non-fatal)', {
+      event: 'screenshot.persist_failed',
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function renderCommentBody(publicUrl: string, previewUrl: string): string {
   // previewUrl is payload-derived; percent-encode its parens so a crafted
   // path can't break out of the markdown link and inject content into a
