@@ -1,20 +1,7 @@
 {
   "ignorePatterns": [
-    { "pattern": "^https?://localhost" },
-    { "pattern": "^https?://127\\.0\\.0\\.1" },
-    { "pattern": "^https?://example\\.com" },
-    { "pattern": "^https?://www\\.npmjs\\.com/package/", "_comment": "npmjs returns 403 to automated requests; retryOn429 does not cover this" },
+    { "pattern": "^https?://", "_comment": "External URLs are not checked: network/bot-block flakiness must not gate every PR (drift-prevention runs on all PRs). Only internal/relative links are validated." },
     { "pattern": "^/sample-autonomous-cloud-coding-agents/" },
     { "pattern": "^link$", "_comment": "Masks intentional placeholder in ADR-004 example prose" }
-  ],
-  "httpHeaders": [
-    {
-      "urls": ["https://github.com"],
-      "headers": { "Accept": "text/html" }
-    }
-  ],
-  "retryOn429": true,
-  "retryCount": 3,
-  "fallbackRetryDelay": "10s",
-  "aliveStatusCodes": [200, 206]
+  ]
 }

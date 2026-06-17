@@ -85,4 +85,4 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 After editing source docs, run `mise //docs:sync` or `mise //docs:build` to regenerate the site.
 
-To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal and external links. The same check runs automatically in CI on every pull request, as part of the build's drift-prevention step.
+To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal (relative) links. The same check runs automatically in CI on every pull request, as part of the build's drift-prevention step. External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
