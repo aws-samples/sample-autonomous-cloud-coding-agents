@@ -211,7 +211,9 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
     );
-    const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\(([^)]*)\)\)/s);
+    // Tolerate ruff's formatting of the frozenset: it may render single-line
+    // ``frozenset(("a", "b"))`` or multi-line with whitespace between the parens.
+    const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\s*\(([^)]*)\)\s*\)/s);
     expect(match).not.toBeNull();
     const agentWriteable = new Set(
       [...match![1].matchAll(/"([^"]+)"/g)].map(m => m[1]),
