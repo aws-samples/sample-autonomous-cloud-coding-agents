@@ -98,9 +98,33 @@ probes + mutation input validation, no migration code:
   ack within 10s is sufficient, which our processor can emit synchronously
   before the async spawn — same shape as today's 👀).
 
-Net: the spike de-risked reachability + the activity model and pinpointed the
-single enablement step, without committing to migration. Re-run the
-session-create + timed-activity sequence once the app is enabled.
+Net (first pass): the spike de-risked reachability + the activity model and
+pinpointed the single enablement step, without committing to migration.
+
+**Spike re-run (2026-06-17, after the app owner enabled "Agent session events")
+— the core risk is RESOLVED end-to-end:**
+
+- `agentSessionCreateOnIssue` now succeeds → session `status: active`.
+- **The 10s-vs-long-compute question is answered:** emit a `thought` at t+0
+  (status `active`), then **wait 14s with no further activity** → session
+  **stays `active`** (not stale/unresponsive). The 10s rule governs only the
+  *initial* ack; once a `thought` lands, an arbitrarily long gap before the
+  next activity is fine. ABCA's webhook can emit the `thought` synchronously
+  (exactly like today's 👀) and let the >10s async spawn proceed — **no
+  architectural conflict.**
+- **Full lifecycle derives correctly**, matching the mapping table below:
+  `thought`→active, `action`→active, `action`+result→active,
+  `response`→**complete**; on a second session `elicitation`→**awaitingInput**,
+  `error`→**error**. All five emittable types accepted; states auto-derive
+  from the last activity. (`AgentActivityContent` is a union —
+  `AgentActivityActionContent`/`…ElicitationContent`/`…ErrorContent`/etc. — so
+  each type persists as a distinct typed record.)
+
+Conclusion: the **trigger/ack half is fully validated** against the live
+Preview API. The remaining gate for an actual additive channel is unchanged —
+it's the per-issue-session vs. cross-issue-epic-rollup gap (engine stays ours)
+plus the Preview→GA stability wait, NOT any technical blocker we found. The
+spike issues were created + deleted; no migration code written.
 
 ### Why a channel, not a rewrite
 
