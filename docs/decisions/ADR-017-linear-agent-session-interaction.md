@@ -69,6 +69,39 @@ mapping cleanly onto what we already built:
 | "reply with guidance" retry (UX.9)   | `elicitation` + `prompted` webhook + conversation history |
 | panel header state (🔄/✅/⚠️)        | session state (active/complete/error) |
 
+### Preview-API spike (2026-06-17, UX.24)
+
+A time-boxed, no-infra spike validated the API surface against the deployed
+**app-actor** token (`bgagent`, workspace `maguireb`) — read-only schema
+probes + mutation input validation, no migration code:
+
+- **API reachable by our token.** Introspection confirms `agentActivityCreate`,
+  `agentSessionCreateOnIssue`/`OnComment`/`Create`, `AgentSession` (fields incl.
+  `status`, `issue`, `comment`, `appUser`), and `AgentActivityType` =
+  `thought, action, response, elicitation, error, prompt` — exactly the docs.
+- **Activity input shape verified callable.** `agentActivityCreate(input:
+  {agentSessionId, content: JSONObject, signal, ephemeral})` accepts our
+  `{type:'thought', body}` content — a call failed only on session-id lookup,
+  not schema/enablement, so the ack-emission half of the loop is proven.
+- **BLOCKER (config, not code):** `agentSessionCreateOnIssue` returns
+  `"Agent sessions are not enabled for this application."` The bgagent OAuth
+  app has the scopes + `actor=app` but has **not been enabled as an agent** in
+  its Linear Application settings. Per docs, enabling = edit the app at
+  *Settings → API → Applications*, enable webhooks, and select the **"Agent
+  session events"** category. App-owner action; no waitlist mentioned.
+- **The 10s-ack-vs-long-compute risk is therefore NOT yet proven end-to-end** —
+  it needs a real `agentSessionId`, which is gated on the enablement toggle
+  above. The pieces it depends on (immediate `thought` ack, then later
+  `action`/`response` activities) are individually confirmed callable; the
+  remaining unknown is purely whether Linear marks the session unresponsive if
+  our spawn exceeds 10s after the initial `thought` (docs say the `thought`
+  ack within 10s is sufficient, which our processor can emit synchronously
+  before the async spawn — same shape as today's 👀).
+
+Net: the spike de-risked reachability + the activity model and pinpointed the
+single enablement step, without committing to migration. Re-run the
+session-create + timed-activity sequence once the app is enabled.
+
 ### Why a channel, not a rewrite
 
 - The win is **real but partial**: agent sessions retire the brittle
