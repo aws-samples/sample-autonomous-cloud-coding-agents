@@ -24,6 +24,8 @@ import {
   deriveOrchestrationId,
   claimRollup,
   clearRollupClaim,
+  claimCommentAck,
+  loadOrchestration,
   findOrchestrationChildByBranch,
 } from '../../../src/handlers/shared/orchestration-store';
 import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
@@ -287,6 +289,53 @@ describe('clearRollupClaim — release the claim so a re-completing epic re-sett
     expect(cmd.input.Key).toMatchObject({ sub_issue_id: '#meta', orchestration_id: 'orch_1' });
     // No conditional — a no-op when already absent.
     expect(cmd.input.ConditionExpression).toBeUndefined();
+  });
+});
+
+describe('claimCommentAck — exactly-once per comment (#247 UX.20 redelivery dedup)', () => {
+  test('first delivery wins → true, conditional create-once on a per-comment SK + TTL', async () => {
+    const ddb = { send: jest.fn().mockResolvedValueOnce({}) };
+    const won = await claimCommentAck(ddb as never, TABLE, 'orch_1', 'cmt-9', NOW, 1781800000);
+    expect(won).toBe(true);
+    const cmd = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(cmd).toBeInstanceOf(UpdateCommand);
+    expect(cmd.input.Key).toMatchObject({ orchestration_id: 'orch_1', sub_issue_id: 'ack#cmt-9' });
+    expect(cmd.input.ConditionExpression).toContain('attribute_not_exists(orchestration_id)');
+    expect(cmd.input.ExpressionAttributeValues).toMatchObject({ ':ttl': 1781800000 });
+    // ``ttl`` is a DynamoDB reserved keyword — must be aliased, else the write
+    // 400s with ValidationException (live-caught: the unaliased form errored
+    // out the whole handler, silently dropping the comment).
+    expect(cmd.input.ExpressionAttributeNames).toMatchObject({ '#ttl': 'ttl' });
+    expect(cmd.input.UpdateExpression).toContain('#ttl');
+  });
+
+  test('redelivery of the same comment loses (ConditionalCheckFailed) → false, no throw', async () => {
+    const ddb = { send: jest.fn().mockRejectedValueOnce(Object.assign(new Error('c'), { name: 'ConditionalCheckFailedException' })) };
+    expect(await claimCommentAck(ddb as never, TABLE, 'orch_1', 'cmt-9', NOW, 1781800000)).toBe(false);
+  });
+
+  test('non-conditional error propagates', async () => {
+    const ddb = { send: jest.fn().mockRejectedValueOnce(new Error('throttle')) };
+    await expect(claimCommentAck(ddb as never, TABLE, 'orch_1', 'cmt-9', NOW, 1781800000)).rejects.toThrow('throttle');
+  });
+});
+
+describe('loadOrchestration — marker rows are not children (#247 UX.20)', () => {
+  test('excludes ack#<commentId> marker rows from children (only real sub-issues count)', async () => {
+    const ddb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Items: [
+          { orchestration_id: 'orch_1', sub_issue_id: '#meta', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1', child_count: 2 },
+          { orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', depends_on: [], child_status: 'succeeded' },
+          { orchestration_id: 'orch_1', sub_issue_id: 'orch_1__integration', depends_on: ['uuid-A'], child_status: 'succeeded' },
+          { orchestration_id: 'orch_1', sub_issue_id: 'ack#cmt-9', acked_at: NOW, ttl: 1781800000 }, // marker — must NOT be a child
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap).not.toBeNull();
+    const ids = snap!.children.map((c) => c.sub_issue_id).sort();
+    expect(ids).toEqual(['orch_1__integration', 'uuid-A']); // ack# row excluded; integration kept
   });
 });
 
