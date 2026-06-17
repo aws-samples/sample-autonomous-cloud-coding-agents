@@ -127,8 +127,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
             # still runs rather than failing setup; the predecessor's code
             # is likely in the default branch by now anyway.
             notes.append(
-                f"base branch '{config.base_branch}' not fetchable; "
-                "branched off default instead"
+                f"base branch '{config.base_branch}' not fetchable; branched off default instead"
             )
             log("SETUP", f"Base branch not found; creating {branch} off HEAD")
             run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
@@ -227,10 +226,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     # - #247 A4 stacked children: base_branch is the predecessor's branch
     #   (linear) or main (diamond) — the child's PR targets it.
     # - Otherwise: detect the repo default (main/master).
-    if config.base_branch:
-        default_branch = config.base_branch
-    else:
-        default_branch = detect_default_branch(config.repo_url, repo_dir)
+    default_branch = config.base_branch or detect_default_branch(config.repo_url, repo_dir)
 
     # Install prepare-commit-msg hook for code attribution
     _install_commit_hook(repo_dir)
