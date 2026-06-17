@@ -138,6 +138,15 @@ interface LinearCommentEvent {
     readonly issueId?: string;
     readonly issue?: { readonly id?: string };
     readonly userId?: string;
+    /**
+     * Set when this comment is a REPLY within a thread — the id of the thread
+     * ROOT (top-level) comment. Linear threads are one level deep, and
+     * commentCreate rejects a reply whose parentId is itself a reply ("Parent
+     * comment must be a top level comment"). So the ✅/❌ ack must reply to the
+     * ROOT, not to this comment when it's a reply (#247 — live-caught: a
+     * thread-reply @bgagent trigger had its ack silently dropped).
+     */
+    readonly parentId?: string;
     readonly [key: string]: unknown;
   };
   readonly actor?: { readonly id?: string; readonly name?: string };
@@ -647,7 +656,11 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const child = snapshot?.children.find((c) => c.sub_issue_id === subIssueId);
   if (!snapshot || !child || !child.child_task_id) {
     await handleStandaloneCommentTrigger({
-      subIssueId, workspaceId, commentId: payload.data.id, trigger, resolved,
+      subIssueId, workspaceId, commentId: payload.data.id,
+      // Reply to the thread ROOT (Linear rejects replying to a reply); the 👀
+      // still goes on the actual comment.
+      replyTargetId: payload.data.parentId ?? payload.data.id,
+      trigger, resolved,
       registryTableName: WORKSPACE_REGISTRY_TABLE,
     });
     return;
@@ -677,6 +690,11 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // the matching ✅/❌ threaded reply lands from the reconciler when the
   // iteration task completes (it reads trigger_comment_id off channel_metadata).
   const commentId = payload.data.id;
+  // The ✅/❌ ack must reply to the thread ROOT — Linear rejects a reply whose
+  // parentId is itself a reply. When the trigger is a thread-reply, data.parentId
+  // is the root; otherwise the comment IS the root. The 👀 still goes on the
+  // actual comment the human wrote (reactions work at any thread depth).
+  const replyTargetId = payload.data.parentId ?? commentId;
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
 
@@ -690,9 +708,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
     // when the iteration completes (A6.2 reads this flag).
     orchestration_iteration: 'true',
-    // #247 UX.3: the reconciler replies ✅/❌ to THIS comment when the
+    // #247 UX.3: the reconciler replies ✅/❌ to the thread ROOT when the
     // iteration lands (threaded ack — closes the conversation the human opened).
-    trigger_comment_id: commentId,
+    trigger_comment_id: replyTargetId,
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
@@ -745,11 +763,13 @@ async function handleStandaloneCommentTrigger(args: {
   subIssueId: string;
   workspaceId: string;
   commentId: string;
+  /** Thread ROOT to reply to (= parentId when the trigger is a reply, else commentId). */
+  replyTargetId: string;
   trigger: CommentTrigger;
   resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
 }): Promise<void> {
-  const { subIssueId: issueId, workspaceId, commentId, trigger, resolved, registryTableName } = args;
+  const { subIssueId: issueId, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
 
   const task = await resolveTaskByLinearIssue(ddb, process.env.TASK_TABLE_NAME!, issueId);
   if (!task) {
@@ -777,8 +797,9 @@ async function handleStandaloneCommentTrigger(args: {
   const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
   const channelMetadata: Record<string, string> = {
     // NO orchestration_id / orchestration_iteration — the reconciler skips
-    // this; the fanout dispatcher posts the ✅/❌ reply on terminal.
-    trigger_comment_id: commentId,
+    // this; the fanout dispatcher posts the ✅/❌ reply on terminal. Reply to
+    // the thread ROOT (replyTargetId), never to a reply.
+    trigger_comment_id: replyTargetId,
     linear_issue_id: issueId,
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
