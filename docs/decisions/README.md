@@ -45,7 +45,7 @@ What follows from this decision:
 
 ## Changelog
 
-(Optional; present once the ADR has been refined in place. One dated bullet per refinement. The decision date in `**Date:**` is never overwritten.)
+(Optional; omit when first creating the ADR. Add this section on the first in-place refinement, one dated bullet per refinement. The decision date in `**Date:**` is never overwritten.)
 
 - YYYY-MM-DD — What was refined and why (decision unchanged).
 ```
@@ -82,7 +82,7 @@ Lifecycle state (above) is **orthogonal** to ordinary upkeep. Two different oper
 | Reverse the decision; choose a different approach; change what a reader must do | **Reversal** | New ADR with `**Supersedes:** ADR-NNN`; mark the old `**Superseded by:** ADR-MMM` | both change | new ADR gets its own `Date:` |
 | The decision no longer applies (context evaporated) | **Obsolescence** | Mark `deprecated`; note why | `deprecated` | bump `Last-updated:` |
 
-This replaces strict immutability with the mainstream ADR practice. Joel Parker Henderson's widely-cited guidance notes that *"in theory, immutability is ideal; in practice, mutability has worked better for our teams"* — insert new information into the existing ADR with a date stamp and a note. MADR likewise tracks a last-updated date distinct from the decision date. The **decision date is never overwritten**; refinements are recorded in the `## Changelog` and the `Last-updated` field, keeping the record self-contained (an agent should not need to excavate git history to learn what was refined and when).
+This replaces strict immutability with the mainstream ADR practice. Joel Parker Henderson's widely-cited guidance notes that *"In theory, immutability is ideal. In practice, mutability has worked better for our teams."* — insert new information into the existing ADR with a date stamp and a note. MADR's template uses a single `date` field meaning "when the decision was last updated"; this standard goes further, keeping the decision `Date:` immutable and recording refinements separately. The **decision date is never overwritten**; refinements are recorded in the `## Changelog` and the `Last-updated` field, keeping the record self-contained (an agent should not need to excavate git history to learn what was refined and when).
 
 ## Relationship to `docs/design/`
 
