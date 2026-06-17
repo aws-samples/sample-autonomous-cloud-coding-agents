@@ -32,6 +32,7 @@ jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
+import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
   renderRollupComment,
   renderStatusBlock,
@@ -43,12 +44,13 @@ import {
   type RollupChildView,
   type EpicPanelRow,
 } from '../../../src/handlers/shared/orchestration-rollup';
-import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
 
 const view = (sub: string, status: string, ident?: string, title?: string, pr_url?: string): RollupChildView => ({
-  sub_issue_id: sub, child_status: status,
-  ...(ident && { linear_identifier: ident }), ...(title && { title }),
+  sub_issue_id: sub,
+  child_status: status,
+  ...(ident && { linear_identifier: ident }),
+  ...(title && { title }),
   ...(pr_url && { pr_url }),
 });
 
@@ -189,9 +191,15 @@ describe('rollupKindFromChildren', () => {
 });
 
 const row = (sub: string, status: string): OrchestrationChildRow => ({
-  orchestration_id: 'orch_1', sub_issue_id: sub, parent_linear_issue_id: 'PARENT',
-  linear_workspace_id: 'WS', repo: 'o/r', depends_on: [], child_status: status as never,
-  created_at: 'now', updated_at: 'now',
+  orchestration_id: 'orch_1',
+  sub_issue_id: sub,
+  parent_linear_issue_id: 'PARENT',
+  linear_workspace_id: 'WS',
+  repo: 'o/r',
+  depends_on: [],
+  child_status: status as never,
+  created_at: 'now',
+  updated_at: 'now',
 });
 
 describe('postRollup', () => {
@@ -205,11 +213,13 @@ describe('postRollup', () => {
   });
 
   test('success → posts comment + logs orch.rollup.posted', async () => {
-    postIssueCommentMock.mockResolvedValue(true);
+    postIssueCommentMock.mockResolvedValue({ ok: true });
     const ok = await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
     });
     expect(ok).toBe(true);
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
@@ -220,11 +230,13 @@ describe('postRollup', () => {
   });
 
   test('complete → advances parent to In Review + ✅ reaction (mirrors children)', async () => {
-    postIssueCommentMock.mockResolvedValue(true);
+    postIssueCommentMock.mockResolvedValue({ ok: true });
     await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
     });
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
       { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'started', ['In Review'],
@@ -235,11 +247,13 @@ describe('postRollup', () => {
   });
 
   test('partial_failure → does NOT advance state, swaps to ❌ reaction', async () => {
-    postIssueCommentMock.mockResolvedValue(true);
+    postIssueCommentMock.mockResolvedValue({ ok: true });
     await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'partial_failure', children: [row('a', 'failed')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'partial_failure',
+      children: [row('a', 'failed')],
     });
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
     expect(swapIssueReactionMock).toHaveBeenCalledWith(
@@ -248,22 +262,26 @@ describe('postRollup', () => {
   });
 
   test('comment fails → does NOT transition state or react (state mirrors only on posted rollup)', async () => {
-    postIssueCommentMock.mockResolvedValue(false);
+    postIssueCommentMock.mockResolvedValue({ ok: false, retryable: false });
     await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
     });
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
     expect(swapIssueReactionMock).not.toHaveBeenCalled();
   });
 
   test('post returns false → logs orch.rollup.failed, returns false', async () => {
-    postIssueCommentMock.mockResolvedValue(false);
+    postIssueCommentMock.mockResolvedValue({ ok: false, retryable: false });
     const ok = await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'partial_failure', children: [row('a', 'failed')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'partial_failure',
+      children: [row('a', 'failed')],
     });
     expect(ok).toBe(false);
     expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
@@ -272,8 +290,10 @@ describe('postRollup', () => {
   test('non-linear channelSource → no Linear post/transition/reaction, returns false (#247 seam)', async () => {
     const ok = await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
       channelSource: 'slack',
     });
     expect(ok).toBe(false);
@@ -283,11 +303,13 @@ describe('postRollup', () => {
   });
 
   test('explicit linear channelSource behaves like the default', async () => {
-    postIssueCommentMock.mockResolvedValue(true);
+    postIssueCommentMock.mockResolvedValue({ ok: true });
     const ok = await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
       channelSource: 'linear',
     });
     expect(ok).toBe(true);
@@ -298,8 +320,10 @@ describe('postRollup', () => {
     upsertStatusCommentMock.mockResolvedValue('cmt-1');
     const ok = await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
       statusCommentId: 'cmt-1',
     });
     expect(ok).toBe(true);
@@ -311,10 +335,11 @@ describe('postRollup', () => {
   });
 
   test('threads prUrls → rendered comment links child PRs + combined PR (#323)', async () => {
-    postIssueCommentMock.mockResolvedValue(true);
+    postIssueCommentMock.mockResolvedValue({ ok: true });
     await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded'), row('orch_1__integration', 'succeeded')],
       prUrls: {
@@ -329,11 +354,13 @@ describe('postRollup', () => {
   });
 
   test('without statusCommentId → posts a fresh comment (back-compat)', async () => {
-    postIssueCommentMock.mockResolvedValue(true);
+    postIssueCommentMock.mockResolvedValue({ ok: true });
     await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
     });
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
     expect(upsertStatusCommentMock).not.toHaveBeenCalled();
@@ -343,8 +370,10 @@ describe('postRollup', () => {
     postIssueCommentMock.mockRejectedValue(new Error('linear down'));
     const ok = await postRollup({
       ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1', parentLinearIssueId: 'PARENT',
-      kind: 'complete', children: [row('a', 'succeeded')],
+      orchestrationId: 'orch_1',
+      parentLinearIssueId: 'PARENT',
+      kind: 'complete',
+      children: [row('a', 'succeeded')],
     });
     expect(ok).toBe(false);
     expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
@@ -388,11 +417,14 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
   });
 
   test('in-progress header shows N/M complete', () => {
-    const body = renderEpicPanel({ inProgress: true, rows: [
-      row('a', 'succeeded', { linear_identifier: 'ENG-1', title: 'A' }),
-      row('b', 'released', { linear_identifier: 'ENG-2', title: 'B' }),
-      row('c', 'blocked', { linear_identifier: 'ENG-3', title: 'C' }),
-    ] });
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        row('a', 'succeeded', { linear_identifier: 'ENG-1', title: 'A' }),
+        row('b', 'released', { linear_identifier: 'ENG-2', title: 'B' }),
+        row('c', 'blocked', { linear_identifier: 'ENG-3', title: 'C' }),
+      ],
+    });
     expect(body).toContain('🔄 **ABCA orchestration** · 1/3 complete');
     expect(body).toContain('✅ ENG-1: A — succeeded');
     expect(body).toContain('🔄 ENG-2: B — running');
@@ -407,56 +439,115 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
   });
 
   test('PR link shown ONLY when a PR exists (first run mid-flight has none)', () => {
-    const body = renderEpicPanel({ inProgress: true, rows: [
-      row('a', 'released', { linear_identifier: 'ENG-1', title: 'A' }), // running, no PR yet
-      row('b', 'succeeded', { linear_identifier: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
-    ] });
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        row('a', 'released', { linear_identifier: 'ENG-1', title: 'A' }), // running, no PR yet
+        row('b', 'succeeded', { linear_identifier: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
+      ],
+    });
     expect(body).toContain('🔄 ENG-1: A — running\n'); // no — [PR] suffix
     expect(body).not.toContain('ENG-1: A — running — [PR]');
     expect(body).toContain('✅ ENG-2: B — succeeded — [PR](https://github.com/o/r/pull/9)');
   });
 
   test('a row with updatingReason renders 🔄 updating <reason>, even when status is succeeded', () => {
-    const body = renderEpicPanel({ inProgress: true, rows: [
-      row('a', 'succeeded', { linear_identifier: 'ENG-1', title: 'UI',
-        pr_url: 'https://github.com/o/r/pull/7',
-        updatingReason: 'per ENG-2\'s "button doesnt work"' }),
-    ] });
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        row('a', 'succeeded', {
+          linear_identifier: 'ENG-1',
+          title: 'UI',
+          pr_url: 'https://github.com/o/r/pull/7',
+          updatingReason: 'per ENG-2\'s "button doesnt work"',
+        }),
+      ],
+    });
     expect(body).toContain('🔄 ENG-1: UI — updating per ENG-2\'s "button doesnt work" — [PR](https://github.com/o/r/pull/7)');
   });
 
   test('a mid-update row keeps the header in-progress (does NOT count as done)', () => {
     // inProgress is passed true by the caller when any row is updating; the
     // updating row is excluded from the done count.
-    const body = renderEpicPanel({ inProgress: true, rows: [
-      row('a', 'succeeded', { updatingReason: 'to include ENG-3\'s change' }),
-      row('b', 'succeeded'),
-    ] });
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        row('a', 'succeeded', { updatingReason: 'to include ENG-3\'s change' }),
+        row('b', 'succeeded'),
+      ],
+    });
     expect(body).toContain('· 1/2 complete'); // only b counts as done
   });
 
   test('integration node renders friendly, never its raw id', () => {
-    const body = renderEpicPanel({ inProgress: false, rows: [
-      row('a', 'succeeded', { linear_identifier: 'ENG-1' }),
-      row('orch_x__integration', 'succeeded', { pr_url: 'https://github.com/o/r/pull/9' }),
-    ], combinedPrUrl: 'https://github.com/o/r/pull/9' });
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [
+        row('a', 'succeeded', { linear_identifier: 'ENG-1' }),
+        row('orch_x__integration', 'succeeded', { pr_url: 'https://github.com/o/r/pull/9' }),
+      ],
+      combinedPrUrl: 'https://github.com/o/r/pull/9',
+    });
     expect(body).toContain('Integration — combined result');
     expect(body).not.toContain('orch_x__integration');
     expect(body).toContain('🔗 **Combined PR (all sub-issues merged):**');
   });
 
   test('embeds the combined preview screenshot when present', () => {
-    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded')],
-      combinedScreenshotUrl: 'https://cdn/x.png' });
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [row('a', 'succeeded')],
+      combinedScreenshotUrl: 'https://cdn/x.png',
+    });
     expect(body).toContain('🖼️ **Combined preview**');
     expect(body).toContain('![combined preview](https://cdn/x.png)');
   });
 
+  test('#247 UX.17: makes the combined preview a clickable deep-link when the preview URL is known', () => {
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [row('a', 'succeeded')],
+      combinedScreenshotUrl: 'https://cdn/x.png',
+      combinedPreviewUrl: 'https://my-app-abc123.vercel.app',
+    });
+    expect(body).toContain('🖼️ **Combined preview**');
+    // Linked image: the embedded screenshot opens the running combined site.
+    expect(body).toContain('[![combined preview](https://cdn/x.png)](https://my-app-abc123.vercel.app)');
+    // Plain "open it" link too, for clients that don't render linked images.
+    expect(body).toContain('[Open the combined preview](https://my-app-abc123.vercel.app)');
+  });
+
+  test('#247 UX.17: percent-encodes parens in the preview URL so it cannot break out of the markdown link', () => {
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [row('a', 'succeeded')],
+      combinedScreenshotUrl: 'https://cdn/x.png',
+      combinedPreviewUrl: 'https://preview.vercel.app/x)](https://evil/a.png)',
+    });
+    // No raw `](` breakout delimiter from the attacker-controlled preview URL.
+    expect(body).not.toContain('x)](https://evil');
+    expect(body).toContain('%29'); // encoded paren survives
+  });
+
+  test('#247 UX.17: falls back to a plain embedded image when no preview URL is known', () => {
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [row('a', 'succeeded')],
+      combinedScreenshotUrl: 'https://cdn/x.png',
+    });
+    expect(body).toContain('![combined preview](https://cdn/x.png)');
+    expect(body).not.toContain('[![combined preview]'); // not a linked image
+    expect(body).not.toContain('Open the combined preview');
+  });
+
   test('rows are sorted by identifier for a stable edited body', () => {
-    const body = renderEpicPanel({ inProgress: true, rows: [
-      row('z', 'released', { linear_identifier: 'ENG-9' }),
-      row('a', 'released', { linear_identifier: 'ENG-1' }),
-    ] });
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        row('z', 'released', { linear_identifier: 'ENG-9' }),
+        row('a', 'released', { linear_identifier: 'ENG-1' }),
+      ],
+    });
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
   });
 });

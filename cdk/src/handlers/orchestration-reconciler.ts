@@ -46,7 +46,10 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
+import { renderFailureReply } from './shared/failure-reply';
+import { postIssueComment, replyToComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
+import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
 import {
   computeReconcilePlan,
@@ -56,9 +59,6 @@ import {
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { cascadeNodeLabel, upsertEpicPanel } from './shared/orchestration-rollup';
-import { postIssueComment, replyToComment } from './shared/linear-feedback';
-import { renderFailureReply } from './shared/failure-reply';
-import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   claimRollup,
   clearRollupClaim,
@@ -247,16 +247,25 @@ async function resolveChildPrUrls(
  * no preview deployed yet, or the read fails. Only the integration node is
  * read (one Get), since that's the only node whose preview is "combined".
  */
-async function resolveCombinedScreenshotUrl(taskId?: string): Promise<string | null> {
+async function resolveCombinedScreenshotUrl(
+  taskId?: string,
+): Promise<{ url: string; previewUrl?: string } | null> {
   if (!taskId) return null;
   try {
     const res = await ddb.send(new GetCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
-      ProjectionExpression: 'screenshot_url',
+      ProjectionExpression: 'screenshot_url, screenshot_preview_url',
     }));
     const url = res.Item?.screenshot_url;
-    return typeof url === 'string' && url.length > 0 ? url : null;
+    if (typeof url !== 'string' || url.length === 0) return null;
+    const previewUrl = res.Item?.screenshot_preview_url;
+    // #247 UX.17: the live preview-deploy URL makes the panel's combined
+    // preview a clickable deep-link to the running combined site.
+    return {
+      url,
+      ...(typeof previewUrl === 'string' && previewUrl.length > 0 && { previewUrl }),
+    };
   } catch (err) {
     logger.warn('Combined screenshot read failed (non-fatal) — panel posts without it', {
       task_id: taskId, error: err instanceof Error ? err.message : String(err),
@@ -418,7 +427,7 @@ async function refreshPanelAndSettle(
   // the panel when the epic is complete. Only read it on the all-terminal
   // settle (the integration node has deployed by then); skip the extra Get on
   // every in-flight edit.
-  const combinedScreenshotUrl = (allTerminal && integration)
+  const combinedScreenshot = (allTerminal && integration)
     ? await resolveCombinedScreenshotUrl(integration.child_task_id)
     : null;
 
@@ -445,7 +454,8 @@ async function refreshPanelAndSettle(
     children,
     prUrls,
     ...(combinedPrUrl !== undefined && { combinedPrUrl }),
-    ...(combinedScreenshotUrl !== null && { combinedScreenshotUrl }),
+    ...(combinedScreenshot !== null && { combinedScreenshotUrl: combinedScreenshot.url }),
+    ...(combinedScreenshot?.previewUrl !== undefined && { combinedPreviewUrl: combinedScreenshot.previewUrl }),
     inProgress: !allTerminal,
     mirrorParentState: allTerminal ? won : false,
     ...(meta.release_context.channel_source !== undefined && {
