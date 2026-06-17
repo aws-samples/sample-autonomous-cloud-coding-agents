@@ -12,8 +12,11 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 - A Cognito user account configured (see [User guide](/using/overview))
 - A Jira Cloud site where you have **admin** access (to create the OAuth app and the webhook)
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
+- **The target GitHub repository onboarded with a deployed Blueprint** — see the prerequisite below.
 
 > **Jira Cloud only.** Jira Server / Data Center are out of scope. The integration uses Jira REST v3 and Atlassian Cloud webhooks.
+
+> **The repo you map must already be onboarded.** A Jira project can only route tasks to a GitHub repository that has an **active Blueprint** — a `status='active'` row in the `RepoTable`, written when you instantiate a `Blueprint` construct in `cdk/src/stacks/agent.ts` and deploy. If you map a project to a repo with no Blueprint, the mapping is accepted but **every label trigger fails** at task creation with `422 REPO_NOT_ONBOARDED`, and no task is created. `bgagent jira map` checks this at map time and refuses (with guidance) unless you pass `--skip-onboarding-check`. Onboard the repo first — set `BLUEPRINT_REPO` / the `blueprintRepo` CDK context, or add a `new Blueprint(this, …, { repo: 'owner/repo', repoTable: repoTable.table })` in the stack, then `MISE_EXPERIMENTAL=1 mise //cdk:deploy`. See [Quick start → onboarding a repository](/getting-started/quick-start) for the full steps.
 
 ## How it works
 
@@ -112,8 +115,11 @@ bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
 - `<PROJECT-KEY>` — the Jira project key, e.g. `ENG` (uppercase, starts with a letter)
 - `--repo owner/repo` — the GitHub repository tasks from this project route to
 - `--label <name>` — trigger label (default `bgagent`)
+- `--skip-onboarding-check` — persist the mapping even if the repo has no active Blueprint (the mapping cannot trigger until one is deployed)
 
 This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it writes DynamoDB directly).
+
+Before writing, `map` verifies the `--repo` is onboarded (has an `active` row in the `RepoTable`). If it is not, the command **fails with remediation steps** instead of silently persisting a mapping that can never trigger (`422 REPO_NOT_ONBOARDED`). If the check cannot run (e.g. the stack predates the `RepoTableName` output, or your IAM principal cannot read the table), it warns and proceeds. Use `--skip-onboarding-check` to bypass the check intentionally — e.g. when you are deploying the Blueprint in the same change.
 
 ### 5. Link your Jira identity
 

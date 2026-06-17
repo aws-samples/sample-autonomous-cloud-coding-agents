@@ -22,6 +22,7 @@ import {
   PutSecretValueCommand,
   ResourceExistsException,
 } from '@aws-sdk/client-secrets-manager';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { ApiClient } from '../../src/api-client';
 import {
   isWebhookSecretConfigured,
@@ -365,9 +366,22 @@ describe('jira map action', () => {
   let exitSpy: jest.SpiedFunction<typeof process.exit>;
 
   beforeEach(() => {
-    ddbSend.mockReset().mockResolvedValue({});
+    // The `map` action issues a GetItem (onboarding check) then a PutItem
+    // (the mapping). Differentiate by command type: GetItem → an active
+    // RepoTable row (onboarded), PutItem → ack.
+    ddbSend.mockReset().mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) {
+        return Promise.resolve({ Item: { repo: 'owner/repo', status: 'active' } });
+      }
+      return Promise.resolve({});
+    });
     cfnSend.mockReset().mockResolvedValue({
-      Stacks: [{ Outputs: [{ OutputKey: 'JiraProjectMappingTableName', OutputValue: 'ProjMapTable' }] }],
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraProjectMappingTableName', OutputValue: 'ProjMapTable' },
+          { OutputKey: 'RepoTableName', OutputValue: 'RepoTable' },
+        ],
+      }],
     });
     loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
@@ -390,10 +404,16 @@ describe('jira map action', () => {
     await program.parseAsync(['node', 'bgagent', 'map', ...args]);
   }
 
+  /** The PutCommand input from the mapping write (skips the GetItem check). */
+  function putMappingInput(): { TableName: string; Item: Record<string, unknown> } {
+    const call = ddbSend.mock.calls.find((c) => !(c[0] instanceof GetCommand));
+    if (!call) throw new Error('no PutCommand was issued');
+    return call[0].input;
+  }
+
   test('writes an active mapping row with the resolved label on the happy path', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--label', 'agentme']);
-    expect(ddbSend).toHaveBeenCalledTimes(1);
-    const putInput = ddbSend.mock.calls[0][0].input;
+    const putInput = putMappingInput();
     expect(putInput.TableName).toBe('ProjMapTable');
     expect(putInput.Item).toMatchObject({
       jira_project_identity: 'cloud-123#ENG',
@@ -407,7 +427,7 @@ describe('jira map action', () => {
 
   test('defaults the trigger label to bgagent when --label is omitted', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
-    expect(ddbSend.mock.calls[0][0].input.Item.label_filter).toBe('bgagent');
+    expect(putMappingInput().Item.label_filter).toBe('bgagent');
   });
 
   test('rejects an invalid --repo value before writing', async () => {
@@ -424,6 +444,46 @@ describe('jira map action', () => {
     cfnSend.mockResolvedValue({ Stacks: [{ Outputs: [] }] });
     await expect(runMap(['cloud-123', 'ENG', '--repo', 'owner/repo'])).rejects.toThrow('process.exit:1');
     expect(ddbSend).not.toHaveBeenCalled();
+  });
+
+  test('rejects a repo with no RepoTable row (not onboarded) before writing the mapping', async () => {
+    ddbSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) return Promise.resolve({}); // no Item
+      return Promise.resolve({});
+    });
+    await expect(runMap(['cloud-123', 'ENG', '--repo', 'owner/repo'])).rejects.toThrow('process.exit:1');
+    // GetItem ran; no PutItem.
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
+    expect(consoleErrorSpy.mock.calls.flat().join('\n')).toContain('REPO_NOT_ONBOARDED');
+  });
+
+  test('rejects a repo whose RepoTable row is not active (soft-removed)', async () => {
+    ddbSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) return Promise.resolve({ Item: { repo: 'owner/repo', status: 'removed' } });
+      return Promise.resolve({});
+    });
+    await expect(runMap(['cloud-123', 'ENG', '--repo', 'owner/repo'])).rejects.toThrow('process.exit:1');
+    expect(consoleErrorSpy.mock.calls.flat().join('\n')).toContain("status is 'removed'");
+  });
+
+  test('--skip-onboarding-check persists the mapping without a RepoTable read', async () => {
+    ddbSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) throw new Error('onboarding check should be skipped');
+      return Promise.resolve({});
+    });
+    await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--skip-onboarding-check']);
+    expect(ddbSend.mock.calls.some((c) => c[0] instanceof GetCommand)).toBe(false);
+    expect(putMappingInput().Item).toMatchObject({ repo: 'owner/repo', status: 'active' });
+  });
+
+  test('warns and proceeds when onboarding cannot be verified (no RepoTable output)', async () => {
+    cfnSend.mockResolvedValue({
+      Stacks: [{ Outputs: [{ OutputKey: 'JiraProjectMappingTableName', OutputValue: 'ProjMapTable' }] }],
+    });
+    await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
+    expect(consoleErrorSpy.mock.calls.flat().join('\n')).toContain('Could not verify repo onboarding');
+    expect(putMappingInput().Item).toMatchObject({ repo: 'owner/repo' });
   });
 });
 

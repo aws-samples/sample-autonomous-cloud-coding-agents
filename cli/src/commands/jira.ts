@@ -44,6 +44,7 @@ import {
   StoredJiraOauthToken,
 } from '../jira-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
+import { checkRepoOnboarding, notOnboardedGuidance } from '../repo-onboarding';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -652,6 +653,7 @@ export function makeJiraCommand(): Command {
       .option('--label <label>', `Label that triggers a task (default: ${DEFAULT_LABEL_FILTER})`, DEFAULT_LABEL_FILTER)
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--skip-onboarding-check', 'Persist the mapping even if the repo has no active Blueprint (the mapping cannot trigger until one is deployed)')
       .action(async (cloudId: string, projectKey: string, opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
@@ -671,6 +673,23 @@ export function makeJiraCommand(): Command {
           console.error(`Invalid Jira project key: ${projectKey}`);
           console.error('Project keys are uppercase, start with a letter, and contain letters/digits/underscore.');
           process.exit(1);
+        }
+
+        // Onboarding gate: refuse to persist a mapping for a repo that has
+        // no active Blueprint, since every label trigger would fail at
+        // task-creation with 422 REPO_NOT_ONBOARDED — and the failure is
+        // nearly invisible to the operator. An inconclusive check (no
+        // RepoTable output, IAM gap) warns and proceeds rather than blocks.
+        if (!opts.skipOnboardingCheck) {
+          const onboarding = await checkRepoOnboarding({ region, stackName: opts.stackName, repo: opts.repo });
+          if (onboarding.kind === 'not-onboarded') {
+            for (const line of notOnboardedGuidance(opts.repo, onboarding)) {
+              console.error(line);
+            }
+            process.exit(1);
+          } else if (onboarding.kind === 'unverifiable') {
+            console.error(`⚠ Could not verify repo onboarding (${onboarding.detail}); proceeding without the check.`);
+          }
         }
 
         const now = new Date().toISOString();
