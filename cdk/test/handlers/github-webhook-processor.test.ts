@@ -249,7 +249,7 @@ describe('github-webhook-processor handler', () => {
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
     });
-    postIssueCommentMock.mockResolvedValueOnce(true);
+    postIssueCommentMock.mockResolvedValueOnce({ ok: true });
 
     await handler(payload());
 
@@ -311,7 +311,7 @@ describe('github-webhook-processor handler', () => {
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
     });
-    postIssueCommentMock.mockResolvedValueOnce(true);
+    postIssueCommentMock.mockResolvedValueOnce({ ok: true });
 
     await handler(payload());
 
@@ -360,7 +360,7 @@ describe('github-webhook-processor handler', () => {
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
     });
-    postIssueCommentMock.mockResolvedValueOnce(false);
+    postIssueCommentMock.mockResolvedValueOnce({ ok: false, retryable: false });
 
     // No throw — postIssueComment returning false is just logged.
     await expect(handler(payload())).resolves.toBeUndefined();
