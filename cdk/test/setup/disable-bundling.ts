@@ -22,8 +22,10 @@
 // `Template.fromStack()` triggers a full CDK synth, which bundles every
 // NodejsFunction via esbuild — ~28s for the AgentStack (413 resources). Unit
 // tests assert on CloudFormation structure/properties, not bundled Lambda code,
-// so bundling is pure overhead here: skipping it cuts a single synth ~15×
-// (~28.7s -> ~1.9s). See #366.
+// so for those assertions bundling is overhead — plus a smoke-test of Lambda
+// `entry` resolution and handler compilation that unit tests intentionally cede
+// to the `agent/` build (real synth/deploy still bundles). Skipping it cuts a
+// single synth ~15× (~28.7s -> ~1.9s). See #366.
 //
 // `aws:cdk:bundling-stacks: []` tells the CLI/synth to bundle no stacks. CDK
 // reads CDK_CONTEXT_JSON when an `App` is constructed, so a bare `new App()`
