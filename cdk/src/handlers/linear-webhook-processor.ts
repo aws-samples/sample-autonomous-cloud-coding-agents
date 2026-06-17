@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { reactToComment, reportIssueFailure, EMOJI_STARTED } from './shared/linear-feedback';
+import { reactToComment, replyToComment, reportIssueFailure, EMOJI_STARTED } from './shared/linear-feedback';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { logger } from './shared/logger';
@@ -29,6 +29,7 @@ import { discoverOrchestration } from './shared/orchestration-discovery';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
+import { parseParentNodeReference, renderParentDisambiguationReply, suggestClosestNode } from './shared/orchestration-parent-comment';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import type { Attachment } from './shared/types';
@@ -643,67 +644,182 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     return;
   }
 
-  // Sub-issue → parent → orchestration. When ANY of these don't hold (no
-  // parent, parent isn't an orchestration, or this isn't a STARTED child),
-  // the issue may still be a plain (non-orchestration) issue that ABCA opened
-  // a PR for — fall through to the standalone path (#247 UX.3), which iterates
-  // on that PR with the same 👀/reply ack but no dependency cascade.
-  const parentId = await fetchIssueParentId(resolved.accessToken, subIssueId);
-  const orchestrationId = parentId ? deriveOrchestrationId(parentId) : null;
-  const snapshot = orchestrationId
-    ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
-    : null;
-  const child = snapshot?.children.find((c) => c.sub_issue_id === subIssueId);
-  if (!snapshot || !child || !child.child_task_id) {
-    await handleStandaloneCommentTrigger({
-      subIssueId, workspaceId, commentId: payload.data.id,
-      // Reply to the thread ROOT (Linear rejects replying to a reply); the 👀
-      // still goes on the actual comment.
-      replyTargetId: payload.data.parentId ?? payload.data.id,
-      trigger, resolved,
-      registryTableName: WORKSPACE_REGISTRY_TABLE,
-    });
-    return;
-  }
-
-  // Resolve the sub-issue's PR number (prefer pr_number, else parse pr_url).
-  const prNumber = await resolveChildPrNumber(child.child_task_id);
-  if (prNumber === null) {
-    logger.warn('A6 comment: sub-issue has no resolvable PR — cannot iterate', {
-      orchestration_id: orchestrationId,
-      sub_issue_id: subIssueId,
-      child_task_id: child.child_task_id,
-    });
-    return;
-  }
-
-  // Past the fall-through guard, this is a started orchestration child:
-  // orchestrationId is non-null. Bind it so the channel metadata types check.
-  const orchId = orchestrationId!;
-
-  // Attribute to the orchestration's release user (the comment author may not
-  // be a linked platform user; the orchestration already ran under this id).
-  const platformUserId = snapshot.meta.release_context.platform_user_id;
-
-  // #247 UX.3: ACK the request the instant we commit to acting on it. 👀 on
-  // the TRIGGERING comment (not the issue) is the zero-clutter "on it" signal;
-  // the matching ✅/❌ threaded reply lands from the reconciler when the
-  // iteration task completes (it reads trigger_comment_id off channel_metadata).
+  const commentedIssueId = subIssueId;
   const commentId = payload.data.id;
   // The ✅/❌ ack must reply to the thread ROOT — Linear rejects a reply whose
   // parentId is itself a reply. When the trigger is a thread-reply, data.parentId
   // is the root; otherwise the comment IS the root. The 👀 still goes on the
   // actual comment the human wrote (reactions work at any thread depth).
   const replyTargetId = payload.data.parentId ?? commentId;
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+
+  // #247 UX.18: is the commented issue itself a PARENT epic? deriveOrchestrationId
+  // is a pure hash of the issue id, so the parent's own id maps to ITS
+  // orchestration; a sub-issue's id hashes to nothing. The maturing panel lives
+  // on the parent, so reviewers comment THERE ("@bgagent for the footer, …") —
+  // route that to the sub-issue it names. (Was a silent drop: the parent has no
+  // PR, so it fell to the standalone GSI path → miss → ignored.)
+  const ownOrchestrationId = deriveOrchestrationId(commentedIssueId);
+  const parentSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, ownOrchestrationId);
+  if (parentSnapshot && parentSnapshot.meta.parent_linear_issue_id === commentedIssueId) {
+    await handleParentEpicCommentTrigger({
+      orchestrationId: ownOrchestrationId,
+      snapshot: parentSnapshot,
+      workspaceId, commentId, replyTargetId, trigger, resolved,
+      registryTableName: WORKSPACE_REGISTRY_TABLE,
+    });
+    return;
+  }
+
+  // Sub-issue → parent → orchestration. When ANY of these don't hold (no
+  // parent, parent isn't an orchestration, or this isn't a STARTED child),
+  // the issue may still be a plain (non-orchestration) issue that ABCA opened
+  // a PR for — fall through to the standalone path (#247 UX.3), which iterates
+  // on that PR with the same 👀/reply ack but no dependency cascade.
+  const parentId = await fetchIssueParentId(resolved.accessToken, commentedIssueId);
+  const orchestrationId = parentId ? deriveOrchestrationId(parentId) : null;
+  const snapshot = orchestrationId
+    ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
+    : null;
+  const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
+  if (!snapshot || !child || !child.child_task_id) {
+    await handleStandaloneCommentTrigger({
+      subIssueId: commentedIssueId, workspaceId, commentId,
+      replyTargetId,
+      trigger, resolved,
+      registryTableName: WORKSPACE_REGISTRY_TABLE,
+    });
+    return;
+  }
+
+  await iterateOrchestrationChild({
+    orchestrationId: orchestrationId!,
+    snapshot, child,
+    workspaceId, commentId, replyTargetId, trigger, resolved,
+    registryTableName: WORKSPACE_REGISTRY_TABLE,
+  });
+}
+
+/**
+ * #247 UX.18 — an ``@bgagent`` comment left on the PARENT epic. The maturing
+ * panel lives on the parent, so a reviewer's natural move is to comment there.
+ * The parent has no PR of its own, so we route the request to the sub-issue it
+ * names (by identifier or title keyword) and iterate THAT sub-issue's PR. When
+ * the comment names no single sub-issue, we 👀 + post a "which one?" reply
+ * (with a best-effort suggestion + the create-a-sub-issue path) — NEVER a
+ * silent drop, and NEVER auto-creating new work (user's call).
+ */
+async function handleParentEpicCommentTrigger(args: {
+  orchestrationId: string;
+  snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>;
+  workspaceId: string;
+  commentId: string;
+  replyTargetId: string;
+  trigger: CommentTrigger;
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  registryTableName: string;
+}): Promise<void> {
+  const { orchestrationId, snapshot, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
+  // ACK immediately — a parent comment is never silently dropped again.
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+
+  // Only STARTED children with a task are iterable candidates; match against all
+  // real nodes for the disambiguation list, but iterate only a started one.
+  const match = parseParentNodeReference(trigger.instruction, snapshot.children);
+  const target = match.reason === null ? match.matches[0] : null;
+
+  if (!target || !target.child_task_id) {
+    // No confident single match (or matched a not-yet-started node) → ask.
+    const reason = match.reason === 'ambiguous' ? 'ambiguous' : 'none';
+    const suggestion = reason === 'none' ? suggestClosestNode(trigger.instruction, snapshot.children) : null;
+    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion);
+    await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
+    logger.info('A6 comment (parent epic): no single iterable sub-issue matched — asked', {
+      orchestration_id: orchestrationId, reason, match_count: match.matches.length,
+    });
+    return;
+  }
+
+  const prNumber = await resolveChildPrNumber(target.child_task_id);
+  if (prNumber === null) {
+    const body = renderParentDisambiguationReply('none', snapshot.children, target);
+    await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
+    logger.info('A6 comment (parent epic): matched sub-issue has no PR yet — asked', {
+      orchestration_id: orchestrationId, sub_issue_id: target.sub_issue_id,
+    });
+    return;
+  }
+
+  // Resolve the FULL child row (the matcher returns a trimmed view without
+  // ``repo``) so the iteration carries the sub-issue's repo.
+  const childRow = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id)!;
+
+  // Route to the matched sub-issue exactly as if the human had commented there.
+  // The 👀 is already on the parent comment; the ✅/❌ reply threads back to it.
+  await iterateOrchestrationChild({
+    orchestrationId, snapshot, child: childRow,
+    workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName,
+    // Already acked on the parent comment above.
+    skipAck: true,
+    prNumber,
+  });
+  logger.info('A6 comment (parent epic): routed to sub-issue', {
+    orchestration_id: orchestrationId, sub_issue_id: target.sub_issue_id, pr_number: prNumber,
+  });
+}
+
+/**
+ * Spawn a ``coding/pr-iteration-v1`` task for one orchestration sub-issue from
+ * an ``@bgagent`` comment (#247 A6 + UX.18). Shared by the direct sub-issue
+ * path (comment on the sub-issue) and the parent-epic path (comment on the
+ * epic, routed here). Acks the trigger comment with 👀 (unless already acked),
+ * marks the task as a cascade SOURCE so the reconciler re-stacks dependents,
+ * and threads ✅/❌ back to ``replyTargetId`` on completion.
+ */
+async function iterateOrchestrationChild(args: {
+  orchestrationId: string;
+  snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>;
+  child: { sub_issue_id: string; repo: string; child_task_id?: string };
+  workspaceId: string;
+  commentId: string;
+  replyTargetId: string;
+  trigger: CommentTrigger;
+  resolved: { oauthSecretArn: string; workspaceSlug: string };
+  registryTableName: string;
+  skipAck?: boolean;
+  prNumber?: number;
+}): Promise<void> {
+  const {
+    orchestrationId, snapshot, child, workspaceId, commentId, replyTargetId,
+    trigger, resolved, registryTableName,
+  } = args;
+  const subIssueId = child.sub_issue_id;
+
+  const prNumber = args.prNumber ?? (child.child_task_id ? await resolveChildPrNumber(child.child_task_id) : null);
+  if (prNumber === null || prNumber === undefined) {
+    logger.warn('A6 comment: sub-issue has no resolvable PR — cannot iterate', {
+      orchestration_id: orchestrationId, sub_issue_id: subIssueId, child_task_id: child.child_task_id,
+    });
+    return;
+  }
+
+  // Attribute to the orchestration's release user (the comment author may not
+  // be a linked platform user; the orchestration already ran under this id).
+  const platformUserId = snapshot.meta.release_context.platform_user_id;
+
+  // #247 UX.3: ACK the request the instant we commit to acting on it. 👀 on the
+  // TRIGGERING comment is the zero-clutter "on it" signal. The parent-epic path
+  // already acked, so it passes skipAck.
+  if (!args.skipAck) {
+    await reactToComment({ linearWorkspaceId: workspaceId, registryTableName }, commentId, EMOJI_STARTED);
+  }
 
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
   const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
 
   const channelMetadata: Record<string, string> = {
-    orchestration_id: orchId,
+    orchestration_id: orchestrationId,
     orchestration_sub_issue_id: subIssueId,
     // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
     // when the iteration completes (A6.2 reads this flag).
@@ -714,9 +830,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    // The agent addresses the real sub-issue (reactions/comments).
+    linear_issue_id: subIssueId,
   };
-  // The agent addresses the real sub-issue (reactions/comments).
-  channelMetadata.linear_issue_id = subIssueId;
 
   try {
     const result = await createTaskCore(
@@ -730,15 +846,11 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       idempotencyKey,
     );
     logger.info('A6 comment: iteration task created for sub-issue PR', {
-      orchestration_id: orchestrationId,
-      sub_issue_id: subIssueId,
-      pr_number: prNumber,
-      status_code: result.statusCode,
+      orchestration_id: orchestrationId, sub_issue_id: subIssueId, pr_number: prNumber, status_code: result.statusCode,
     });
   } catch (err) {
     logger.error('A6 comment: createTaskCore threw for iteration', {
-      orchestration_id: orchestrationId,
-      sub_issue_id: subIssueId,
+      orchestration_id: orchestrationId, sub_issue_id: subIssueId,
       error: err instanceof Error ? err.message : String(err),
     });
   }
