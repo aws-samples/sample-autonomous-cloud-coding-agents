@@ -38,9 +38,10 @@ import {
   upsertStatusComment,
 } from './linear-feedback';
 import { logger } from './logger';
-import { ORCH_LOG } from './orchestration-log-events';
 import { isIntegrationNode } from './orchestration-integration-node';
+import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
+import { encodeMarkdownUrl } from './screenshot-url';
 import type { ChannelSource } from './types';
 
 /** Which rollup we're posting — drives the heading + emoji. */
@@ -198,6 +199,13 @@ export interface EpicPanelParams {
   readonly combinedPrUrl?: string;
   /** Combined preview screenshot url, embedded in the panel (auto-refreshes; no separate comment). */
   readonly combinedScreenshotUrl?: string;
+  /**
+   * Live deploy-preview URL the combined screenshot was captured from (#247
+   * UX.17). When present, the embedded combined preview becomes a clickable
+   * deep-link to the running combined site. Ignored unless
+   * ``combinedScreenshotUrl`` is also set.
+   */
+  readonly combinedPreviewUrl?: string;
 }
 
 const PANEL_FOOTER = '_One live panel — updates in place as the epic progresses; no comment stream._';
@@ -248,7 +256,7 @@ function panelLabel(row: EpicPanelRow): string {
  *  - Combined PR callout + embedded combined screenshot when present.
  */
 export function renderEpicPanel(params: EpicPanelParams): string {
-  const { rows, inProgress, combinedPrUrl, combinedScreenshotUrl } = params;
+  const { rows, inProgress, combinedPrUrl, combinedScreenshotUrl, combinedPreviewUrl } = params;
   const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
   // "done" counts settled rows that are NOT mid-update (an updating row is back in flight).
   const done = rows.filter((r) => terminal(r.child_status) && !r.updatingReason).length;
@@ -283,9 +291,29 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   const callout = combinedPrUrl
     ? ['', `🔗 **Combined PR (all sub-issues merged):** [${combinedPrUrl}](${combinedPrUrl})`]
     : [];
-  const shot = combinedScreenshotUrl
-    ? ['', `🖼️ **Combined preview**`, '', `![combined preview](${combinedScreenshotUrl})`]
-    : [];
+  // #247 UX.17: when we know the live preview-deploy URL, render the embedded
+  // screenshot as a clickable linked image + a plain "Open the combined
+  // preview" link, so a reviewer can open the running combined site, not just
+  // see a static PNG. The preview URL is payload-derived (came from the deploy
+  // webhook) — percent-encode its parens so a crafted path can't break out of
+  // the markdown link. The CloudFront screenshot URL is our own key (no
+  // parens) so it's interpolated as-is.
+  let shot: string[] = [];
+  if (combinedScreenshotUrl) {
+    if (combinedPreviewUrl) {
+      const safePreview = encodeMarkdownUrl(combinedPreviewUrl);
+      shot = [
+        '',
+        '🖼️ **Combined preview**',
+        '',
+        `[![combined preview](${combinedScreenshotUrl})](${safePreview})`,
+        '',
+        `[Open the combined preview](${safePreview})`,
+      ];
+    } else {
+      shot = ['', '🖼️ **Combined preview**', '', `![combined preview](${combinedScreenshotUrl})`];
+    }
+  }
 
   return [heading, '', ...lines, ...callout, ...shot, '', PANEL_FOOTER].join('\n');
 }
@@ -333,6 +361,8 @@ export interface UpsertEpicPanelParams {
   readonly updating?: Readonly<Record<string, string>>;
   readonly combinedPrUrl?: string;
   readonly combinedScreenshotUrl?: string;
+  /** Live preview-deploy URL the combined screenshot was captured from (#247 UX.17). */
+  readonly combinedPreviewUrl?: string;
   /**
    * Whether the epic is in progress. When omitted, derived: in progress iff any
    * child is non-terminal OR any row has an updating reason. Pass explicitly to
@@ -383,6 +413,7 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
     inProgress,
     ...(params.combinedPrUrl !== undefined && { combinedPrUrl: params.combinedPrUrl }),
     ...(params.combinedScreenshotUrl !== undefined && { combinedScreenshotUrl: params.combinedScreenshotUrl }),
+    ...(params.combinedPreviewUrl !== undefined && { combinedPreviewUrl: params.combinedPreviewUrl }),
   });
 
   let commentId: string | null;

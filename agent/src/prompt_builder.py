@@ -144,6 +144,15 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     """
     if config.channel_source != "linear":
         return ""
+    # #247 UX.16: a synthetic orchestration integration node has NO real Linear
+    # sub-issue — `linear_issue_id` is intentionally omitted from its
+    # channel_metadata (see orchestration-release.ts). Without a target issue
+    # the agent would grope via the MCP and post its "Starting"/"PR opened"
+    # comments onto the PARENT epic, cluttering the maturing panel (which
+    # already shows the integration row + combined PR + preview). Skip the
+    # progress addendum entirely for these nodes — the panel is the surface.
+    if not config.channel_metadata.get("linear_issue_id"):
+        return ""
     issue_identifier = config.channel_metadata.get("linear_issue_identifier") or ""
     issue_ref = f" (`{issue_identifier}`)" if issue_identifier else ""
     return (

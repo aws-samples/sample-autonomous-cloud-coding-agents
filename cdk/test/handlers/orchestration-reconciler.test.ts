@@ -141,14 +141,24 @@ function mockOrchestration(opts: {
   // fresh loadOrchestration reflects them — which is exactly what the
   // concurrency-safe re-read relies on.
   const meta = {
-    sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
-    linear_workspace_id: 'WS', repo: 'o/r', child_count: opts.children.length, platform_user_id: 'user-1',
+    sub_issue_id: '#meta',
+    orchestration_id: 'orch_1',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
+    repo: 'o/r',
+    child_count: opts.children.length,
+    platform_user_id: 'user-1',
   };
   const rows: Record<string, Record<string, unknown>> = {};
   for (const c of opts.children) {
     rows[c.sub_issue_id] = {
-      orchestration_id: 'orch_1', sub_issue_id: c.sub_issue_id, depends_on: c.depends_on ?? [],
-      child_status: c.child_status, repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS',
+      orchestration_id: 'orch_1',
+      sub_issue_id: c.sub_issue_id,
+      depends_on: c.depends_on ?? [],
+      child_status: c.child_status,
+      repo: 'o/r',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
     };
   }
   ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
@@ -248,17 +258,39 @@ describe('orchestration-reconciler handler', () => {
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
     const meta = {
-      sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS', repo: 'o/r', child_count: 2, platform_user_id: 'u1',
+      sub_issue_id: '#meta',
+      orchestration_id: 'orch_1',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: 2,
+      platform_user_id: 'u1',
       status_comment_id: 'panel-1',
     };
     // A (real leaf) + integration node, BOTH succeeded → all-terminal. The
     // integration node's task record carries a screenshot_url.
     const rows = [
-      { orchestration_id: 'orch_1', sub_issue_id: 'A', depends_on: [], child_status: 'succeeded',
-        child_task_id: 'task-A', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS', linear_identifier: 'ENG-1' },
-      { orchestration_id: 'orch_1', sub_issue_id: 'orch_1__integration', depends_on: ['A'], child_status: 'succeeded',
-        child_task_id: 'task-int', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS' },
+      {
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'A',
+        depends_on: [],
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        repo: 'o/r',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ENG-1',
+      },
+      {
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'orch_1__integration',
+        depends_on: ['A'],
+        child_status: 'succeeded',
+        child_task_id: 'task-int',
+        repo: 'o/r',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+      },
     ];
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'ChildTaskIndex') {
@@ -272,19 +304,27 @@ describe('orchestration-reconciler handler', () => {
       }
       if (cmd._type === 'Get') { // resolveCombinedScreenshotUrl(task-int)
         const tid = (cmd.input.Key as { task_id: string }).task_id;
-        return { Item: tid === 'task-int' ? { screenshot_url: 'https://cdn.example/combined.png' } : {} };
+        return {
+          Item: tid === 'task-int'
+            ? { screenshot_url: 'https://cdn.example/combined.png', screenshot_preview_url: 'https://combined.vercel.app' }
+            : {},
+        };
       }
       return {};
     });
 
-    await handler({ Records: [taskRecord({
-      task_id: 'task-int', status: 'COMPLETED', orchestration_id: 'orch_1',
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'task-int', status: 'COMPLETED', orchestration_id: 'orch_1',
+      })],
+    } as never);
 
     expect(upsertStatusCommentMock).toHaveBeenCalled();
     const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
     expect(body).toContain('✅'); // complete
-    expect(body).toContain('![combined preview](https://cdn.example/combined.png)');
+    // #247 UX.17: the panel embeds the image AND deep-links to the live combined deploy.
+    expect(body).toContain('[![combined preview](https://cdn.example/combined.png)](https://combined.vercel.app)');
+    expect(body).toContain('[Open the combined preview](https://combined.vercel.app)');
   });
 });
 
@@ -292,16 +332,22 @@ describe('orchestration-reconciler handler', () => {
 describe('parseTerminalTaskRecord — A6 cascade marker', () => {
   test('a restack task (carries restack_predecessor) → cascadeSubIssueId set', () => {
     const evt = parseTerminalTaskRecord(taskRecord({
-      task_id: 'TR', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'B', restack_predecessor_sub_issue_id: 'A',
+      task_id: 'TR',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'B',
+      restack_predecessor_sub_issue_id: 'A',
     }));
     expect(evt?.cascadeSubIssueId).toBe('B');
   });
 
   test('an iteration task (orchestration_iteration=true) → cascadeSubIssueId set', () => {
     const evt = parseTerminalTaskRecord(taskRecord({
-      task_id: 'TI', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
+      task_id: 'TI',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A',
+      orchestration_iteration: true,
     }));
     expect(evt?.cascadeSubIssueId).toBe('A');
   });
@@ -316,18 +362,32 @@ describe('parseTerminalTaskRecord — A6 cascade marker', () => {
 
 /** Mock for the cascade path: loadOrchestration + per-dependent GetCommand pr_url. */
 function mockCascade(children: Array<{
-  sub_issue_id: string; depends_on?: string[]; child_status: string;
-  child_task_id?: string; child_branch_name?: string; linear_identifier?: string;
+  sub_issue_id: string;
+  depends_on?: string[];
+  child_status: string;
+  child_task_id?: string;
+  child_branch_name?: string;
+  linear_identifier?: string;
 }>): void {
   const meta = {
-    sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
-    linear_workspace_id: 'WS', repo: 'o/r', child_count: children.length, platform_user_id: 'user-1',
+    sub_issue_id: '#meta',
+    orchestration_id: 'orch_1',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
+    repo: 'o/r',
+    child_count: children.length,
+    platform_user_id: 'user-1',
     // A panel comment exists → the cascade EDITS it (UX.2), rather than posting fresh.
     status_comment_id: 'panel-cmt-1',
   };
   const rows = children.map((c) => ({
-    orchestration_id: 'orch_1', sub_issue_id: c.sub_issue_id, depends_on: c.depends_on ?? [],
-    child_status: c.child_status, repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS',
+    orchestration_id: 'orch_1',
+    sub_issue_id: c.sub_issue_id,
+    depends_on: c.depends_on ?? [],
+    child_status: c.child_status,
+    repo: 'o/r',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
     ...(c.child_task_id && { child_task_id: c.child_task_id }),
     ...(c.child_branch_name && { child_branch_name: c.child_branch_name }),
     ...(c.linear_identifier && { linear_identifier: c.linear_identifier }),
@@ -362,10 +422,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
       { sub_issue_id: 'C', depends_on: ['B'], child_status: 'succeeded', child_task_id: 'task-C', child_branch_name: 'branch-C' },
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'restack-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'B', restack_predecessor_sub_issue_id: 'A',
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
 
     // Exactly one restack spawned — for C (B's direct dependent), NOT A.
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
@@ -383,10 +448,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
     expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.orchestration_sub_issue_id).toBe('B');
   });
@@ -399,10 +469,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
     // An Update issued a `REMOVE rollup_posted_at` on the meta row.
     const clears = ddbSend.mock.calls
       .map((c) => c[0])
@@ -417,10 +492,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'iter-fail', status: 'FAILED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-fail',
+        status: 'FAILED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
@@ -429,10 +509,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' }, // not started
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'iter-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
@@ -450,10 +535,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
     // A re-stack of B (the no-dependents leaf) completes.
-    await handler({ Records: [taskRecord({
-      task_id: 'restack-B', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'B', restack_predecessor_sub_issue_id: 'A',
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
 
     // No further restack (B has no dependents).
     expect(createTaskCoreMock).not.toHaveBeenCalled();
@@ -471,10 +561,15 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'iter-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
     // Never queried ChildTaskIndex (that's the normal-gating path).
     const gsiCalls = ddbSend.mock.calls.filter(
       (c) => c[0]?._type === 'Query' && c[0]?.input?.IndexName === 'ChildTaskIndex');
@@ -494,8 +589,11 @@ describe('orchestration-reconciler handler — A6 cascade surfacing via the pane
 
   const iterEvent = (sub: string) => ({
     Records: [taskRecord({
-      task_id: 'iter-task-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: sub, orchestration_iteration: true,
+      task_id: 'iter-task-1',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: sub,
+      orchestration_iteration: true,
     })],
   }) as never;
 
@@ -543,10 +641,15 @@ describe('orchestration-reconciler handler — A6 cascade surfacing via the pane
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
     // restack source (carries restack_predecessor, NOT orchestration_iteration).
-    await handler({ Records: [taskRecord({
-      task_id: 'restack-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', restack_predecessor_sub_issue_id: 'Z',
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        restack_predecessor_sub_issue_id: 'Z',
+      })],
+    } as never);
     const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
     expect(body).toMatch(/ENG-2.*updating to include ENG-1's change/);
   });
@@ -566,8 +669,11 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
   /** An iteration event carrying the human comment id that triggered it. */
   const iterEventWithComment = (status: string, commentId = 'human-cmt-1', buildPassed?: boolean, errorMessage?: string) => ({
     Records: [taskRecord({
-      task_id: 'iter-task-1', status, orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', orchestration_iteration: true,
+      task_id: 'iter-task-1',
+      status,
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A',
+      orchestration_iteration: true,
       trigger_comment_id: commentId,
       ...(buildPassed !== undefined && { build_passed: buildPassed }),
       ...(errorMessage !== undefined && { error_message: errorMessage }),
@@ -662,10 +768,15 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
     ]);
-    await handler({ Records: [taskRecord({
-      task_id: 'restack-1', status: 'COMPLETED', orchestration_id: 'orch_1',
-      orchestration_sub_issue_id: 'A', restack_predecessor_sub_issue_id: 'Z',
-    })] } as never);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        restack_predecessor_sub_issue_id: 'Z',
+      })],
+    } as never);
     expect(replyToCommentMock).not.toHaveBeenCalled();
   });
 });

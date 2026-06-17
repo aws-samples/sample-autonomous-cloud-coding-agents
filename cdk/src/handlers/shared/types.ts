@@ -104,6 +104,15 @@ export interface TaskRecord {
    * tasks with no UI to screenshot).
    */
   readonly screenshot_url?: string;
+  /**
+   * Live deploy-preview URL the {@link screenshot_url} image was captured from
+   * (e.g. the Vercel/Netlify preview deploy). Persisted alongside
+   * ``screenshot_url`` so the orchestration reconciler can make the INTEGRATION
+   * node's combined preview in the parent epic panel a clickable deep-link to
+   * the running combined site, not just a static image (#247 UX.17). Absent
+   * when no preview deployed.
+   */
+  readonly screenshot_preview_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
   readonly channel_source: ChannelSource;
