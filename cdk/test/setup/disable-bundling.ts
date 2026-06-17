@@ -28,11 +28,19 @@
 // `aws:cdk:bundling-stacks: []` tells the CLI/synth to bundle no stacks. CDK
 // reads CDK_CONTEXT_JSON when an `App` is constructed, so a bare `new App()`
 // (the overwhelming-majority pattern in our tests) picks this up with no
-// call-site changes. Tests that pass their own `{ context }` still merge on top.
+// call-site changes.
+//
+// Precedence matters for the opt-out. CDK's `App.loadContext(props.context,
+// props.postCliContext)` applies `props.context` FIRST, then overwrites it with
+// CDK_CONTEXT_JSON, then applies `postCliContext` LAST. So for this key the env
+// var beats constructor `context` — `new App({ context: { 'aws:cdk:bundling-
+// stacks': ['**'] } })` does NOT re-enable bundling (the env var clobbers it).
 //
 // If a test ever needs real bundled assets (e.g. asserting on an asset hash /
-// S3 key), it must opt out by constructing its `App` with
-// `aws:cdk:bundling-stacks: ['**']` (or the specific stack id) in its context.
+// S3 key), it must opt out via `postCliContext` (which wins over the env var),
+// constructing its `App` with
+// `new App({ postCliContext: { 'aws:cdk:bundling-stacks': ['**'] } })`
+// (or the specific stack id).
 const BUNDLING_DISABLED_CONTEXT = { 'aws:cdk:bundling-stacks': [] as string[] };
 
 const existing = process.env.CDK_CONTEXT_JSON;

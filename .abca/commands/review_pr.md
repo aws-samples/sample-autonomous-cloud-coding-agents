@@ -100,8 +100,9 @@ Then apply principal-architect judgment over the diff:
 - **Test performance (CDK synth)** — New/changed CDK tests must not re-enable Lambda bundling at
   synth or synthesize the same stack repeatedly. `cdk/` disables bundling globally via
   `test/setup/disable-bundling.ts` (~15× faster synth); flag any test that turns
-  `aws:cdk:bundling-stacks` back on without asserting on a bundled asset, or that calls
-  `new App()` + `Template.fromStack()` per-test instead of once in `beforeAll`. See
+  `aws:cdk:bundling-stacks` back on (only valid via `postCliContext`, not constructor
+  `context` — the env var overwrites the latter) without asserting on a bundled asset, or
+  that calls `new App()` + `Template.fromStack()` per-test instead of once in `beforeAll`. See
   [CI build performance](../../docs/design/CI_BUILD_PERFORMANCE.md).
 - **Routing** — Changes should land in the right package per the AGENTS.md routing table
   (agent runtime in `agent/`, API/Lambdas in `cdk/`, CLI in `cli/`).
