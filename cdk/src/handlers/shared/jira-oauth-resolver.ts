@@ -97,6 +97,21 @@ export interface ResolverOptions {
   readonly dynamoDbClient?: DynamoDBDocumentClient;
   /** Override fetch for token-endpoint refresh in tests. */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * Force a token refresh even when the stored `expires_at` claims the token
+   * is still valid. Used by the reactive-401 retry path: Atlassian can reject
+   * an access token (401) before its advertised expiry — server-side
+   * invalidation, a re-issued token after a scope change, or a token cached
+   * within {@link SECRET_CACHE_TTL_MS} that was rotated out-of-band. The
+   * proactive expiry check can't see those, so on a 401 the caller re-resolves
+   * with `forceRefresh: true` to bypass the in-memory *token* cache and the
+   * expiry short-circuit and mint a guaranteed-fresh token before retrying.
+   *
+   * The registry-row cache is intentionally NOT bypassed: a revoked access
+   * token does not change the row (`site_url`, `oauth_secret_arn`), so forcing
+   * a DDB read on every 401 would add load without changing the outcome.
+   */
+  readonly forceRefresh?: boolean;
 }
 
 interface CacheEntry<T> {
@@ -137,6 +152,10 @@ export interface ResolvedJiraToken {
  * Refreshes silently if the cached token is expiring. Returns null on any
  * failure (registry miss, secret missing, refresh-token revoked) so callers
  * can gracefully no-op rather than blowing up.
+ *
+ * Pass `options.forceRefresh` to mint a guaranteed-fresh token even when the
+ * stored `expires_at` looks valid — see {@link ResolverOptions.forceRefresh}
+ * (the reactive-401 retry path).
  */
 export async function resolveJiraOauthToken(
   cloudId: string,
@@ -146,6 +165,7 @@ export async function resolveJiraOauthToken(
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
   const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
   const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const forceRefresh = options.forceRefresh ?? false;
 
   // ─── Step 1: Registry row ────────────────────────────────────────
   const row = await getRegistryRow(ddb, registryTableName, cloudId);
@@ -162,7 +182,11 @@ export async function resolveJiraOauthToken(
   }
 
   // ─── Step 2: Cached or fresh token JSON ──────────────────────────
-  const cached = tokenCache.get(row.oauth_secret_arn);
+  // `forceRefresh` bypasses the in-memory token cache: the cached access token
+  // is the one a caller just saw 401, so we must re-read the secret (and
+  // refresh below) rather than hand the same dead token back. (The registry
+  // row above still uses its own cache — see ResolverOptions.forceRefresh.)
+  const cached = forceRefresh ? undefined : tokenCache.get(row.oauth_secret_arn);
   let token: StoredOauthToken;
   if (cached && cached.expiresAt > Date.now() && !isTokenExpiring(cached.value.expires_at)) {
     token = cached.value;
@@ -178,8 +202,11 @@ export async function resolveJiraOauthToken(
     token = fetched;
   }
 
-  // ─── Step 3: Refresh if expiring ─────────────────────────────────
-  if (isTokenExpiring(token.expires_at)) {
+  // ─── Step 3: Refresh if expiring (or forced) ─────────────────────
+  // `forceRefresh` refreshes regardless of `expires_at`: a 401 on a
+  // not-yet-expired token means the stored access token is dead despite the
+  // timestamp, so trust the 401 over the clock and rotate.
+  if (forceRefresh || isTokenExpiring(token.expires_at)) {
     const refreshed = await refreshJiraToken(token, sm, row.oauth_secret_arn, options);
     if (!refreshed) {
       return null;
