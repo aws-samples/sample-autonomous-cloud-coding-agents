@@ -124,3 +124,20 @@ export function buildScreenshotKey(repo: string, sha: string, deploymentId?: num
 export function encodeMarkdownUrl(rawUrl: string): string {
   return rawUrl.replaceAll('(', '%28').replaceAll(')', '%29');
 }
+
+/**
+ * Pull the ABCA ``taskId`` out of a deploy PR's head branch (#247 — parent
+ * panel combined screenshot). ABCA names every task branch
+ * ``bgagent/{taskId}/{slug}`` (see ``generateBranchName``), so the task id is
+ * always the SECOND path segment. Returns null for any branch that doesn't
+ * match the ABCA shape (a human-created branch, a fork default, etc.) so the
+ * screenshot pipeline simply skips persistence for non-ABCA deploys.
+ */
+export function extractTaskIdFromBranch(branchName: string | null | undefined): string | null {
+  if (!branchName) return null;
+  const parts = branchName.split('/');
+  // ``bgagent`` / ``{taskId}`` / ``{slug…}`` — at least 3 segments, prefix fixed.
+  if (parts.length < 3 || parts[0] !== 'bgagent') return null;
+  const taskId = parts[1];
+  return taskId && taskId.length > 0 ? taskId : null;
+}

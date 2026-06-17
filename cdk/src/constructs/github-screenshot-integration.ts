@@ -68,6 +68,15 @@ export interface GitHubScreenshotIntegrationProps {
   readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
 
   /**
+   * Optional — when provided, the processor persists the captured
+   * screenshot's public URL onto the deploy task's TaskRecord (keyed by the
+   * taskId in the deploy branch), so the #247 orchestration reconciler can
+   * embed the integration node's combined preview in the parent epic panel.
+   * Unset → persistence is skipped (the PR + Linear comments still post).
+   */
+  readonly taskTable?: dynamodb.ITable;
+
+  /**
    * Removal policy for the dedup table + screenshot bucket. Defaults
    * to DESTROY so dev stacks don't accumulate orphans on `cdk destroy`.
    */
@@ -192,6 +201,9 @@ export class GitHubScreenshotIntegration extends Construct {
         ...(props.linearWorkspaceRegistryTable && {
           LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: props.linearWorkspaceRegistryTable.tableName,
         }),
+        ...(props.taskTable && {
+          TASK_TABLE_NAME: props.taskTable.tableName,
+        }),
       },
       bundling: commonBundling,
     });
@@ -245,6 +257,13 @@ export class GitHubScreenshotIntegration extends Construct {
           }),
         ],
       }));
+    }
+
+    // #247: write access so the processor can persist screenshot_url onto the
+    // deploy task's TaskRecord (conditional UpdateItem). grantWriteData covers
+    // the UpdateItem; the handler's update is guarded by attribute_exists.
+    if (props.taskTable) {
+      props.taskTable.grantWriteData(this.webhookProcessorFn);
     }
 
     // AgentCore Browser session lifecycle + automation-stream connect.

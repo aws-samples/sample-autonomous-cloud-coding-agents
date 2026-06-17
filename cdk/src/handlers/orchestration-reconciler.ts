@@ -240,6 +240,31 @@ async function resolveChildPrUrls(
   return out;
 }
 
+/**
+ * #247: read the integration node's deploy-preview screenshot URL from its
+ * TaskRecord (persisted by the screenshot pipeline) so the parent panel can
+ * embed the combined preview. Best-effort — null when the node has no task,
+ * no preview deployed yet, or the read fails. Only the integration node is
+ * read (one Get), since that's the only node whose preview is "combined".
+ */
+async function resolveCombinedScreenshotUrl(taskId?: string): Promise<string | null> {
+  if (!taskId) return null;
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      ProjectionExpression: 'screenshot_url',
+    }));
+    const url = res.Item?.screenshot_url;
+    return typeof url === 'string' && url.length > 0 ? url : null;
+  } catch (err) {
+    logger.warn('Combined screenshot read failed (non-fatal) — panel posts without it', {
+      task_id: taskId, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 /** Apply one terminal child's reconcile plan. */
 async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
@@ -389,6 +414,13 @@ async function refreshPanelAndSettle(
   const prUrls = await resolveChildPrUrls(children);
   const integration = children.find((c) => isIntegrationNode(c.sub_issue_id));
   const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
+  // #247 (task #57): embed the integration node's combined deploy preview in
+  // the panel when the epic is complete. Only read it on the all-terminal
+  // settle (the integration node has deployed by then); skip the extra Get on
+  // every in-flight edit.
+  const combinedScreenshotUrl = (allTerminal && integration)
+    ? await resolveCombinedScreenshotUrl(integration.child_task_id)
+    : null;
 
   if (allTerminal) {
     logger.info('Orchestration complete', {
@@ -413,6 +445,7 @@ async function refreshPanelAndSettle(
     children,
     prUrls,
     ...(combinedPrUrl !== undefined && { combinedPrUrl }),
+    ...(combinedScreenshotUrl !== null && { combinedScreenshotUrl }),
     inProgress: !allTerminal,
     mirrorParentState: allTerminal ? won : false,
     ...(meta.release_context.channel_source !== undefined && {

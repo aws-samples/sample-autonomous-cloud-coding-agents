@@ -242,6 +242,50 @@ describe('orchestration-reconciler handler', () => {
     await handler({ Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })] } as never);
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
+
+  test('#57: all-terminal epic with an integration node → embeds its combined screenshot in the panel', async () => {
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    const meta = {
+      sub_issue_id: '#meta', orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS', repo: 'o/r', child_count: 2, platform_user_id: 'u1',
+      status_comment_id: 'panel-1',
+    };
+    // A (real leaf) + integration node, BOTH succeeded → all-terminal. The
+    // integration node's task record carries a screenshot_url.
+    const rows = [
+      { orchestration_id: 'orch_1', sub_issue_id: 'A', depends_on: [], child_status: 'succeeded',
+        child_task_id: 'task-A', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS', linear_identifier: 'ENG-1' },
+      { orchestration_id: 'orch_1', sub_issue_id: 'orch_1__integration', depends_on: ['A'], child_status: 'succeeded',
+        child_task_id: 'task-int', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS' },
+    ];
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'ChildTaskIndex') {
+        return { Items: [{ ...rows[1] }] }; // the integration node just completed
+      }
+      if (cmd._type === 'Query') return { Items: [meta, ...rows] };
+      if (cmd._type === 'BatchGet') { // resolveChildPrUrls
+        const keys = cmd.input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>;
+        const tbl = Object.keys(keys)[0];
+        return { Responses: { [tbl]: keys[tbl].Keys.map((k) => ({ task_id: k.task_id, pr_url: `https://github.com/o/r/pull/${k.task_id.length}` })) } };
+      }
+      if (cmd._type === 'Get') { // resolveCombinedScreenshotUrl(task-int)
+        const tid = (cmd.input.Key as { task_id: string }).task_id;
+        return { Item: tid === 'task-int' ? { screenshot_url: 'https://cdn.example/combined.png' } : {} };
+      }
+      return {};
+    });
+
+    await handler({ Records: [taskRecord({
+      task_id: 'task-int', status: 'COMPLETED', orchestration_id: 'orch_1',
+    })] } as never);
+
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toContain('✅'); // complete
+    expect(body).toContain('![combined preview](https://cdn.example/combined.png)');
+  });
 });
 
 /** Detect a cascade marker in parseTerminalTaskRecord. */
