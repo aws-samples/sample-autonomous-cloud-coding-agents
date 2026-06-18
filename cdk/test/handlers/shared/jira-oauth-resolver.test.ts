@@ -575,6 +575,113 @@ describe('resolveJiraOauthToken', () => {
   });
 });
 
+describe('resolveJiraOauthToken: forceRefresh (reactive-401 path, issue #370)', () => {
+  beforeEach(() => {
+    _resetCachesForTesting();
+  });
+
+  test('refreshes even when the stored token is NOT expiring', async () => {
+    // Token is valid for 12h (makeStoredToken default) — the proactive check
+    // would never refresh it. forceRefresh must refresh anyway.
+    const stored = makeStoredToken({
+      access_token: 'jira_oauth_valid',
+      refresh_token: 'rt-old',
+    });
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: stored,
+    });
+    const fetchImpl = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'jira_oauth_forced',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: 'rt-new',
+      }),
+    });
+
+    const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      forceRefresh: true,
+    });
+
+    expect(result?.accessToken).toBe('jira_oauth_forced');
+    // A refresh actually happened (one /oauth/token POST + one persist).
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const putCalls = clients.smSend.mock.calls.filter(
+      (c) => c[0]!.constructor.name === 'PutSecretValueCommand',
+    );
+    expect(putCalls).toHaveLength(1);
+  });
+
+  test('bypasses the in-memory token cache', async () => {
+    const stored = makeStoredToken({ access_token: 'cached_token', refresh_token: 'rt-old' });
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: stored,
+    });
+
+    // Prime the cache with a normal (non-forced) resolve — no refresh, token valid.
+    const first = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
+    expect(first?.accessToken).toBe('cached_token');
+
+    // Now force-refresh: must NOT return the cached token; must mint a new one.
+    const fetchImpl = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'minted_token',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: 'rt-new',
+      }),
+    });
+    const second = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      forceRefresh: true,
+    });
+    expect(second?.accessToken).toBe('minted_token');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns null when the forced refresh is rejected (invalid_grant)', async () => {
+    const stored = makeStoredToken({ refresh_token: 'rt-dead' });
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: stored,
+    });
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_grant', error_description: 'revoked' }),
+    });
+
+    const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      forceRefresh: true,
+    });
+
+    expect(result).toBeNull();
+  });
+});
+
 describe('getRegistryRow / parseRegistryRow', () => {
   beforeEach(() => {
     _resetCachesForTesting();
