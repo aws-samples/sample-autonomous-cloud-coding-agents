@@ -63,14 +63,36 @@ jobs:
         run: |
           set -uo pipefail
 
-          # All non-deleted int-* stacks (active, DELETE_FAILED, or rollback states).
-          mapfile -t stacks < <(
+          # Only the integ test's own per-run stacks are eligible. The test names
+          # them `int-<commit-hash>` where the hash is the 8-char short SHA
+          # (integ.task-lifecycle.ts: COMMIT_HASH.slice(0,8)). We therefore sweep
+          # ONLY names matching `int-<8 lowercase hex>` — NOT a bare `int-*` glob.
+          # `int-` is a short prefix; an unguarded glob in a shared account could
+          # delete an unrelated stack that merely starts with those 4 chars. The
+          # `int-local` fallback name (local dev runs) is intentionally NOT swept:
+          # CI never produces it, so a match would be someone's local stack.
+          STACK_RE='^int-[0-9a-f]{8}$'
+
+          # All non-deleted int-* stacks (active, DELETE_FAILED, or rollback states);
+          # the JMESPath prefilter narrows the API page, the regex below is the
+          # authoritative guard.
+          mapfile -t candidates < <(
             aws cloudformation list-stacks \
               --stack-status-filter CREATE_COMPLETE CREATE_FAILED ROLLBACK_COMPLETE ROLLBACK_FAILED \
                 UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
               --query 'StackSummaries[?starts_with(StackName, `int-`)].StackName' \
               --output text 2>/dev/null | tr '\t' '\n' | sort -u
           )
+
+          stacks=()
+          for c in "${candidates[@]}"; do
+            [ -n "$c" ] || continue
+            if [[ "$c" =~ $STACK_RE ]]; then
+              stacks+=("$c")
+            else
+              echo "Skipping '$c' — does not match ${STACK_RE} (not a sweepable integ stack)."
+            fi
+          done
 
           if [ "${#stacks[@]}" -eq 0 ]; then
             echo "No int-* stacks present. Nothing to sweep."
@@ -132,6 +154,9 @@ jobs:
           # (zizmor template-injection). Stack names are AWS-controlled, but env
           # is the correct, lint-clean pattern regardless.
           LEAKED: ${{ steps.sweep.outputs.leaked }}
+          # Stable label used both to tag the tracking issue and to find an
+          # existing open one — this is the dedup key, so it must not change.
+          LEAK_LABEL: integ-leak
         run: |
           set -euo pipefail
           body_file="$(mktemp)"
@@ -140,7 +165,7 @@ jobs:
             echo ""
             echo "These are normally reclaimed automatically once the AgentCore \`agentic_ai\` ENIs detach (~1-2h). Past ${ALARM_AGE_HOURS}h, investigate: the ENIs may be genuinely stuck (needs manual ENI/VPC cleanup) or the deploy role lacks teardown permissions."
             echo ""
-            echo "### Stranded stacks"
+            echo "### Stranded stacks (as of this run)"
             echo -e "${LEAKED}"
             echo ""
             echo "| Field | Value |"
@@ -151,10 +176,28 @@ jobs:
             echo "Close this issue once the stacks are deleted and the sweeper run is green."
           } > "${body_file}"
 
-          gh issue create \
-            --title "Stranded integ stacks not reclaimed (>${ALARM_AGE_HOURS}h)" \
-            --label bug \
-            --body-file "${body_file}"
+          # Dedup: a stuck stack re-alarms every 2h cycle. Without this guard each
+          # cycle files a fresh duplicate. Find an existing OPEN issue carrying the
+          # stable leak label and comment on it instead of opening another; only
+          # open a new issue when none exists. `--search` scopes to open issues with
+          # the label; `--json number --jq '.[0].number'` yields the first match (or
+          # empty). Ensure the label exists first (idempotent; ignore "already exists").
+          gh label create "${LEAK_LABEL}" \
+            --description "Stranded integ stacks flagged by integ-sweeper" \
+            --color B60205 2>/dev/null || true
+
+          existing="$(gh issue list --state open --label "${LEAK_LABEL}" \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+
+          if [ -n "${existing}" ]; then
+            echo "Existing open leak issue #${existing} — commenting instead of opening a duplicate."
+            gh issue comment "${existing}" --body-file "${body_file}"
+          else
+            gh issue create \
+              --title "Stranded integ stacks not reclaimed (>${ALARM_AGE_HOURS}h)" \
+              --label "${LEAK_LABEL}" \
+              --body-file "${body_file}"
+          fi
 
       - name: Fail job on genuine leak
         if: steps.sweep.outputs.leaked != ''

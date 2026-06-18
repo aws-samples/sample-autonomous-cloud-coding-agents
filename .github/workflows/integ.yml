@@ -7,10 +7,20 @@ name: integ
 #
 # Trigger model mirrors deploy.yml: build.yml completes -> workflow_run picks it
 # up in the trusted base-repo context (secrets/OIDC available even for fork PRs)
-# -> we resolve whether the PR touches cdk/** or agent/** -> an admin approves
-# the `integ` environment gate -> deploy/assert/destroy runs against the shared
-# account -> a commit status `integ-smoke` is posted back to the PR head so it
-# shows up as a (required) check that blocks merge.
+# -> we resolve whether the PR touches cdk/** or agent/** -> deploy/assert/destroy
+# runs against the shared account -> a commit status `integ-smoke` is posted back
+# to the PR head so it shows up as a (required) check that blocks merge.
+#
+# Fork-code gate: the ENFORCED gate on fork-authored test code is the
+# `safe-to-test` label check in the `resolve` job below — a maintainer must apply
+# it before this workflow will run a fork PR. The `integ` GitHub environment is a
+# SECOND, OPTIONAL layer: it only adds a manual approval if required reviewers are
+# configured on it, and at time of writing NONE are. Two consequences worth
+# knowing: (a) do not rely on the environment as the fork-code gate — that is the
+# label's job; (b) the scheduled integ-sweeper (.github/workflows/integ-sweeper.yml)
+# also runs under `environment: integ`, and a cron trigger CANNOT satisfy a manual
+# approval, so adding required reviewers here would silently break the sweeper.
+# If reviewers are ever wanted for PR runs, give the sweeper its own environment.
 #
 # Local dev path is unchanged: run `mise //cdk:integ` with your own AWS creds.
 #
@@ -19,9 +29,10 @@ name: integ
 on:
   # zizmor: ignore[dangerous-triggers] — intentional; workflow_run is required so
   # fork PRs can run against the shared account (a fork `pull_request` job gets no
-  # secrets/OIDC). Mitigations: build-success guard, path-filter, `integ`
-  # environment approval gate (admin reviews fork test code before it runs with
-  # the privileged role), least-privilege role, status-only tokens per job.
+  # secrets/OIDC). Mitigations: build-success guard, path-filter, the
+  # `safe-to-test` label gate (the enforced fork-code review gate), the `integ`
+  # environment (an optional second approval layer IF reviewers are configured —
+  # currently none), least-privilege role, status-only tokens per job.
   workflow_run:
     workflows: [build]
     types: [completed]
@@ -41,8 +52,9 @@ jobs:
   # docs/cli-only PRs get an immediate green (skipped) status and never deadlock
   # the required check.
   resolve:
-    # Manual dispatch is restricted to main (defence in depth — the `integ`
-    # environment approval is the primary gate). PR runs come via workflow_run.
+    # Manual dispatch is restricted to main (defence in depth). For fork PRs the
+    # primary gate is the `safe-to-test` label check below. PR runs come via
+    # workflow_run.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
@@ -129,10 +141,12 @@ jobs:
             exit 0
           fi
 
-          # Fork-PR safety: only run fork-authored code after a maintainer has
-          # applied the `safe-to-test` label (defence in depth on top of the
-          # `integ` environment approval). If it's absent, leave the status
-          # pending and don't run — re-trigger once the label is added.
+          # Fork-PR safety: this is the ENFORCED gate on fork-authored code — only
+          # run it after a maintainer has applied the `safe-to-test` label. (The
+          # `integ` environment can add a second approval layer, but only if
+          # required reviewers are configured on it — currently none, so this label
+          # is the effective gate.) If absent, leave the status pending and don't
+          # run — re-trigger once the label is added.
           if [[ "$WF_HEAD_REPO" != "$REPO" ]]; then
             if ! LABELS=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '.[].name'); then
               echo "::error::Failed to read labels for PR #$PR_NUMBER."
@@ -157,7 +171,7 @@ jobs:
             exit 1
           fi
           if echo "$CHANGED" | grep -Eq '^(cdk|agent)/'; then
-            post_status pending "awaiting admin approval / running"
+            post_status pending "awaiting integ run"
             echo "applicable=true" >> "$GITHUB_OUTPUT"
             echo "PR #$PR_NUMBER touches cdk/** or agent/** — integ applies."
           else
@@ -166,9 +180,11 @@ jobs:
             echo "PR #$PR_NUMBER has no cdk/** or agent/** changes — integ skipped (green)."
           fi
 
-  # The admin-gated deploy -> assert -> destroy. The `integ` environment's
-  # required reviewer is the approval gate; while it waits, the integ-smoke
-  # status stays pending and merge stays blocked.
+  # The deploy -> assert -> destroy job. It runs in the `integ` environment; if
+  # required reviewers are ever configured there, a pending approval holds this
+  # job (and the integ-smoke status stays pending / merge stays blocked) until
+  # approved. With no reviewers configured (current state), it proceeds directly
+  # once `resolve` marks it applicable and the `safe-to-test` gate has passed.
   integ:
     needs: resolve
     if: needs.resolve.outputs.applicable == 'true'
@@ -191,9 +207,11 @@ jobs:
       - name: Checkout PR head (incl. forks)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Approving the `integ` environment authorizes this fork-authored test
-          # code to run with the privileged role — the approver MUST review
-          # cdk/test/integ/** changes before approving.
+          # This checks out fork-authored test code that then runs with the
+          # privileged role. The `safe-to-test` label (gated in `resolve`) is the
+          # enforced review point for cdk/test/integ/** changes; if required
+          # reviewers are configured on the `integ` environment they add a second
+          # manual review before this runs.
           repository: ${{ needs.resolve.outputs.head_repo }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           persist-credentials: false

@@ -146,13 +146,27 @@ const githubTokenSecretArn = output('GitHubTokenSecretArn');
 //
 // Sourced from CI repo vars (INTEG_SANDBOX_REPO / INTEG_PAT_SECRET_ID — the same
 // vars the integ.yml sandbox-cleanup step reads), so the gate scenarios bind to
-// whatever sandbox+secret the running account provisioned rather than one
-// contributor's. Fall back to the original literals for local runs in that
-// account. When unset in another account, scenarios 3 & 4 degrade to
-// clone-failures (the comment-config still synthesizes); set the vars to exercise
-// the Cedar gates.
-const SANDBOX_REPO = process.env.INTEG_SANDBOX_REPO || 'ayushtr-aws/abca-integ-sandbox';
-const PRESEEDED_PAT_SECRET = process.env.INTEG_PAT_SECRET_ID || 'bgagent/integ/github-pat';
+// whatever sandbox+secret the running account provisioned. There is deliberately
+// NO fallback literal: an account that hasn't provisioned a sandbox (e.g. upstream
+// aws-samples, or any fork) leaves both unset, and scenarios 3 & 4 SKIP with a
+// clear message (see the chain-assembly block at the bottom) rather than silently
+// routing the gate runs — which clone and push with a write-PAT — into one
+// contributor's personal repo. Set both vars to exercise the Cedar gates;
+// scenarios 1 & 2 always run regardless.
+const SANDBOX_REPO = process.env.INTEG_SANDBOX_REPO;
+const PRESEEDED_PAT_SECRET = process.env.INTEG_PAT_SECRET_ID;
+
+// Gate scenarios (3 & 4) require BOTH a sandbox repo and its pre-seeded PAT. When
+// either is unset, skip them (scenarios 1 & 2 still run). This keeps the test
+// account-agnostic: it never falls back to a hardcoded personal repo.
+const gatesEnabled = Boolean(SANDBOX_REPO && PRESEEDED_PAT_SECRET);
+if (!gatesEnabled) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[integ.task-lifecycle] INTEG_SANDBOX_REPO / INTEG_PAT_SECRET_ID not set — ' +
+      'skipping Cedar gate scenarios 3 & 4 (approve/deny). Set both to exercise the gates.',
+  );
+}
 
 const integ = new IntegTest(app, 'TaskLifecycle', {
   testCases: [stack],
@@ -221,29 +235,6 @@ const auth = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
 });
 
 const idToken = auth.getAttString('AuthenticationResult.IdToken');
-
-// Re-mint a FRESH token right before the approve/deny POSTs. The Cognito app
-// client uses the default 60-min ID-token validity (task-api.ts sets no
-// idTokenValidity), but the strictly-serial .next() chain reaches the gate POSTs
-// only after ~32 min (approve) / ~48 min (deny) of polling budget PLUS real agent
-// cold-start + runtime — the live run took ~54 min. Reusing the original token
-// would risk a 401 (expired) → the decision never records → false timeout keyed
-// to agent latency. These re-auths run just before their POSTs in the chain, so
-// each token is minted minutes (not ~50 min) before use. The user/password are
-// permanent (adminSetUserPassword above), so re-auth needs no new setup.
-const reAuthApprove = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
-  AuthFlow: 'USER_PASSWORD_AUTH',
-  ClientId: appClientId,
-  AuthParameters: { USERNAME: username, PASSWORD: password },
-});
-const approveToken = reAuthApprove.getAttString('AuthenticationResult.IdToken');
-
-const reAuthDeny = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
-  AuthFlow: 'USER_PASSWORD_AUTH',
-  ClientId: appClientId,
-  AuthParameters: { USERNAME: username, PASSWORD: password },
-});
-const denyToken = reAuthDeny.getAttString('AuthenticationResult.IdToken');
 
 // Conservative polling windows. Agent runs are real LLM sessions over a freshly
 // cold-started AgentCore runtime; the first invocation pays the cold-start tax.
@@ -328,194 +319,234 @@ pollFail
   .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.FAILED } } }))
   .waitForAssertions(TERMINAL_POLL);
 
-// --- Token seeding (prerequisite for gate scenarios) --------------------------
-// Copy the pre-seeded PAT into the stack-created GitHubTokenSecret so the agent
-// runtime can clone SANDBOX_REPO and push a branch. This automates the documented
-// operator step (QUICK_START.md §4). No getAttString is read off seedPut, and the
-// SecretString token is consumed inline by seedPut, never asserted on.
-const seedGet = integ.assertions.awsApiCall('SecretsManager', 'getSecretValue', {
-  SecretId: PRESEEDED_PAT_SECRET,
-});
-
-const seedPut = integ.assertions.awsApiCall('SecretsManager', 'putSecretValue', {
-  SecretId: githubTokenSecretArn,
-  SecretString: seedGet.getAttString('SecretString'),
-});
-
-// Onboard SANDBOX_REPO so the gate submits pass the onboarding gate (otherwise
-// 422 REPO_NOT_ONBOARDED at submit, before the agent ever runs). A minimal active
-// row is enough — the agent reads the GitHub token from the platform-default
-// GitHubTokenSecret we seeded above, so the blueprint needs no per-repo token.
-const onboardSandbox = integ.assertions.awsApiCall('DynamoDB', 'putItem', {
-  TableName: repoTableName,
-  Item: {
-    repo: { S: SANDBOX_REPO },
-    status: { S: 'active' },
-    onboarded_at: { S: '2026-01-01T00:00:00.000Z' },
-    updated_at: { S: '2026-01-01T00:00:00.000Z' },
-  },
-});
-
-// --- Scenario 3: AWAITING_APPROVAL -> approve ---------------------------------
-// coding/new-task-v1 against the sandbox. The task asks the agent to write a
-// `config.env` file, which the Write tool routes through the write_env_files
-// soft-deny rule (agent/policies/soft_deny.cedar) -> the task parks at
-// AWAITING_APPROVAL with a PENDING approval row. We approve it, then assert the
-// row flips to APPROVED. (Post-approval the agent may COMPLETE or FAIL — both
-// terminal — so the deterministic assertion is the recorded decision, not a
-// specific terminal status.)
-const submitApprove = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': idToken,
-  },
-  body: JSON.stringify({
-    workflow_ref: 'coding/new-task-v1',
-    repo: SANDBOX_REPO,
-    task_description: 'Create a file named config.env at the repo root with the single line FOO=bar, then commit it.',
-    max_turns: 6,
-    max_budget_usd: 0.5,
-  }),
-});
-const approveTaskId = submitApprove.getAttString('body.data.task_id');
-
-// Wait for the gate to open (interim AWAITING_APPROVAL).
-const pollGateApprove = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
-  TableName: taskTableName,
-  Key: { task_id: { S: approveTaskId } },
-});
-pollGateApprove
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.AWAITING_APPROVAL } } }))
-  .waitForAssertions(GATE_POLL);
-
-// Read the PENDING approval row's request_id (SK). Querying by task_id (PK) is
-// required because we do not know the agent-minted request_id. The status=PENDING
-// FilterExpression makes Items[0] deterministic: a task could trip the gate more
-// than once (or carry already-decided rows), and an unfiltered query orders only
-// by SK, so without the filter Items[0] could be the wrong/decided row and the
-// POST would target the wrong request_id. getAttString here flips this call to a
-// flattened response, so we do NOT .expect() on it.
-const queryApprove = integ.assertions.awsApiCall('DynamoDB', 'query', {
-  TableName: taskApprovalsTableName,
-  KeyConditionExpression: 'task_id = :tid',
-  FilterExpression: '#st = :pending',
-  ExpressionAttributeNames: { '#st': 'status' },
-  ExpressionAttributeValues: { ':tid': { S: approveTaskId }, ':pending': { S: 'PENDING' } },
-});
-const approveRequestId = queryApprove.getAttString('Items.0.request_id.S');
-
-const approve = integ.assertions.httpApiCall(`${apiUrl}tasks/${approveTaskId}/approve`, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    // Fresh token (see reAuthApprove) — the original idToken may be expired by now.
-    'Authorization': approveToken,
-  },
-  body: JSON.stringify({ request_id: approveRequestId, decision: 'approve', scope: 'this_call' }),
-});
-
-// Assert the decision was recorded on the approval row. Now that request_id is
-// known we read the exact row by its full key.
-const pollApproveDecision = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
-  TableName: taskApprovalsTableName,
-  Key: { task_id: { S: approveTaskId }, request_id: { S: approveRequestId } },
-});
-pollApproveDecision
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: 'APPROVED' } } }))
-  .waitForAssertions(GATE_POLL);
-
-// --- Scenario 4: AWAITING_APPROVAL -> deny ------------------------------------
-// Identical trigger to scenario 3; we deny instead and assert the row flips to
-// DENIED.
-const submitDeny = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': idToken,
-  },
-  body: JSON.stringify({
-    workflow_ref: 'coding/new-task-v1',
-    repo: SANDBOX_REPO,
-    task_description: 'Create a file named config.env at the repo root with the single line FOO=bar, then commit it.',
-    max_turns: 6,
-    max_budget_usd: 0.5,
-  }),
-});
-const denyTaskId = submitDeny.getAttString('body.data.task_id');
-
-const pollGateDeny = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
-  TableName: taskTableName,
-  Key: { task_id: { S: denyTaskId } },
-});
-pollGateDeny
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.AWAITING_APPROVAL } } }))
-  .waitForAssertions(GATE_POLL);
-
-const queryDeny = integ.assertions.awsApiCall('DynamoDB', 'query', {
-  TableName: taskApprovalsTableName,
-  KeyConditionExpression: 'task_id = :tid',
-  FilterExpression: '#st = :pending',
-  ExpressionAttributeNames: { '#st': 'status' },
-  ExpressionAttributeValues: { ':tid': { S: denyTaskId }, ':pending': { S: 'PENDING' } },
-});
-const denyRequestId = queryDeny.getAttString('Items.0.request_id.S');
-
-const deny = integ.assertions.httpApiCall(`${apiUrl}tasks/${denyTaskId}/deny`, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    // Fresh token (see reAuthDeny) — the original idToken may be expired by now.
-    'Authorization': denyToken,
-  },
-  body: JSON.stringify({ request_id: denyRequestId, decision: 'deny', reason: 'integ: exercising the deny path' }),
-});
-
-const pollDenyDecision = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
-  TableName: taskApprovalsTableName,
-  Key: { task_id: { S: denyTaskId }, request_id: { S: denyRequestId } },
-});
-pollDenyDecision
-  .expect(ExpectedResult.objectLike({ Item: { status: { S: 'DENIED' } } }))
-  .waitForAssertions(GATE_POLL);
-
-// --- Execution order ----------------------------------------------------------
+// --- Execution order (scenarios 1 & 2) ----------------------------------------
 // Auth first, then SEED THE GITHUB TOKEN BEFORE ANY SUBMIT. This ordering is
 // load-bearing: the orchestrator's resolveGitHubToken caches the secret value
 // for 5 min keyed by ARN (context-hydration.ts). Any coding-workflow task that
 // runs GitHub preflight reads + caches the token. Scenario 2 (coding/new-task-v1)
-// runs preflight too — so if it ran BEFORE seedPut, it would cache the stack's
+// runs preflight too — so if it ran BEFORE the seed, it would cache the stack's
 // INITIAL EMPTY secret and every later gate task would reuse that empty token →
 // preflight 401 GITHUB_UNREACHABLE → FAILED before ever reaching the gate
 // (observed live). Seeding right after auth means the secret is populated before
 // the first token read, so no empty value is ever cached. This is exactly the
 // documented operator flow (QUICK_START §4: populate the secret before submitting
-// tasks) — no agent.ts change.
+// tasks) — no agent.ts change. The seed only happens when the gates are enabled
+// (it is sourced from the pre-seeded PAT secret); scenario 2 targets a
+// nonexistent repo and fails at clone regardless of token, so it is unaffected.
 //
 // Onboarding: scenario 2's repo and the sandbox both need a RepoTable row before
 // submit (else 422 REPO_NOT_ONBOARDED), so both onboard steps precede their
 // submits. Gate approve/deny run sequentially since each POST needs the
 // request_id read from the parked task's approval row.
-createUser
+let chain = createUser
   .next(setPassword)
   .next(auth)
-  .next(seedGet)
-  .next(seedPut)
   .next(onboardFailRepo)
-  .next(onboardSandbox)
   .next(submitComplete)
   .next(submitFail)
   .next(pollComplete)
-  .next(pollFail)
-  .next(submitApprove)
-  .next(submitDeny)
-  .next(pollGateApprove)
-  .next(queryApprove)
-  .next(reAuthApprove)
-  .next(approve)
-  .next(pollApproveDecision)
-  .next(pollGateDeny)
-  .next(queryDeny)
-  .next(reAuthDeny)
-  .next(deny)
-  .next(pollDenyDecision);
+  .next(pollFail);
+
+// --- Scenarios 3 & 4 (Cedar gates) — only when a sandbox is configured --------
+// Every assertion call below is CONSTRUCTED only inside this block, so when the
+// gates are disabled nothing is registered with the integ provider and the run
+// reduces cleanly to scenarios 1 & 2 (no skipped/failing gate steps, no PAT seed
+// into the stack secret, no clone of a personal repo).
+if (gatesEnabled) {
+  // Narrow the env-sourced config to non-null for this block.
+  const sandboxRepo = SANDBOX_REPO as string;
+  const patSecretId = PRESEEDED_PAT_SECRET as string;
+
+  // Re-mint a FRESH token right before each approve/deny POST. The Cognito app
+  // client uses the default 60-min ID-token validity (task-api.ts sets no
+  // idTokenValidity), but the strictly-serial .next() chain reaches the gate POSTs
+  // only after ~32 min (approve) / ~48 min (deny) of polling budget PLUS real agent
+  // cold-start + runtime — the live run took ~54 min. Reusing the original token
+  // would risk a 401 (expired) → the decision never records → false timeout keyed
+  // to agent latency. These re-auths run just before their POSTs in the chain, so
+  // each token is minted minutes (not ~50 min) before use. The user/password are
+  // permanent (adminSetUserPassword above), so re-auth needs no new setup.
+  const reAuthApprove = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
+    AuthFlow: 'USER_PASSWORD_AUTH',
+    ClientId: appClientId,
+    AuthParameters: { USERNAME: username, PASSWORD: password },
+  });
+  const approveToken = reAuthApprove.getAttString('AuthenticationResult.IdToken');
+
+  const reAuthDeny = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
+    AuthFlow: 'USER_PASSWORD_AUTH',
+    ClientId: appClientId,
+    AuthParameters: { USERNAME: username, PASSWORD: password },
+  });
+  const denyToken = reAuthDeny.getAttString('AuthenticationResult.IdToken');
+
+  // --- Token seeding (prerequisite for gate scenarios) ------------------------
+  // Copy the pre-seeded PAT into the stack-created GitHubTokenSecret so the agent
+  // runtime can clone the sandbox and push a branch. This automates the documented
+  // operator step (QUICK_START.md §4). No getAttString is read off seedPut, and the
+  // SecretString token is consumed inline by seedPut, never asserted on.
+  const seedGet = integ.assertions.awsApiCall('SecretsManager', 'getSecretValue', {
+    SecretId: patSecretId,
+  });
+
+  const seedPut = integ.assertions.awsApiCall('SecretsManager', 'putSecretValue', {
+    SecretId: githubTokenSecretArn,
+    SecretString: seedGet.getAttString('SecretString'),
+  });
+
+  // Onboard the sandbox so the gate submits pass the onboarding gate (otherwise
+  // 422 REPO_NOT_ONBOARDED at submit, before the agent ever runs). A minimal active
+  // row is enough — the agent reads the GitHub token from the platform-default
+  // GitHubTokenSecret we seeded above, so the blueprint needs no per-repo token.
+  const onboardSandbox = integ.assertions.awsApiCall('DynamoDB', 'putItem', {
+    TableName: repoTableName,
+    Item: {
+      repo: { S: sandboxRepo },
+      status: { S: 'active' },
+      onboarded_at: { S: '2026-01-01T00:00:00.000Z' },
+      updated_at: { S: '2026-01-01T00:00:00.000Z' },
+    },
+  });
+
+  // --- Scenario 3: AWAITING_APPROVAL -> approve -------------------------------
+  // coding/new-task-v1 against the sandbox. The task asks the agent to write a
+  // `config.env` file, which the Write tool routes through the write_env_files
+  // soft-deny rule (agent/policies/soft_deny.cedar) -> the task parks at
+  // AWAITING_APPROVAL with a PENDING approval row. We approve it, then assert the
+  // row flips to APPROVED. (Post-approval the agent may COMPLETE or FAIL — both
+  // terminal — so the deterministic assertion is the recorded decision, not a
+  // specific terminal status.)
+  const submitApprove = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': idToken,
+    },
+    body: JSON.stringify({
+      workflow_ref: 'coding/new-task-v1',
+      repo: sandboxRepo,
+      task_description: 'Create a file named config.env at the repo root with the single line FOO=bar, then commit it.',
+      max_turns: 6,
+      max_budget_usd: 0.5,
+    }),
+  });
+  const approveTaskId = submitApprove.getAttString('body.data.task_id');
+
+  // Wait for the gate to open (interim AWAITING_APPROVAL).
+  const pollGateApprove = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
+    TableName: taskTableName,
+    Key: { task_id: { S: approveTaskId } },
+  });
+  pollGateApprove
+    .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.AWAITING_APPROVAL } } }))
+    .waitForAssertions(GATE_POLL);
+
+  // Read the PENDING approval row's request_id (SK). Querying by task_id (PK) is
+  // required because we do not know the agent-minted request_id. The status=PENDING
+  // FilterExpression makes Items[0] deterministic: a task could trip the gate more
+  // than once (or carry already-decided rows), and an unfiltered query orders only
+  // by SK, so without the filter Items[0] could be the wrong/decided row and the
+  // POST would target the wrong request_id. getAttString here flips this call to a
+  // flattened response, so we do NOT .expect() on it.
+  const queryApprove = integ.assertions.awsApiCall('DynamoDB', 'query', {
+    TableName: taskApprovalsTableName,
+    KeyConditionExpression: 'task_id = :tid',
+    FilterExpression: '#st = :pending',
+    ExpressionAttributeNames: { '#st': 'status' },
+    ExpressionAttributeValues: { ':tid': { S: approveTaskId }, ':pending': { S: 'PENDING' } },
+  });
+  const approveRequestId = queryApprove.getAttString('Items.0.request_id.S');
+
+  const approve = integ.assertions.httpApiCall(`${apiUrl}tasks/${approveTaskId}/approve`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // Fresh token (see reAuthApprove) — the original idToken may be expired by now.
+      'Authorization': approveToken,
+    },
+    body: JSON.stringify({ request_id: approveRequestId, decision: 'approve', scope: 'this_call' }),
+  });
+
+  // Assert the decision was recorded on the approval row. Now that request_id is
+  // known we read the exact row by its full key.
+  const pollApproveDecision = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
+    TableName: taskApprovalsTableName,
+    Key: { task_id: { S: approveTaskId }, request_id: { S: approveRequestId } },
+  });
+  pollApproveDecision
+    .expect(ExpectedResult.objectLike({ Item: { status: { S: 'APPROVED' } } }))
+    .waitForAssertions(GATE_POLL);
+
+  // --- Scenario 4: AWAITING_APPROVAL -> deny ----------------------------------
+  // Identical trigger to scenario 3; we deny instead and assert the row flips to
+  // DENIED.
+  const submitDeny = integ.assertions.httpApiCall(`${apiUrl}tasks`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': idToken,
+    },
+    body: JSON.stringify({
+      workflow_ref: 'coding/new-task-v1',
+      repo: sandboxRepo,
+      task_description: 'Create a file named config.env at the repo root with the single line FOO=bar, then commit it.',
+      max_turns: 6,
+      max_budget_usd: 0.5,
+    }),
+  });
+  const denyTaskId = submitDeny.getAttString('body.data.task_id');
+
+  const pollGateDeny = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
+    TableName: taskTableName,
+    Key: { task_id: { S: denyTaskId } },
+  });
+  pollGateDeny
+    .expect(ExpectedResult.objectLike({ Item: { status: { S: TaskStatus.AWAITING_APPROVAL } } }))
+    .waitForAssertions(GATE_POLL);
+
+  const queryDeny = integ.assertions.awsApiCall('DynamoDB', 'query', {
+    TableName: taskApprovalsTableName,
+    KeyConditionExpression: 'task_id = :tid',
+    FilterExpression: '#st = :pending',
+    ExpressionAttributeNames: { '#st': 'status' },
+    ExpressionAttributeValues: { ':tid': { S: denyTaskId }, ':pending': { S: 'PENDING' } },
+  });
+  const denyRequestId = queryDeny.getAttString('Items.0.request_id.S');
+
+  const deny = integ.assertions.httpApiCall(`${apiUrl}tasks/${denyTaskId}/deny`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // Fresh token (see reAuthDeny) — the original idToken may be expired by now.
+      'Authorization': denyToken,
+    },
+    body: JSON.stringify({ request_id: denyRequestId, decision: 'deny', reason: 'integ: exercising the deny path' }),
+  });
+
+  const pollDenyDecision = integ.assertions.awsApiCall('DynamoDB', 'getItem', {
+    TableName: taskApprovalsTableName,
+    Key: { task_id: { S: denyTaskId }, request_id: { S: denyRequestId } },
+  });
+  pollDenyDecision
+    .expect(ExpectedResult.objectLike({ Item: { status: { S: 'DENIED' } } }))
+    .waitForAssertions(GATE_POLL);
+
+  // Splice the gate steps into the chain. seedPut/onboardSandbox precede the gate
+  // submits (token + onboarding must exist first); approve/deny run sequentially.
+  chain = chain
+    .next(seedGet)
+    .next(seedPut)
+    .next(onboardSandbox)
+    .next(submitApprove)
+    .next(submitDeny)
+    .next(pollGateApprove)
+    .next(queryApprove)
+    .next(reAuthApprove)
+    .next(approve)
+    .next(pollApproveDecision)
+    .next(pollGateDeny)
+    .next(queryDeny)
+    .next(reAuthDeny)
+    .next(deny)
+    .next(pollDenyDecision);
+}
