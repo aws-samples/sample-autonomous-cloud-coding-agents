@@ -224,8 +224,16 @@ jobs:
         # cdk/test/integ/integ.task-lifecycle.ts + cdk/mise.toml). Using the
         # resolved head SHA means a stranded stack from a failed teardown never
         # collides with / blocks a later run on a different commit.
+        #
+        # INTEG_SANDBOX_REPO / INTEG_PAT_SECRET_ID bind the gate scenarios (3 & 4)
+        # to the account's provisioned sandbox repo + PAT secret instead of a
+        # hardcoded contributor repo. Same vars the sandbox-cleanup step reads.
+        # When unset, the test falls back to its literals and the gates degrade to
+        # clone-failures (still synthesizes).
         env:
           COMMIT_HASH: ${{ needs.resolve.outputs.head_sha }}
+          INTEG_SANDBOX_REPO: ${{ vars.INTEG_SANDBOX_REPO }}
+          INTEG_PAT_SECRET_ID: ${{ vars.INTEG_PAT_SECRET_ID }}
         run: mise //cdk:integ
 
       # Safety net: integ-runner forces teardown on success and failure, but if

@@ -143,11 +143,15 @@ const githubTokenSecretArn = output('GitHubTokenSecretArn');
 //                   into the stack-created GitHubTokenSecret by the token-seeding
 //                   assertion below.
 //
-// Until these hold real values the gate submits will FAIL at clone/preflight
-// (like scenario 2) rather than reaching AWAITING_APPROVAL — so flip them to the
-// provisioned repo/secret before relying on scenarios 3 & 4.
-const SANDBOX_REPO = 'ayushtr-aws/abca-integ-sandbox';
-const PRESEEDED_PAT_SECRET = 'bgagent/integ/github-pat';
+// Sourced from CI repo vars (INTEG_SANDBOX_REPO / INTEG_PAT_SECRET_ID — the same
+// vars the integ.yml sandbox-cleanup step reads), so the gate scenarios bind to
+// whatever sandbox+secret the running account provisioned rather than one
+// contributor's. Fall back to the original literals for local runs in that
+// account. When unset in another account, scenarios 3 & 4 degrade to
+// clone-failures (the comment-config still synthesizes); set the vars to exercise
+// the Cedar gates.
+const SANDBOX_REPO = process.env.INTEG_SANDBOX_REPO || 'ayushtr-aws/abca-integ-sandbox';
+const PRESEEDED_PAT_SECRET = process.env.INTEG_PAT_SECRET_ID || 'bgagent/integ/github-pat';
 
 const integ = new IntegTest(app, 'TaskLifecycle', {
   testCases: [stack],
@@ -215,6 +219,29 @@ const auth = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
 });
 
 const idToken = auth.getAttString('AuthenticationResult.IdToken');
+
+// Re-mint a FRESH token right before the approve/deny POSTs. The Cognito app
+// client uses the default 60-min ID-token validity (task-api.ts sets no
+// idTokenValidity), but the strictly-serial .next() chain reaches the gate POSTs
+// only after ~32 min (approve) / ~48 min (deny) of polling budget PLUS real agent
+// cold-start + runtime — the live run took ~54 min. Reusing the original token
+// would risk a 401 (expired) → the decision never records → false timeout keyed
+// to agent latency. These re-auths run just before their POSTs in the chain, so
+// each token is minted minutes (not ~50 min) before use. The user/password are
+// permanent (adminSetUserPassword above), so re-auth needs no new setup.
+const reAuthApprove = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
+  AuthFlow: 'USER_PASSWORD_AUTH',
+  ClientId: appClientId,
+  AuthParameters: { USERNAME: username, PASSWORD: password },
+});
+const approveToken = reAuthApprove.getAttString('AuthenticationResult.IdToken');
+
+const reAuthDeny = integ.assertions.awsApiCall(cognitoService, 'initiateAuth', {
+  AuthFlow: 'USER_PASSWORD_AUTH',
+  ClientId: appClientId,
+  AuthParameters: { USERNAME: username, PASSWORD: password },
+});
+const denyToken = reAuthDeny.getAttString('AuthenticationResult.IdToken');
 
 // Conservative polling windows. Agent runs are real LLM sessions over a freshly
 // cold-started AgentCore runtime; the first invocation pays the cold-start tax.
@@ -361,13 +388,18 @@ pollGateApprove
   .waitForAssertions(GATE_POLL);
 
 // Read the PENDING approval row's request_id (SK). Querying by task_id (PK) is
-// required because we do not know the agent-minted request_id. getAttString here
-// flips this call to a flattened response, so we do NOT .expect() on it — the
-// decision assertion below uses a separate getItem.
+// required because we do not know the agent-minted request_id. The status=PENDING
+// FilterExpression makes Items[0] deterministic: a task could trip the gate more
+// than once (or carry already-decided rows), and an unfiltered query orders only
+// by SK, so without the filter Items[0] could be the wrong/decided row and the
+// POST would target the wrong request_id. getAttString here flips this call to a
+// flattened response, so we do NOT .expect() on it.
 const queryApprove = integ.assertions.awsApiCall('DynamoDB', 'query', {
   TableName: taskApprovalsTableName,
   KeyConditionExpression: 'task_id = :tid',
-  ExpressionAttributeValues: { ':tid': { S: approveTaskId } },
+  FilterExpression: '#st = :pending',
+  ExpressionAttributeNames: { '#st': 'status' },
+  ExpressionAttributeValues: { ':tid': { S: approveTaskId }, ':pending': { S: 'PENDING' } },
 });
 const approveRequestId = queryApprove.getAttString('Items.0.request_id.S');
 
@@ -375,7 +407,8 @@ const approve = integ.assertions.httpApiCall(`${apiUrl}tasks/${approveTaskId}/ap
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': idToken,
+    // Fresh token (see reAuthApprove) — the original idToken may be expired by now.
+    'Authorization': approveToken,
   },
   body: JSON.stringify({ request_id: approveRequestId, decision: 'approve', scope: 'this_call' }),
 });
@@ -420,7 +453,9 @@ pollGateDeny
 const queryDeny = integ.assertions.awsApiCall('DynamoDB', 'query', {
   TableName: taskApprovalsTableName,
   KeyConditionExpression: 'task_id = :tid',
-  ExpressionAttributeValues: { ':tid': { S: denyTaskId } },
+  FilterExpression: '#st = :pending',
+  ExpressionAttributeNames: { '#st': 'status' },
+  ExpressionAttributeValues: { ':tid': { S: denyTaskId }, ':pending': { S: 'PENDING' } },
 });
 const denyRequestId = queryDeny.getAttString('Items.0.request_id.S');
 
@@ -428,7 +463,8 @@ const deny = integ.assertions.httpApiCall(`${apiUrl}tasks/${denyTaskId}/deny`, {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': idToken,
+    // Fresh token (see reAuthDeny) — the original idToken may be expired by now.
+    'Authorization': denyToken,
   },
   body: JSON.stringify({ request_id: denyRequestId, decision: 'deny', reason: 'integ: exercising the deny path' }),
 });
@@ -473,9 +509,11 @@ createUser
   .next(submitDeny)
   .next(pollGateApprove)
   .next(queryApprove)
+  .next(reAuthApprove)
   .next(approve)
   .next(pollApproveDecision)
   .next(pollGateDeny)
   .next(queryDeny)
+  .next(reAuthDeny)
   .next(deny)
   .next(pollDenyDecision);
