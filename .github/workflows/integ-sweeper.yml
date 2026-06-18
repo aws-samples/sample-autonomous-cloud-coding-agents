@@ -1,0 +1,161 @@
+name: integ-sweeper
+# Reclaims stranded ephemeral integ stacks (issue #317 / PR #348 follow-up).
+#
+# The Phase-1 lifecycle integ test (integ.yml + cdk/test/integ/integ.task-lifecycle.ts)
+# deploys a per-run `int-<commit-sha>` stack running the AgentCore Runtime in VPC
+# mode. That runtime injects AWS-service-managed `agentic_ai` ENIs into the private
+# subnets, which AWS releases only ASYNCHRONOUSLY (observed: 1+ hours after the
+# runtime is deleted). So the in-run `cdk destroy` reliably fails the subnet/SG/VPC
+# deletes (DependencyViolation) and the integ run tolerates that failure
+# (destroy.expectError) rather than blocking on a wait it can't win. The per-run
+# UNIQUE stack name means a stranded stack never blocks a later run — but nothing
+# in the run reclaims it either.
+#
+# THIS workflow is that reclaimer: on a schedule (after the ENIs have had time to
+# detach), it deletes every `int-*` stack, and FAILS LOUDLY + opens a tracking
+# issue for any `int-*` stack older than the alarm threshold that still won't
+# delete — so a genuine leak (cost in the shared account) surfaces instead of
+# accumulating silently.
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Every 2 hours. Frequent enough that a normal stranded stack (ENIs release in
+    # ~1-2h) is reclaimed within a cycle or two, well before the 6h alarm age.
+    - cron: "0 */2 * * *"
+
+concurrency:
+  group: integ-sweeper
+  cancel-in-progress: false
+
+permissions:
+  contents: none
+
+jobs:
+  sweep:
+    name: Reclaim stranded int-* stacks
+    runs-on: ubuntu-latest
+    # The integ deploy role (secrets.AWS_ROLE_TO_ASSUME) is scoped to the `integ`
+    # environment — same as integ.yml. The environment's protection rules must
+    # permit this scheduled run to assume the role (no manual approval is possible
+    # on a cron trigger).
+    environment: integ
+    timeout-minutes: 30
+    permissions:
+      id-token: write   # OIDC role assumption
+      contents: read
+      issues: write     # open a tracking issue on a genuine leak
+    env:
+      # Stacks older than this (hours) that STILL fail to delete are treated as a
+      # genuine leak → fail the job + file an issue. Comfortably past the observed
+      # ENI-release window so normal teardown lag never false-alarms.
+      ALARM_AGE_HOURS: "6"
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Sweep int-* stacks
+        id: sweep
+        run: |
+          set -uo pipefail
+
+          # All non-deleted int-* stacks (active, DELETE_FAILED, or rollback states).
+          mapfile -t stacks < <(
+            aws cloudformation list-stacks \
+              --stack-status-filter CREATE_COMPLETE CREATE_FAILED ROLLBACK_COMPLETE ROLLBACK_FAILED \
+                UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+              --query 'StackSummaries[?starts_with(StackName, `int-`)].StackName' \
+              --output text 2>/dev/null | tr '\t' '\n' | sort -u
+          )
+
+          if [ "${#stacks[@]}" -eq 0 ]; then
+            echo "No int-* stacks present. Nothing to sweep."
+            exit 0
+          fi
+
+          echo "Found ${#stacks[@]} int-* stack(s): ${stacks[*]}"
+          now_epoch="$(date -u +%s)"
+          alarm_secs=$(( ALARM_AGE_HOURS * 3600 ))
+          leaked=""
+
+          for stack in "${stacks[@]}"; do
+            [ -n "$stack" ] || continue
+            echo "::group::$stack"
+
+            # Best-effort delete (idempotent; no-op if already deleting/gone).
+            aws cloudformation delete-stack --stack-name "$stack" || true
+            # Give CloudFormation a moment, then read the resulting status.
+            sleep 15
+            status="$(aws cloudformation describe-stacks --stack-name "$stack" \
+              --query 'Stacks[0].StackStatus' --output text 2>&1 || true)"
+
+            if echo "$status" | grep -qiE 'does not exist|ValidationError'; then
+              echo "✅ $stack deleted (or gone)."
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Still present — how old is it? Alarm only if past the threshold.
+            created="$(aws cloudformation describe-stacks --stack-name "$stack" \
+              --query 'Stacks[0].CreationTime' --output text 2>/dev/null || true)"
+            created_epoch="$(date -u -d "$created" +%s 2>/dev/null || echo 0)"
+            age_secs=$(( now_epoch - created_epoch ))
+            age_hours=$(( age_secs / 3600 ))
+
+            if [ "$created_epoch" -gt 0 ] && [ "$age_secs" -ge "$alarm_secs" ]; then
+              echo "❌ $stack still present (status: $status), age ${age_hours}h ≥ ${ALARM_AGE_HOURS}h — LEAK."
+              leaked="${leaked}\n- \`${stack}\` — status \`${status}\`, age ~${age_hours}h"
+            else
+              echo "⏳ $stack still present (status: $status), age ~${age_hours}h — within ${ALARM_AGE_HOURS}h window; ENIs likely not yet released. Will retry next cycle."
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ -n "$leaked" ]; then
+            {
+              echo "leaked<<EOF"
+              echo -e "$leaked"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on genuine leak
+        if: steps.sweep.outputs.leaked != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass via env (not inline ${{ }} interpolation) so the value never
+          # expands into the shell script body — avoids template injection
+          # (zizmor template-injection). Stack names are AWS-controlled, but env
+          # is the correct, lint-clean pattern regardless.
+          LEAKED: ${{ steps.sweep.outputs.leaked }}
+        run: |
+          set -euo pipefail
+          body_file="$(mktemp)"
+          {
+            echo "The integ-sweeper found stranded \`int-*\` CloudFormation stacks older than ${ALARM_AGE_HOURS}h that still fail to delete — likely a real leak in the shared integ account (each carries a VPC + NAT gateway + interface endpoints + the AgentCore runtime, billing hourly)."
+            echo ""
+            echo "These are normally reclaimed automatically once the AgentCore \`agentic_ai\` ENIs detach (~1-2h). Past ${ALARM_AGE_HOURS}h, investigate: the ENIs may be genuinely stuck (needs manual ENI/VPC cleanup) or the deploy role lacks teardown permissions."
+            echo ""
+            echo "### Stranded stacks"
+            echo -e "${LEAKED}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Workflow run | [integ-sweeper #${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+            echo "| Region | \`${AWS_REGION}\` |"
+            echo ""
+            echo "Close this issue once the stacks are deleted and the sweeper run is green."
+          } > "${body_file}"
+
+          gh issue create \
+            --title "Stranded integ stacks not reclaimed (>${ALARM_AGE_HOURS}h)" \
+            --label bug \
+            --body-file "${body_file}"
+
+      - name: Fail job on genuine leak
+        if: steps.sweep.outputs.leaked != ''
+        run: exit 1

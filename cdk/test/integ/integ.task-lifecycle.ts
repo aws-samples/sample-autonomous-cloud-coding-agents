@@ -72,8 +72,9 @@ const app = new App();
 // releases ASYNCHRONOUSLY, so `cdk destroy` reliably fails the subnet/SG/VPC
 // deletes (DependencyViolation) and strands the stack. With a fixed name that
 // stranded stack BLOCKS the next run (name conflict). A unique per-commit name
-// means a failed teardown never blocks a later run, and an out-of-band ephemeral
-// sweeper can reclaim `int-*` stacks once their ENIs detach.
+// means a failed teardown never blocks a later run, and the out-of-band ephemeral
+// sweeper (.github/workflows/integ-sweeper.yml) reclaims `int-*` stacks once their
+// ENIs detach, alarming if any stays stuck past its age threshold.
 //
 // The hash comes from the COMMIT_HASH env var (set by CI from the resolved head
 // SHA; the mise //cdk:integ task falls back to the local git SHA). We read the
@@ -175,7 +176,8 @@ const integ = new IntegTest(app, 'TaskLifecycle', {
   // FAILED on teardown alone — masking whether the ASSERTIONS passed. We tolerate
   // the teardown failure (scoped to the dependency-violation message so unrelated
   // teardown bugs still surface) and hand the stranded `int-<hash>` stack to the
-  // out-of-band ephemeral sweeper, which reclaims it once AWS detaches the ENIs.
+  // out-of-band ephemeral sweeper (.github/workflows/integ-sweeper.yml), which
+  // reclaims it once AWS detaches the ENIs and alarms if it stays stuck.
   cdkCommandOptions: {
     destroy: {
       args: { force: true },

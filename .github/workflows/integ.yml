@@ -262,8 +262,10 @@ jobs:
       # so an immediate delete reliably hits DELETE_FAILED on the subnets/SG/VPC.
       # Because the stack name is now per-commit-UNIQUE, a stranded `int-<sha>`
       # stack never blocks a future run, so we leave it for the out-of-band
-      # ephemeral sweeper to reclaim once the ENIs detach. We fire one delete to
-      # start the teardown and move on.
+      # ephemeral sweeper (.github/workflows/integ-sweeper.yml) to reclaim once the
+      # ENIs detach — that sweeper FAILS LOUDLY + files an issue for any int-*
+      # stack still stuck past its alarm age, so leaks surface rather than
+      # accumulate. Here we just fire one delete to start the teardown and move on.
       - name: Ensure stacks torn down (best effort)
         if: always()
         env:
