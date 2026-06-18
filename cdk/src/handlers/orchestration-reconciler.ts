@@ -663,11 +663,17 @@ async function maybeRecoverFailedNode(
     re_releasing: plan.toRelease.length,
   });
 
-  // 1. Persist the un-fail (→succeeded) + un-skip (→blocked) writes. Release
-  //    flips the freed rows itself, so skip those here (avoid a double-write
-  //    race), exactly as reconcileTerminalChild does for its toRelease set.
+  // 1. Persist ALL the un-fail (→succeeded) + un-skip (→blocked) writes,
+  //    INCLUDING the toRelease rows. Unlike the forward path (reconcileTerminalChild),
+  //    we must NOT exclude the toRelease rows here: there they're already
+  //    'blocked' in the store so releaseReadyChildren can flip them; here they're
+  //    still 'skipped', and releaseReadyChildren's conditional write only accepts
+  //    child_status IN (blocked, ready) — so without first persisting
+  //    skipped→'blocked' the release spawns the task but the row stays 'skipped'
+  //    (live-caught: DEP ran + opened a PR yet the panel kept showing ⏭️ skipped
+  //    and the epic never advanced). Persist blocked first, then release flips
+  //    blocked→released.
   for (const update of plan.statusUpdates) {
-    if (plan.toRelease.includes(update.sub_issue_id)) continue;
     try {
       await ddb.send(new UpdateCommand({
         TableName: ORCHESTRATION_TABLE,
