@@ -10,7 +10,6 @@ from config import AGENT_WORKSPACE
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content as sanitize_memory_content
 from shell import log
-from system_prompt import SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from models import HydratedContext, RepoSetup, TaskConfig
@@ -23,12 +22,8 @@ def build_system_prompt(
     overrides: str,
 ) -> str:
     """Assemble the system prompt with task-specific values and memory context."""
-    task_type = config.task_type
-    try:
-        system_prompt = get_system_prompt(task_type)
-    except ValueError:
-        log("ERROR", f"Unknown task_type {task_type!r} — falling back to default system prompt")
-        system_prompt = SYSTEM_PROMPT
+    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    system_prompt = get_system_prompt(workflow_id)
     system_prompt = system_prompt.replace("{repo_url}", config.repo_url)
     system_prompt = system_prompt.replace("{task_id}", config.task_id)
     system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
@@ -84,14 +79,79 @@ def build_system_prompt(
     return system_prompt
 
 
+def build_repoless_system_prompt(
+    config: TaskConfig,
+    hydrated_context: HydratedContext | None,
+    overrides: str,
+) -> str:
+    """Assemble the system prompt for a repo-less workflow (#248 Phase 3).
+
+    The repo-bound :func:`build_system_prompt` requires a ``RepoSetup`` (branch,
+    default_branch, setup notes); a repo-less task has none. This builds the
+    repo-less template (no git/branch/PR placeholders), substituting only
+    task_id/workspace/max_turns and the rendered memory context, then appends the
+    same Blueprint overrides + channel guidance as the repo-bound path.
+    """
+    workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
+    system_prompt = get_system_prompt(workflow_id, repo_less=True)
+    system_prompt = system_prompt.replace("{task_id}", config.task_id)
+    system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
+    system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
+    system_prompt = system_prompt.replace(
+        "{memory_context}", _render_memory_context(hydrated_context)
+    )
+
+    if overrides:
+        system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
+        log("TASK", f"Applied system prompt overrides ({len(overrides)} chars)")
+
+    channel_addendum = _channel_prompt_addendum(config)
+    if channel_addendum:
+        system_prompt += channel_addendum
+
+    return system_prompt
+
+
+def _render_memory_context(hydrated_context: HydratedContext | None) -> str:
+    """Render the memory-context block shared by repo-bound and repo-less prompts."""
+    if not (hydrated_context and hydrated_context.memory_context):
+        return "(No previous knowledge available.)"
+    mc = hydrated_context.memory_context
+    mc_parts: list[str] = []
+    if mc.repo_knowledge:
+        mc_parts.append("**Prior knowledge:**")
+        for item in mc.repo_knowledge:
+            mc_parts.append(f"- {sanitize_memory_content(item)}")
+    if mc.past_episodes:
+        mc_parts.append("\n**Past task episodes:**")
+        for item in mc.past_episodes:
+            mc_parts.append(f"- {sanitize_memory_content(item)}")
+    return "\n".join(mc_parts) if mc_parts else "(No previous knowledge available.)"
+
+
 def _channel_prompt_addendum(config: TaskConfig) -> str:
     """Return channel-specific prompt guidance, or empty string.
 
     For Linear-origin tasks, instruct the agent to post progress comments and
     transition state using the already-loaded Linear MCP tools. The tool names
     are stated explicitly so the agent doesn't grope for them.
+
+    Jira-origin tasks intentionally get NO addendum: Atlassian's Remote MCP
+    requires an interactive OAuth flow a headless agent can't complete, so the
+    MCP tools never load. Instructing the agent to use them just wastes turns.
+    Jira progress comments are posted out-of-band by ``jira_reactions`` (a REST
+    shim wired into the pipeline), not by the agent.
     """
     if config.channel_source != "linear":
+        return ""
+    # #247 UX.16: a synthetic orchestration integration node has NO real Linear
+    # sub-issue — `linear_issue_id` is intentionally omitted from its
+    # channel_metadata (see orchestration-release.ts). Without a target issue
+    # the agent would grope via the MCP and post its "Starting"/"PR opened"
+    # comments onto the PARENT epic, cluttering the maturing panel (which
+    # already shows the integration row + combined PR + preview). Skip the
+    # progress addendum entirely for these nodes — the panel is the surface.
+    if not config.channel_metadata.get("linear_issue_id"):
         return ""
     issue_identifier = config.channel_metadata.get("linear_issue_identifier") or ""
     issue_ref = f" (`{issue_identifier}`)" if issue_identifier else ""
@@ -139,12 +199,15 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
         "the team has no `In Review` state, fall back to leaving it at "
         "`In Progress` — DO NOT silently fail by claiming you transitioned "
         "when the response shows the state didn't change. Acknowledge in the "
-        "PR comment that the team workflow has no In-Review-equivalent.\n"
-        "3. **On completion or failure** — call `mcp__linear-server__save_comment` "
-        "with the final status (succeeded / failed + short reason).\n\n"
-        "Keep comments concise. Do not mirror the full agent transcript back to "
-        "Linear. Even small tasks must post all three updates — users rely on "
-        "them to track progress.\n\n"
+        "PR comment that the team workflow has no In-Review-equivalent.\n\n"
+        "**Do NOT post a final 'task completed' or 'task failed' comment.** "
+        "The platform fan-out plane (issue #239) posts a structured "
+        "✅/⚠️/❌ summary on terminal events with cost / turns / duration / "
+        "PR-link metrics that you don't have visibility into. A redundant "
+        "agent-side completion comment would just stack two near-identical "
+        "comments on the issue.\n\n"
+        "Keep the start + PR-opened comments concise. Do not mirror the full "
+        "agent transcript back to Linear.\n\n"
         "## Linear context discovery (on demand)\n\n"
         "The same Linear MCP exposes tools for fetching extra context on the "
         "issue when you need it. Use them sparingly — only when the task "

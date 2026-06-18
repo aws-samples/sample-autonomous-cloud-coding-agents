@@ -138,18 +138,48 @@ describe('linear-webhook handler', () => {
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
-  test('ignores non-Issue event types with 200', async () => {
+  test('ignores unrecognized event types with 200 (e.g. Reaction)', async () => {
     const body = JSON.stringify({
       action: 'create',
-      type: 'Comment',
+      type: 'Reaction',
       webhookTimestamp: Date.now(),
       webhookId: 'wh-2',
-      data: { id: 'cmt-1' },
+      data: { id: 'rx-1' },
     });
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(200);
     expect(ddbSend).not.toHaveBeenCalled();
     expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('forwards a Comment:create event to the processor (#247 A6 trigger)', async () => {
+    const body = JSON.stringify({
+      action: 'create',
+      type: 'Comment',
+      webhookTimestamp: Date.now(),
+      webhookId: 'wh-2c',
+      organizationId: 'org-1',
+      data: { id: 'cmt-1', body: '@bgagent fix it', issueId: 'iss-9' },
+    });
+    ddbSend.mockResolvedValueOnce({}); // dedup Put succeeds
+    lambdaSend.mockResolvedValueOnce({});
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(ddbSend).toHaveBeenCalled(); // deduped
+    expect(lambdaSend).toHaveBeenCalled(); // forwarded to processor
+  });
+
+  test('ignores a non-create Comment event (edited/removed) with 200', async () => {
+    const body = JSON.stringify({
+      action: 'update',
+      type: 'Comment',
+      webhookTimestamp: Date.now(),
+      webhookId: 'wh-2u',
+      data: { id: 'cmt-2', body: '@bgagent edited', issueId: 'iss-9' },
+    });
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).not.toHaveBeenCalled(); // not forwarded
   });
 
   test('400s when data.id is missing on an Issue event', async () => {

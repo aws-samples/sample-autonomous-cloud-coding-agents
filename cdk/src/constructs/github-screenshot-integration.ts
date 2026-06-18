@@ -20,14 +20,28 @@
 import * as path from 'path';
 import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { ScreenshotBucket } from './screenshot-bucket';
+
+/** Async screenshot-processor Lambda timeout (seconds). */
+const PROCESSOR_TIMEOUT_SECONDS = 120;
+
+/** Async-invoke DLQ message retention (days). */
+const PROCESSOR_DLQ_RETENTION_DAYS = 14;
+
+/** DLQ-depth alarm metric period (minutes). */
+const DLQ_ALARM_PERIOD_MINUTES = 5;
+
+/** Async screenshot-processor Lambda memory (MB). */
+const PROCESSOR_MEMORY_MB = 512;
 
 /**
  * Properties for GitHubScreenshotIntegration construct.
@@ -52,6 +66,15 @@ export interface GitHubScreenshotIntegrationProps {
    * via Linear's `issueVcsBranchSearch` GraphQL.
    */
   readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
+
+  /**
+   * Optional — when provided, the processor persists the captured
+   * screenshot's public URL onto the deploy task's TaskRecord (keyed by the
+   * taskId in the deploy branch), so the #247 orchestration reconciler can
+   * embed the integration node's combined preview in the parent epic panel.
+   * Unset → persistence is skipped (the PR + Linear comments still post).
+   */
+  readonly taskTable?: dynamodb.ITable;
 
   /**
    * Removal policy for the dedup table + screenshot bucket. Defaults
@@ -83,14 +106,14 @@ export interface GitHubScreenshotIntegrationProps {
  *     window with slack)
  *   - Webhook signing-secret (Secrets Manager placeholder; populated
  *     manually when the operator pastes GitHub's value into the secret)
- *   - Public-read screenshot S3 bucket
+ *   - Private screenshot S3 bucket; served anonymously via CloudFront OAC
  *   - API Gateway route `POST /v1/github/webhook`
  *
  * Inbound-only adapter — there's no outbound polling or stream
  * consumer, just the webhook → screenshot → comment fan-out.
  */
 export class GitHubScreenshotIntegration extends Construct {
-  /** Public-read bucket hosting the screenshot PNGs. */
+  /** Private bucket; served via CloudFront OAC. Hosts the screenshot PNGs. */
   public readonly screenshotBucket: ScreenshotBucket;
 
   /**
@@ -109,12 +132,17 @@ export class GitHubScreenshotIntegration extends Construct {
   /** Async processor Lambda (browser + S3 + PR comment). */
   public readonly webhookProcessorFn: lambda.NodejsFunction;
 
+  /** Fires when a failed async invocation lands in the processor DLQ —
+   *  mirrors ``FanOutConsumer.dlqDepthAlarm``: without it the queue is
+   *  "for operator inspection" that no operator is ever told to make. */
+  public readonly processorDlqDepthAlarm: cloudwatch.Alarm;
+
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
     super(scope, id);
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
-    // --- Screenshot bucket (public-read on `screenshots/*`) ---
+    // --- Screenshot bucket (private; served via CloudFront with OAC) ---
     this.screenshotBucket = new ScreenshotBucket(this, 'ScreenshotBucket', {
       removalPolicy,
     });
@@ -140,16 +168,32 @@ export class GitHubScreenshotIntegration extends Construct {
     };
 
     // --- Async processor (browser + S3 + comment) ---
-    // Timeout budget: 60s screenshot + 5s navigate slack + 30s slack for
-    // the GitHub PR-lookup + comment + S3 PUT + JSON encode = 95s. Round
-    // to 120 for headroom on cold-start CDP handshake.
+    // Lambda timeout: 120s. The handler enforces a single wall-clock
+    // deadline of 110s (TOTAL_BUDGET_MS in github-webhook-processor.ts)
+    // shared across PR-lookup retry + screenshot capture + S3 PUT +
+    // comment POST, so no individual sub-step can run past the Lambda
+    // timeout even on the worst-case path. The 10s headroom covers
+    // SDK auto-retries + the runtime's shutdown grace so a hard timeout
+    // never severs an in-flight comment-post. (theagenticguy PR-241
+    // review item B1: previous comment under-counted the 35s retry
+    // ladder that runs before captureScreenshot's 60s budget.)
+    // Async-invoke failure backstop: the handler swallows its own errors,
+    // but an init-time crash (missing env at cold start, bundling defect)
+    // would otherwise vanish after Lambda's built-in async retries. The
+    // DLQ keeps the failed invocation payload for operator inspection.
+    const processorDlq = new sqs.Queue(this, 'WebhookProcessorDlq', {
+      retentionPeriod: Duration.days(PROCESSOR_DLQ_RETENTION_DAYS),
+      enforceSSL: true,
+    });
+
     this.webhookProcessorFn = new lambda.NodejsFunction(this, 'WebhookProcessorFn', {
       entry: path.join(handlersDir, 'github-webhook-processor.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(120),
-      memorySize: 512,
+      timeout: Duration.seconds(PROCESSOR_TIMEOUT_SECONDS),
+      memorySize: PROCESSOR_MEMORY_MB,
+      deadLetterQueue: processorDlq,
       environment: {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
         SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
@@ -157,8 +201,34 @@ export class GitHubScreenshotIntegration extends Construct {
         ...(props.linearWorkspaceRegistryTable && {
           LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: props.linearWorkspaceRegistryTable.tableName,
         }),
+        ...(props.taskTable && {
+          TASK_TABLE_NAME: props.taskTable.tableName,
+        }),
       },
       bundling: commonBundling,
+    });
+
+    NagSuppressions.addResourceSuppressions(processorDlq, [
+      {
+        id: 'AwsSolutions-SQS3',
+        reason: 'This queue IS the async-invoke DLQ for the processor Lambda — a DLQ for the DLQ would be infinite recursion',
+      },
+    ]);
+
+    // Alarm on any record landing in the DLQ. The processor handler
+    // swallows its own errors, so only init-time crashes reach this queue
+    // — rare, but each one is a screenshot pipeline silently down. Same
+    // threshold-1 shape as FanOutConsumer.dlqDepthAlarm.
+    this.processorDlqDepthAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorDlqDepthAlarm', {
+      metric: processorDlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      alarmDescription:
+        'Screenshot webhook processor DLQ has failed async invocations — the screenshot pipeline is crashing before handling events',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
@@ -169,6 +239,11 @@ export class GitHubScreenshotIntegration extends Construct {
     // workspaces, then per-workspace looks up the OAuth token from
     // Secrets Manager (`bgagent-linear-oauth-*` prefix, written by
     // `bgagent linear setup`).
+    //
+    // PutSecretValue is intentional, not a typo: resolveLinearOauthToken
+    // rotates Linear's refresh token in place when it expires (the same
+    // pattern as the orchestrator role). This is a write grant by
+    // design — see linear-oauth-resolver.ts.
     if (props.linearWorkspaceRegistryTable) {
       props.linearWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
@@ -184,15 +259,33 @@ export class GitHubScreenshotIntegration extends Construct {
       }));
     }
 
+    // #247: write access so the processor can persist screenshot_url onto the
+    // deploy task's TaskRecord (conditional UpdateItem). grantWriteData covers
+    // the UpdateItem; the handler's update is guarded by attribute_exists.
+    if (props.taskTable) {
+      props.taskTable.grantWriteData(this.webhookProcessorFn);
+    }
+
     // AgentCore Browser session lifecycle + automation-stream connect.
-    // The data-plane API doesn't support per-resource ARNs (sessions
-    // are ephemeral), so wildcards are required — annotated with a
-    // cdk-nag suppression below. The wildcard set covers
-    // `ConnectBrowserAutomationStream` (the SigV4-presigned WSS dial)
-    // which lives under the same prefix but isn't visible in the
-    // public CLI command list.
+    // Action set scoped to the three calls the handler actually makes;
+    // resource is `*` because Browser sessions are ephemeral and the
+    // two `Connect*Stream` data-plane actions in the AWS Service
+    // Authorization Reference for `bedrock-agentcore` declare no
+    // resource types or condition keys (they require Resource:"*"
+    // anyway). cdk-nag IAM5 suppression annotates the resource
+    // wildcard.
+    //
+    // Source: AWS Service Authorization Reference for bedrock-agentcore,
+    //   https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
+    //   - bedrock-agentcore:StartBrowserSession (Write)
+    //   - bedrock-agentcore:StopBrowserSession (Write)
+    //   - bedrock-agentcore:ConnectBrowserAutomationStream (Read; no resource scoping)
     this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['bedrock-agentcore:*'],
+      actions: [
+        'bedrock-agentcore:StartBrowserSession',
+        'bedrock-agentcore:StopBrowserSession',
+        'bedrock-agentcore:ConnectBrowserAutomationStream',
+      ],
       resources: ['*'],
     }));
 

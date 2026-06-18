@@ -24,6 +24,7 @@ import {
   generateInviteCode,
   INVITE_CODE_ALPHABET,
   isWebhookSecretConfigured,
+  queryLinearTeamKeys,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
 import * as config from '../../src/config';
@@ -370,5 +371,92 @@ describe('generateInviteCode', () => {
       seen.add(generateInviteCode());
     }
     expect(seen.size).toBe(200);
+  });
+});
+
+describe('queryLinearTeamKeys', () => {
+  // Returned keys are persisted on the registry row at install time and
+  // drive prefix-routing inside the screenshot processor — see #96. The
+  // helper intentionally swallows every failure path (returns []) so a
+  // transient Linear outage during `setup` doesn't abort the OAuth
+  // dance. Coverage verifies (a) the happy-path normalization and (b)
+  // every failure mode collapses to [].
+  const originalFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  test('uppercases, dedupes, and sorts the team keys returned by Linear', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          teams: {
+            nodes: [
+              { key: 'plat' },
+              { key: 'ABCA' },
+              { key: 'PLAT' }, // dedup case-insensitive
+              { key: 'web' },
+            ],
+          },
+        },
+      }),
+    }) as unknown as typeof fetch;
+
+    const keys = await queryLinearTeamKeys('Bearer tok');
+
+    expect(keys).toEqual(['ABCA', 'PLAT', 'WEB']);
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.linear.app/graphql',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer tok' }),
+      }),
+    );
+  });
+
+  test('drops empty / non-string key entries', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          teams: {
+            nodes: [
+              { key: 'ABCA' },
+              { key: '' },
+              { key: undefined },
+              {}, // missing key entirely
+            ],
+          },
+        },
+      }),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual(['ABCA']);
+  });
+
+  test('returns [] when Linear responds non-2xx', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+  });
+
+  test('returns [] when fetch itself throws (network failure)', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('ECONNRESET')) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+  });
+
+  test('returns [] when GraphQL response shape is missing teams.nodes', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: {} }),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
   });
 });

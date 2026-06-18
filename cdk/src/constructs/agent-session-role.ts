@@ -27,6 +27,8 @@ import { Construct } from 'constructs';
 /** S3 key prefixes the agent writes/reads, scoped per tenant. */
 const TRACE_KEY_PREFIX = 'traces';
 const ATTACHMENT_KEY_PREFIX = 'attachments';
+/** Repo-less deliverable artifacts (#248 Phase 3), scoped per task_id. */
+const ARTIFACT_KEY_PREFIX = 'artifacts';
 
 /**
  * Properties for {@link AgentSessionRole}.
@@ -184,6 +186,21 @@ export class AgentSessionRole extends Construct {
       }),
     );
 
+    // --- S3 artifact writes: scoped to artifacts/<task_id>/ (#248 Phase 3) ---
+    // A repo-less workflow's deliver_artifact step uploads its product here. The
+    // key is task_id-scoped (per ADR-014 addendum) — same PrincipalTag the
+    // DynamoDB LeadingKeys condition uses — sharing the trace-artifacts bucket.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject'],
+        resources: [
+          props.traceArtifactsBucket.arnForObjects(
+            `${ARTIFACT_KEY_PREFIX}/\${aws:PrincipalTag/task_id}/*`,
+          ),
+        ],
+      }),
+    );
+
     // The object-level prefix conditions above already constrain access to the
     // session's own tenant prefix; the remaining wildcard is the per-object
     // suffix (task_id/attachment_id/filename), which is the intended scope.
@@ -195,7 +212,8 @@ export class AgentSessionRole extends Construct {
           reason:
             'Resource wildcards are the per-object suffix under a tenant-scoped '
             + 'prefix (traces/${aws:PrincipalTag/user_id}/*, '
-            + 'attachments/${aws:PrincipalTag/user_id}/*) and the DynamoDB item '
+            + 'attachments/${aws:PrincipalTag/user_id}/*, '
+            + 'artifacts/${aws:PrincipalTag/task_id}/*) and the DynamoDB item '
             + 'set gated by a dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id} '
             + 'condition — narrower than the compute role this replaces.',
         },

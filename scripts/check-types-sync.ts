@@ -141,6 +141,7 @@ const CLI_ONLY_ALLOWLIST = new Set<string>([
   'CancelTaskResponse',
   'SlackLinkResponse',
   'LinearLinkResponse',
+  'JiraLinkResponse',
   'TraceUrlResponse',
   // Error classification — derived server-side via a function and
   // emitted on TaskDetail. The CLI consumes the resulting interface
@@ -157,6 +158,13 @@ const CLI_ONLY_ALLOWLIST = new Set<string>([
   'Credentials',
   // Terminal-status helper for CLI exit codes:
   'TERMINAL_STATUSES',
+  // Client-side display/default helper: the workflow id the CLI treats
+  // as "the default coding workflow" (suppressed in detail output,
+  // applied by `submit` when no --workflow is given). Distinct from
+  // CDK's DEFAULT_WORKFLOW_ID ('default/agent-v1'), which is the
+  // server-side fallback for repo-less tasks — the two are different
+  // contracts, hence the different name.
+  'DEFAULT_CODING_WORKFLOW_ID',
 ]);
 
 function parseFile(filePath: string): Map<string, ExportSummary> {
@@ -283,6 +291,7 @@ function resolveConstantsReference(
   let value: unknown = SHARED_CONSTANTS;
   for (const seg of segments) {
     if (value == null || typeof value !== 'object') return undefined;
+    // nosemgrep: javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop -- read-only walk down build-time-trusted contracts/constants.json; `seg` keys come from this script's own TS AST, not external input, and no object property is ever assigned (value is reassigned, never written).
     value = (value as Record<string, unknown>)[seg];
   }
   if (value == null || typeof value === 'object') return undefined;

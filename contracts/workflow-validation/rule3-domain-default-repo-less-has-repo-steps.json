@@ -1,0 +1,79 @@
+{
+  "name": "rule3-domain-default-repo-less-has-repo-steps",
+  "description": "knowledge default (repo-less) but declares clone_repo + issue source; schema-invisible.",
+  "workflow": {
+    "id": "knowledge/note-v1",
+    "version": "1.0.0",
+    "domain": "knowledge",
+    "description": "Research a topic and deliver a cited artifact. No repo.",
+    "read_only": false,
+    "prompt": {
+      "template": "registry://prompt/web-research-workflow"
+    },
+    "hydration": {
+      "sources": [
+        "issue",
+        "task_description"
+      ]
+    },
+    "agent_config": {
+      "tier": "elevated",
+      "allowed_tools": [
+        "Read",
+        "WebFetch"
+      ],
+      "mcp_servers": [
+        "registry://mcp/web-search-v1"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny",
+        "builtin/soft_deny"
+      ],
+      "skills": [
+        "registry://skill/research-synthesis-v1"
+      ]
+    },
+    "repo_config": {
+      "discover": false
+    },
+    "required_inputs": {
+      "all_of": [
+        "task_description"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "clone_repo"
+      },
+      {
+        "kind": "hydrate_context"
+      },
+      {
+        "kind": "run_agent"
+      },
+      {
+        "kind": "deliver_artifact",
+        "target": "s3_and_comment"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "artifact"
+    },
+    "limits": {
+      "max_turns": 25,
+      "max_budget_usd": 5
+    },
+    "promotion_gate": {
+      "requires": [
+        "eval:web-research-quality"
+      ]
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "rule-3"
+    ]
+  }
+}

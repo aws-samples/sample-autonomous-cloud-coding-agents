@@ -78,7 +78,7 @@ If a task fails with a `preflight_failed` event, the platform rejected the run b
 
 - `GITHUB_UNREACHABLE` - The platform could not reach the GitHub API. Check network connectivity and GitHub status.
 - `REPO_NOT_FOUND_OR_NO_ACCESS` - The GitHub PAT does not have access to the target repository, or the repo does not exist.
-- `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the task type. For `new_task` and `pr_iteration`, you need Contents (read/write) and Pull requests (read/write). For `pr_review`, Triage or higher is enough.
+- `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the workflow. For `coding/new-task-v1` and `coding/pr-iteration-v1`, you need Contents (read/write) and Pull requests (read/write). For `coding/pr-review-v1`, Triage or higher is enough.
 - `PR_NOT_FOUND_OR_CLOSED` - The specified PR does not exist or is already closed.
 
 To fix permission issues, update the GitHub PAT in AWS Secrets Manager and submit a new task. See [Developer guide - Repository preparation](/developer-guide/repository-preparation) for the full permissions table.
@@ -97,7 +97,7 @@ Filter by task ID to find logs for a specific task.
 
 ### Notifications (GitHub edit-in-place)
 
-When a task targets a pull request (`pr_iteration` or `pr_review`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
+When a task targets a pull request (`coding/pr-iteration-v1` or `coding/pr-review-v1`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
 
 The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers. Currently the GitHub edit-in-place dispatcher is active; Slack and Email dispatchers are planned.
 

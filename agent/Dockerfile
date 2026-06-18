@@ -74,6 +74,12 @@ COPY agent/policies/ /app/policies/
 # by ``cdk/src/handlers/shared/types.ts`` at synth time. See
 # ``contracts/README.md`` for the contract.
 COPY contracts/ /app/contracts/
+# First-party workflow files (#248). ``agent/src/workflow/loader.py`` resolves
+# ``_WORKFLOWS_ROOT`` to ``/app/workflows`` (parents[2] of /app/src/workflow/)
+# and loads ``<domain>/<name>-vN.yaml`` plus ``schema/workflow.schema.json`` at
+# task time; without these files every workflow load fails with
+# ``WorkflowValidationError: workflow '...' not found at /app/workflows/...``.
+COPY agent/workflows/ /app/workflows/
 COPY agent/prepare-commit-msg.sh /app/
 COPY agent/test_sdk_smoke.py agent/test_subprocess_threading.py /app/
 

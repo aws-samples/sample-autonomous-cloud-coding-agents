@@ -203,7 +203,9 @@ const MAX_POLL_INTERVAL_MS = 300_000;
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
-  const repoConfig = await loadRepoConfig(task.repo);
+  // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
+  // defaults directly rather than a RepoTable lookup on a missing repo.
+  const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
     logger.info('Loaded per-repo blueprint config', {
@@ -246,6 +248,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
+    build_command: repoConfig?.build_command,
+    lint_command: repoConfig?.lint_command,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
   };
@@ -343,7 +347,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     try {
       await emitTaskEvent(task.task_id, 'guardrail_blocked', {
         reason: hydratedContext.guardrail_blocked,
-        task_type: task.task_type,
+        resolved_workflow: task.resolved_workflow?.id,
         pr_number: task.pr_number,
         sources: hydratedContext.sources,
         token_estimate: hydratedContext.token_estimate,
@@ -508,9 +512,18 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
-    task_type: task.task_type ?? 'new_task',
+    resolved_workflow: task.resolved_workflow ?? { id: 'coding/new-task-v1', version: '1.0.0' },
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
+    // #247 A4: orchestration children carry their stacked base branch +
+    // (diamond case) predecessor branches to merge in, via channel_metadata.
+    // The PR-task ``resolved_base_branch`` path above wins if both are set
+    // (a task is never both a PR-iteration and an orchestration child).
+    ...(!hydratedContext.resolved_base_branch
+      && task.channel_metadata?.orchestration_base_branch
+      && { base_branch: task.channel_metadata.orchestration_base_branch }),
+    ...(task.channel_metadata?.orchestration_merge_branches
+      && { merge_branches: parseMergeBranches(task.channel_metadata.orchestration_merge_branches) }),
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
@@ -520,6 +533,11 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
+    // #1: per-repo build/lint verification commands. Absent → agent defaults
+    // to ``mise run build`` / ``mise run lint``. Set for non-mise repos so
+    // build-regression gating actually runs the repo's real command.
+    ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
+    ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
     // Cedar HITL: the agent's PreToolUse hook uses this to compute
     // the maxLifetime ceiling on per-gate approval timeouts (§6.5).
@@ -744,9 +762,12 @@ export async function finalizeTask(
           { field: 'cost_usd', task_id: taskId },
           logger,
         );
+        // Memory actorId: repo for coding tasks, user:{user_id} for repo-less
+        // workflows (#248 Phase 3, ADR-014 addendum 2026-06-08).
+        const actorNamespace = task.repo ?? `user:${task.user_id}`;
         const written = await writeMinimalEpisode(
           MEMORY_ID,
-          task.repo,
+          actorNamespace,
           taskId,
           currentStatus,
           durationS ?? undefined,
@@ -887,4 +908,26 @@ async function decrementConcurrency(userId: string): Promise<void> {
       logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+/**
+ * Parse the JSON-encoded predecessor merge-branch list that the
+ * orchestration release path stashes in
+ * ``channel_metadata.orchestration_merge_branches`` (#247 A4, diamond
+ * case). Best-effort: a malformed value yields an empty list rather than
+ * failing the orchestration — the child still branches off its base, it
+ * just won't have the predecessor code merged in (surfaced as a normal
+ * build failure if it actually needed it, never a silent crash here).
+ */
+function parseMergeBranches(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed) && parsed.every((b) => typeof b === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through
+  }
+  logger.warn('Ignoring malformed orchestration_merge_branches', { raw });
+  return [];
 }
