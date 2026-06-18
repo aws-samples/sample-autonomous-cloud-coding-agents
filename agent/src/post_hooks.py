@@ -49,16 +49,27 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     )
 
 
-def resolve_verify_argv(command: str | None, default: str) -> list[str]:
-    """Split a configured verify command into argv, falling back to the default.
+# Shell metacharacters that mean the command can't be a single argv exec and
+# must run through a shell to behave as written (#72: a configured
+# ``npm ci && npm run lint && npm test`` was shlex-split into one ``npm`` call
+# with ``&&``/``npm``/… as bogus args — ``npm ci`` ran, ignored the rest, exited
+# 0, and the chain's lint/test NEVER ran, so a broken build reported "OK").
+_SHELL_OPERATORS = ("&&", "||", "|", ";", ">", "<", "$(", "`")
 
-    Empty/whitespace/None ``command`` → the default (mise). Parsed with ``shlex`` so
-    a configured ``'npm run build && npm test'`` would need a shell — we keep it
-    simple argv here; chained shell commands should be wrapped in a mise/npm
-    task by the repo. A single command with args (``npm run build``) splits
-    cleanly.
+
+def resolve_verify_argv(command: str | None, default: str) -> list[str]:
+    """Resolve a configured verify command into an argv for :func:`run_cmd`.
+
+    Empty/whitespace/None ``command`` → the default (mise). A plain command with
+    args (``npm run build``) is ``shlex``-split and exec'd directly. A command
+    containing shell operators (``&&``, ``|``, ``;``, redirects, command
+    substitution) is wrapped as ``bash -lc '<command>'`` so the chain executes as
+    written — otherwise the operators are passed as literal args to the first
+    program and silently ignored (#72: chained build commands couldn't gate).
     """
     cmd = (command or "").strip() or default
+    if any(op in cmd for op in _SHELL_OPERATORS):
+        return ["bash", "-lc", cmd]
     return shlex.split(cmd)
 
 
