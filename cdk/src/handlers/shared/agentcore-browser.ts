@@ -46,8 +46,14 @@ const AWS_BROWSER_IDENTIFIER = 'aws.browser.v1';
  */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** CDP message id allocator. */
-let nextCdpId = 1;
+/** Post-load settle wait (ms) before screenshot — lets SPA fetches finish. */
+const PAGE_SETTLE_WAIT_MS = 2000;
+
+/** Inclusive lower bound for a successful HTTP status (2xx). */
+const HTTP_STATUS_SUCCESS_MIN = 200;
+
+/** Exclusive upper bound for a successful HTTP status (first non-2xx). */
+const HTTP_STATUS_REDIRECT_MIN = 300;
 
 interface CdpMessage {
   readonly id?: number;
@@ -77,7 +83,7 @@ interface CdpMessage {
  *      3. CDP `Target.attachToBrowserTarget` to get a flat session
  *      4. CDP `Target.getTargets`, find the about:blank page
  *      5. `Target.attachToTarget` (flatten=true) on that page → sessionId
- *      6. `Page.navigate` + wait for `Page.frameStoppedLoading`
+ *      6. `Page.navigate` + wait for `Page.loadEventFired`
  *      7. `Page.captureScreenshot` (returns base64 PNG)
  *      8. StopBrowserSession (best-effort; sessions auto-expire)
  *
@@ -144,6 +150,10 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(0, deadline - Date.now());
 
+  // CDP message id allocator. Scoped to the function so concurrent
+  // captures (unusual but possible in tests) don't share counter state.
+  let nextCdpId = 1;
+
   // Promise machinery for tracking in-flight CDP requests by `id`.
   const pending = new Map<number, { resolve: (msg: CdpMessage) => void; reject: (err: Error) => void }>();
   const eventQueue: CdpMessage[] = [];
@@ -155,12 +165,38 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   }
   const eventWaiters: EventWaiter[] = [];
 
+  // Track the latest Document response status PER FRAME so we can fail fast
+  // on 4xx/5xx (404 / 503 / auth wall pages) instead of capturing what looks
+  // like the app but isn't. The main frame's id is only known once
+  // Page.navigate resolves, but `Network.responseReceived` for the main
+  // document frequently arrives BEFORE that response — so record every
+  // Document status keyed by frameId and resolve which one is the main
+  // document afterwards. (Recording a single "latest" status instead would
+  // race: an early sub-frame response could be misattributed as the main
+  // document, or the real main-document status missed entirely.)
+  // Redirect chains re-fire for the same frameId; last write wins, which is
+  // the final response. (Auth walls that return 200 are out of scope — #287.)
+  const documentStatusByFrame = new Map<string, number>();
+
   ws.on('message', (raw: RawData) => {
     const data = raw.toString();
     let msg: CdpMessage;
     try {
       msg = JSON.parse(data) as CdpMessage;
     } catch {
+      return;
+    }
+    if (msg.method === 'Network.responseReceived') {
+      const params = msg.params as
+        | { type?: string; frameId?: string; response?: { status?: number } }
+        | undefined;
+      // CDP's `Network.responseReceived` fires for every resource (HTML,
+      // JS, CSS, images, XHR, …). Only type==='Document' responses are
+      // candidate main-document responses.
+      if (params?.type === 'Document' && typeof params.frameId === 'string') {
+        const status = params.response?.status;
+        if (typeof status === 'number') documentStatusByFrame.set(params.frameId, status);
+      }
       return;
     }
     if (typeof msg.id === 'number') {
@@ -188,6 +224,10 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   // `unexpected-response` event surfaces HTTP-level handshake failures
   // (e.g. 403 from misaligned SigV4) so we can log a meaningful error
   // instead of an empty `error` event.
+  //
+  // Failure paths must close the socket — without `terminate()` on the
+  // open-timeout path, a hung handshake leaks the underlying TCP
+  // connection per failed attempt (review nit, PR #241).
   await new Promise<void>((resolve, reject) => {
     const onOpen = (): void => {
       cleanup();
@@ -195,10 +235,12 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     };
     const onError = (err: Error): void => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket error: ${err.message || '(no message)'}`));
     };
     const onUnexpectedResponse = (_req: unknown, res: { statusCode?: number }): void => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket handshake failed: HTTP ${res.statusCode ?? '?'}`));
     };
     const cleanup = (): void => {
@@ -211,6 +253,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     ws.on('unexpected-response', onUnexpectedResponse);
     setTimeout(() => {
       cleanup();
+      try { ws.terminate(); } catch { /* socket may already be closed */ }
       reject(new Error(`AgentCore Browser WebSocket open timeout after ${timeoutMs}ms`));
     }, remaining());
   });
@@ -257,8 +300,8 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   try {
     // 1. List existing targets, find the default about:blank page.
     const targetsResp = await cdpSend('Target.getTargets');
-    const targets = (targetsResp.result?.targetInfos as Array<{ targetId: string; type: string; url: string }> | undefined) ?? [];
-    const pageTarget = targets.find((t) => t.type === 'page');
+    const targetInfos = narrowTargetInfos(targetsResp.result);
+    const pageTarget = targetInfos.find((t) => t.type === 'page');
     if (!pageTarget) {
       throw new Error('No page target found in AgentCore Browser session');
     }
@@ -268,37 +311,68 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       targetId: pageTarget.targetId,
       flatten: true,
     });
-    const pageSessionId = attachResp.result?.sessionId as string | undefined;
+    const pageSessionId = narrowSessionId(attachResp.result);
     if (!pageSessionId) {
       throw new Error('Target.attachToTarget did not return a sessionId');
     }
 
-    // 3. Enable Page domain so we get frameStoppedLoading events.
+    // 3. Enable Page + Network so we get the `Page.loadEventFired` event
+    //    we wait on below AND the main-document response status. Network
+    //    has to be enabled BEFORE Page.navigate, or the response event
+    //    fires before our listener is wired and we miss the status.
+    //    (Document statuses are recorded per-frame by the single message
+    //    listener above; we resolve the main frame's status after load.)
     await cdpSend('Page.enable', {}, pageSessionId);
+    await cdpSend('Network.enable', {}, pageSessionId);
 
     // 4. Navigate. The response includes a `frameId`; we wait on the
     //    `Page.loadEventFired` event below (more reliable than
     //    `frameStoppedLoading` which can fire before navigation
     //    actually starts on `about:blank` → real-URL transitions).
     const navResp = await cdpSend('Page.navigate', { url }, pageSessionId);
-    const navError = navResp.result?.errorText as string | undefined;
+    const navError = narrowNavigateError(navResp.result);
     if (navError) {
       throw new Error(`Page.navigate failed: ${navError}`);
     }
+    const mainDocumentFrameId = (navResp.result?.frameId as string | undefined) ?? null;
 
     // 5. Wait for the page load event. SPA-style apps may continue
     //    fetching after this fires, so add a 2s settle wait. For
     //    typical preview URLs (Vercel/Netlify/Amplify CDN edges) this
     //    is enough.
     await waitForEvent('Page.loadEventFired');
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, PAGE_SETTLE_WAIT_MS));
 
-    // 6. Take the screenshot.
+    // 6. Reject non-2xx main-document statuses before screenshotting.
+    //    A 404 / 503 / auth wall renders a "successful" page from CDP's
+    //    perspective; the user sees a confidently-wrong screenshot of an
+    //    error page posted as the deploy preview. Throw → processor's
+    //    catch logs and skips the PR/Linear comment cleanly.
+    //    The main frame's id comes from the Page.navigate response; its
+    //    Document responses were recorded per-frame by the message
+    //    listener even if they arrived before navigate resolved. If
+    //    Page.navigate returned no frameId, only an unambiguous single
+    //    recorded status is trusted — with multiple frames we cannot
+    //    tell which is the main document.
+    //    If we never captured a status (e.g. a service variant that
+    //    doesn't emit Network events), fall through and capture
+    //    optimistically; that's the pre-#287 behaviour.
+    let mainDocumentStatus: number | null = null;
+    if (mainDocumentFrameId !== null) {
+      mainDocumentStatus = documentStatusByFrame.get(mainDocumentFrameId) ?? null;
+    } else if (documentStatusByFrame.size === 1) {
+      mainDocumentStatus = documentStatusByFrame.values().next().value ?? null;
+    }
+    if (mainDocumentStatus !== null && (mainDocumentStatus < HTTP_STATUS_SUCCESS_MIN || mainDocumentStatus >= HTTP_STATUS_REDIRECT_MIN)) {
+      throw new Error(`Preview URL returned HTTP ${mainDocumentStatus}; skipping screenshot`);
+    }
+
+    // 7. Take the screenshot.
     const shotResp = await cdpSend('Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: true,
     }, pageSessionId);
-    const base64 = shotResp.result?.data as string | undefined;
+    const base64 = narrowScreenshotData(shotResp.result);
     if (!base64) {
       throw new Error('Page.captureScreenshot returned no data');
     }
@@ -351,4 +425,42 @@ async function sigV4PresignWss(wssUrl: string): Promise<string> {
     out.searchParams.set(k, Array.isArray(v) ? v[0] : (v as string));
   }
   return out.toString();
+}
+
+/**
+ * Type-narrow helpers for CDP response shapes. Replaces inline `as`
+ * casts with checked accessors so a malformed response is logged as
+ * `null`/`undefined` rather than silently miscoerced. (theagenticguy
+ * PR-241 review: reduce unchecked casts in CDP plumbing.)
+ */
+interface TargetInfo {
+  readonly targetId: string;
+  readonly type: string;
+  readonly url: string;
+}
+
+function narrowTargetInfos(result: Record<string, unknown> | undefined): TargetInfo[] {
+  const infos = result?.targetInfos;
+  if (!Array.isArray(infos)) return [];
+  return infos.filter((t): t is TargetInfo =>
+    typeof t === 'object' && t !== null
+    && typeof (t as Record<string, unknown>).targetId === 'string'
+    && typeof (t as Record<string, unknown>).type === 'string'
+    && typeof (t as Record<string, unknown>).url === 'string',
+  );
+}
+
+function narrowSessionId(result: Record<string, unknown> | undefined): string | undefined {
+  const id = result?.sessionId;
+  return typeof id === 'string' ? id : undefined;
+}
+
+function narrowNavigateError(result: Record<string, unknown> | undefined): string | undefined {
+  const err = result?.errorText;
+  return typeof err === 'string' ? err : undefined;
+}
+
+function narrowScreenshotData(result: Record<string, unknown> | undefined): string | undefined {
+  const data = result?.data;
+  return typeof data === 'string' ? data : undefined;
 }

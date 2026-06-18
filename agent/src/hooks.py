@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
@@ -53,6 +54,7 @@ POLL_SLOW_INTERVAL_S: float = 5.0
 POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this count (§13.2)
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this count (§13.2)
 TOOL_INPUT_PREVIEW_MAX: int = 256  # §6.5: strip-ANSI, truncate
+ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
 # ``permissionDecisionReason`` fields (§12.7). Re-derives the pattern from
@@ -66,15 +68,19 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
-def _truncate(text: str, max_len: int) -> str:
+def _truncate(text: str | None, max_len: int) -> str:
     """Truncate ``text`` to ``max_len`` chars with an ellipsis marker."""
     if text is None:
         return ""
     if len(text) <= max_len:
         return text
     # Reserve 3 chars for the ellipsis so the returned string never
-    # exceeds ``max_len``.
-    return text[: max_len - 3] + "..."
+    # exceeds ``max_len``. For very small ``max_len`` (<= 3) there is no
+    # room for the ellipsis and ``max_len - 3`` would slice negatively
+    # (dropping characters off the END), so fall back to a plain prefix.
+    if max_len <= ELLIPSIS_LEN:
+        return text[:max_len]
+    return text[: max_len - ELLIPSIS_LEN] + "..."
 
 
 def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) -> str:
@@ -167,6 +173,17 @@ async def pre_tool_use_hook(
         except (json.JSONDecodeError, TypeError):
             log("WARN", f"PreToolUse hook failed to parse tool_input — denying {tool_name}")
             return _deny_response("unparseable tool input")
+
+    # Fail-closed contract: every downstream consumer (Cedar evaluation,
+    # the approval-row builder, the SHA-256 cache key) assumes ``tool_input``
+    # is a JSON object. A bare list/scalar (e.g. ``"[1,2]"`` or ``"\"foo\""``
+    # decoded by the branch above, or a non-dict passed in directly) would
+    # otherwise raise an AttributeError deep in the engine and rely on the
+    # SDK-boundary wrapper to catch it. Make the rejection explicit here so
+    # the deny reason names the malformed input rather than a stack trace.
+    if not isinstance(tool_input, dict):
+        log("WARN", f"PreToolUse hook received non-dict tool_input — denying {tool_name}")
+        return _deny_response("tool input is not an object")
 
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
@@ -805,7 +822,12 @@ def _remaining_maxlifetime_s() -> int | None:
         else:
             from datetime import datetime
 
-            started_epoch = int(datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            # The trailing Z means UTC; strptime returns a naive datetime whose
+            # .timestamp() would otherwise be interpreted in the container's
+            # local TZ, skewing remaining-lifetime math by the UTC offset.
+            started_epoch = int(
+                datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+            )
     except (ValueError, AttributeError):
         return None
     elapsed = int(time.time()) - started_epoch
@@ -972,6 +994,11 @@ BetweenTurnsHook = Callable[[dict], list[str]]
 # leak across tasks in the same runtime.
 _INJECTED_NUDGES: dict[str, set[str]] = {}
 
+# Preview length for the first nudge message in the milestone details
+# string.  Kept short so the whole details line stays under ~120 chars
+# (single terminal line in ``bgagent watch``).
+_NUDGE_PREVIEW_LEN = 60
+
 
 def _reset_injected_nudges_for_tests() -> None:
     """Test-only helper to clear the in-process injected-nudge dedup set."""
@@ -1061,6 +1088,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         pending = nudge_reader.read_pending(task_id)
     except Exception as exc:
         log("WARN", f"nudge read_pending raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; DDB blip must not block agent
         return []
 
     # Filter out any nudges already injected in this process (regardless of
@@ -1075,6 +1103,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         formatted = nudge_reader.format_as_user_message(pending)
     except Exception as exc:
         log("WARN", f"nudge format failed: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; bad nudge must not block agent
         return []
 
     # Record injection BEFORE mark_consumed so a persistent mark_consumed
@@ -1098,10 +1127,10 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     # Short details string for the stream — preview the first nudge, total
     # count, and the nudge IDs for traceability.  Kept under ~120 chars so
     # it fits on a single terminal line.
-    first_msg = (pending[0].get("message") or "")[:60]
+    first_msg = (pending[0].get("message") or "")[:_NUDGE_PREVIEW_LEN]
     ids = ",".join(str(n.get("nudge_id", ""))[-8:] for n in pending)
     details = f"{count} nudge(s) acknowledged (ids=…{ids}): {first_msg}" + (
-        "…" if count > 1 or len(first_msg) == 60 else ""
+        "…" if count > 1 or len(first_msg) == _NUDGE_PREVIEW_LEN else ""
     )
     # AD-5: emit the ack BEFORE returning the injection list.
     _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
@@ -1136,6 +1165,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
         pending = engine.drain_denial_injections()
     except Exception as exc:  # pragma: no cover — defensive
         log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
         return []
     if not pending:
         return []
@@ -1190,6 +1220,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
         record = task_state.get_task(task_id)
     except task_state.TaskFetchError as exc:
         log("WARN", f"cancel hook get_task raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open cancel; DDB blip delays one turn
         return []
     if record and record.get("status") == "CANCELLED":
         ctx["_cancel_requested"] = True

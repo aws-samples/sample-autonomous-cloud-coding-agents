@@ -27,7 +27,19 @@ import { debug } from './debug';
 import { CliError } from './errors';
 import { Credentials } from './types';
 
-const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
+const TOKEN_REFRESH_BUFFER_MINUTES = 5;
+const TOKEN_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MINUTES * 60 * 1000;
+
+/**
+ * In-flight refresh promise, memoized at module scope. Concurrent callers
+ * that all observe an expired token (e.g. several ``ApiClient`` requests
+ * firing in parallel) would otherwise each send their own
+ * ``REFRESH_TOKEN_AUTH`` and race to ``saveCredentials`` — clobbering each
+ * other's freshly-written tokens. Sharing one refresh promise collapses
+ * those into a single Cognito round-trip; the slot is cleared when the
+ * refresh settles so the next genuine expiry re-refreshes.
+ */
+let inFlightRefresh: Promise<void> | null = null;
 
 /** Authenticate with username/password and cache tokens. */
 export async function login(username: string, password: string): Promise<void> {
@@ -84,7 +96,16 @@ async function ensureFreshCredentials(): Promise<Credentials> {
     return creds;
   }
   debug('Tokens expired or near expiry, refreshing...');
-  await refreshToken(creds);
+  // Share a single in-flight refresh across concurrent callers so we do not
+  // fire multiple ``REFRESH_TOKEN_AUTH`` calls that clobber each other's
+  // ``saveCredentials``. The slot is cleared in ``finally`` so a later
+  // expiry triggers a fresh refresh.
+  if (!inFlightRefresh) {
+    inFlightRefresh = refreshToken(creds).finally(() => {
+      inFlightRefresh = null;
+    });
+  }
+  await inFlightRefresh;
   const fresh = loadCredentials();
   if (!fresh) {
     throw new CliError('Credentials vanished after refresh. Run `bgagent login`.');
@@ -94,6 +115,12 @@ async function ensureFreshCredentials(): Promise<Credentials> {
 
 function isExpired(creds: Credentials): boolean {
   const expiryMs = new Date(creds.token_expiry).getTime();
+  // A corrupt token_expiry parses to NaN, and every comparison against NaN
+  // is false — the token would be classified as never-expiring and surface
+  // as an opaque 401 instead of a refresh. Treat unparseable as expired.
+  if (!Number.isFinite(expiryMs)) {
+    return true;
+  }
   return Date.now() >= expiryMs - TOKEN_REFRESH_BUFFER_MS;
 }
 
@@ -123,6 +150,16 @@ async function refreshToken(creds: Credentials): Promise<void> {
     });
   } catch (err) {
     if (err instanceof CliError) throw err;
-    throw new CliError('Session expired. Run `bgagent login` to re-authenticate.');
+    // Distinguish a genuinely rejected/expired refresh token from a
+    // transient transport failure. Only Cognito's auth-rejection error
+    // names mean the session is really over; telling a user to re-login
+    // over a network blip is wrong advice — and with the shared in-flight
+    // refresh, that one blip's message reaches every concurrent caller.
+    const name = (err as Error)?.name;
+    if (name === 'NotAuthorizedException' || name === 'UserNotFoundException') {
+      throw new CliError('Session expired. Run `bgagent login` to re-authenticate.');
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new CliError(`Token refresh failed (${detail}). Retry, or run \`bgagent login\` if it persists.`);
   }
 }

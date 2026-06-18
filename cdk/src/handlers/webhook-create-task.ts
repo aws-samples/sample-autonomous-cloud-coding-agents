@@ -23,6 +23,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { createTaskCore } from './shared/create-task-core';
 import { buildWebhookChannelMetadata, extractWebhookContext } from './shared/gateway';
+import { isUsableHmacSecret } from './shared/hmac-secret';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
@@ -33,7 +34,11 @@ const SECRET_PREFIX = 'bgagent/webhook/';
 
 // In-memory secret cache with 5-minute TTL
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+
+/** Length of the ``sha256=`` prefix GitHub-style signatures carry. */
+const SIGNATURE_PREFIX_LENGTH = 'sha256='.length;
 
 async function getSecret(webhookId: string): Promise<string | null> {
   const now = Date.now();
@@ -46,14 +51,19 @@ async function getSecret(webhookId: string): Promise<string | null> {
     const result = await sm.send(new GetSecretValueCommand({
       SecretId: `${SECRET_PREFIX}${webhookId}`,
     }));
-    if (!result.SecretString) return null;
+    // Treat empty / whitespace-only SecretString as null — an empty secret
+    // must never reach HMAC, or HMAC('', body) becomes forgeable.
+    if (!isUsableHmacSecret(result.SecretString)) {
+      logger.error('Webhook secret is empty — refusing to use for HMAC', { webhook_id: webhookId });
+      return null;
+    }
     secretCache.set(webhookId, { secret: result.SecretString, expiresAt: now + CACHE_TTL_MS });
     return result.SecretString;
   } catch (err) {
     const errorName = (err as Error)?.name;
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Webhook secret not found in Secrets Manager', { webhook_id: webhookId });
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing per-webhook secret is an expected config state; other SM errors rethrow below
     }
     logger.error('Failed to fetch webhook secret from Secrets Manager', {
       webhook_id: webhookId,
@@ -65,8 +75,13 @@ async function getSecret(webhookId: string): Promise<string | null> {
 }
 
 function verifySignature(body: string, secret: string, signature: string): boolean {
+  // Defense-in-depth: getSecret already filters empty secrets, but HMAC('')
+  // must always be rejected — anyone can compute it.
+  if (!isUsableHmacSecret(secret)) {
+    return false;
+  }
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-  const providedHex = signature.startsWith('sha256=') ? signature.slice(7) : signature;
+  const providedHex = signature.startsWith('sha256=') ? signature.slice(SIGNATURE_PREFIX_LENGTH) : signature;
 
   try {
     return crypto.timingSafeEqual(

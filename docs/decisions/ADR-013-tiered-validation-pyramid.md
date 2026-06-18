@@ -129,6 +129,20 @@ Progressive build-out:
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
+> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the `integ` environment's admin-approval gate so it never assumes the privileged role unattended, and posts a required `integ-smoke` status that blocks merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
+
+#### Residual risk acceptance — fork PR integ execution
+
+The deployed E2E gate runs **fork-authored test code** (`cdk/test/integ/**`) against the shared AWS account. This is intentional: a fork `pull_request` job gets no secrets/OIDC, so the `workflow_run` trigger is the only way to give fork PRs the same deploy-verify coverage that branch PRs get. The accepted risk is that fork code executes with a role capable of CloudFormation operations in the shared account.
+
+Mitigations layered against that risk:
+
+- **Two human gates before fork code runs.** The `resolve` job requires a maintainer-applied `safe-to-test` label on fork PRs, and the `integ` job requires explicit approval of the `integ` GitHub environment. The approver MUST review `cdk/test/integ/**` changes before approving.
+- **Least-privilege role is a hard go-live prerequisite.** The privileged role (`AWS_ROLE_TO_ASSUME`) MUST be the dedicated `GitHubIntegE2E` role scoped per `docs/integ-e2e-role.policy.json` — it can only assume the `cdk-hnb659fds-*` bootstrap roles and drive CloudFormation on the `backgroundagent-integ` (+ `TaskApiSmokeDefaultTestDeployAssert*`) stacks. A broad/admin role here would void this acceptance. Provisioning the role in the account is an account-side (Isengard) task tracked outside this repo.
+- **Status-only tokens and forced teardown.** Each job gets minimal `permissions`; the report path only posts commit statuses, and teardown runs `if: always()` with a fail-loud `wait` so a stranded stack surfaces rather than leaking billable resources.
+
+Residual risk after these mitigations (a malicious fork PR that passes maintainer review and operates strictly within the scoped stacks) is **accepted** for Phase 0.
+
 ### Enforcement model
 
 | Event | Required tier | Enforcement |

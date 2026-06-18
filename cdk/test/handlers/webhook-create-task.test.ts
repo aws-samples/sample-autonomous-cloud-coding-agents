@@ -177,6 +177,33 @@ describe('webhook-create-task handler', () => {
     expect(result.statusCode).toBe(500);
   });
 
+  // Empty-secret fail-open guard: an attacker who learns the stored secret
+  // is empty/whitespace could compute HMAC('', body). The handler must
+  // refuse to verify against such a secret (500, not a forged 2xx).
+  test('returns 500 when the stored secret is the empty string', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: '' });
+    const body = JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug' });
+    const event = makeEvent({
+      body,
+      headers: { 'X-Webhook-Signature': sign(body, '') },
+    });
+    event.requestContext.authorizer = { userId: 'user-abc', webhookId: 'wh-empty-secret' };
+    const result = await handler(event);
+    expect(result.statusCode).toBe(500);
+  });
+
+  test('returns 500 when the stored secret is whitespace-only', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: '   ' });
+    const body = JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug' });
+    const event = makeEvent({
+      body,
+      headers: { 'X-Webhook-Signature': sign(body, '   ') },
+    });
+    event.requestContext.authorizer = { userId: 'user-abc', webhookId: 'wh-ws-secret' };
+    const result = await handler(event);
+    expect(result.statusCode).toBe(500);
+  });
+
   test('returns 400 for missing body', async () => {
     const event = makeEvent({
       body: null,
@@ -219,7 +246,7 @@ describe('webhook-create-task handler', () => {
       user_id: 'user-abc',
       status: 'SUBMITTED',
       repo: 'org/repo',
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       task_description: 'Fix the bug',
       branch_name: 'bgagent/existing-task/slug',
       channel_source: 'webhook',
@@ -256,7 +283,7 @@ describe('webhook-create-task handler', () => {
       user_id: 'other-user',
       status: 'SUBMITTED',
       repo: 'org/repo',
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       branch_name: 'bgagent/existing-task/slug',
       channel_source: 'webhook',
       status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',

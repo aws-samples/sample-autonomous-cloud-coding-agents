@@ -122,6 +122,67 @@ describe('LinearIntegration construct', () => {
   });
 });
 
+describe('LinearIntegration construct — #331 seed-time root release throttle', () => {
+  // When orchestrationTable + userConcurrencyTable are both provided, the
+  // webhook processor env carries the concurrency table + cap so it throttles
+  // the seed-time ROOT release (a failed root is unrecoverable by the sweep).
+  function buildWith(opts: { withConcurrency: boolean }): Template {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchTable', {
+      partitionKey: { name: 'orchestration_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sub_issue_id', type: dynamodb.AttributeType.STRING },
+    });
+    const userConcurrencyTable = opts.withConcurrency
+      ? new dynamodb.Table(stack, 'ConcTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      })
+      : undefined;
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      orchestrationTable,
+      ...(userConcurrencyTable && { userConcurrencyTable, maxConcurrentTasksPerUser: 7 }),
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('wires USER_CONCURRENCY_TABLE_NAME + cap when the concurrency table is provided', () => {
+    const t = buildWith({ withConcurrency: true });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ORCHESTRATION_TABLE_NAME: Match.anyValue(),
+          USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
+          MAX_CONCURRENT_TASKS_PER_USER: '7',
+        }),
+      },
+    });
+  });
+
+  test('does NOT set USER_CONCURRENCY_TABLE_NAME when the table is omitted (back-compat)', () => {
+    const t = buildWith({ withConcurrency: false });
+    // The processor still has ORCHESTRATION_TABLE_NAME but no concurrency var.
+    const fns = t.findResources('AWS::Lambda::Function', {
+      Properties: {
+        Environment: { Variables: Match.objectLike({ USER_CONCURRENCY_TABLE_NAME: Match.anyValue() }) },
+      },
+    });
+    expect(Object.keys(fns)).toHaveLength(0);
+  });
+});
+
 describe('LinearIntegration construct — attachmentsBucket wiring', () => {
   // Regression-guard: webhook processor needs ATTACHMENTS_BUCKET_NAME and S3
   // Put/Delete on the bucket so `extractImageUrlAttachments` can reach the

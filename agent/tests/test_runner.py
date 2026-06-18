@@ -13,7 +13,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from models import TaskConfig
-from runner import _initialize_policy_engine_and_hooks
+from runner import _FULL_TOOL_SURFACE, _initialize_policy_engine_and_hooks, _resolve_allowed_tools
 
 
 def _config(**overrides: Any) -> TaskConfig:
@@ -87,6 +87,33 @@ class TestInitializePolicyEngineAndHooks:
         kwargs = mock_policy_engine.call_args.kwargs
         assert kwargs["initial_approvals"] == ["tool_type:Read", "rule:force_push_any"]
         assert kwargs["task_default_timeout_s"] == 600
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_read_only_threaded_to_engine(self, mock_policy_engine, _mock_build_hooks):
+        # SECURITY (#248 Phase 2a): config.read_only MUST reach
+        # PolicyEngine(read_only=...) — that is the seam between "config computes
+        # read_only" and "Cedar enforces context.read_only". Without this
+        # assertion, dropping the kwarg passes every other test while silently
+        # disabling the Write/Edit hard-deny for read-only workflows.
+        config = _config(read_only=True)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        assert mock_policy_engine.call_args.kwargs["read_only"] is True
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_writeable_read_only_false_threaded_to_engine(
+        self, mock_policy_engine, _mock_build_hooks
+    ):
+        config = _config(read_only=False)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        assert mock_policy_engine.call_args.kwargs["read_only"] is False
 
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
@@ -185,7 +212,7 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_includes_cap_and_threaded_source(
-        self, _mock_policy_engine, _mock_build_hooks, capsys
+        self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
         # Non-None cap came from the orchestrator payload (blueprint value
         # or the platform-default-50 frozen on the TaskRecord at submit).
@@ -196,7 +223,7 @@ class TestInitializePolicyEngineAndHooks:
         config = _config(approval_gate_cap=200)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "Cedar policy engine initialized" in captured.out
         assert "approval_gate_cap=200" in captured.out
         assert "approval_gate_cap_source=threaded" in captured.out
@@ -204,7 +231,7 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_marks_engine_default_when_cap_none(
-        self, _mock_policy_engine, _mock_build_hooks, capsys
+        self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
         # Legacy task — cap falls through to ``PolicyEngine``'s own
         # default. Operator signal is ``approval_gate_cap_source=engine_default``
@@ -217,6 +244,54 @@ class TestInitializePolicyEngineAndHooks:
         config = _config(approval_gate_cap=None)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "approval_gate_cap_source=engine_default" in captured.out
         assert "approval_gate_cap=unset" in captured.out
+
+
+class TestResolveAllowedTools:
+    """The SDK tool surface (``allowed_tools``) is the second enforcement layer
+    the design promises alongside Cedar's ``context.read_only``. These tests pin
+    the seam between "config carries the workflow tool list" and "the SDK
+    receives it" — previously every allowed_tools assertion lived at the
+    validator/loader layer with zero coverage of the runtime hand-off (#248).
+    """
+
+    def test_workflow_tool_list_passed_through_verbatim(self):
+        # A writeable workflow's declared list reaches the SDK unchanged.
+        config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=False)
+        assert _resolve_allowed_tools(config) == ["Bash", "Read", "Write", "Edit"]
+
+    def test_empty_list_falls_back_to_full_surface(self):
+        # Legacy/batch callers that never resolved a workflow get the built-in
+        # full surface (preserves pre-#248 behavior). A copy, not the shared list.
+        config = _config(allowed_tools=[], read_only=False)
+        resolved = _resolve_allowed_tools(config)
+        assert resolved == _FULL_TOOL_SURFACE
+        assert resolved is not _FULL_TOOL_SURFACE
+
+    def test_read_only_drops_write_and_edit_from_full_surface(self):
+        # read_only with no explicit list: full surface minus Write/Edit.
+        config = _config(allowed_tools=[], read_only=True)
+        resolved = _resolve_allowed_tools(config)
+        assert "Write" not in resolved
+        assert "Edit" not in resolved
+        assert resolved == ["Bash", "Read", "Glob", "Grep", "WebFetch"]
+
+    def test_read_only_drops_write_and_edit_from_workflow_list(self):
+        # Even if a (misconfigured) read-only workflow declares Write/Edit, the
+        # runner strips them — the SDK can never receive a mutating tool on a
+        # read-only lane. This is the defense-in-depth the HIGH finding flagged.
+        config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=True)
+        assert _resolve_allowed_tools(config) == ["Bash", "Read"]
+
+    def test_read_leaning_default_lane_keeps_its_restricted_list(self):
+        # default/agent-v1 and web-research-v1 declare [Read, Glob, Grep,
+        # WebFetch] and are read_only:false — Cedar's read_only rules do NOT
+        # fire, so the tool list is the ONLY thing keeping Write/Bash off the
+        # lane. Verify the restricted list survives intact (no fallback widening).
+        restricted = ["Read", "Glob", "Grep", "WebFetch"]
+        config = _config(allowed_tools=list(restricted), read_only=False)
+        assert _resolve_allowed_tools(config) == restricted
+        assert "Bash" not in _resolve_allowed_tools(config)
+        assert "Write" not in _resolve_allowed_tools(config)

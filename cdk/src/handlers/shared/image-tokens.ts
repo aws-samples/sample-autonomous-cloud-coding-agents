@@ -26,6 +26,9 @@ const MAX_IMAGE_TOKENS = 1568;
 const TOKEN_SAFETY_MARGIN = 1.2;
 const TILE_SIZE = 28;
 
+/** Anthropic tile divisor for image token estimation (pixels per token). */
+const PIXELS_PER_TOKEN_DIVISOR = 750;
+
 /**
  * Estimate the token cost of an image given its pixel dimensions.
  * Applies Anthropic's resize-and-tile algorithm with a safety margin.
@@ -47,7 +50,7 @@ export function estimateImageTokens(width: number, height: number): number {
   h = Math.ceil(h / TILE_SIZE) * TILE_SIZE;
 
   // Token calculation with safety margin, then capped to hard ceiling
-  const rawTokens = Math.ceil((w * h) / 750);
+  const rawTokens = Math.ceil((w * h) / PIXELS_PER_TOKEN_DIVISOR);
   return Math.min(Math.ceil(rawTokens * TOKEN_SAFETY_MARGIN), MAX_IMAGE_TOKENS);
 }
 

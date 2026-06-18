@@ -57,8 +57,8 @@ describe('builtin-policies — parseable by shared/cedar-policy', () => {
     // entry. The hard-deny rules that survive:
     expect(ruleIds).toEqual(
       expect.arrayContaining([
-        'pr_review_forbid_write',
-        'pr_review_forbid_edit',
+        'read_only_forbid_write',
+        'read_only_forbid_edit',
         'rm_slash',
         'write_git_internals',
         'write_git_internals_nested',

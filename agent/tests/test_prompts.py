@@ -1,22 +1,91 @@
 """Unit tests for the prompts module and sanitization."""
 
+from typing import Any
+
 import pytest
 
-from prompt_builder import sanitize_memory_content
+from models import TaskConfig
+from prompt_builder import _channel_prompt_addendum, sanitize_memory_content
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content
 
 
+def _config(**overrides) -> TaskConfig:
+    # Use an explicitly typed dict so ty can see the heterogenous field
+    # types across the TaskConfig signature (``bool`` for ``dry_run``,
+    # ``int`` for ``max_turns``, etc.) rather than inferring ``dict[str, str]``
+    # from the homogeneous base literal.
+    base: dict[str, Any] = {
+        "repo_url": "owner/repo",
+        "github_token": "ghp_test",
+        "aws_region": "us-west-2",
+    }
+    base.update(overrides)
+    return TaskConfig(**base)
+
+
+class TestChannelPromptAddendum:
+    def test_no_channel_returns_empty(self):
+        assert _channel_prompt_addendum(_config()) == ""
+
+    def test_api_channel_returns_empty(self):
+        assert _channel_prompt_addendum(_config(channel_source="api")) == ""
+
+    def test_linear_channel_includes_linear_tools(self):
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={
+                    "linear_issue_id": "issue-uuid-1",
+                    "linear_issue_identifier": "ABC-42",
+                },
+            )
+        )
+        assert "Linear issue progress updates" in addendum
+        assert "mcp__linear-server__save_comment" in addendum
+        assert "ABC-42" in addendum
+
+    def test_linear_integration_node_gets_no_addendum(self):
+        # #247 UX.16: the synthetic orchestration integration node is a Linear
+        # task but has NO real sub-issue — channel_metadata omits
+        # linear_issue_id. Without a target issue the agent would grope via the
+        # MCP and post its "Starting"/"PR opened" comments onto the PARENT epic,
+        # cluttering the maturing panel. No issue id → no progress addendum.
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={
+                    "orchestration_id": "orch_abc",
+                    "orchestration_sub_issue_id": "orch_abc__integration",
+                    "parent_linear_issue_id": "parent-uuid",
+                },
+            )
+        )
+        assert addendum == ""
+
+    def test_jira_channel_gets_no_addendum(self):
+        # Jira comments are posted out-of-band by jira_reactions (REST shim);
+        # the Atlassian MCP can't load in a headless agent, so instructing the
+        # agent to use it would just waste turns. No prompt addendum.
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="jira",
+                channel_metadata={"jira_issue_key": "KAN-1"},
+            )
+        )
+        assert addendum == ""
+
+
 class TestGetSystemPrompt:
     def test_new_task_returns_prompt_with_create_pr(self):
-        prompt = get_system_prompt("new_task")
+        prompt = get_system_prompt("coding/new-task-v1")
         assert "Create a Pull Request" in prompt
         assert "{repo_url}" in prompt
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
     def test_pr_iteration_returns_prompt_with_update_pr(self):
-        prompt = get_system_prompt("pr_iteration")
+        prompt = get_system_prompt("coding/pr-iteration-v1")
         assert "Post a summary comment on the PR" in prompt
         assert "Reply to each review comment thread" in prompt
         assert "gh api" in prompt
@@ -27,7 +96,7 @@ class TestGetSystemPrompt:
         assert "{workflow}" not in prompt
 
     def test_pr_review_returns_prompt_with_review_workflow(self):
-        prompt = get_system_prompt("pr_review")
+        prompt = get_system_prompt("coding/pr-review-v1")
         assert "READ-ONLY" in prompt
         assert "must NOT modify" in prompt
         assert "gh api" in prompt
@@ -36,16 +105,71 @@ class TestGetSystemPrompt:
         assert "Write and Edit are not available" in prompt
         assert "{workflow}" not in prompt
 
-    def test_all_types_contain_shared_base_sections(self):
-        for task_type in ("new_task", "pr_iteration", "pr_review"):
-            prompt = get_system_prompt(task_type)
-            assert "## Environment" in prompt, f"Missing Environment in {task_type}"
-            has_rules = "## Rules" in prompt or "## Rules override" in prompt
-            assert has_rules, f"Missing Rules in {task_type}"
+    def test_restack_returns_prompt_with_remerge_workflow(self):
+        prompt = get_system_prompt("coding/restack-v1")
+        assert "RE-STACKING" in prompt
+        assert "predecessor" in prompt
+        assert (
+            "do NOT add features" in prompt
+            or "NOT new feature work" in prompt
+            or "not new feature" in prompt.lower()
+        )
+        assert "{branch_name}" in prompt  # pushes to the SAME existing branch
+        assert "{pr_number}" in prompt
+        assert "{repo_url}" in prompt
+        assert "{workflow}" not in prompt
 
-    def test_unknown_task_type_raises(self):
-        with pytest.raises(ValueError, match="Unknown task_type"):
-            get_system_prompt("invalid_type")
+    def test_all_workflows_contain_shared_base_sections(self):
+        for workflow_id in (
+            "coding/new-task-v1",
+            "coding/pr-iteration-v1",
+            "coding/pr-review-v1",
+            "coding/restack-v1",
+        ):
+            prompt = get_system_prompt(workflow_id)
+            assert "## Environment" in prompt, f"Missing Environment in {workflow_id}"
+            has_rules = "## Rules" in prompt or "## Rules override" in prompt
+            assert has_rules, f"Missing Rules in {workflow_id}"
+
+    def test_unknown_workflow_falls_back_to_default_prompt(self):
+        # No built-in template for an id (e.g. registry-only in Phase 4) falls
+        # back to the default coding prompt rather than raising.
+        assert get_system_prompt("registry://something/unknown-v1") == get_system_prompt(
+            "coding/new-task-v1"
+        )
+
+    def test_repoless_default_agent_prompt_has_no_repo_placeholders(self):
+        # #248 Phase 3: the repo-less workflow's prompt must not carry git/branch/
+        # PR placeholders — there is no repo for build_repoless_system_prompt to
+        # substitute, so a leftover {repo_url}/{branch_name} would render literally.
+        prompt = get_system_prompt("default/agent-v1")
+        assert prompt is not get_system_prompt("coding/new-task-v1")
+        for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
+            assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+        assert "repo-less" in prompt.lower()
+
+    def test_web_research_has_its_own_registered_prompt(self):
+        # PR review #296 finding #8: knowledge/web-research-v1 now has a
+        # research-specialized prompt rather than silently degrading to the
+        # generic default-agent prompt. It must be distinct from default/agent-v1,
+        # be research-flavored, and carry no repo placeholders (it is repo-less).
+        prompt = get_system_prompt("knowledge/web-research-v1", repo_less=True)
+        assert prompt != get_system_prompt("default/agent-v1")
+        assert "research" in prompt.lower()
+        for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
+            assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+
+    def test_repo_less_fallback_uses_repoless_default_not_coding(self):
+        # An UNREGISTERED repo-less id (e.g. a future registry-only knowledge
+        # workflow) must still fall back to the repo-less default, NOT the coding
+        # prompt — else it would inherit unsubstitutable {repo_url}.
+        repoless = get_system_prompt("knowledge/not-registered-yet-v1", repo_less=True)
+        assert repoless == get_system_prompt("default/agent-v1")
+        assert "{repo_url}" not in repoless
+        # Without the flag, the same unknown id falls back to the coding default.
+        assert get_system_prompt("knowledge/not-registered-yet-v1") == get_system_prompt(
+            "coding/new-task-v1"
+        )
 
 
 class TestSanitizeMemoryContent:

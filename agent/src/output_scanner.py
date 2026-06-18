@@ -42,9 +42,15 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             re.IGNORECASE,
         ),
     ),
-    # GitHub tokens (PAT, OAuth, App, user-to-server, fine-grained)
-    ("GITHUB_TOKEN", re.compile(r"(?:ghp|gho|ghs|ghu)_[a-zA-Z0-9]{36}")),
+    # GitHub tokens (PAT, OAuth, App, user-to-server, refresh, fine-grained).
+    # Length is variable across token generations — match 36+ chars rather
+    # than exactly 36 so newer/longer formats are still caught.
+    ("GITHUB_TOKEN", re.compile(r"(?:ghp|gho|ghs|ghu|ghr)_[a-zA-Z0-9]{36,}")),
     ("GITHUB_PAT", re.compile(r"github_pat_[a-zA-Z0-9_]{22,}")),
+    # Credentials embedded in git remote URLs (https://x-access-token:TOKEN@github.com/...).
+    # The agent authenticates via env-based credential helper, but tool output
+    # may still echo such URLs from other sources.
+    ("GITHUB_URL_TOKEN", re.compile(r"x-access-token:[^\s@\"']+@")),
     # Private keys (PEM blocks)
     (
         "PRIVATE_KEY",

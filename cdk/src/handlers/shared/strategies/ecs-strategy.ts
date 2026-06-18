@@ -107,7 +107,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
       + 'system_prompt_overrides=p.get("system_prompt_overrides",""), '
       + 'prompt_version=p.get("prompt_version",""), '
       + 'memory_id=p.get("memory_id",""), '
-      + 'task_type=p.get("task_type","new_task"), '
+      + 'resolved_workflow=p.get("resolved_workflow"), '
       + 'branch_name=p.get("branch_name",""), '
       + 'pr_number=str(p.get("pr_number",""))'
       + '); '

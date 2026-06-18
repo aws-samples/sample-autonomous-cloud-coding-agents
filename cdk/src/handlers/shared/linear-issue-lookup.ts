@@ -53,6 +53,35 @@ export function extractLinearIdentifier(text: string | null | undefined): string
 }
 
 /**
+ * Pull the Linear identifier out of an ABCA-generated git branch name.
+ *
+ * This is the *authoritative* identifier source for the screenshot
+ * router, and it must be tried before PR title/body. ABCA derives every
+ * task branch as `bgagent/{taskId}/{slug}` where the slug is
+ * `slugify("ABCA-151: <title>")` — so the identifier is ALWAYS the
+ * leading slug segment (see `generateBranchName` / `slugify` in
+ * `gateway.ts`, and the `${identifier}: ${title}` description built in
+ * `linear-webhook-processor.ts` / `orchestration-release.ts`).
+ *
+ * Why branch-first matters (issue #247): in a stacked sub-issue
+ * orchestration, an agent's PR *body* commonly narrates the predecessor
+ * issue ("cherry-picked from ABCA-151 … Closes ABCA-152") before the
+ * issue the PR actually closes. `extractLinearIdentifier` returns the
+ * first match in document order, so body-first routing misattributes the
+ * screenshot to the predecessor. The branch name has no such ambiguity —
+ * it encodes exactly one issue, the PR's own.
+ *
+ * The slug is lowercased by `slugify`, so we upper-case before matching
+ * (the identifier regex anchors on `[A-Z]`). The ULID `taskId` segment
+ * contains no `-`, so it can never produce a false `<KEY>-<n>` match
+ * ahead of the real identifier.
+ */
+export function extractLinearIdentifierFromBranch(branchName: string | null | undefined): string | null {
+  if (!branchName) return null;
+  return extractLinearIdentifier(branchName.toUpperCase());
+}
+
+/**
  * Resolved Linear issue location, paired with the workspace that owns
  * it. The screenshot processor uses these to construct a
  * LinearFeedbackContext + issueId for postIssueComment.
@@ -73,14 +102,17 @@ query IssueByIdentifier($identifier: String!) {
 `.trim();
 
 /**
- * Look up a Linear issue by identifier (e.g. `ABCA-42`) by iterating
- * over every active workspace in the registry until one returns a
- * match. Returns the first hit.
+ * Look up a Linear issue by identifier (e.g. `ABCA-42`).
  *
- * For v1 this scan is cheap — typical deployments have 1-2 workspaces.
- * If a stack ever onboards many workspaces sharing identifier prefixes,
- * a followup can store team_key prefixes on the registry row and route
- * directly. Until then, linear-time iteration is fine.
+ * Routing strategy:
+ * 1. Scan active workspaces (one round-trip — typical stacks have 1–2).
+ * 2. If any row's `team_keys` contains the identifier's team key (`ABCA`),
+ *    query that workspace directly and return on hit.
+ * 3. Otherwise fall back to iterating every active workspace until one
+ *    returns a match. This handles legacy rows missing `team_keys` (the
+ *    column was added in #96 and back-fills only on next `setup` /
+ *    `add-workspace` re-run) and the rare case where a team was added in
+ *    Linear after the workspace was registered.
  *
  * @param identifier `ABCA-42`-style Linear issue identifier
  * @param registryTableName name of LinearWorkspaceRegistryTable
@@ -90,7 +122,11 @@ export async function findLinearIssueByIdentifier(
   identifier: string,
   registryTableName: string,
 ): Promise<LinearIssueLocation | null> {
-  let active: Array<{ linear_workspace_id: string; workspace_slug: string }> = [];
+  let active: Array<{
+    linear_workspace_id: string;
+    workspace_slug: string;
+    team_keys: string[] | null;
+  }> = [];
   try {
     const scanResp = await ddb.send(new ScanCommand({
       TableName: registryTableName,
@@ -101,12 +137,13 @@ export async function findLinearIssueByIdentifier(
     active = (scanResp.Items ?? []).map((item) => ({
       linear_workspace_id: item.linear_workspace_id as string,
       workspace_slug: item.workspace_slug as string,
+      team_keys: Array.isArray(item.team_keys) ? (item.team_keys as string[]) : null,
     }));
   } catch (err) {
     logger.warn('Linear issue lookup: failed to scan workspace registry', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- registry scan failure degrades to "issue not found"; logged WARN, caller iterates safely
   }
 
   if (active.length === 0) {
@@ -114,7 +151,33 @@ export async function findLinearIssueByIdentifier(
     return null;
   }
 
+  // Identifier prefix is the part before the first dash (`ABCA-42` → `ABCA`).
+  // Compare uppercase since Linear team keys are upper-case but inbound text
+  // (PR titles, branch names) is mixed-case.
+  const teamKey = identifier.split('-', 1)[0]?.toUpperCase();
+  const prefixMatch = teamKey
+    ? active.find((ws) => ws.team_keys?.some((k) => k.toUpperCase() === teamKey))
+    : undefined;
+
+  // Try the prefix-matched workspace first.
+  if (prefixMatch) {
+    const resolved = await resolveLinearOauthToken(prefixMatch.linear_workspace_id, registryTableName);
+    if (resolved) {
+      const found = await queryIssueByIdentifier(resolved.accessToken, identifier);
+      if (found) {
+        return {
+          issueId: found,
+          linearWorkspaceId: prefixMatch.linear_workspace_id,
+          workspaceSlug: prefixMatch.workspace_slug,
+        };
+      }
+    }
+  }
+
+  // Fallback: iterate workspaces NOT already tried via prefix-match.
+  // Covers legacy rows without `team_keys` and post-registration team adds.
   for (const ws of active) {
+    if (prefixMatch && ws.linear_workspace_id === prefixMatch.linear_workspace_id) continue;
     const resolved = await resolveLinearOauthToken(ws.linear_workspace_id, registryTableName);
     if (!resolved) continue;
 
@@ -159,7 +222,7 @@ async function queryIssueByIdentifier(accessToken: string, identifier: string): 
       identifier,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- per-workspace GraphQL blip returns miss; caller tries the next workspace
   }
 
   if (!resp.ok) {

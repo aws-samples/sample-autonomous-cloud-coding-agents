@@ -48,7 +48,8 @@ const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAM
  * skew, without making stale rows live meaningfully longer (DDB TTL is
  * async best-effort anyway).
  */
-const DEDUP_TTL_SECONDS = 8 * 60 * 60;
+const DEDUP_TTL_HOURS = 8;
+const DEDUP_TTL_SECONDS = DEDUP_TTL_HOURS * 3600;
 
 /**
  * Shape of the top-level Linear webhook payload we care about for dedup + routing.
@@ -161,19 +162,29 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(401, { error: 'Stale webhook timestamp' });
     }
 
-    // Only Issue events flow through to task creation. Every other type is
-    // acknowledged silently so Linear stops retrying.
-    if (payload.type !== 'Issue') {
-      logger.info('Ignoring non-Issue Linear webhook', { type: payload.type, action: payload.action });
+    // Issue events drive task creation; Comment events drive the A6 comment
+    // trigger (#247 — an @bgagent mention on a sub-issue re-iterates its PR).
+    // Every other type is acknowledged silently so Linear stops retrying.
+    if (payload.type !== 'Issue' && payload.type !== 'Comment') {
+      logger.info('Ignoring non-Issue/Comment Linear webhook', { type: payload.type, action: payload.action });
       return jsonResponse(200, { ok: true });
     }
 
-    const issueId = payload.data?.id;
+    // data.id is the issue id (Issue events) or the comment id (Comment events).
+    const dataId = payload.data?.id;
     const action = payload.action ?? 'unknown';
-    if (!issueId) {
-      logger.warn('Linear Issue webhook missing data.id', { action });
-      return jsonResponse(400, { error: 'Missing issue id' });
+    if (!dataId) {
+      logger.warn('Linear webhook missing data.id', { type: payload.type, action });
+      return jsonResponse(400, { error: 'Missing data id' });
     }
+    // Comment events: only forward creates (an edited/removed comment must not
+    // re-fire the agent). Issue events keep their existing create/update gate
+    // downstream in the processor.
+    if (payload.type === 'Comment' && action !== 'create') {
+      logger.info('Ignoring non-create Comment webhook', { action });
+      return jsonResponse(200, { ok: true });
+    }
+    const issueId = dataId;
 
     // Dedup via conditional PutItem.
     //

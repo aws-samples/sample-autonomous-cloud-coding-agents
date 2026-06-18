@@ -27,8 +27,8 @@ Determine which area the issue falls into:
 
 ```bash
 export MISE_EXPERIMENTAL=1
-mise run //cdk:compile 2>&1 | tail -50  # TypeScript errors
-mise run //cdk:test 2>&1 | tail -50     # Test failures
+mise //cdk:compile 2>&1 | tail -50  # TypeScript errors
+mise //cdk:test 2>&1 | tail -50     # Test failures
 ```
 
 **Common causes:**
@@ -47,7 +47,7 @@ aws cloudformation describe-stack-events --stack-name backgroundagent-dev \
 
 **Common causes:**
 - Docker not running — Required for CDK asset bundling
-- Missing CDK bootstrap — Run `mise run //cdk:bootstrap`
+- Missing CDK bootstrap — Run `mise //cdk:bootstrap`
 - IAM permission issues — Check `aws sts get-caller-identity`
 - Region mismatch — Ensure consistent region across all commands
 

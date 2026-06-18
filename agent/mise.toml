@@ -12,6 +12,10 @@ PROJECT_NAME = "{{ config_root | basename }}"
 [tasks]
 install = "uv sync --all-groups"
 
+[tasks.upgrade]
+description = "Refresh uv.lock within the pins declared in pyproject.toml (exact pins, incl. cedarpy, are not rewritten)"
+run = "uv lock --upgrade"
+
 [tasks.info]
 description = "Print project information"
 run = '''

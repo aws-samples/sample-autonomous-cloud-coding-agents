@@ -1,0 +1,90 @@
+{
+  "name": "schema-bad-status-enum",
+  "description": "status not in the enum \u2014 pure schema violation.",
+  "workflow": {
+    "id": "coding/new-task-v1",
+    "version": "1.0.0",
+    "domain": "coding",
+    "description": "Implement a GitHub issue and open a PR.",
+    "requires_repo": true,
+    "read_only": false,
+    "prompt": {
+      "template": "registry://prompt/coding-new-task-workflow"
+    },
+    "hydration": {
+      "sources": [
+        "issue",
+        "memory",
+        "task_description"
+      ]
+    },
+    "agent_config": {
+      "tier": "standard",
+      "allowed_tools": [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebFetch"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny",
+        "builtin/soft_deny"
+      ]
+    },
+    "repo_config": {
+      "provider": "github",
+      "discover": true
+    },
+    "required_inputs": {
+      "one_of": [
+        "issue_number",
+        "task_description"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "clone_repo",
+        "name": "setup"
+      },
+      {
+        "kind": "hydrate_context",
+        "name": "context"
+      },
+      {
+        "kind": "run_agent",
+        "name": "implement"
+      },
+      {
+        "kind": "verify_build",
+        "name": "build",
+        "gate": "regression_only"
+      },
+      {
+        "kind": "ensure_pr",
+        "name": "open_pr",
+        "strategy": "create"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "pr_url"
+    },
+    "limits": {
+      "max_turns": 100
+    },
+    "promotion_gate": {
+      "requires": [
+        "tests:agent/new_task"
+      ]
+    },
+    "status": "shipped"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "schema"
+    ]
+  }
+}

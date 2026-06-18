@@ -33,6 +33,15 @@ import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
 import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
 
+/** Default task-record retention used for TTL computation (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/** Webhook-processor Lambda timeout (seconds). */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
+
+/** Webhook-processor Lambda memory (MB). */
+const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
+
 /**
  * Properties for LinearIntegration construct.
  */
@@ -52,8 +61,32 @@ export interface LinearIntegrationProps {
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
+  /**
+   * OrchestrationTable for #247 Mode A parent/sub-issue orchestration.
+   * When provided, the webhook processor probes labeled parent issues for
+   * a sub-issue graph (seeds the DAG + releases root children). When
+   * omitted, the orchestration path is dormant (ORCHESTRATION_TABLE_NAME
+   * unset) and the processor behaves as one-issue → one-task.
+   */
+  readonly orchestrationTable?: dynamodb.ITable;
+
   /** Orchestrator Lambda function ARN for async task invocation. */
   readonly orchestratorFunctionArn?: string;
+
+  /**
+   * User concurrency counter table (#331). When provided alongside
+   * ``orchestrationTable``, the webhook processor throttles the seed-time
+   * ROOT release to the user's free concurrency budget so a wide-root epic
+   * (many independent sub-issues, no shared foundation) doesn't over-release
+   * roots that admission then hard-fails. A failed root is UNRECOVERABLE
+   * (the sweep can only re-release a child whose predecessor still shows
+   * succeeded — a root has none), so throttling here matters most. Omitted
+   * → release all roots (back-compat; admission still gates).
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /** Per-user concurrency cap, shared with the orchestrator (#331). Default 10. */
+  readonly maxConcurrentTasksPerUser?: number;
 
   /** Bedrock Guardrail ID for input screening. */
   readonly guardrailId?: string;
@@ -156,7 +189,7 @@ export class LinearIntegration extends Construct {
     const createTaskEnv: Record<string, string> = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
@@ -194,24 +227,43 @@ export class LinearIntegration extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(30),
+      timeout: Duration.seconds(WEBHOOK_PROCESSOR_TIMEOUT_SECONDS),
       // Default 128 MB OOMs at module init since the attachment-screening
       // path (#176) bundles pdf-parse + URL-resolver libs alongside the
       // existing AWS SDK + bedrock-agentcore deps. 512 MB gives ~4× headroom
       // and lifts CPU enough that p99 startup stays under the API Gateway
       // 30s deadline on cold starts.
-      memorySize: 512,
+      memorySize: WEBHOOK_PROCESSOR_MEMORY_MB,
       environment: {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+        // #247 Mode A: when set, enables parent/sub-issue orchestration
+        // (seed DAG + release roots). Unset → orchestration path dormant.
+        ...(props.orchestrationTable && {
+          ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
+        }),
+        // #331: throttle the seed-time root release to the free concurrency
+        // budget (see prop doc). Only wired when both tables are present.
+        ...(props.orchestrationTable && props.userConcurrencyTable && {
+          USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+          MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+        }),
       },
       bundling: commonBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
     this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    // #247: seed the orchestration DAG + release root children.
+    if (props.orchestrationTable) {
+      props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
+    // #331: read the user concurrency counter to throttle the root release.
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      props.userConcurrencyTable.grantReadData(webhookProcessorFn);
+    }
     // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
     // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant
     // the webhook processor Get + Put on the prefix so it can read tokens

@@ -69,6 +69,11 @@ bgagent linear webhook-info
 
 This prints the URL and values to paste into Linear. Open `https://linear.app/<slug>/settings/api/webhooks` and create the webhook with those values.
 
+Under **Resource types**, enable both **Issues** and **Comments**:
+
+- **Issues** — label-triggered tasks and parent/sub-issue epic orchestration.
+- **Comments** — the `@bgagent` re-iteration trigger: a reviewer comments `@bgagent <change>` on a sub-issue and ABCA updates that sub-issue's PR, then re-stacks its dependents. Without the Comments subscription this trigger silently never fires.
+
 Then open the webhook detail page and copy the **signing secret** (`lin_wh_…`).
 
 ### 5. Tell ABCA the signing secret
@@ -173,6 +178,40 @@ No additional setup is required — once Linear MCP is wired (steps above), this
 - **Check status**: from the Linear issue (progress comments) or `bgagent list` / `bgagent status <task-id>`.
 - **Cancel**: `bgagent cancel <task-id>`. Removing the Linear label does not cancel a running task.
 
+## Parent/sub-issue orchestration
+
+If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:
+
+1. **Discovery** — it reads the sub-issues and their `blocked by` / `blocking` relations, builds a dependency graph (DAG), and rejects cycles with a terminal comment on the parent.
+2. **Dependency-ordered execution** — root sub-issues (no blockers) start immediately; a blocked sub-issue does not start until **all** its blockers reach terminal-success (a sub-issue that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
+3. **Stacked PRs** — a sub-issue with a single predecessor branches from that predecessor's branch (so it sees its code before merge); a sub-issue with multiple predecessors branches from the default branch and merges all predecessor branches in. Review/merge the resulting stack bottom-up.
+4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
+5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
+
+Notes and current limitations:
+
+- The parent issue itself spawns **no task** — a human-authored sub-issue graph is treated as consent to execute.
+- **No "cancel the whole epic" button yet.** Cancelling an individual sub-issue's task (`bgagent cancel <task-id>`) stops it and skips its dependents, but there is no single command to cancel a whole in-flight orchestration. Tracked as a follow-up.
+- A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
+- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
+
+## Parent/sub-issue orchestration
+
+If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:
+
+1. **Discovery** — it reads the sub-issues and their `blocked by` / `blocking` relations, builds a dependency graph (DAG), and rejects cycles with a terminal comment on the parent.
+2. **Dependency-ordered execution** — root sub-issues (no blockers) start immediately; a blocked sub-issue does not start until **all** its blockers reach terminal-success (a sub-issue that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
+3. **Stacked PRs** — a sub-issue with a single predecessor branches from that predecessor's branch (so it sees its code before merge); a sub-issue with multiple predecessors branches from the default branch and merges all predecessor branches in. Review/merge the resulting stack bottom-up.
+4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
+5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
+
+Notes and current limitations:
+
+- The parent issue itself spawns **no task** — a human-authored sub-issue graph is treated as consent to execute.
+- **No "cancel the whole epic" button yet.** Cancelling an individual sub-issue's task (`bgagent cancel <task-id>`) stops it and skips its dependents, but there is no single command to cancel a whole in-flight orchestration. Tracked as a follow-up.
+- A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
+- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
+
 ## Troubleshooting
 
 ### Webhook doesn't trigger a task
@@ -200,11 +239,11 @@ If the failing event's `organizationId` doesn't match any registered workspace a
 
 ### "Invalid redirect_uri parameter for the application" during step 3
 
-Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete. In your Linear app settings:
+Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete (it reports `Invalid redirect_uri` regardless of which required field is actually missing). In your Linear app settings, confirm:
 
-- **GitHub username** must end with `[bot]` (e.g. `bgagent[bot]`)
-- **Webhooks** toggle must be ON
-- The Callback URL must be on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects)
+- **GitHub username** is filled in (Linear's inline help describes the field and the `[bot]` suffix) — a blank value triggers this error.
+- **Webhooks** toggle is ON.
+- The Callback URL is on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects).
 
 Re-run `bgagent linear setup` after fixing.
 

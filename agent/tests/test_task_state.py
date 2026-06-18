@@ -311,10 +311,46 @@ class TestWriteTerminalTraceS3Uri:
         update_expr = calls[0]["UpdateExpression"]
         assert "trace_s3_uri" not in update_expr
 
+
+class TestWriteTerminalArtifactUri:
+    """#248 Phase 3 — write_terminal persists artifact_uri so a repo-less task's
+    delivered S3 artifact is discoverable via TaskDetail. Regression guard: the
+    field was previously dropped by the write_terminal allowlist."""
+
+    def test_artifact_uri_written_when_present(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-art",
+            "COMPLETED",
+            {"artifact_uri": "s3://bkt/artifacts/t-art/result.md"},
+        )
+        update_expr = calls[0]["UpdateExpression"]
+        assert "artifact_uri = :au" in update_expr
+        assert calls[0]["ExpressionAttributeValues"][":au"] == "s3://bkt/artifacts/t-art/result.md"
+
+    def test_artifact_uri_omitted_when_absent(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-noart", "COMPLETED", {"pr_url": "https://github.com/o/r/pull/1"}
+        )
+        assert "artifact_uri" not in calls[0]["UpdateExpression"]
+
     def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
         self,
         monkeypatch,
-        capsys,
+        capfd,
     ):
         """K2 final review SIG-1: when ``write_terminal``'s precondition
         fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
@@ -349,7 +385,7 @@ class TestWriteTerminalTraceS3Uri:
             "COMPLETED",
             {"trace_s3_uri": "s3://bucket/traces/u-1/t-orphan.jsonl.gz"},
         )
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         # Generic skip message still prints (benign-case compatibility).
         assert "write_terminal skipped" in out
         # And the specific orphan log calls out the URI + actionable
@@ -364,7 +400,7 @@ class TestWriteTerminalTraceS3Uri:
     def test_conditional_check_failed_without_trace_uri_skips_orphan_log(
         self,
         monkeypatch,
-        capsys,
+        capfd,
     ):
         """The orphan diagnostic must NOT fire on the common
         benign-cancel case (where no S3 write happened) — otherwise
@@ -381,7 +417,7 @@ class TestWriteTerminalTraceS3Uri:
 
         monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
         task_state.write_terminal("t-benign", "COMPLETED", {"pr_url": "https://pr"})
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         assert "write_terminal skipped" in out
         assert "orphaned" not in out
 
@@ -428,7 +464,7 @@ class TestWriteTraceUriConditional:
         assert values[":failed"] == "FAILED"
         assert values[":timed_out"] == "TIMED_OUT"
 
-    def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capsys):
+    def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capfd):
         """``ConditionalCheckFailedException`` → returns False, INFO log (benign)."""
         from botocore.exceptions import ClientError
 
@@ -444,7 +480,7 @@ class TestWriteTraceUriConditional:
             "t-already", "s3://bucket/traces/u/t-already.jsonl.gz"
         )
         assert healed is False
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         assert "write_trace_uri_conditional skipped" in out
         assert "t-already" in out
 
@@ -465,7 +501,7 @@ class TestWriteTraceUriConditional:
         )
         assert healed is False
 
-    def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capsys):
+    def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capfd):
         """A non-CCF ClientError (e.g., throttling) → returns False, WARN log."""
         from botocore.exceptions import ClientError
 
@@ -486,7 +522,7 @@ class TestWriteTraceUriConditional:
             "t-throttle", "s3://b/traces/u/t-throttle.jsonl.gz"
         )
         assert healed is False
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         assert "write_trace_uri_conditional failed" in out
         # Log surfaces the exception type name to aid triage.
         assert "ClientError" in out

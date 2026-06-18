@@ -19,6 +19,7 @@
 
 import * as path from 'path';
 import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -29,6 +30,18 @@ import * as sm from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+
+/** DLQ message retention for persistent-failure records (days). */
+const DLQ_RETENTION_DAYS = 14;
+
+/** Max batching window before the Lambda is invoked on a partial batch (seconds). */
+const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
+
+/** DLQ-depth alarm metric period (minutes). */
+const DLQ_ALARM_PERIOD_MINUTES = 5;
+
+/** Fan-out consumer Lambda memory (MB). */
+const FANOUT_MEMORY_MB = 256;
 
 /**
  * Properties for `FanOutConsumer` — the Phase 1b §8.9 fan-out plane
@@ -77,6 +90,23 @@ export interface FanOutConsumerProps {
   readonly slackSecretArnPattern?: string;
 
   /**
+   * LinearWorkspaceRegistryTable — the Linear dispatcher reads this to
+   * resolve per-workspace OAuth tokens at comment-post time. Optional:
+   * when omitted, the dispatcher logs and skips so a deployment without
+   * Linear onboarding doesn't accumulate dangling IAM grants.
+   */
+  readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
+
+  /**
+   * Secrets Manager ARN-prefix pattern for per-workspace Linear OAuth
+   * bundles. Mirrors ``slackSecretArnPattern`` shape — typically
+   * ``bgagent-linear-oauth-*``. Required when ``linearWorkspaceRegistryTable``
+   * is set; without it the dispatcher would resolve the registry row but
+   * fail at the SM GetSecretValue call.
+   */
+  readonly linearOauthSecretArnPattern?: string;
+
+  /**
    * Maximum batch size delivered to the Lambda per invocation.
    *
    * @default 100 (DynamoDB Stream default)
@@ -106,6 +136,10 @@ export interface FanOutConsumerProps {
 export class FanOutConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
+  /** Fires when records land in the fan-out DLQ — a silent fan-out
+   *  outage (every Slack/GitHub/Linear notification failing) would
+   *  otherwise accumulate unnoticed for the queue's 14-day retention. */
+  public readonly dlqDepthAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
     super(scope, id);
@@ -115,7 +149,7 @@ export class FanOutConsumer extends Construct {
     this.dlq = new sqs.Queue(this, 'FanOutDlq', {
       // Persistent failures (e.g., dispatcher throws non-caught error
       // five times in a row) land here for operator inspection.
-      retentionPeriod: Duration.days(14),
+      retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
@@ -135,7 +169,7 @@ export class FanOutConsumer extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(1),
-      memorySize: 256,
+      memorySize: FANOUT_MEMORY_MB,
       logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -173,10 +207,51 @@ export class FanOutConsumer extends Construct {
       }));
     }
 
+    // Linear dispatcher plumbing. Same guarded shape as Slack/GitHub:
+    // a deployment without Linear onboarding gets no IAM grants and
+    // the dispatcher logs-and-skips on missing env. The registry table
+    // tells us per-workspace OAuth-secret ARN; the secret holds the
+    // access token that ``postIssueComment`` uses to drive
+    // ``commentCreate`` GraphQL.
+    if (props.linearWorkspaceRegistryTable) {
+      props.linearWorkspaceRegistryTable.grantReadData(this.fn);
+      this.fn.addEnvironment(
+        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+        props.linearWorkspaceRegistryTable.tableName,
+      );
+    }
+    if (props.linearOauthSecretArnPattern) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        // GetSecretValue + PutSecretValue: the resolver may rotate the
+        // OAuth token (writes the refreshed bundle back to SM) — same
+        // grants the LinearIntegration's webhook-processor Lambda holds
+        // for the same reason.
+        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+        resources: [props.linearOauthSecretArnPattern],
+      }));
+    }
+
+    // Alarm on any record landing in the DLQ. Notifications are
+    // best-effort by design, so individual failures don't fail the
+    // batch — which means the DLQ is the ONLY persistent signal of a
+    // fan-out outage. Threshold 1 / single period: even one poisoned
+    // record means three Lambda retries already failed.
+    this.dlqDepthAlarm = new cloudwatch.Alarm(this, 'FanOutDlqDepthAlarm', {
+      metric: this.dlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      alarmDescription:
+        'Fan-out DLQ has undelivered task-event records — Slack/GitHub/Linear notifications are failing',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,
       batchSize: props.batchSize ?? 100,
-      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(5),
+      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(DEFAULT_MAX_BATCHING_WINDOW_SECONDS),
       // Fan-out delivery is best-effort; don't block the stream if one
       // poisonous record blows up the Lambda. After 3 retries, send the
       // record batch to the DLQ and advance the iterator.

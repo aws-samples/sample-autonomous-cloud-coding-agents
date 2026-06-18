@@ -28,6 +28,11 @@ describe('status command', () => {
   const mockGetStatusSnapshot = jest.fn();
 
   beforeEach(() => {
+    // The command under test sets process.exitCode; without resetting it,
+    // a test that legitimately asserts exitCode=1 leaks that value into
+    // the Jest process itself, which then exits 1 with green assertions.
+    // Same pattern as watch.test.ts.
+    process.exitCode = undefined;
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     mockGetTask.mockReset();
     mockGetStatusSnapshot.mockReset();
@@ -45,6 +50,10 @@ describe('status command', () => {
   });
 
   afterEach(() => {
+    // Reset here too: beforeEach only covers between-tests; without this,
+    // the LAST test's exitCode (1) survives into the Jest worker's own
+    // exit, failing the test command with green assertions.
+    process.exitCode = undefined;
     consoleSpy.mockRestore();
   });
 
@@ -55,7 +64,7 @@ describe('status command', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
-        task_type: 'new_task',
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
         pr_number: null,
         task_description: 'Fix bug',
         branch_name: 'bgagent/abc/fix',
@@ -112,7 +121,7 @@ describe('status command', () => {
       status: 'COMPLETED',
       repo: 'owner/repo',
       issue_number: null,
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       pr_number: null,
       task_description: 'Fix bug',
       branch_name: 'bgagent/abc/fix',
@@ -156,5 +165,36 @@ describe('status command', () => {
 
     expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(terminal, null, 2));
     expect(process.exitCode).toBe(1);
+  });
+
+  test('--wait --max-wait <seconds> overrides the 24h ceiling', async () => {
+    // A task stuck in RUNNING must trip the user-provided ceiling, not
+    // poll for the default 24h. (--max-wait 1 → ceiling check fires on
+    // the second loop iteration; the first poll resolves immediately.)
+    jest.useFakeTimers();
+    try {
+      mockGetTask.mockResolvedValue({ task_id: 'abc', status: 'RUNNING' });
+
+      const cmd = makeStatusCommand();
+      const parsed = cmd.parseAsync(['node', 'test', 'abc', '--wait', '--max-wait', '1']);
+      const assertion = expect(parsed).rejects.toThrow(/Timed out waiting/);
+      // Drain poll sleeps until the ceiling trips.
+      for (let i = 0; i < 3; i += 1) {
+        await Promise.resolve();
+        jest.advanceTimersByTime(6_000);
+        await Promise.resolve();
+      }
+      await assertion;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('rejects a non-positive --max-wait', async () => {
+    const cmd = makeStatusCommand();
+    await expect(
+      cmd.parseAsync(['node', 'test', 'abc', '--wait', '--max-wait', '0']),
+    ).rejects.toThrow('--max-wait must be a positive integer');
+    expect(mockGetTask).not.toHaveBeenCalled();
   });
 });

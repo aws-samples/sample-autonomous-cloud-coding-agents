@@ -30,6 +30,12 @@ import { decodePaginationToken, encodePaginationToken, parseLimit, parseStatusFi
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 
+/** Default page size when the caller omits ``?limit=``. */
+const DEFAULT_PAGE_LIMIT = 20;
+
+/** Hard page-size ceiling. */
+const MAX_PAGE_LIMIT = 100;
+
 /**
  * GET /v1/tasks — List tasks for the authenticated user.
  */
@@ -45,7 +51,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 2. Parse query parameters
     const params = event.queryStringParameters ?? {};
-    const limit = parseLimit(params.limit, 20, 100);
+    const limit = parseLimit(params.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const statusFilter = params.status !== undefined ? parseStatusFilter(params.status) : null;
     const repoFilter = params.repo;
     const startKey = decodePaginationToken(params.next_token);

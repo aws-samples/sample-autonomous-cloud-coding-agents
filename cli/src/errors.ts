@@ -17,11 +17,19 @@
  *  SOFTWARE.
  */
 
-/** Generic CLI error with a user-facing message. */
+/** Generic CLI error with a user-facing message.
+ *
+ * ``exitCode`` defaults to 1. Pass a different code when the failure class
+ * must be script-distinguishable — e.g. ``waitForTask`` uses 2 for
+ * "the CLI gave up waiting" so wrappers can tell a timeout apart from a
+ * genuinely FAILED task (which exits 1 via ``exitCodeForStatus``). */
 export class CliError extends Error {
-  constructor(message: string) {
+  readonly exitCode: number;
+
+  constructor(message: string, exitCode = 1) {
     super(message);
     this.name = 'CliError';
+    this.exitCode = exitCode;
   }
 }
 

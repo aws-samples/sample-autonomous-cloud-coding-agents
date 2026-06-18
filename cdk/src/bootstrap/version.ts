@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 import { allPolicies } from './policies';
 
 /** Semantic version of the bootstrap policy bundle. */
-export const BOOTSTRAP_VERSION = '1.1.0';
+export const BOOTSTRAP_VERSION = '1.2.0';
 
 /**
  * Computes a SHA-256 hash over all bootstrap policies.

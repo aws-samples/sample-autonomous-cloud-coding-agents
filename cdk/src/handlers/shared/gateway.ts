@@ -94,6 +94,9 @@ export function buildWebhookChannelMetadata(
  * Lowercases, replaces non-alphanumeric with hyphens, collapses consecutive hyphens,
  * trims leading/trailing hyphens, and truncates to 50 characters.
  */
+/** Maximum slug length for gateway path segments. */
+const SLUG_MAX_LENGTH = 50;
+
 function slugify(text?: string): string {
   if (!text) return '';
   return text
@@ -101,5 +104,5 @@ function slugify(text?: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 50);
+    .slice(0, SLUG_MAX_LENGTH);
 }
