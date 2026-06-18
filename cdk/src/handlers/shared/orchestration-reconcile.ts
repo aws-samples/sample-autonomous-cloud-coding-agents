@@ -239,26 +239,48 @@ export function computeRecoveryPlan(
   // 1. Un-fail the recovered node.
   setStatus(recoveredSubIssueId, 'succeeded');
 
-  // 2/3. Re-release skipped descendants whose predecessors are now all
-  //      succeeded, iterating to a fixed point (a freed child can satisfy the
-  //      next one's predecessors in the same pass).
-  const toRelease: string[] = [];
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const c of children) {
-      if (statusOf.get(c.sub_issue_id) !== 'skipped') continue;
-      const allSucceeded = c.depends_on.every((dep) => statusOf.get(dep) === 'succeeded');
-      if (allSucceeded) {
-        // A freed child isn't 'succeeded' yet — it must actually run. Mark it
-        // 'ready' here so a downstream sibling in this same pass doesn't treat
-        // it as a satisfied predecessor (it'll flip to 'released' on spawn, then
-        // 'succeeded' when its task lands and the forward cascade frees ITS deps).
-        setStatus(c.sub_issue_id, 'ready');
-        toRelease.push(c.sub_issue_id);
-        changed = true;
-      }
+  // 2. Reset EVERY transitively-skipped descendant of the recovered node back to
+  //    'blocked' — the normal waiting state the forward cascade understands.
+  //    This is the key fix: once a node is 'skipped' the forward cascade
+  //    (computeReconcilePlan) never releases it (it only releases 'blocked'
+  //    nodes), so a deeper node like the integration node would strand skipped
+  //    forever even after its predecessors recover. Putting the whole subtree
+  //    back to 'blocked' lets each layer release normally as predecessors
+  //    succeed: the immediately-ready layer here, deeper layers via the forward
+  //    cascade when their tasks land. BFS over the reverse-dependency graph.
+  const dependents = new Map<string, string[]>();
+  for (const c of children) {
+    for (const dep of c.depends_on) {
+      const list = dependents.get(dep) ?? [];
+      list.push(c.sub_issue_id);
+      dependents.set(dep, list);
     }
+  }
+  const queue = [recoveredSubIssueId];
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const depId of dependents.get(cur) ?? []) {
+      if (seen.has(depId)) continue;
+      seen.add(depId);
+      if (statusOf.get(depId) === 'skipped') {
+        setStatus(depId, 'blocked');
+      }
+      queue.push(depId);
+    }
+  }
+
+  // 3. Release any now-'blocked' node whose predecessors are ALL succeeded
+  //    (the immediate layer behind the recovered node). Deeper nodes stay
+  //    'blocked' and release via the forward cascade as their tasks complete.
+  //    A node with ANOTHER still-failed/-skipped predecessor stays 'blocked'
+  //    (correctly waiting for that one's own recovery) — gated exactly like the
+  //    original release.
+  const toRelease: string[] = [];
+  for (const c of children) {
+    if (statusOf.get(c.sub_issue_id) !== 'blocked') continue;
+    const allSucceeded = c.depends_on.every((dep) => statusOf.get(dep) === 'succeeded');
+    if (allSucceeded) toRelease.push(c.sub_issue_id);
   }
 
   return { statusUpdates: updates, toRelease };

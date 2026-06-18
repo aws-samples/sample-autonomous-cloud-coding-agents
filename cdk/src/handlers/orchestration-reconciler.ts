@@ -656,15 +656,16 @@ async function maybeRecoverFailedNode(
   const plan = computeRecoveryPlan(recoveredSubIssueId, children);
   if (plan.statusUpdates.length === 0) return; // node wasn't failed — nothing to recover
 
-  logger.info('A6 recovery: un-failing node + re-releasing skipped dependents', {
+  logger.info('A6 recovery: un-failing node + resetting skipped subtree', {
     orchestration_id: orchestrationId,
     recovered_sub_issue_id: recoveredSubIssueId,
+    un_skipped: plan.statusUpdates.length - 1,
     re_releasing: plan.toRelease.length,
   });
 
-  // 1. Persist the un-fail + un-skip writes. Release flips the freed rows to
-  //    'released' itself, so skip those here (avoid a double-write race), exactly
-  //    as reconcileTerminalChild does for its toRelease set.
+  // 1. Persist the un-fail (→succeeded) + un-skip (→blocked) writes. Release
+  //    flips the freed rows itself, so skip those here (avoid a double-write
+  //    race), exactly as reconcileTerminalChild does for its toRelease set.
   for (const update of plan.statusUpdates) {
     if (plan.toRelease.includes(update.sub_issue_id)) continue;
     try {
@@ -681,40 +682,58 @@ async function maybeRecoverFailedNode(
     }
   }
 
-  if (plan.toRelease.length === 0) return;
+  // 2. The epic had settled to "⚠️ finished with failures" — its rollup claim is
+  //    held and the parent carries the ❌ reaction. Recovery re-opens it: release
+  //    the once-only rollup claim so the parent state can re-settle (❌→🔄→✅) as
+  //    the recovered work lands. Without this the panel + parent reaction stay
+  //    stuck at the failed snapshot even though work is running again (live-caught).
+  await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
 
-  // 2. Re-release the freed children against a FRESH read (the un-fail write
-  //    above must be visible), gated on the concurrency budget like the forward
-  //    path. A freed row is currently 'skipped' in the store; releaseReadyChildren
-  //    flips ready→released, so present them as ready.
+  // 3. Re-release the now-'blocked' freed children against a FRESH read (the
+  //    un-skip writes above must be visible), gated on the concurrency budget
+  //    like the forward path. releaseReadyChildren accepts child_status IN
+  //    (blocked, ready); present them as ready.
   const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
   const freshChildren = fresh?.children ?? snapshot.children;
-  const releasableRows = freshChildren
-    .filter((c) => plan.toRelease.includes(c.sub_issue_id))
-    .map((c) => ({ ...c, child_status: 'ready' as const }));
-  if (releasableRows.length === 0) return;
+  if (plan.toRelease.length > 0) {
+    const releasableRows = freshChildren
+      .filter((c) => plan.toRelease.includes(c.sub_issue_id))
+      .map((c) => ({ ...c, child_status: 'ready' as const }));
+    if (releasableRows.length > 0) {
+      const releaseCtx = (fresh ?? snapshot).meta.release_context;
+      const budget = USER_CONCURRENCY_TABLE
+        ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
+        : undefined;
+      const results = await releaseReadyChildren(
+        ddb,
+        ORCHESTRATION_TABLE,
+        releasableRows,
+        releaseCtx,
+        createTaskCore,
+        now,
+        freshChildren,
+        'main',
+        budget,
+      );
+      logger.info('A6 recovery: re-released children', {
+        orchestration_id: orchestrationId,
+        recovered_sub_issue_id: recoveredSubIssueId,
+        released: results.filter((r) => r.kind === 'released').length,
+        requested: releasableRows.length,
+      });
+    }
+  }
 
-  const releaseCtx = (fresh ?? snapshot).meta.release_context;
-  const budget = USER_CONCURRENCY_TABLE
-    ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
-    : undefined;
-  const results = await releaseReadyChildren(
-    ddb,
-    ORCHESTRATION_TABLE,
-    releasableRows,
-    releaseCtx,
-    createTaskCore,
+  // 4. Refresh the panel against the fresh post-recovery view so the un-skipped
+  //    rows stop rendering ⏭️ and the header reverts from "finished with
+  //    failures" to in-progress (the parent reaction re-settles on completion).
+  const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  await refreshPanelAndSettle(
+    orchestrationId,
+    (refreshed ?? fresh ?? snapshot).children,
+    (refreshed ?? fresh ?? snapshot).meta,
     now,
-    freshChildren,
-    'main',
-    budget,
   );
-  logger.info('A6 recovery: re-released children', {
-    orchestration_id: orchestrationId,
-    recovered_sub_issue_id: recoveredSubIssueId,
-    released: results.filter((r) => r.kind === 'released').length,
-    requested: releasableRows.length,
-  });
 }
 
 /**
