@@ -108,12 +108,18 @@ describe('fetchConfigureBundleFromStack', () => {
 
 describe('resolveOperatorRegion', () => {
   const originalRegion = process.env.AWS_REGION;
+  const originalDefaultRegion = process.env.AWS_DEFAULT_REGION;
 
   afterEach(() => {
     if (originalRegion === undefined) {
       delete process.env.AWS_REGION;
     } else {
       process.env.AWS_REGION = originalRegion;
+    }
+    if (originalDefaultRegion === undefined) {
+      delete process.env.AWS_DEFAULT_REGION;
+    } else {
+      process.env.AWS_DEFAULT_REGION = originalDefaultRegion;
     }
   });
 
@@ -122,7 +128,9 @@ describe('resolveOperatorRegion', () => {
   });
 
   test('throws when region cannot be resolved', () => {
+    // Both AWS_REGION and AWS_DEFAULT_REGION feed the fallback chain.
     delete process.env.AWS_REGION;
+    delete process.env.AWS_DEFAULT_REGION;
     expect(() => resolveOperatorRegion({}, undefined)).toThrow(CliError);
   });
 });
@@ -148,5 +156,13 @@ describe('getStackOutput', () => {
     cfSend.mockResolvedValueOnce({ Stacks: [] });
     await expect(getStackOutput('us-east-1', 'missing', 'ApiUrl'))
       .rejects.toThrow(/not found/);
+  });
+
+  test('wraps a raw SDK error into an actionable CliError', async () => {
+    cfSend.mockRejectedValueOnce(
+      Object.assign(new Error('User is not authorized'), { name: 'AccessDeniedException' }),
+    );
+    await expect(getStackOutput('us-east-1', 'dev', 'ApiUrl'))
+      .rejects.toThrow(/Could not describe stack 'dev' in us-east-1/);
   });
 });

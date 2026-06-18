@@ -30,6 +30,7 @@ import {
   putGithubToken,
   resolveGithubTokenSecretArn,
 } from '../github-token';
+import { DEFAULT_STACK_NAME } from '../operator-context';
 import { promptSecret } from '../prompt-secret';
 import { getStackOutput } from '../stack-outputs';
 
@@ -44,7 +45,7 @@ export function makeGithubCommand(): Command {
     new Command('webhook-info')
       .description('Print the GitHub webhook URL + values to paste into a repo\'s webhook config')
       .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .action(async (opts) => {
         // Read-only convenience — surfaces the values an operator needs
         // to wire a GitHub repo's webhook to the screenshot pipeline.
@@ -101,7 +102,7 @@ export function makeGithubCommand(): Command {
     new Command('set-webhook-secret')
       .description('Mirror the GitHub webhook signing secret into Secrets Manager')
       .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .action(async (opts) => {
         // Companion to `webhook-info`: after the operator pastes the
         // webhook config into GitHub, this command captures the
@@ -170,7 +171,7 @@ export function makeGithubCommand(): Command {
     new Command('set-token')
       .description('Store a GitHub personal access token in Secrets Manager')
       .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .option('--repo <owner/repo>', 'Target a blueprint\'s per-repo token secret (when configured)')
       .option('--secret-arn <arn>', 'Write to an explicit Secrets Manager ARN (instead of stack outputs)')
       .action(async (opts) => {

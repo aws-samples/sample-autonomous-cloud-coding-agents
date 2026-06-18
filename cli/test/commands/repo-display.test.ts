@@ -59,6 +59,24 @@ describe('formatRepoConfigForDisplay', () => {
       'arn:aws:secretsmanager:us-east-1:123456789012:secret:****-XyZ123',
     );
   });
+
+  test('redacts github_token_secret_arn in blueprint_overrides (JSON output contract)', () => {
+    const display = formatRepoConfigForDisplay(
+      {
+        repo: 'acme/foo',
+        status: 'active',
+        github_token_secret_arn: BLUEPRINT_ARN,
+      },
+      PLATFORM,
+    );
+
+    // `repo show --output json` serializes blueprint_overrides verbatim, so the
+    // raw secret ARN must never appear here.
+    expect(display.blueprint_overrides.github_token_secret_arn).toBe(
+      'arn:aws:secretsmanager:us-east-1:123456789012:secret:****-XyZ123',
+    );
+    expect(JSON.stringify(display)).not.toContain(BLUEPRINT_ARN);
+  });
 });
 
 describe('buildRepoShowLines', () => {

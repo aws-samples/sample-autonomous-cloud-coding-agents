@@ -24,11 +24,20 @@ import {
   DescribeUserPoolCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { isGithubTokenConfigured } from './github-token';
+import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { countActiveRepos } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
 
-/** Default foundation model checked when no onboarded repo specifies model_id. */
-export const DEFAULT_BEDROCK_MODEL_ID = 'anthropic.claude-sonnet-4-6';
+/**
+ * Default foundation model checked when no onboarded repo specifies model_id.
+ *
+ * Derived from the platform default model so the two never drift on a model
+ * bump: `PLATFORM_REPO_DEFAULTS.model_id` is the cross-region inference profile
+ * (`us.anthropic.…`) used at invoke time, while `GetFoundationModel` requires
+ * the bare foundation-model id, so we strip the regional inference prefix.
+ */
+export const DEFAULT_BEDROCK_MODEL_ID =
+  PLATFORM_REPO_DEFAULTS.model_id.replace(/^(us|eu|apac)\./, '');
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
 

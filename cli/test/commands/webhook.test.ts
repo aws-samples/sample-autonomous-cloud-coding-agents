@@ -19,8 +19,38 @@
 
 import { ApiClient } from '../../src/api-client';
 import { makeWebhookCommand } from '../../src/commands/webhook';
+import { tryLoadConfig } from '../../src/config';
+import { listRepoConfigs, loadActiveRepoConfig } from '../../src/repo-lookup';
+import { getStackOutput } from '../../src/stack-outputs';
+import {
+  fetchWebhookSecret,
+  sendWebhookTestRequest,
+} from '../../src/webhook-test';
 
 jest.mock('../../src/api-client');
+jest.mock('../../src/config');
+jest.mock('../../src/stack-outputs', () => {
+  const actual = jest.requireActual('../../src/stack-outputs');
+  // Keep resolveOperatorRegion real (operator-context depends on it); only stub
+  // the network-touching getStackOutput.
+  return { ...actual, getStackOutput: jest.fn() };
+});
+jest.mock('../../src/repo-lookup');
+jest.mock('../../src/webhook-test', () => {
+  const actual = jest.requireActual('../../src/webhook-test');
+  return {
+    ...actual,
+    fetchWebhookSecret: jest.fn(),
+    sendWebhookTestRequest: jest.fn(),
+  };
+});
+
+const tryLoadConfigMock = tryLoadConfig as jest.Mock;
+const getStackOutputMock = getStackOutput as jest.Mock;
+const listRepoConfigsMock = listRepoConfigs as jest.Mock;
+const loadActiveRepoConfigMock = loadActiveRepoConfig as jest.Mock;
+const fetchWebhookSecretMock = fetchWebhookSecret as jest.Mock;
+const sendWebhookTestRequestMock = sendWebhookTestRequest as jest.Mock;
 
 describe('webhook command', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
@@ -194,11 +224,142 @@ describe('webhook command', () => {
   });
 
   describe('webhook test', () => {
+    let warnSpy: jest.SpiedFunction<typeof console.warn>;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      tryLoadConfigMock.mockReset().mockReturnValue({ region: 'us-east-1' });
+      getStackOutputMock.mockReset();
+      listRepoConfigsMock.mockReset();
+      loadActiveRepoConfigMock.mockReset().mockResolvedValue({ repo: 'acme/a', status: 'active' });
+      fetchWebhookSecretMock.mockReset().mockResolvedValue('fetched-secret');
+      sendWebhookTestRequestMock.mockReset().mockResolvedValue({
+        http_status: 202,
+        body: {},
+        task_id: 'task-9',
+      });
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
     test('requires secret or fetch-secret', async () => {
       const cmd = makeWebhookCommand();
       await expect(cmd.parseAsync([
         'node', 'test', 'test', 'wh-1', '--api-url', 'https://api/v1', '--repo', 'acme/a',
       ])).rejects.toThrow('--secret');
+    });
+
+    test('validates an explicit --repo and posts the signed payload', async () => {
+      getStackOutputMock.mockImplementation(async (_r, _s, key) =>
+        (key === 'RepoTableName' ? 'RepoTable' : null));
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1',
+        '--api-url', 'https://api/v1', '--repo', 'acme/a', '--secret', 's3cret',
+        '--region', 'us-east-1',
+      ]);
+
+      expect(loadActiveRepoConfigMock).toHaveBeenCalledWith('us-east-1', 'RepoTable', 'acme/a');
+      expect(sendWebhookTestRequestMock).toHaveBeenCalledWith(
+        'https://api/v1', 'wh-1', 's3cret', expect.objectContaining({ repo: 'acme/a' }),
+      );
+      const output = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+      expect(output).toContain('task-9');
+    });
+
+    test('warns instead of silently skipping when RepoTableName is absent', async () => {
+      getStackOutputMock.mockResolvedValue(null);
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1',
+        '--api-url', 'https://api/v1', '--repo', 'acme/a', '--secret', 's3cret',
+        '--region', 'us-east-1',
+      ]);
+
+      expect(loadActiveRepoConfigMock).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('without verifying'));
+      expect(sendWebhookTestRequestMock).toHaveBeenCalled();
+    });
+
+    test('auto-selects the first active repo when --repo is omitted', async () => {
+      getStackOutputMock.mockImplementation(async (_r, _s, key) =>
+        (key === 'RepoTableName' ? 'RepoTable' : null));
+      listRepoConfigsMock.mockResolvedValue([
+        { repo: 'acme/removed', status: 'removed' },
+        { repo: 'acme/active', status: 'active' },
+      ]);
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1',
+        '--api-url', 'https://api/v1', '--secret', 's3cret', '--region', 'us-east-1',
+      ]);
+
+      expect(sendWebhookTestRequestMock).toHaveBeenCalledWith(
+        'https://api/v1', 'wh-1', 's3cret', expect.objectContaining({ repo: 'acme/active' }),
+      );
+    });
+
+    test('errors when no active repos exist and --repo is omitted', async () => {
+      getStackOutputMock.mockImplementation(async (_r, _s, key) =>
+        (key === 'RepoTableName' ? 'RepoTable' : null));
+      listRepoConfigsMock.mockResolvedValue([{ repo: 'acme/removed', status: 'removed' }]);
+
+      const cmd = makeWebhookCommand();
+      await expect(cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1',
+        '--api-url', 'https://api/v1', '--secret', 's3cret', '--region', 'us-east-1',
+      ])).rejects.toThrow('No active repos');
+    });
+
+    test('fetches the secret from Secrets Manager with --fetch-secret', async () => {
+      getStackOutputMock.mockImplementation(async (_r, _s, key) =>
+        (key === 'RepoTableName' ? 'RepoTable' : null));
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1',
+        '--api-url', 'https://api/v1', '--repo', 'acme/a', '--fetch-secret',
+        '--region', 'us-east-1',
+      ]);
+
+      expect(fetchWebhookSecretMock).toHaveBeenCalledWith('us-east-1', 'wh-1');
+      expect(sendWebhookTestRequestMock).toHaveBeenCalledWith(
+        'https://api/v1', 'wh-1', 'fetched-secret', expect.anything(),
+      );
+    });
+
+    test('resolves api-url from stack output when neither flag nor config provides it', async () => {
+      tryLoadConfigMock.mockReturnValue(null);
+      getStackOutputMock.mockImplementation(async (_r, _s, key) => {
+        if (key === 'ApiUrl') return 'https://stack-api/v1';
+        if (key === 'RepoTableName') return 'RepoTable';
+        return null;
+      });
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1',
+        '--repo', 'acme/a', '--secret', 's3cret', '--region', 'us-east-1',
+      ]);
+
+      expect(sendWebhookTestRequestMock).toHaveBeenCalledWith(
+        'https://stack-api/v1', 'wh-1', 's3cret', expect.anything(),
+      );
+    });
+
+    test('errors when api-url cannot be resolved from anywhere', async () => {
+      tryLoadConfigMock.mockReturnValue(null);
+      getStackOutputMock.mockResolvedValue(null);
+
+      const cmd = makeWebhookCommand();
+      await expect(cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1', '--secret', 's3cret', '--region', 'us-east-1',
+      ])).rejects.toThrow('API URL is required');
     });
   });
 });

@@ -227,6 +227,7 @@ bgagent repo onboard owner/repo \
   --model <model-id> \
   --token-secret-arn <arn> \
   --max-turns <n> \
+  --poll-interval <ms>        Default agent poll interval in milliseconds \
   --output <text|json>
 ```
 
@@ -291,6 +292,8 @@ Store a GitHub personal access token in Secrets Manager (interactive masked prom
 bgagent github set-token \
   --repo <owner/repo>         Target a blueprint's per-repo token secret (when configured)
   --secret-arn <arn>          Write to an explicit Secrets Manager ARN
+  --region <region>           AWS region (defaults to configured region)
+  --stack-name <name>         CloudFormation stack name (default: backgroundagent-dev)
 ```
 
 With no flags, writes to the platform default `GitHubTokenSecretArn` stack output. When `--repo` is used, the CLI reads `github_token_secret_arn` from `RepoTable` if the Blueprint configured `credentials.githubTokenSecretArn`; otherwise it falls back to the platform default with a notice.

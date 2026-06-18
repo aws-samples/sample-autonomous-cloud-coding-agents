@@ -48,21 +48,41 @@ describe('ops-queries', () => {
     docSend.mockReset();
   });
 
-  test('findStuckTasks returns parsed task rows', async () => {
+  test('findStuckTasks parses each status query into a distinct, status-tagged row', async () => {
     const oldCreated = new Date(Date.now() - 3600_000).toISOString();
-    lowLevelSend.mockResolvedValue({
-      Items: [{
-        task_id: { S: 'task-1' },
-        user_id: { S: 'user-1' },
-        created_at: { S: oldCreated },
-        repo: { S: 'acme/a' },
-      }],
-    });
+    // One distinct task per status query (Promise.all fires three queries).
+    lowLevelSend
+      .mockResolvedValueOnce({
+        Items: [{
+          task_id: { S: 'task-submitted' },
+          user_id: { S: 'user-1' },
+          created_at: { S: oldCreated },
+          repo: { S: 'acme/a' },
+        }],
+      })
+      .mockResolvedValueOnce({
+        Items: [{
+          task_id: { S: 'task-hydrating' },
+          user_id: { S: 'user-1' },
+          created_at: { S: oldCreated },
+        }],
+      })
+      .mockResolvedValueOnce({
+        Items: [{
+          task_id: { S: 'task-awaiting' },
+          user_id: { S: 'user-1' },
+          created_at: { S: oldCreated },
+        }],
+      });
 
     const tasks = await findStuckTasks('us-east-1', 'TaskTable');
     expect(tasks).toHaveLength(3);
-    expect(tasks[0].task_id).toBe('task-1');
-    expect(tasks[0].repo).toBe('acme/a');
+    // Each row carries the status of the query that produced it, not a shared value.
+    const byId = Object.fromEntries(tasks.map((t) => [t.task_id, t.status]));
+    expect(byId['task-submitted']).toBe('SUBMITTED');
+    expect(byId['task-hydrating']).toBe('HYDRATING');
+    expect(byId['task-awaiting']).toBe('AWAITING_APPROVAL');
+    expect(tasks.find((t) => t.task_id === 'task-submitted')?.repo).toBe('acme/a');
   });
 
   test('findStuckTasks queries StatusIndex for each stuck status', async () => {
@@ -186,5 +206,28 @@ describe('ops-queries', () => {
     expect(scanCmd.input.TableName).toBe('ConcurrencyTable');
     const queryCmd = docSend.mock.calls[1][0] as DocQueryCommand;
     expect(queryCmd.input.IndexName).toBe('UserStatusIndex');
+  });
+
+  test('buildConcurrencyReport reports a per-user error row instead of aborting', async () => {
+    docSend
+      // Scan returns two users.
+      .mockResolvedValueOnce({
+        Items: [{ user_id: 'user-1', active_count: 1 }, { user_id: 'user-2', active_count: 2 }],
+      })
+      // user-1 live count succeeds.
+      .mockResolvedValueOnce({ Items: [{ status: 'RUNNING' }] })
+      // user-2 live count throttles — must not blank the whole report.
+      .mockRejectedValueOnce(
+        Object.assign(new Error('throughput exceeded'), {
+          name: 'ProvisionedThroughputExceededException',
+        }),
+      );
+
+    const rows = await buildConcurrencyReport('us-east-1', 'TaskTable', 'ConcurrencyTable', 3);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.user_id === 'user-1')).toMatchObject({ actual_count: 1, drift: 0 });
+    const failed = rows.find((r) => r.user_id === 'user-2');
+    expect(failed).toMatchObject({ actual_count: null, drift: null });
+    expect(failed?.error).toMatch(/throughput exceeded/);
   });
 });

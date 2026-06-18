@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import type { GithubTokenSecretSource } from './github-token';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
 
@@ -41,7 +42,8 @@ export const PLATFORM_REPO_DEFAULTS = {
   approval_gate_cap: 50,
 } as const;
 
-export type GithubTokenSource = 'platform' | 'blueprint';
+/** How `repo show` resolved the effective GitHub token (subset of the resolver's sources). */
+export type GithubTokenSource = Exclude<GithubTokenSecretSource, 'explicit'>;
 
 /** Enriched RepoConfig for operator display (repo show / JSON output). */
 export interface RepoConfigDisplay {
@@ -108,7 +110,12 @@ export function formatRepoConfigForDisplay(
   ] as const) {
     const value = config[key];
     if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) {
-      blueprintOverrides[key] = value;
+      // `repo show` (text and JSON) must never echo a raw secret ARN — redact
+      // here so the JSON branch, which serializes blueprint_overrides wholesale,
+      // honors the command's "secret ARNs redacted" contract.
+      blueprintOverrides[key] = key === 'github_token_secret_arn'
+        ? redactSecretArn(String(value))
+        : value;
     }
   }
 

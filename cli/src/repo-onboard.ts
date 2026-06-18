@@ -19,7 +19,13 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { assertRepoFormat, loadRepoConfig, RepoConfigRow } from './repo-lookup';
+import {
+  assertRepoFormat,
+  loadRepoConfig,
+  parseRepoConfigRow,
+  RepoConfigRow,
+  RepoNotOnboardedError,
+} from './repo-lookup';
 
 /** TTL (days) for soft-deleted repo rows — matches Blueprint construct. */
 export const REMOVED_REPO_TTL_DAYS = 30;
@@ -51,7 +57,13 @@ export async function onboardRepo(
   let existing: RepoConfigRow | undefined;
   try {
     existing = await loadRepoConfig(region, tableName, repo);
-  } catch {
+  } catch (err) {
+    // Only a genuinely absent row means "start from scratch". Any other failure
+    // (table missing, AccessDenied, throttling) must propagate — swallowing it
+    // would silently wipe the existing blueprint overrides carried forward below.
+    if (!(err instanceof RepoNotOnboardedError)) {
+      throw err;
+    }
     existing = undefined;
   }
 
@@ -97,7 +109,7 @@ export async function onboardRepo(
     Item: item,
   }));
 
-  return item as unknown as RepoConfigRow;
+  return parseRepoConfigRow(item);
 }
 
 /** Soft-delete a repository (Blueprint delete semantics). */

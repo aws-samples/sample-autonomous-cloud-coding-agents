@@ -107,10 +107,18 @@ export function makeWebhookCommand(): Command {
 
         let repo = opts.repo as string | undefined;
         if (repo) {
+          // Operator named a repo explicitly: validate it against RepoTable when
+          // the table is resolvable, but don't claim validation we didn't do —
+          // warn rather than silently skip when the stack output is absent.
           const { region, stackName } = resolveOperatorContext(opts);
           const repoTable = await getStackOutput(region, stackName, 'RepoTableName');
           if (repoTable) {
             await loadActiveRepoConfig(region, repoTable, repo);
+          } else {
+            console.warn(
+              `⚠ Could not read 'RepoTableName' from stack '${stackName}' — `
+              + `sending the test for '${repo}' without verifying it is an active onboarded repo.`,
+            );
           }
         } else {
           const { region, stackName } = resolveOperatorContext(opts);

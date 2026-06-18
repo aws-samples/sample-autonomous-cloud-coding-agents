@@ -156,12 +156,20 @@ export function makeOpsCommand(): Command {
           + `${'ACTUAL'.padEnd(COUNT_COLUMN_WIDTH)} ${'LIMIT'.padEnd(COUNT_COLUMN_WIDTH)} DRIFT`,
         );
         for (const row of rows) {
-          const driftLabel = row.drift === 0 ? '0' : `${row.drift > 0 ? '+' : ''}${row.drift}`;
+          let driftLabel: string;
+          if (row.drift === null) {
+            driftLabel = `error: ${row.error ?? 'unknown'}`;
+          } else if (row.drift === 0) {
+            driftLabel = '0';
+          } else {
+            driftLabel = `${row.drift > 0 ? '+' : ''}${row.drift}`;
+          }
+          const actualLabel = row.actual_count === null ? '?' : String(row.actual_count);
           console.log(
             `${resolveUserEmailForDisplay(row.user_id, emailByUsername).padEnd(EMAIL_COLUMN_WIDTH)} `
             + `${row.user_id.padEnd(USERNAME_COLUMN_WIDTH)} `
             + `${String(row.stored_count).padEnd(COUNT_COLUMN_WIDTH)} `
-            + `${String(row.actual_count).padEnd(COUNT_COLUMN_WIDTH)} `
+            + `${actualLabel.padEnd(COUNT_COLUMN_WIDTH)} `
             + `${String(row.limit).padEnd(COUNT_COLUMN_WIDTH)} `
             + driftLabel,
           );

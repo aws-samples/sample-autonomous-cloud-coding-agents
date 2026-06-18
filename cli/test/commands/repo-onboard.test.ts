@@ -18,6 +18,8 @@
  */
 
 import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { CliError } from '../../src/errors';
+import { RepoNotOnboardedError } from '../../src/repo-lookup';
 import { onboardRepo, offboardRepo, REMOVED_REPO_TTL_DAYS } from '../../src/repo-onboard';
 
 const ddbSend = jest.fn();
@@ -100,5 +102,41 @@ describe('repo onboard/offboard', () => {
     const put = ddbSend.mock.calls[0][0] as PutCommand;
     expect(put.input.Item?.onboarded_at).toBe('2025-01-01T00:00:00Z');
     expect(put.input.Item?.cedar_policies).toEqual(['policy']);
+  });
+
+  test('onboardRepo persists --poll-interval override', async () => {
+    await onboardRepo('us-east-1', 'RepoTable', 'acme/a', { pollIntervalMs: 12345 });
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item?.poll_interval_ms).toBe(12345);
+  });
+
+  test('onboardRepo treats a missing row as a fresh onboard', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
+      loadRepoConfig: jest.Mock;
+    };
+    loadRepoConfig.mockRejectedValueOnce(new RepoNotOnboardedError('acme/a'));
+
+    await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a')).resolves.toBeDefined();
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('onboardRepo re-throws non-not-found load errors instead of wiping overrides', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
+      loadRepoConfig: jest.Mock;
+    };
+    loadRepoConfig.mockRejectedValueOnce(
+      Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }),
+    );
+
+    await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a')).rejects.toThrow('throttled');
+    // Must NOT have written a defaults-only row over the existing config.
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
+  test('offboardRepo rejects an invalid repo format before any write', async () => {
+    await expect(offboardRepo('us-east-1', 'RepoTable', 'not-a-repo'))
+      .rejects.toBeInstanceOf(CliError);
+    expect(ddbSend).not.toHaveBeenCalled();
   });
 });

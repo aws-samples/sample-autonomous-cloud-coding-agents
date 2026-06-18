@@ -18,7 +18,8 @@
  */
 
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { listRepoConfigs } from '../../src/repo-lookup';
+import { CliError } from '../../src/errors';
+import { listRepoConfigs, parseRepoConfigRow } from '../../src/repo-lookup';
 
 const ddbSend = jest.fn();
 
@@ -64,5 +65,30 @@ describe('listRepoConfigs', () => {
     const repos = await listRepoConfigs('us-east-1', 'RepoTable-dev');
     expect(repos).toHaveLength(2);
     expect(ddbSend).toHaveBeenCalledTimes(2);
+  });
+
+  test('rejects a scanned row with an unexpected status', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ repo: 'acme/a', status: 'disabled' }],
+    });
+
+    await expect(listRepoConfigs('us-east-1', 'RepoTable-dev')).rejects.toThrow(/unexpected status/);
+  });
+});
+
+describe('parseRepoConfigRow', () => {
+  test('accepts a valid row', () => {
+    const row = parseRepoConfigRow({ repo: 'acme/a', status: 'active', max_turns: 10 });
+    expect(row.repo).toBe('acme/a');
+    expect(row.status).toBe('active');
+  });
+
+  test('throws on a non-string repo', () => {
+    expect(() => parseRepoConfigRow({ status: 'active' })).toThrow(CliError);
+  });
+
+  test('throws on an out-of-union status', () => {
+    expect(() => parseRepoConfigRow({ repo: 'acme/a', status: 'paused' }))
+      .toThrow(/unexpected status/);
   });
 });

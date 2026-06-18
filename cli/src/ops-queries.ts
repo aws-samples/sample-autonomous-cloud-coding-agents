@@ -44,9 +44,13 @@ export interface StuckTaskRow {
 export interface ConcurrencyRow {
   readonly user_id: string;
   readonly stored_count: number;
-  readonly actual_count: number;
+  /** Null when the live count could not be read (see `error`). */
+  readonly actual_count: number | null;
   readonly limit: number;
-  readonly drift: number;
+  /** Null when `actual_count` is unavailable, so drift can't be computed. */
+  readonly drift: number | null;
+  /** Set when the per-user TaskTable query failed; the row is still reported. */
+  readonly error?: string;
 }
 
 function documentClient(region: string): DynamoDBDocumentClient {
@@ -187,14 +191,27 @@ export async function buildConcurrencyReport(
       const userId = item.user_id as string | undefined;
       if (!userId) continue;
       const storedCount = Number(item.active_count ?? 0);
-      const actualCount = await countActiveTasksForUser(region, taskTableName, userId);
-      rows.push({
-        user_id: userId,
-        stored_count: storedCount,
-        actual_count: actualCount,
-        limit: limitPerUser,
-        drift: storedCount - actualCount,
-      });
+      try {
+        const actualCount = await countActiveTasksForUser(region, taskTableName, userId);
+        rows.push({
+          user_id: userId,
+          stored_count: storedCount,
+          actual_count: actualCount,
+          limit: limitPerUser,
+          drift: storedCount - actualCount,
+        });
+      } catch (err) {
+        // One user's failed live count must not blank the whole operational
+        // view — report the row with the error so the operator still sees it.
+        rows.push({
+          user_id: userId,
+          stored_count: storedCount,
+          actual_count: null,
+          limit: limitPerUser,
+          drift: null,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     lastKey = scan.LastEvaluatedKey;
   } while (lastKey);

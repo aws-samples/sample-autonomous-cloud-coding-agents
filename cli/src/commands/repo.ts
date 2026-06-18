@@ -139,6 +139,7 @@ export function makeRepoCommand(): Command {
       .option('--model <model-id>', 'Foundation model ID override')
       .option('--token-secret-arn <arn>', 'Per-repo GitHub token Secrets Manager ARN')
       .option('--max-turns <n>', 'Default max turns for tasks', parseInt)
+      .option('--poll-interval <ms>', 'Default agent poll interval in milliseconds', parseInt)
       .option('--output <format>', 'Output format: text or json', 'text')
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
@@ -164,6 +165,7 @@ export function makeRepoCommand(): Command {
           modelId: opts.model,
           githubTokenSecretArn: opts.tokenSecretArn,
           maxTurns: opts.maxTurns,
+          pollIntervalMs: opts.pollInterval,
         });
         const notes = buildRepoOnboardNotes({
           config,

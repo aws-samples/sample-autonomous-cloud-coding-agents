@@ -77,6 +77,14 @@ describe('fetchWebhookSecret', () => {
     smSend.mockResolvedValueOnce({ SecretString: '' });
     await expect(fetchWebhookSecret('us-east-1', 'wh-1')).rejects.toThrow('empty');
   });
+
+  test('throws an actionable error when the secret does not exist', async () => {
+    smSend.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), { name: 'ResourceNotFoundException' }),
+    );
+    await expect(fetchWebhookSecret('us-east-1', 'wh-1'))
+      .rejects.toThrow(/No webhook secret found/);
+  });
 });
 
 describe('sendWebhookTestRequest', () => {
@@ -136,5 +144,20 @@ describe('sendWebhookTestRequest', () => {
       'secret',
       buildSampleWebhookPayload('acme/a'),
     )).rejects.toMatchObject({ statusCode: 500, errorCode: 'WEBHOOK_TEST_FAILED' });
+  });
+
+  test('throws when a 2xx response has a malformed (non-JSON) body', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => { throw new Error('not json'); },
+    }) as typeof fetch;
+
+    await expect(sendWebhookTestRequest(
+      'https://api.example/v1',
+      'wh-1',
+      'secret',
+      buildSampleWebhookPayload('acme/a'),
+    )).rejects.toMatchObject({ statusCode: 200, errorCode: 'WEBHOOK_TEST_MALFORMED_RESPONSE' });
   });
 });

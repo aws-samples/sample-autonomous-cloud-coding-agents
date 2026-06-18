@@ -32,18 +32,31 @@ export interface BlueprintRuntimeBinding {
   readonly runtime_arn_source: 'blueprint' | 'platform';
 }
 
-export interface RuntimeProbeResult {
+interface RuntimeProbeBase {
   readonly runtime_arn: string;
   readonly compute_type: 'agentcore';
   readonly used_by_repos: readonly string[];
-  readonly probe_status: 'ok' | 'error' | 'skipped';
-  readonly agent_runtime_id?: string;
-  readonly agent_runtime_name?: string;
-  readonly control_plane_status?: string;
-  readonly last_updated_at?: string;
-  readonly failure_reason?: string;
-  readonly error?: string;
 }
+
+/**
+ * AgentCore runtime probe outcome, discriminated on `probe_status` so the
+ * control-plane fields and the error string can never coexist: an `'ok'` probe
+ * carries the GetAgentRuntime response, an `'error'` probe carries only the
+ * failure message.
+ */
+export type RuntimeProbeResult =
+  | (RuntimeProbeBase & {
+    readonly probe_status: 'ok';
+    readonly agent_runtime_id?: string;
+    readonly agent_runtime_name?: string;
+    readonly control_plane_status?: string;
+    readonly last_updated_at?: string;
+    readonly failure_reason?: string;
+  })
+  | (RuntimeProbeBase & {
+    readonly probe_status: 'error';
+    readonly error: string;
+  });
 
 export interface EcsSubstrateSummary {
   readonly compute_type: 'ecs';

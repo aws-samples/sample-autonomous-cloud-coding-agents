@@ -23,10 +23,13 @@ import { CliError } from './errors';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 
+const REPO_STATUSES = ['active', 'removed'] as const;
+export type RepoStatus = (typeof REPO_STATUSES)[number];
+
 /** RepoTable row shape used by operator CLI and github set-token. */
 export interface RepoConfigRow {
   readonly repo: string;
-  readonly status: 'active' | 'removed';
+  readonly status: RepoStatus;
   readonly onboarded_at?: string;
   readonly updated_at?: string;
   readonly compute_type?: string;
@@ -42,6 +45,24 @@ export interface RepoConfigRow {
   readonly approval_gate_cap?: number;
 }
 
+/**
+ * Thrown when a repo is absent from RepoTable (never registered via Blueprint
+ * or operator onboard). Distinguished from infrastructure failures (table
+ * missing, AccessDenied, throttling) so callers can safely treat only this as
+ * "start from scratch" — see {@link onboardRepo}.
+ */
+export class RepoNotOnboardedError extends CliError {
+  readonly repo: string;
+
+  constructor(repo: string) {
+    super(
+      `Repository '${repo}' is not onboarded. Register it with a Blueprint before querying repo config.`,
+    );
+    this.name = 'RepoNotOnboardedError';
+    this.repo = repo;
+  }
+}
+
 function documentClient(region: string): DynamoDBDocumentClient {
   return DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 }
@@ -51,6 +72,27 @@ export function assertRepoFormat(repo: string): void {
   if (!REPO_PATTERN.test(repo)) {
     throw new CliError(`Invalid repo format: '${repo}'. Expected 'owner/repo'.`);
   }
+}
+
+/**
+ * Narrow a raw DynamoDB item to {@link RepoConfigRow}, validating the fields the
+ * CLI branches on. RepoTable is written by CDK-controlled writers, but a schema
+ * drift or hand-edited row should fail loudly here rather than flow through the
+ * type system as a valid config.
+ */
+export function parseRepoConfigRow(item: Record<string, unknown>): RepoConfigRow {
+  const repo = item.repo;
+  if (typeof repo !== 'string') {
+    throw new CliError(`RepoTable row is missing a string 'repo' key: ${JSON.stringify(item)}`);
+  }
+  const status = item.status;
+  if (status !== 'active' && status !== 'removed') {
+    throw new CliError(
+      `RepoTable row for '${repo}' has unexpected status '${String(status)}' `
+      + `(expected one of ${REPO_STATUSES.join(', ')}).`,
+    );
+  }
+  return { ...(item as unknown as RepoConfigRow), repo, status };
 }
 
 /** Load a RepoConfig row from RepoTable (any status). */
@@ -68,12 +110,10 @@ export async function loadRepoConfig(
   }));
 
   if (!result.Item) {
-    throw new CliError(
-      `Repository '${repo}' is not onboarded. Register it with a Blueprint before querying repo config.`,
-    );
+    throw new RepoNotOnboardedError(repo);
   }
 
-  return result.Item as RepoConfigRow;
+  return parseRepoConfigRow(result.Item);
 }
 
 /** Load an active RepoConfig row from RepoTable. */
@@ -106,7 +146,7 @@ export async function listRepoConfigs(
       ExclusiveStartKey: lastEvaluatedKey,
     }));
     for (const item of result.Items ?? []) {
-      items.push(item as RepoConfigRow);
+      items.push(parseRepoConfigRow(item));
     }
     lastEvaluatedKey = result.LastEvaluatedKey;
   } while (lastEvaluatedKey);

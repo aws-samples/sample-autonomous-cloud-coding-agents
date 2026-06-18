@@ -19,7 +19,7 @@
 
 import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { ApiError } from './errors';
+import { ApiError, CliError } from './errors';
 import type { CreateTaskRequest, CreateTaskResponse, SuccessResponse } from './types';
 
 export const WEBHOOK_SECRET_PREFIX = 'bgagent/webhook/';
@@ -44,11 +44,22 @@ export function signWebhookBody(secret: string, body: string): string {
 /** Fetch webhook HMAC secret from Secrets Manager (operator credentials). */
 export async function fetchWebhookSecret(region: string, webhookId: string): Promise<string> {
   const sm = new SecretsManagerClient({ region });
-  const result = await sm.send(new GetSecretValueCommand({
-    SecretId: `${WEBHOOK_SECRET_PREFIX}${webhookId}`,
-  }));
+  let result;
+  try {
+    result = await sm.send(new GetSecretValueCommand({
+      SecretId: `${WEBHOOK_SECRET_PREFIX}${webhookId}`,
+    }));
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ResourceNotFoundException') {
+      throw new CliError(
+        `No webhook secret found for '${webhookId}'. Create the webhook first with `
+        + '`bgagent webhook create`, or pass --secret explicitly.',
+      );
+    }
+    throw err;
+  }
   if (!result.SecretString) {
-    throw new Error(`Webhook secret for '${webhookId}' is empty.`);
+    throw new CliError(`Webhook secret for '${webhookId}' is empty.`);
   }
   return result.SecretString;
 }
@@ -92,6 +103,16 @@ export async function sendWebhookTestRequest(
     throw new ApiError(response.status, code, message, requestId);
   }
 
+  if (!json || typeof json !== 'object') {
+    // A 2xx with a missing/non-JSON body means the gateway did not return the
+    // documented envelope — surface it instead of reporting a hollow success.
+    throw new ApiError(
+      response.status,
+      'WEBHOOK_TEST_MALFORMED_RESPONSE',
+      `Webhook accepted (HTTP ${response.status}) but returned a non-JSON body.`,
+      '',
+    );
+  }
   const envelope = json as SuccessResponse<CreateTaskResponse>;
   const taskId = envelope.data?.task_id;
   return {

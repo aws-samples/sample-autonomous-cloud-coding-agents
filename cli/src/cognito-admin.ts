@@ -23,6 +23,7 @@ import {
   AdminSetUserPasswordCommand,
   CognitoIdentityProviderClient,
   ListUsersCommand,
+  type UserStatusType,
   type UserType,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { tryLoadConfig } from './config';
@@ -38,9 +39,12 @@ export interface CognitoAdminContext {
   readonly configureBundle: CliConfig | null;
 }
 
+/** Cognito user status, widened with a local sentinel for absent values. */
+export type CognitoUserStatus = UserStatusType | 'UNKNOWN';
+
 export interface CognitoUserSummary {
   readonly username: string;
-  readonly status: string;
+  readonly status: CognitoUserStatus;
   readonly enabled: boolean;
   readonly created_at?: string;
   readonly email?: string;
@@ -70,7 +74,7 @@ export async function resolveCognitoAdminContext(opts: {
     );
   }
 
-  const configureBundle = await resolveConfigureBundle(region, stackName, configured, userPoolId);
+  const configureBundle = await resolveConfigureBundle(region, stackName, configured);
 
   return { region, userPoolId, configureBundle };
 }
@@ -79,21 +83,15 @@ async function resolveConfigureBundle(
   region: string,
   stackName: string,
   configured: CliConfig | null,
-  userPoolId: string,
 ): Promise<CliConfig | null> {
   if (configured?.api_url && configured.client_id && configured.user_pool_id) {
     return configured;
   }
 
-  const fromStack = await resolveConfigureBundleFromStack(region, stackName);
-  if (fromStack) {
-    return {
-      ...fromStack,
-      user_pool_id: fromStack.user_pool_id ?? userPoolId,
-    };
-  }
-
-  return null;
+  // resolveConfigureBundleFromStack already guarantees a non-null user_pool_id
+  // (it returns null unless every configure output is present), so no fallback
+  // merge is needed here.
+  return resolveConfigureBundleFromStack(region, stackName);
 }
 
 export function cognitoClient(region: string): CognitoIdentityProviderClient {
@@ -287,6 +285,13 @@ export async function resolveCognitoUsername(
 ): Promise<string> {
   if (!emailOrUsername.includes('@')) {
     return emailOrUsername;
+  }
+
+  // Guard the ListUsers Filter interpolation: a double-quote would break the
+  // filter syntax (and is never valid in an email). Command-level callers run
+  // assertLikelyEmail, but this is exported, so defend it independently.
+  if (emailOrUsername.includes('"')) {
+    throw new CliError(`Invalid email '${emailOrUsername}': contains a quote character.`);
   }
 
   const result = await client.send(new ListUsersCommand({
