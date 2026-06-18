@@ -25,6 +25,8 @@ import {
   formatRepoConfigForDisplay,
 } from '../repo-display';
 import { assertRepoFormat, listRepoConfigs, loadRepoConfig } from '../repo-lookup';
+import { offboardRepo, onboardRepo } from '../repo-onboard';
+import { buildRepoOnboardNotes } from '../repo-onboard-notes';
 import { getStackOutput } from '../stack-outputs';
 
 const REPO_COLUMN_WIDTH = 36;
@@ -123,6 +125,91 @@ export function makeRepoCommand(): Command {
         for (const line of buildRepoShowLines(display)) {
           console.log(`${line.key.padEnd(FIELD_LABEL_WIDTH)} ${line.text}`);
         }
+      }),
+  );
+
+  repo.addCommand(
+    new Command('onboard')
+      .description('Register or re-activate a repository in RepoTable (operator path; CDK Blueprint is canonical)')
+      .argument('<owner/repo>', 'Repository identifier')
+      .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
+      .option('--compute-type <type>', 'Compute substrate: agentcore or ecs')
+      .option('--runtime-arn <arn>', 'Override AgentCore runtime ARN (agentcore only)')
+      .option('--model <model-id>', 'Foundation model ID override')
+      .option('--token-secret-arn <arn>', 'Per-repo GitHub token Secrets Manager ARN')
+      .option('--max-turns <n>', 'Default max turns for tasks', parseInt)
+      .option('--output <format>', 'Output format: text or json', 'text')
+      .action(async (repoId: string, opts) => {
+        assertRepoFormat(repoId);
+        if (opts.computeType && opts.computeType !== 'agentcore' && opts.computeType !== 'ecs') {
+          throw new CliError("--compute-type must be 'agentcore' or 'ecs'.");
+        }
+
+        const { region, stackName } = resolveOperatorContext(opts);
+        const [tableName, platformRuntimeArn, platformGithubTokenSecretArn] = await Promise.all([
+          getStackOutput(region, stackName, 'RepoTableName'),
+          getStackOutput(region, stackName, 'RuntimeArn'),
+          getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
+        ]);
+        if (!tableName) {
+          throw new CliError(
+            `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
+          );
+        }
+
+        const config = await onboardRepo(region, tableName, repoId, {
+          computeType: opts.computeType,
+          runtimeArn: opts.runtimeArn,
+          modelId: opts.model,
+          githubTokenSecretArn: opts.tokenSecretArn,
+          maxTurns: opts.maxTurns,
+        });
+        const notes = buildRepoOnboardNotes({
+          config,
+          platformRuntimeArn,
+          platformGithubTokenSecretArn,
+        });
+
+        if (opts.output === 'json') {
+          console.log(JSON.stringify({ repo: config, notes }, null, 2));
+          return;
+        }
+
+        console.log(`Repository '${repoId}' onboarded (status: ${config.status}).`);
+        console.log();
+        for (const note of notes) {
+          console.log(note);
+        }
+      }),
+  );
+
+  repo.addCommand(
+    new Command('offboard')
+      .description('Soft-delete a repository (status=removed + TTL; operator path)')
+      .argument('<owner/repo>', 'Repository identifier')
+      .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
+      .option('--output <format>', 'Output format: text or json', 'text')
+      .action(async (repoId: string, opts) => {
+        assertRepoFormat(repoId);
+        const { region, stackName } = resolveOperatorContext(opts);
+        const tableName = await getStackOutput(region, stackName, 'RepoTableName');
+        if (!tableName) {
+          throw new CliError(
+            `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
+          );
+        }
+
+        const config = await offboardRepo(region, tableName, repoId);
+
+        if (opts.output === 'json') {
+          console.log(JSON.stringify({ repo: config }, null, 2));
+          return;
+        }
+
+        console.log(`Repository '${repoId}' offboarded (status: ${config.status}).`);
+        console.log('Existing Blueprint constructs will re-activate this repo on the next CDK deploy.');
       }),
   );
 

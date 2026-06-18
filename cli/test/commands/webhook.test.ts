@@ -192,4 +192,13 @@ describe('webhook command', () => {
       expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(webhookData, null, 2));
     });
   });
+
+  describe('webhook test', () => {
+    test('requires secret or fetch-secret', async () => {
+      const cmd = makeWebhookCommand();
+      await expect(cmd.parseAsync([
+        'node', 'test', 'test', 'wh-1', '--api-url', 'https://api/v1', '--repo', 'acme/a',
+      ])).rejects.toThrow('--secret');
+    });
+  });
 });

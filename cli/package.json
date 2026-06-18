@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock": "3.1024.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "3.1024.0",
     "@aws-sdk/client-cloudformation": "3.1024.0",
     "@aws-sdk/client-cognito-identity-provider": "3.1024.0",
     "@aws-sdk/client-dynamodb": "3.1024.0",

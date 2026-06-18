@@ -251,6 +251,31 @@ export function displayUserIdentity(user: CognitoUserSummary): string {
   return user.email ?? user.username;
 }
 
+/** Map Cognito Username (often the task `user_id` / sub UUID) to email for operator display. */
+export async function buildCognitoEmailByUsername(
+  ctx: CognitoAdminContext,
+): Promise<Map<string, string>> {
+  const users = await listCognitoUsers(ctx);
+  const byUsername = new Map<string, string>();
+  for (const user of users) {
+    if (user.email) {
+      byUsername.set(user.username, user.email);
+    }
+  }
+  return byUsername;
+}
+
+/** Resolve a task/concurrency `user_id` to an operator-friendly email label. */
+export function resolveUserEmailForDisplay(
+  userId: string,
+  emailByUsername: ReadonlyMap<string, string>,
+): string {
+  if (userId.includes('@')) {
+    return userId;
+  }
+  return emailByUsername.get(userId) ?? '-';
+}
+
 /**
  * Resolve the Cognito `Username` for admin API calls.
  * Email-alias pools store a UUID in `Username` while the email lives in attributes.

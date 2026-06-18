@@ -216,6 +216,73 @@ bgagent repo show owner/repo \
   --output <text|json>        Output format (default: text)
 ```
 
+### `bgagent repo onboard <owner/repo>`
+
+Register or re-activate a repository in `RepoTable` without a CDK redeploy. With no overrides, tasks use the platform `RuntimeArn` and `GitHubTokenSecretArn` (IAM already granted at deploy). Custom `--runtime-arn` / `--token-secret-arn` values require matching `TaskOrchestrator` IAM via CDK — the command prints notes explaining this. Prefer CDK `Blueprint` constructs for durable lifecycle, Cedar policies, and egress validation.
+
+```
+bgagent repo onboard owner/repo \
+  --compute-type <agentcore|ecs> \
+  --runtime-arn <arn>         AgentCore runtime override (agentcore only) \
+  --model <model-id> \
+  --token-secret-arn <arn> \
+  --max-turns <n> \
+  --output <text|json>
+```
+
+### `bgagent repo offboard <owner/repo>`
+
+Soft-delete a repository (`status=removed` + TTL), matching Blueprint delete semantics. An existing Blueprint will re-activate the repo on the next CDK deploy.
+
+```
+bgagent repo offboard owner/repo \
+  --output <text|json>
+```
+
+### `bgagent runtime status`
+
+Show **per-blueprint** effective compute substrate and runtime ARN (merged with platform `RuntimeArn`), then probe unique AgentCore runtimes via the control-plane API. ECS blueprints are listed separately — they use the platform ECS cluster/task definition, not per-repo `runtime_arn`.
+
+```
+bgagent runtime status \
+  --repo <owner/repo>         Limit to one repository \
+  --output <text|json>
+```
+
+### `bgagent ops stuck-tasks`
+
+List tasks in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` older than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID.
+
+```
+bgagent ops stuck-tasks \
+  --stranded-timeout <seconds> \
+  --approval-timeout <seconds> \
+  --output <text|json>
+```
+
+### `bgagent ops concurrency`
+
+Compare `UserConcurrencyTable` counters with live active task counts per user. Resolves Cognito usernames to email (same as `bgagent admin list-users`).
+
+```
+bgagent ops concurrency \
+  --limit <n>                 Per-user limit (default: 3) \
+  --output <text|json>
+```
+
+### `bgagent webhook test <webhook-id>`
+
+Send a signed sample payload to `POST /v1/webhooks/tasks` (creates a real task — cancel afterward if this was only a connectivity check).
+
+```
+bgagent webhook test <webhook-id> \
+  --secret <secret>           From `webhook create` output \
+  --fetch-secret              Read secret from Secrets Manager (operator IAM) \
+  --repo <owner/repo>         Target repo (defaults to first active repo) \
+  --api-url <url>             Defaults to configure api_url or stack ApiUrl \
+  --output <text|json>
+```
+
 ### `bgagent github set-token`
 
 Store a GitHub personal access token in Secrets Manager (interactive masked prompt).
