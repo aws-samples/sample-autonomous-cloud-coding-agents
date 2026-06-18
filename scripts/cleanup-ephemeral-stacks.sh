@@ -5,16 +5,17 @@
 # Handles stuck ENI cleanup (AgentCore/Lambda Hyperplane ENIs) before deletion.
 #
 # Usage:
-#   AWS_PROFILE=abca ./scripts/cleanup-ephemeral-stacks.sh [--dry-run] [--max-age-hours N] [--prefix PREFIX]
+#   AWS_PROFILE=abca ./scripts/cleanup-ephemeral-stacks.sh [--dry-run] [--max-age-hours N] [--prefix PREFIX] [--region REGION]
 #
 # Options:
 #   --dry-run           Show what would be deleted without acting
-#   --max-age-hours N   Delete stacks older than N hours (default: 4)
+#   --max-age-hours N   Delete stacks older than N hours (default: 48)
 #   --prefix PREFIX     Only target stacks matching this prefix (default: all ABCA stacks)
+#   --region REGION     AWS region to operate in (default: $AWS_DEFAULT_REGION or us-east-1)
 #
 # Safety:
 #   - Never touches stacks with termination protection enabled
-#   - Only targets stacks with description matching "ABCA Development Stack"
+#   - Only targets stacks whose description starts with "ABCA Development Stack"
 #   - Skips stacks in UPDATE_IN_PROGRESS or CREATE_IN_PROGRESS states
 
 set -euo pipefail
@@ -27,8 +28,15 @@ REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --dry-run) DRY_RUN=true; shift ;;
-    --max-age-hours) MAX_AGE_HOURS="$2"; shift 2 ;;
-    --prefix) PREFIX="$2"; shift 2 ;;
+    --max-age-hours)
+      [[ $# -ge 2 ]] || { echo "Error: --max-age-hours requires a value" >&2; exit 1; }
+      MAX_AGE_HOURS="$2"; shift 2 ;;
+    --prefix)
+      [[ $# -ge 2 ]] || { echo "Error: --prefix requires a value" >&2; exit 1; }
+      PREFIX="$2"; shift 2 ;;
+    --region)
+      [[ $# -ge 2 ]] || { echo "Error: --region requires a value" >&2; exit 1; }
+      REGION="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -62,14 +70,22 @@ echo "  Dry run:       $DRY_RUN"
 echo "  Prefix filter: ${PREFIX:-<none>}"
 echo ""
 
-# List all stacks (excluding deleted ones)
-STACKS=$(aws cloudformation list-stacks \
+# List all stacks (excluding deleted ones).
+# DELETE_FAILED is included so a stack that previously failed to delete is
+# re-targeted on the next run (delete-stack is idempotent and retries it).
+# Capture the exit code separately from emptiness: an API failure (auth,
+# throttle, IAM) must NOT look like "nothing to clean" — that would exit 0
+# and silently skip the whole run.
+if ! STACKS=$(aws cloudformation list-stacks \
   --region "$REGION" \
   --stack-status-filter \
     CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE \
     UPDATE_ROLLBACK_COMPLETE DELETE_FAILED \
   --query 'StackSummaries[*].[StackName,CreationTime]' \
-  --output text 2>/dev/null)
+  --output text); then
+  echo "Error: cloudformation:ListStacks failed. Check credentials/permissions/region." >&2
+  exit 1
+fi
 
 if [[ -z "$STACKS" ]]; then
   echo "No stacks found."
@@ -97,8 +113,13 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
   TERMINATION_PROTECTED=$(echo "$STACK_INFO" | cut -f2)
   STATUS=$(echo "$STACK_INFO" | cut -f3)
 
-  # Only target stacks from this CDK app
-  if [[ "$DESCRIPTION" != "ABCA Development Stack" ]]; then
+  # Only target stacks from this CDK app. Prefix-match, not exact-match: the
+  # app description carries an optional solution-id suffix (e.g.
+  # "ABCA Development Stack (uksb-...)", see cdk/src/main.ts) that operators may
+  # add or strip. An exact-equality check silently matches zero stacks whenever
+  # the suffix is present. (Tag-based filtering would be even more robust —
+  # tracked as a follow-up.)
+  if [[ "$DESCRIPTION" != "ABCA Development Stack"* ]]; then
     continue
   fi
 
@@ -117,9 +138,14 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
   fi
 
   # Check age. Parse the CreationTime to epoch seconds (GNU date, then BSD date).
+  # CreationTime is UTC (e.g. 2026-06-18T00:23:10.123Z). The BSD branch strips
+  # the fractional seconds and trailing Z, so it MUST parse as UTC (-u) — without
+  # it, BSD `date -j` assumes local time and a stack reads N hours off (8h on a
+  # PST Mac), wrongly skipping/deleting near the age boundary. GNU `date -d`
+  # honours the Z natively.
   # FAIL CLOSED: if both parsers fail we cannot trust the age, so SKIP rather than
   # risk deleting a stack we can't prove is old enough.
-  CREATED_EPOCH=$(date -d "$CREATION_TIME" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${CREATION_TIME%%.*}" +%s 2>/dev/null || echo "")
+  CREATED_EPOCH=$(date -d "$CREATION_TIME" +%s 2>/dev/null || date -j -u -f "%Y-%m-%dT%H:%M:%S" "${CREATION_TIME%%.*}" +%s 2>/dev/null || echo "")
   if ! [[ "$CREATED_EPOCH" =~ ^[0-9]+$ ]]; then
     echo "  SKIP (unparseable creation time '$CREATION_TIME'): $STACK_NAME"
     ((SKIPPED++)) || true
@@ -201,9 +227,12 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
   # (e.g. AccessDenied, transient throttling) without aborting the whole run —
   # set -e would otherwise kill the loop mid-pass and orphan later stacks.
   echo "    Deleting stack $STACK_NAME..."
+  # Let stderr through: this is the one call where the API error matters —
+  # AccessDenied vs ValidationError vs throttling are diagnosed differently.
+  # Suppressing it would leave the operator with only a generic failure line.
   if aws cloudformation delete-stack \
     --region "$REGION" \
-    --stack-name "$STACK_NAME" 2>/dev/null; then
+    --stack-name "$STACK_NAME"; then
     ((DELETED++)) || true
   else
     echo "    ERROR: delete-stack failed for $STACK_NAME (continuing)" >&2
