@@ -103,12 +103,48 @@ describe('jira-feedback: postIssueComment', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test('returns false on a non-2xx response and swallows the error', async () => {
-    global.fetch = jest.fn().mockResolvedValue(mockResponse(401)) as unknown as typeof fetch;
+  test('returns false (never throws) when the initial resolve throws an infra error', async () => {
+    // The resolver can throw on DDB/SM failure (not just resolve null). The
+    // catch in resolveTenantToken must swallow it and no-op.
+    resolveJiraOauthTokenMock.mockRejectedValueOnce(new Error('DDB throttle'));
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
 
     const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
 
     expect(ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('returns false when the forced-refresh resolve throws an infra error after a 401', async () => {
+    // First resolve succeeds; the POST 401s; the forced-refresh resolve then
+    // throws (SM unavailable). Must swallow and no-op — never throw.
+    resolveJiraOauthTokenMock
+      .mockResolvedValueOnce({ accessToken: 'stale_token', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockRejectedValueOnce(new Error('SecretsManager unavailable'));
+    const fetchMock = jest.fn().mockResolvedValueOnce(mockResponse(401));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    // Only the first POST happened; the retry never got a token.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
+    // The forced-refresh resolve carried forceRefresh: true.
+    expect(resolveJiraOauthTokenMock.mock.calls[1][2]).toEqual({ forceRefresh: true });
+  });
+
+  test('returns false on a non-auth non-2xx response and does NOT refresh', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(500));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    // 5xx is terminal — no forced-refresh retry, no second POST.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(1);
   });
 
   test('reportIssueFailure never throws even when fetch rejects', async () => {
@@ -117,5 +153,105 @@ describe('jira-feedback: postIssueComment', () => {
       .mockRejectedValue(new Error('network down')) as unknown as typeof fetch;
 
     await expect(reportIssueFailure(CTX, 'ENG-42', '❌ nope')).resolves.toBeUndefined();
+  });
+});
+
+describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
+  test('refreshes the token and retries once on 401, succeeding the second time', async () => {
+    // First resolve hands back a (stale) token; the forced-refresh resolve
+    // hands back a different, freshly-minted token.
+    resolveJiraOauthTokenMock
+      .mockResolvedValueOnce({
+        accessToken: 'stale_token',
+        scope: 'write:jira-work',
+        siteUrl: 'https://acme.atlassian.net',
+        oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:111:secret:x',
+      })
+      .mockResolvedValueOnce({
+        accessToken: 'fresh_token',
+        scope: 'write:jira-work',
+        siteUrl: 'https://acme.atlassian.net',
+        oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:111:secret:x',
+      });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse(401)) // first POST: stale token rejected
+      .mockResolvedValueOnce(mockResponse(201)); // retry: fresh token accepted
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(true);
+    // Two POSTs, and the second carried the refreshed bearer token.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstHeaders = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    const secondHeaders = (fetchMock.mock.calls[1][1] as RequestInit).headers as Record<string, string>;
+    expect(firstHeaders.Authorization).toBe('Bearer stale_token');
+    expect(secondHeaders.Authorization).toBe('Bearer fresh_token');
+    // The forced-refresh resolve must pass forceRefresh: true.
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
+    expect(resolveJiraOauthTokenMock.mock.calls[0][2]).toEqual({ forceRefresh: false });
+    expect(resolveJiraOauthTokenMock.mock.calls[1][2]).toEqual({ forceRefresh: true });
+  });
+
+  test('also retries on 403 (insufficient-permission style auth rejection)', async () => {
+    resolveJiraOauthTokenMock
+      .mockResolvedValueOnce({ accessToken: 'stale_token', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh_token', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse(403))
+      .mockResolvedValueOnce(mockResponse(201));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('returns false without a second POST when the refresh yields the same token', async () => {
+    // Both resolves return the identical access token (e.g. refresh-token
+    // revoked, so the resolver couldn't rotate). Retrying would only 401
+    // again, so we skip it.
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(401));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no retry with an unchanged token
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('returns false when the forced refresh cannot resolve a token', async () => {
+    resolveJiraOauthTokenMock
+      .mockResolvedValueOnce({ accessToken: 'stale_token', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce(null); // refresh-token revoked → resolver gives up
+    const fetchMock = jest.fn().mockResolvedValueOnce(mockResponse(401));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not retry a second time if the refreshed token is also rejected', async () => {
+    resolveJiraOauthTokenMock
+      .mockResolvedValueOnce({ accessToken: 'stale_token', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh_token', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse(401)) // stale rejected
+      .mockResolvedValueOnce(mockResponse(401)); // fresh also rejected → give up
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(false);
+    // Exactly two POSTs — the retry is bounded at one attempt.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
   });
 });
