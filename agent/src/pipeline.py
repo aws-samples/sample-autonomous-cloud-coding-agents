@@ -1029,7 +1029,11 @@ def run_task(
                 # gates the verdict regardless; this keeps the persisted signal
                 # honest rather than a false red).
                 if getattr(setup, "lint_gate_inert", False):
-                    log("POST", "Skipping post-agent lint verification (lint gating is INERT for this repo)")
+                    log(
+                        "POST",
+                        "Skipping post-agent lint verification "
+                        "(lint gating is INERT for this repo)",
+                    )
                     lint_passed = True
                 else:
                     lint_passed = verify_lint(setup.repo_dir, config.lint_command)

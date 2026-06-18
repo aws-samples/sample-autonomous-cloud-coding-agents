@@ -246,7 +246,9 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             return
         now = _now_iso()
         expr_names = {"#s": "status"}
-        expr_values = {
+        # Mixed value types: most are strings, but build_passed/lint_passed are
+        # persisted as native booleans (the reconciler reads them via .BOOL).
+        expr_values: dict[str, object] = {
             ":s": status,
             ":t": now,
             ":sca": f"{status}#{now}",
