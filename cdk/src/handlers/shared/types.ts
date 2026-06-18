@@ -34,8 +34,18 @@ import type { TaskStatusType } from '../../constructs/task-status';
  */
 export type { TaskStatusType };
 
-/** Valid task types for task creation. */
-export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+/**
+ * A resolved workflow pin: the ``{id, version}`` produced at the create-task
+ * boundary from a ``workflow_ref`` (or the resolution fallback). Replaces the
+ * former ``task_type`` enum end-to-end (#248). Persisted on the TaskRecord and
+ * threaded to the agent so it loads the exact pinned workflow file.
+ *
+ * Keep in sync with ``cli/src/types.ts::ResolvedWorkflow``.
+ */
+export type ResolvedWorkflow = {
+  readonly id: string;
+  readonly version: string;
+};
 
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
@@ -49,18 +59,14 @@ export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions (see SlackIntegration)
  * - ``linear``: Linear label-triggered submissions (see LinearIntegration)
+ * - ``jira``: Jira Cloud label-triggered submissions (see JiraIntegration)
  *
  * Narrowed from ``string`` so switches and predicates that read
  * ``channel_source`` get exhaustiveness checking at compile time; matches the
  * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
  * Keep in sync with ``cli/src/types.ts::ChannelSource``.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
-
-/** Task types that operate on an existing pull request. */
-export function isPrTaskType(taskType: TaskType): boolean {
-  return taskType === 'pr_iteration' || taskType === 'pr_review';
-}
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /**
  * Full task record as stored in DynamoDB.
@@ -69,9 +75,16 @@ export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
+   *  repo-less workflow (``requires_repo: false``) runs with no repo. */
+  readonly repo?: string;
   readonly issue_number?: number;
-  readonly task_type: TaskType;
+  /** The ref the caller supplied (if any); resolution may fall back to a
+   *  default when absent. Persisted for audit alongside ``resolved_workflow``. */
+  readonly workflow_ref?: string;
+  /** The pinned ``{id, version}`` this task runs. Resolved at the create-task
+   *  boundary; optional only on records that predate the cutover. */
+  readonly resolved_workflow?: ResolvedWorkflow;
   readonly pr_number?: number;
   readonly task_description?: string;
   readonly branch_name: string;
@@ -82,10 +95,38 @@ export interface TaskRecord {
   readonly agent_heartbeat_at?: string;
   readonly execution_id?: string;
   readonly pr_url?: string;
+  /**
+   * Public CloudFront URL of the deploy-preview screenshot captured for this
+   * task's PR (#247). Persisted best-effort by the screenshot pipeline
+   * (github-webhook-processor) keyed off the taskId in the deploy branch, so
+   * the orchestration reconciler can embed the INTEGRATION node's combined
+   * preview in the parent epic panel. Absent until a preview deploys (and for
+   * tasks with no UI to screenshot).
+   */
+  readonly screenshot_url?: string;
+  /**
+   * Live deploy-preview URL the {@link screenshot_url} image was captured from
+   * (e.g. the Vercel/Netlify preview deploy). Persisted alongside
+   * ``screenshot_url`` so the orchestration reconciler can make the INTEGRATION
+   * node's combined preview in the parent epic panel a clickable deep-link to
+   * the running combined site, not just a static image (#247 UX.17). Absent
+   * when no preview deployed.
+   */
+  readonly screenshot_preview_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
   readonly channel_source: ChannelSource;
   readonly channel_metadata?: Record<string, string>;
+  /**
+   * Linear issue UUID, hoisted to the top level from
+   * ``channel_metadata.linear_issue_id`` at task-create time (#247 UX.3).
+   * Top-level because a DynamoDB GSI (``LinearIssueIndex``) cannot key off a
+   * nested map field — the standalone ``@bgagent`` comment trigger queries
+   * this index to resolve a plain issue back to its newest ABCA task + PR.
+   * Present only for Linear-origin tasks; absent for GitHub/Slack/API tasks
+   * (which keeps the GSI sparse).
+   */
+  readonly linear_issue_id?: string;
   readonly status_created_at: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -113,6 +154,9 @@ export interface TaskRecord {
    * ``get-trace-url`` handler reads this to issue presigned download URLs.
    */
   readonly trace_s3_uri?: string;
+  /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
+   *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
+  readonly artifact_uri?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
   readonly turns_attempted?: number;
@@ -141,6 +185,15 @@ export interface TaskRecord {
    * dispatch fires successfully.
    */
   readonly github_comment_id?: number;
+  /**
+   * Event ID of the terminal event whose Linear final-status comment
+   * was successfully posted (fan-out plane). Linear has no comment
+   * edit API, so the dispatcher is post-once: this marker makes the
+   * post idempotent across partial-batch Lambda retries (a sibling
+   * channel's infra rejection re-runs every dispatcher for the
+   * record). Absent until the first successful post.
+   */
+  readonly linear_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
@@ -181,6 +234,33 @@ export interface TaskRecord {
    * atomically on resume (§10.2, §9).
    */
   readonly awaiting_approval_request_id?: string;
+  /**
+   * Linear parent/sub-issue orchestration (issue #247, Mode A).
+   * ``orchestration_id`` PK of the row in ``OrchestrationTable`` whose
+   * DAG this task is a child of. Absent on ordinary (non-orchestrated)
+   * tasks. PR A1 introduces the field; graph discovery (A2) and the
+   * reconciler (A3) populate and read it. Until then it is always
+   * ``undefined`` at runtime.
+   */
+  readonly orchestration_id?: string;
+  /**
+   * Linear orchestration (#247): the ``task_id`` of the parent task
+   * for attribution and rollup, when a parent task exists. Absent on
+   * non-orchestrated tasks and on root children whose parent is the
+   * Linear issue rather than an ABCA task. Introduced in PR A1;
+   * unused at runtime until A2/A3.
+   */
+  readonly parent_task_id?: string;
+  /**
+   * Linear orchestration (#247): sibling ``sub_issue_id``s this child
+   * is blocked by — the predecessors that must reach terminal-success
+   * (``COMPLETED`` with ``build_passed !== false``) before the
+   * reconciler releases this child. Empty/absent for root children.
+   * Authoritative gating state lives on the ``OrchestrationTable`` row;
+   * this is the denormalized copy threaded onto the task record.
+   * Introduced in PR A1; unused at runtime until A3.
+   */
+  readonly depends_on?: readonly string[];
 }
 
 /** Per-channel override for one notification channel. See
@@ -204,6 +284,7 @@ export interface TaskNotificationsConfig {
   readonly slack?: ChannelConfig;
   readonly email?: ChannelConfig;
   readonly github?: ChannelConfig;
+  readonly linear?: ChannelConfig;
 }
 
 /**
@@ -213,9 +294,10 @@ export interface TaskNotificationsConfig {
 export interface TaskDetail {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -255,6 +337,9 @@ export interface TaskDetail {
    *  the field being present; CLI download resolves this via the
    *  ``get-trace-url`` handler rather than hitting S3 directly. */
   readonly trace_s3_uri: string | null;
+  /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` for
+   *  coding tasks or comment-only delivery. */
+  readonly artifact_uri: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task (TaskRecord §10.2, §13.6). Surfaced so CLI / dashboard
@@ -278,9 +363,10 @@ export interface TaskDetail {
 export interface TaskSummary {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -337,12 +423,18 @@ export interface GetTaskEventsQuery {
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
-  readonly repo: string;
+  /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
+   *  repo-less workflow (``requires_repo: false``) is submitted without it.
+   *  Required-ness is enforced conditionally in ``createTaskCore`` based on
+   *  the resolved workflow's ``requiresRepo``. */
+  readonly repo?: string;
   readonly issue_number?: number;
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
-  readonly task_type?: TaskType;
+  /** Workflow selector ``<id>[@<constraint>]``. Replaces ``task_type`` (#248).
+   *  Omitted ⇒ the create-task boundary resolves via the fallback ladder. */
+  readonly workflow_ref?: string;
   readonly pr_number?: number;
   readonly attachments?: readonly Attachment[];
   /** Enable 4 KB debug previews (design §10.1, opt-in per task). */
@@ -558,9 +650,9 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
   return {
     task_id: record.task_id,
     status: record.status,
-    repo: record.repo,
+    repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
-    task_type: record.task_type ?? 'new_task',
+    resolved_workflow: record.resolved_workflow ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
@@ -583,6 +675,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     prompt_version: record.prompt_version ?? null,
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,
+    artifact_uri: record.artifact_uri ?? null,
     attachments: record.attachments
       ? record.attachments.map(a => ({
         attachment_id: a.attachment_id,
@@ -735,9 +828,9 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
   return {
     task_id: record.task_id,
     status: record.status,
-    repo: record.repo,
+    repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
-    task_type: record.task_type ?? 'new_task',
+    resolved_workflow: record.resolved_workflow ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
@@ -1051,3 +1144,12 @@ export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.def
 export const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 export const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 export const APPROVAL_GATE_CAP_DEFAULT = sharedConstants.approval_gate_cap.default;
+
+/** Minimum allowed `max_budget_usd` (1 cent). The CLI pre-validates with the
+ *  same bound (`bgagent submit --max-budget`), so it lives in
+ *  ``contracts/constants.json`` rather than as a local literal (#258). */
+export const MAX_BUDGET_USD_MIN = sharedConstants.max_budget_usd.min;
+
+/** Maximum allowed `max_budget_usd` ($100).
+ *  Sourced from ``contracts/constants.json`` (#258). */
+export const MAX_BUDGET_USD_MAX = sharedConstants.max_budget_usd.max;

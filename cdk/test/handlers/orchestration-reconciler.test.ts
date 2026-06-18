@@ -1,0 +1,822 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import type { DynamoDBRecord } from 'aws-lambda';
+
+const ddbSend = jest.fn();
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  BatchGetCommand: jest.fn((input: unknown) => ({ _type: 'BatchGet', input })),
+}));
+
+const createTaskCoreMock = jest.fn();
+jest.mock('../../src/handlers/shared/create-task-core', () => ({
+  createTaskCore: (...args: unknown[]) => createTaskCoreMock(...args),
+}));
+
+const postIssueCommentMock = jest.fn();
+const upsertStatusCommentMock = jest.fn();
+const swapIssueReactionMock = jest.fn();
+const swapCommentReactionMock = jest.fn();
+const transitionIssueStateMock = jest.fn();
+const replyToCommentMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
+  upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
+  swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
+  swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
+  transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
+  replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
+  EMOJI_SUCCESS: 'white_check_mark',
+  EMOJI_FAILURE: 'x',
+}));
+
+jest.mock('../../src/handlers/shared/logger', () => ({
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+}));
+
+process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
+process.env.TASK_TABLE_NAME = 'TaskTable';
+// A6 surfacing (#34/#35): the cascade posts Linear comments only when the
+// workspace registry is configured. Set it so the surfacing path is exercised.
+process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
+
+import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
+
+/** Build a TaskTable stream MODIFY record. */
+function taskRecord(fields: {
+  task_id?: string;
+  status?: string;
+  build_passed?: boolean;
+  orchestration_id?: string;
+  eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
+  // A6 cascade markers (channel_metadata fields on an iteration/restack task).
+  orchestration_sub_issue_id?: string;
+  restack_predecessor_sub_issue_id?: string;
+  orchestration_iteration?: boolean;
+  // #247 UX.3: the human comment that triggered an iteration.
+  trigger_comment_id?: string;
+  // #247 UX.19: the issue that trigger comment lives on (parent epic when routed).
+  trigger_comment_issue_id?: string;
+  // #247 UX.5: raw agent error_message (drives the failure-reply detail).
+  error_message?: string;
+}): DynamoDBRecord {
+  const img: Record<string, unknown> = {};
+  if (fields.task_id) img.task_id = { S: fields.task_id };
+  if (fields.status) img.status = { S: fields.status };
+  if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
+  if (fields.error_message) img.error_message = { S: fields.error_message };
+  // PRODUCTION SHAPE: createTaskCore persists orchestration_id INSIDE the
+  // nested channel_metadata MAP, not as a top-level attribute. The stream
+  // image must mirror that or the reconciler skips every orchestration
+  // child. (Regression: the first dev smoke had orchestration_id only in
+  // channel_metadata and the reconciler — reading it top-level — ignored
+  // all completions, so dependents never released.)
+  const cm: Record<string, unknown> = {};
+  if (fields.orchestration_id) cm.orchestration_id = { S: fields.orchestration_id };
+  if (fields.orchestration_sub_issue_id) cm.orchestration_sub_issue_id = { S: fields.orchestration_sub_issue_id };
+  if (fields.restack_predecessor_sub_issue_id) {
+    cm.restack_predecessor_sub_issue_id = { S: fields.restack_predecessor_sub_issue_id };
+  }
+  if (fields.orchestration_iteration) cm.orchestration_iteration = { S: 'true' };
+  if (fields.trigger_comment_id) cm.trigger_comment_id = { S: fields.trigger_comment_id };
+  if (fields.trigger_comment_issue_id) cm.trigger_comment_issue_id = { S: fields.trigger_comment_issue_id };
+  if (Object.keys(cm).length > 0) img.channel_metadata = { M: cm };
+  return {
+    eventName: fields.eventName ?? 'MODIFY',
+    dynamodb: { NewImage: img as never },
+  } as DynamoDBRecord;
+}
+
+describe('parseTerminalTaskRecord', () => {
+  test('extracts a terminal orchestration child event', () => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'T1', status: 'COMPLETED', build_passed: true, orchestration_id: 'orch_1',
+    }));
+    expect(evt).toEqual({ taskId: 'T1', status: 'COMPLETED', buildPassed: true, orchestrationId: 'orch_1' });
+  });
+
+  test('skips non-terminal status', () => {
+    expect(parseTerminalTaskRecord(taskRecord({ task_id: 'T1', status: 'RUNNING', orchestration_id: 'orch_1' }))).toBeNull();
+  });
+
+  test('skips tasks with no orchestration_id (non-orchestration tasks)', () => {
+    expect(parseTerminalTaskRecord(taskRecord({ task_id: 'T1', status: 'COMPLETED' }))).toBeNull();
+  });
+
+  test('skips REMOVE events', () => {
+    expect(parseTerminalTaskRecord(taskRecord({
+      task_id: 'T1', status: 'COMPLETED', orchestration_id: 'orch_1', eventName: 'REMOVE',
+    }))).toBeNull();
+  });
+
+  test('skips records with no NewImage', () => {
+    expect(parseTerminalTaskRecord({ eventName: 'MODIFY', dynamodb: {} } as DynamoDBRecord)).toBeNull();
+  });
+});
+
+/** Mock the GSI lookup + loadOrchestration Query for a child set. */
+function mockOrchestration(opts: {
+  subIssueId: string;
+  children: Array<{ sub_issue_id: string; depends_on?: string[]; child_status: string }>;
+}): void {
+  // Stateful, query-type-aware mock (robust to the reconciler's read
+  // pattern: GSI lookup + possibly-repeated loadOrchestration + status
+  // Updates). Status Updates mutate the in-memory rows so a subsequent
+  // fresh loadOrchestration reflects them — which is exactly what the
+  // concurrency-safe re-read relies on.
+  const meta = {
+    sub_issue_id: '#meta',
+    orchestration_id: 'orch_1',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
+    repo: 'o/r',
+    child_count: opts.children.length,
+    platform_user_id: 'user-1',
+  };
+  const rows: Record<string, Record<string, unknown>> = {};
+  for (const c of opts.children) {
+    rows[c.sub_issue_id] = {
+      orchestration_id: 'orch_1',
+      sub_issue_id: c.sub_issue_id,
+      depends_on: c.depends_on ?? [],
+      child_status: c.child_status,
+      repo: 'o/r',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+    };
+  }
+  ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+    const { _type, input } = cmd;
+    if (_type === 'Query' && input.IndexName === 'ChildTaskIndex') {
+      return { Items: [{ ...rows[opts.subIssueId], sub_issue_id: opts.subIssueId }] };
+    }
+    if (_type === 'Query') { // loadOrchestration
+      return { Items: [meta, ...Object.values(rows)] };
+    }
+    if (_type === 'Update') {
+      const sk = (input.Key as { sub_issue_id: string }).sub_issue_id;
+      const vals = input.ExpressionAttributeValues as Record<string, unknown>;
+      const row = rows[sk];
+      if (row) {
+        if (vals[':s'] !== undefined) row.child_status = vals[':s'];
+        if (vals[':released'] !== undefined) { row.child_status = 'released'; row.child_task_id = vals[':tid']; }
+      }
+      return {};
+    }
+    return {};
+  });
+}
+
+describe('orchestration-reconciler handler', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'child-task' } }) });
+  });
+
+  test('A succeeds → releases blocked dependent B', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
+    await handler({ Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })] } as never);
+
+    // B released via createTaskCore.
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const ctx = createTaskCoreMock.mock.calls[0][1];
+    expect(ctx.idempotencyKey).toBe('orch_1_B');
+  });
+
+  test('A fails → no release, B skipped (createTaskCore not called)', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
+
+    await handler({ Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })] } as never);
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('COMPLETED with build_passed=false → treated as failure, B not released', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
+
+    await handler({
+      Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', build_passed: false, orchestration_id: 'orch_1' })],
+    } as never);
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('non-orchestration / non-terminal records are skipped entirely', async () => {
+    await handler({
+      Records: [
+        taskRecord({ task_id: 'T1', status: 'RUNNING', orchestration_id: 'orch_1' }),
+        taskRecord({ task_id: 'T2', status: 'COMPLETED' }), // no orchestration_id
+      ],
+    } as never);
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('unresolvable sub_issue_id (GSI miss) → skip, no throw', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [] }); // GSI miss
+    await handler({ Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })] } as never);
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('#57: all-terminal epic with an integration node → embeds its combined screenshot in the panel', async () => {
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    const meta = {
+      sub_issue_id: '#meta',
+      orchestration_id: 'orch_1',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: 2,
+      platform_user_id: 'u1',
+      status_comment_id: 'panel-1',
+    };
+    // A (real leaf) + integration node, BOTH succeeded → all-terminal. The
+    // integration node's task record carries a screenshot_url.
+    const rows = [
+      {
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'A',
+        depends_on: [],
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        repo: 'o/r',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ENG-1',
+      },
+      {
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'orch_1__integration',
+        depends_on: ['A'],
+        child_status: 'succeeded',
+        child_task_id: 'task-int',
+        repo: 'o/r',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+      },
+    ];
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'ChildTaskIndex') {
+        return { Items: [{ ...rows[1] }] }; // the integration node just completed
+      }
+      if (cmd._type === 'Query') return { Items: [meta, ...rows] };
+      if (cmd._type === 'BatchGet') { // resolveChildPrUrls
+        const keys = cmd.input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>;
+        const tbl = Object.keys(keys)[0];
+        return { Responses: { [tbl]: keys[tbl].Keys.map((k) => ({ task_id: k.task_id, pr_url: `https://github.com/o/r/pull/${k.task_id.length}` })) } };
+      }
+      if (cmd._type === 'Get') { // resolveCombinedScreenshotUrl(task-int)
+        const tid = (cmd.input.Key as { task_id: string }).task_id;
+        return {
+          Item: tid === 'task-int'
+            ? { screenshot_url: 'https://cdn.example/combined.png', screenshot_preview_url: 'https://combined.vercel.app' }
+            : {},
+        };
+      }
+      return {};
+    });
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'task-int', status: 'COMPLETED', orchestration_id: 'orch_1',
+      })],
+    } as never);
+
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toContain('✅'); // complete
+    // #247 UX.17: the panel embeds the image AND deep-links to the live combined deploy.
+    expect(body).toContain('[![combined preview](https://cdn.example/combined.png)](https://combined.vercel.app)');
+    expect(body).toContain('[Open the combined preview](https://combined.vercel.app)');
+  });
+});
+
+/** Detect a cascade marker in parseTerminalTaskRecord. */
+describe('parseTerminalTaskRecord — A6 cascade marker', () => {
+  test('a restack task (carries restack_predecessor) → cascadeSubIssueId set', () => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'TR',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'B',
+      restack_predecessor_sub_issue_id: 'A',
+    }));
+    expect(evt?.cascadeSubIssueId).toBe('B');
+  });
+
+  test('an iteration task (orchestration_iteration=true) → cascadeSubIssueId set', () => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'TI',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A',
+      orchestration_iteration: true,
+    }));
+    expect(evt?.cascadeSubIssueId).toBe('A');
+  });
+
+  test('a normal child task (no markers) → cascadeSubIssueId undefined', () => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'T1', status: 'COMPLETED', orchestration_id: 'orch_1',
+    }));
+    expect(evt?.cascadeSubIssueId).toBeUndefined();
+  });
+});
+
+/** Mock for the cascade path: loadOrchestration + per-dependent GetCommand pr_url. */
+function mockCascade(children: Array<{
+  sub_issue_id: string;
+  depends_on?: string[];
+  child_status: string;
+  child_task_id?: string;
+  child_branch_name?: string;
+  linear_identifier?: string;
+}>): void {
+  const meta = {
+    sub_issue_id: '#meta',
+    orchestration_id: 'orch_1',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
+    repo: 'o/r',
+    child_count: children.length,
+    platform_user_id: 'user-1',
+    // A panel comment exists → the cascade EDITS it (UX.2), rather than posting fresh.
+    status_comment_id: 'panel-cmt-1',
+  };
+  const rows = children.map((c) => ({
+    orchestration_id: 'orch_1',
+    sub_issue_id: c.sub_issue_id,
+    depends_on: c.depends_on ?? [],
+    child_status: c.child_status,
+    repo: 'o/r',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
+    ...(c.child_task_id && { child_task_id: c.child_task_id }),
+    ...(c.child_branch_name && { child_branch_name: c.child_branch_name }),
+    ...(c.linear_identifier && { linear_identifier: c.linear_identifier }),
+  }));
+  ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+    if (cmd._type === 'Query') return { Items: [meta, ...rows] }; // loadOrchestration
+    if (cmd._type === 'Get') { // resolvePrNumber for a dependent task
+      const tid = (cmd.input.Key as { task_id: string }).task_id;
+      return { Item: { task_id: tid, pr_url: `https://github.com/o/r/pull/${tid.length}` } };
+    }
+    if (cmd._type === 'BatchGet') { // resolveChildPrUrls for the panel
+      const keys = (cmd.input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>);
+      const tbl = Object.keys(keys)[0];
+      return { Responses: { [tbl]: keys[tbl].Keys.map((k) => ({ task_id: k.task_id, pr_url: `https://github.com/o/r/pull/${k.task_id.length}` })) } };
+    }
+    return {};
+  });
+}
+
+describe('orchestration-reconciler handler — A6 cascade', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
+  });
+
+  test('restack on B completes → re-stacks B\'s direct dependent C (one hop)', async () => {
+    // chain A→B→C, all started; the just-completed task re-stacked B.
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
+      { sub_issue_id: 'C', depends_on: ['B'], child_status: 'succeeded', child_task_id: 'task-C', child_branch_name: 'branch-C' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
+
+    // Exactly one restack spawned — for C (B's direct dependent), NOT A.
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [body, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(body.workflow_ref).toBe('coding/restack-v1');
+    expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('C');
+    expect(ctx.channelMetadata.restack_predecessor_sub_issue_id).toBe('B');
+    expect(ctx.channelMetadata.orchestration_merge_branches).toBe(JSON.stringify(['branch-B']));
+    // Idempotency keyed on the SOURCE task id (converges, no loop).
+    expect(ctx.idempotencyKey).toContain('restack-task-1');
+  });
+
+  test('iteration on A completes → re-stacks A\'s direct dependent B', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.orchestration_sub_issue_id).toBe('B');
+  });
+
+  test('UX.15: a cascade that RE-OPENS the epic clears rollup_posted_at (so parent state can re-settle)', async () => {
+    // A comment on an already-completed epic re-opens it. The first
+    // completion's rollup_posted_at stamp must be cleared, or claimRollup stays
+    // failed forever and the parent reaction/state never re-mirror (👀→✅).
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
+    // An Update issued a `REMOVE rollup_posted_at` on the meta row.
+    const clears = ddbSend.mock.calls
+      .map((c) => c[0])
+      .filter((cmd) => cmd?._type === 'Update'
+        && typeof cmd.input?.UpdateExpression === 'string'
+        && cmd.input.UpdateExpression.includes('REMOVE rollup_posted_at'));
+    expect(clears.length).toBeGreaterThan(0);
+  });
+
+  test('FAILED iteration → no cascade', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-fail',
+        status: 'FAILED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('cascade source with no started dependents → no restack', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' }, // not started
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('UX.15 regression: a re-stack of a NO-DEPENDENTS node still refreshes the panel + settles (not stuck)', async () => {
+    // The stress-caught hang: a cascade source with no dependents returned
+    // early without refreshing → the node's '🔄 updating' row never cleared and
+    // the epic never re-settled to ✅. Here every child is already terminal, so
+    // the completion settle must fire: panel edited + parent state mirrored.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      // B is a leaf (nothing depends on it) AND has no dependents → planDirectRestack=0.
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    // A re-stack of B (the no-dependents leaf) completes.
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
+
+    // No further restack (B has no dependents).
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // But the panel WAS refreshed (settle) — and since all children are
+    // terminal, it shows complete + mirrors parent state.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toMatch(/complete/i);
+    expect(body).not.toMatch(/updating/i); // the stale updating row is gone
+    expect(transitionIssueStateMock).toHaveBeenCalled(); // parent settled
+  });
+
+  test('a cascade source does NOT run normal child gating (no GSI sub-issue lookup)', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+      })],
+    } as never);
+    // Never queried ChildTaskIndex (that's the normal-gating path).
+    const gsiCalls = ddbSend.mock.calls.filter(
+      (c) => c[0]?._type === 'Query' && c[0]?.input?.IndexName === 'ChildTaskIndex');
+    expect(gsiCalls).toHaveLength(0);
+  });
+});
+
+describe('orchestration-reconciler handler — A6 cascade surfacing via the panel (#247 UX.2)', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+  });
+
+  const iterEvent = (sub: string) => ({
+    Records: [taskRecord({
+      task_id: 'iter-task-1',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: sub,
+      orchestration_iteration: true,
+    })],
+  }) as never;
+
+  test('refreshes the panel with the impacted row as "updating per comment" — NO standalone parent/sub-issue comments', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler(iterEvent('A'));
+    // The panel is edited (upsertStatusComment), NOT a stream of new comments.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    // Impacted dependent B shows '🔄 … updating per ENG-1's comment'.
+    expect(body).toMatch(/ENG-2.*updating per ENG-1's comment/);
+    // The retired standalone '🔄 Re-stacked' / 'revised' parent comments are GONE.
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+
+  test('idempotent replay (200, NOT 201) does NOT re-mark the panel as updating', async () => {
+    createTaskCoreMock.mockResolvedValue({ statusCode: 200, body: '{}' });
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler(iterEvent('A'));
+    // No NEW restack task created → no panel "updating" refresh from the cascade.
+    expect(upsertStatusCommentMock).not.toHaveBeenCalled();
+  });
+
+  test('integration-node dependent renders friendly in the panel (never raw id)', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'orch_1__integration', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-int', child_branch_name: 'branch-int' },
+    ]);
+    await handler(iterEvent('A'));
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toContain('Integration — combined result');
+    expect(body).not.toContain('orch_1__integration');
+  });
+
+  test('a restack from a PREDECESSOR change (not a comment) says "updating to include … change"', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    // restack source (carries restack_predecessor, NOT orchestration_iteration).
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        restack_predecessor_sub_issue_id: 'Z',
+      })],
+    } as never);
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toMatch(/ENG-2.*updating to include ENG-1's change/);
+  });
+});
+
+describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3)', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    swapCommentReactionMock.mockReset().mockResolvedValue(true);
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    replyToCommentMock.mockReset().mockResolvedValue('reply-1');
+  });
+
+  /** An iteration event carrying the human comment id that triggered it. */
+  const iterEventWithComment = (status: string, commentId = 'human-cmt-1', buildPassed?: boolean, errorMessage?: string) => ({
+    Records: [taskRecord({
+      task_id: 'iter-task-1',
+      status,
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A',
+      orchestration_iteration: true,
+      trigger_comment_id: commentId,
+      ...(buildPassed !== undefined && { build_passed: buildPassed }),
+      ...(errorMessage !== undefined && { error_message: errorMessage }),
+    })],
+  }) as never;
+
+  test('successful iteration → ✅ threaded reply to the triggering comment, linking the PR', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler(iterEventWithComment('COMPLETED'));
+
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    // Signature: replyToComment(ctx, issueId, parentCommentId, body).
+    const [, issueId, parentCommentId, body] = replyToCommentMock.mock.calls[0];
+    expect(issueId).toBe('A'); // the sub-issue the comment lives on
+    expect(parentCommentId).toBe('human-cmt-1');
+    expect(body).toMatch(/^✅ Updated — PR #\d+\./);
+    // #247 UX.21: the trigger comment's 👀 swaps to ✅, and the sub-issue
+    // advances to In Review (platform-owned settle, not agent-flapped).
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'white_check_mark');
+    expect(transitionIssueStateMock).toHaveBeenCalledWith(expect.anything(), 'A', 'started', ['In Review']);
+  });
+
+  test('#247 UX.19: a PARENT-routed iteration replies on the PARENT issue, not the sub-issue', async () => {
+    // The human commented on the parent epic (UX.18 routed it to sub-issue A).
+    // The ✅/❌ reply must use the PARENT issue id as commentCreate's issueId —
+    // else Linear rejects the reply (parentId belongs to a different issue) and
+    // the human sees 👀 then silence (live-caught on ABCA-304).
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+        trigger_comment_id: 'parent-cmt-1',
+        trigger_comment_issue_id: 'PARENT', // comment lives on the parent epic
+      })],
+    } as never);
+
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    const [, issueId, parentCommentId] = replyToCommentMock.mock.calls[0];
+    expect(issueId).toBe('PARENT'); // NOT 'A' — the reply targets the parent comment's issue
+    expect(parentCommentId).toBe('parent-cmt-1');
+  });
+
+  test('FAILED iteration (agent crash) → ❌ reply with classified reason + CloudWatch task id (UX.5)', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler(iterEventWithComment('FAILED', 'human-cmt-1', undefined, 'agent_status="error_max_turns"'));
+
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    const [, , , body] = replyToCommentMock.mock.calls[0];
+    expect(body).toMatch(/^❌/);
+    expect(body).toMatch(/Exceeded max turns/i); // classified
+    expect(body).toMatch(/CloudWatch for task `iter-task-1`/);
+    expect(body).toMatch(/reply with guidance/i);
+    // A failed iteration still does not cascade onto dependents.
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // #247 UX.21: the trigger comment's 👀 swaps to ❌, but the sub-issue state
+    // is LEFT in place on failure (the ❌ + reply convey it; never demote).
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'x');
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
+  });
+
+  test('COMPLETED-but-build-failed iteration → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    // COMPLETED, build_passed=false, NO error_message → build/test failure shape.
+    await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
+
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    const [, , , body] = replyToCommentMock.mock.calls[0];
+    expect(body).toMatch(/build\/tests didn't pass/i);
+    expect(body).toMatch(/PR's checks/i);
+    expect(body).not.toMatch(/CloudWatch/i); // build-fail copy omits the log pointer
+    // build_passed=false ⇒ not a success ⇒ no cascade onto dependents.
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('build_passed=false → ❌ reply (treated as not-successful)', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
+    const [, , , body] = replyToCommentMock.mock.calls[0];
+    expect(body).toMatch(/^❌/);
+  });
+
+  test('idempotent: redelivery loses the claim → no duplicate reply', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    // First Update (the ack claim) wins; a second Update with the same key is
+    // rejected by the conditional → simulate the redelivery losing the claim.
+    let ackClaims = 0;
+    const base = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Update' && (cmd.input.UpdateExpression as string)?.includes('ack_replied_at')) {
+        ackClaims += 1;
+        if (ackClaims > 1) {
+          const err = new Error('conditional');
+          (err as { name?: string }).name = 'ConditionalCheckFailedException';
+          throw err;
+        }
+        return {};
+      }
+      return base(cmd);
+    });
+
+    await handler(iterEventWithComment('COMPLETED'));
+    await handler(iterEventWithComment('COMPLETED')); // redelivery
+
+    // Replied exactly once across both deliveries.
+    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a restack (no trigger_comment_id) → no ack reply', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        restack_predecessor_sub_issue_id: 'Z',
+      })],
+    } as never);
+    expect(replyToCommentMock).not.toHaveBeenCalled();
+  });
+});

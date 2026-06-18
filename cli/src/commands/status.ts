@@ -19,6 +19,7 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
+import { CliError } from '../errors';
 import { formatJson, formatStatusSnapshot } from '../format';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -27,8 +28,18 @@ export function makeStatusCommand(): Command {
     .description('Get a deterministic status snapshot of a task')
     .argument('<task-id>', 'Task ID')
     .option('--wait', 'Block until the task reaches a terminal status, then print the final snapshot and exit with a status-derived code')
+    .option(
+      '--max-wait <seconds>',
+      'With --wait: give up (exit 2) after this many seconds instead of the 24h default',
+      parseInt,
+    )
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (taskId: string, opts) => {
+      if (opts.maxWait !== undefined
+        && (isNaN(opts.maxWait) || !Number.isInteger(opts.maxWait) || opts.maxWait < 1)) {
+        throw new CliError('--max-wait must be a positive integer (seconds).');
+      }
+
       const client = new ApiClient();
 
       // ``--wait`` is a pure blocking flag: it polls until terminal,
@@ -37,7 +48,9 @@ export function makeStatusCommand(): Command {
       // surface, ``--wait`` just delays it until there is a final
       // answer. JSON output follows the same rule: same shape, later.
       if (opts.wait) {
-        const task = await waitForTask(client, taskId);
+        const task = await waitForTask(client, taskId, {
+          maxWaitMs: opts.maxWait !== undefined ? opts.maxWait * 1_000 : undefined,
+        });
         process.stderr.write('\n');
         if (opts.output === 'json') {
           console.log(formatJson(task));

@@ -34,8 +34,8 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
 
 ```typescript
-new Blueprint(this, ‘MyServiceBlueprint’, {
-  repo: ‘acme/my-service’,
+new Blueprint(this, 'MyServiceBlueprint', {
+  repo: 'acme/my-service',
   repoTable: repoTable.table,
 });
 ```
@@ -53,13 +53,23 @@ new Blueprint(this, 'MyServiceBlueprint', {
     systemPromptOverrides: 'Extra instructions...',   // appended to the platform prompt
   },
   credentials: { githubTokenSecretArn: '...' },       // per-repo GitHub token secret
-  pipeline: { pollIntervalMs: 5000 },                 // poll interval awaiting completion
+  pipeline: {
+    pollIntervalMs: 5000,                             // poll interval awaiting completion
+    buildCommand: 'npm run build && npm test',        // build/test verification (default: mise run build)
+    lintCommand: 'npm run lint',                      // lint verification (default: mise run lint)
+  },
 });
 ```
 
 If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](/architecture/repo-onboarding) for the full model.
 
-Redeploy after changing Blueprints: `mise run //cdk:deploy`.
+#### Build-regression gating (important for non-mise repos)
+
+Before opening a PR, the agent runs a **build** and **lint** command in its cloud container — once on the clean clone (baseline) and again after its changes. If the build was green before and fails after, the task fails (a build-**regression** gate). This is a compile/test verification, **not** a deployment — your app's actual deploy stays in your own CI/CD after the PR merges.
+
+The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set `pipeline.buildCommand`** (and optionally `lintCommand`) to its real command — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
+
+Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
 ### Customizing the agent image
 

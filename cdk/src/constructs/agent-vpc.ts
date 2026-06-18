@@ -23,6 +23,9 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+/** HTTPS port — the only egress allowed from the Runtime ENIs. */
+const HTTPS_PORT = 443;
+
 /**
  * Properties for the AgentVpc construct.
  */
@@ -113,7 +116,7 @@ export class AgentVpc extends Construct {
 
     this.runtimeSecurityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
+      ec2.Port.tcp(HTTPS_PORT),
       'Allow HTTPS egress (GitHub + package registries via NAT, AWS services via endpoints)',
     );
 

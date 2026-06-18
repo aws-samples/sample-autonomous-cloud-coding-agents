@@ -17,8 +17,18 @@
  *  SOFTWARE.
  */
 
-/** Valid task types for task creation. */
-export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+/**
+ * A resolved workflow pin: the ``{id, version}`` produced at the create-task
+ * boundary from a ``workflow_ref`` (or the resolution fallback). Replaces the
+ * former ``task_type`` enum end-to-end (#248).
+ *
+ * Mirrors ``cdk/src/handlers/shared/types.ts::ResolvedWorkflow`` per the CLI
+ * types-sync contract.
+ */
+export type ResolvedWorkflow = {
+  readonly id: string;
+  readonly version: string;
+};
 
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
@@ -47,12 +57,13 @@ export type TaskStatusType =
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions
  * - ``linear``: Linear label-triggered submissions
+ * - ``jira``: Jira Cloud label-triggered submissions
  *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
 export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
@@ -70,9 +81,10 @@ export interface ErrorClassification {
 export interface TaskDetail {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -121,6 +133,8 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` otherwise. */
+  readonly artifact_uri: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task. Null only on pre-Cedar-HITL records. */
@@ -146,9 +160,10 @@ export interface TraceUrlResponse {
 export interface TaskSummary {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -221,12 +236,15 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
-  readonly repo: string;
+  /** Optional since #248 Phase 3: repo-less workflows submit without it. */
+  readonly repo?: string;
   readonly issue_number?: number;
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
-  readonly task_type?: TaskType;
+  /** Workflow selector ``<id>[@<constraint>]``. Replaces ``task_type`` (#248).
+   *  Omitted ⇒ the create-task boundary resolves via the fallback ladder. */
+  readonly workflow_ref?: string;
   readonly pr_number?: number;
   readonly attachments?: readonly Attachment[];
   /**
@@ -349,6 +367,22 @@ export interface LinearLinkResponse {
   readonly linked_at?: string;
 }
 
+/** Jira link response from POST /v1/jira/link.
+ *
+ * Mirrors LinearLinkResponse semantics: `dry_run: true` returns the
+ * identity attached to the code without writing. The CLI uses dry-run
+ * to render a preview before the user confirms. `linked_at` is omitted
+ * from the dry-run response. */
+export interface JiraLinkResponse {
+  readonly dry_run?: boolean;
+  readonly jira_cloud_id: string;
+  readonly jira_site_url?: string;
+  readonly jira_account_id: string;
+  readonly jira_user_name?: string;
+  readonly jira_user_email?: string;
+  readonly linked_at?: string;
+}
+
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;
@@ -371,6 +405,16 @@ export interface Credentials {
 
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+/**
+ * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
+ * (no ``--workflow``/``--pr``/``--review-pr``) maps to this workflow — the
+ * old ``new_task`` default that clones, builds, and opens a PR. Also used by
+ * the formatters to suppress a redundant "Workflow:" line when the resolved
+ * workflow is just the default. Hoisted to a single constant so the literal
+ * is not duplicated across ``submit.ts`` and ``format.ts``.
+ */
+export const DEFAULT_CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 // ---------------------------------------------------------------------------
 // Cedar HITL approval types — mirrored from
@@ -494,3 +538,11 @@ export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default approval_timeout_s when the submit payload omits it. */
 export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+
+/** Minimum allowed max_budget_usd (1 cent).
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
+export const MAX_BUDGET_USD_MIN = 0.01;
+
+/** Maximum allowed max_budget_usd ($100).
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
+export const MAX_BUDGET_USD_MAX = 100;

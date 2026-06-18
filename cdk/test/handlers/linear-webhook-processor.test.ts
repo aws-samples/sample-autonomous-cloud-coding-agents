@@ -71,7 +71,7 @@ function issue(overrides: Record<string, unknown> = {}): Record<string, unknown>
       description: 'Users cannot log in.',
       projectId: 'project-1',
       teamId: 'team-1',
-      labels: [{ id: 'lbl-abca', name: 'abca' }],
+      labels: [{ id: 'lbl-bgagent', name: 'bgagent' }],
     },
     ...overrides,
   };
@@ -95,6 +95,8 @@ describe('linear-webhook-processor handler', () => {
       workspaceSlug: 'acme',
       oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
     });
+    // Attachments-via-MCP probe (672bfa6): default to "nothing to fetch" so
+    // existing tests are unaffected; the context-discovery tests override.
     probeLinearIssueContextMock.mockReset();
     probeLinearIssueContextMock.mockResolvedValue({
       attachmentTitles: [],
@@ -158,7 +160,7 @@ describe('linear-webhook-processor handler', () => {
     ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } });
     const payload = issue({
       action: 'update',
-      updatedFrom: { labelIds: ['lbl-abca', 'lbl-other'] },
+      updatedFrom: { labelIds: ['lbl-bgagent', 'lbl-other'] },
     });
     await handler(eventWith(payload));
     expect(createTaskCoreMock).not.toHaveBeenCalled();

@@ -27,6 +27,15 @@ description = "Jest tests"
 depends = [":compile"]
 run = ["mkdir -p $TMPDIR", "yarn test"]
 
+# Focused, low-footprint test run for iterating on one file/pattern:
+#   mise //cdk:testf -- orchestration-release
+# Skips coverage (the heaviest phase) and runs a single worker, so it
+# won't spawn the worker fleet that OOMs the Mac on the 1240-test
+# stack-synth suite. Use //cdk:test for the full coverage run (CI parity).
+[tasks.testf]
+description = "Focused jest run (no coverage, single worker)"
+run = "yarn jest --coverage=false --runInBand"
+
 [tasks.synth]
 description = "cdk synth"
 run = ["mkdir -p $TMPDIR", "yarn synth"]
@@ -57,6 +66,17 @@ run = "npx cdk destroy"
 [tasks.diff]
 description = "cdk diff"
 run = "npx cdk diff"
+
+[tasks.integ]
+description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for the shared integ account."
+depends = [":compile"]
+run = [
+  "mkdir -p $TMPDIR",
+  # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
+  # snapshot to diff against or update. --force re-runs the deploy-then-verify
+  # unconditionally, which is what we want in CI.
+  "npx integ-runner --language typescript --directory test/integ --force",
+]
 
 [tasks.bundle]
 description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"

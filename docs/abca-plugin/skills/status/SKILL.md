@@ -32,7 +32,7 @@ Run these in parallel where possible:
 
 4. **Local build health:**
    ```bash
-   export MISE_EXPERIMENTAL=1 && mise run //cdk:compile 2>&1 | tail -5
+   export MISE_EXPERIMENTAL=1 && mise //cdk:compile 2>&1 | tail -5
    ```
 
 ## Output Format
