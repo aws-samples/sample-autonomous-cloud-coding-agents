@@ -36,6 +36,12 @@ import { logger } from './logger';
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 const REQUEST_TIMEOUT_MS = 5000;
 
+/**
+ * Cap on attachment titles listed inline in the task-description hint; any
+ * beyond this are summarized as "(+N more)" so the prepended hint stays short.
+ */
+const MAX_HINTED_ATTACHMENT_TITLES = 5;
+
 const ISSUE_CONTEXT_QUERY = `
 query IssueContext($id: String!) {
   issue(id: $id) {
@@ -150,8 +156,10 @@ export async function probeLinearIssueContext(
 export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
   const bits: string[] = [];
   if (probe.attachmentTitles.length > 0) {
-    const titles = probe.attachmentTitles.slice(0, 5).map((t) => `"${t}"`).join(', ');
-    const more = probe.attachmentTitles.length > 5 ? ` (+${probe.attachmentTitles.length - 5} more)` : '';
+    const titles = probe.attachmentTitles
+      .slice(0, MAX_HINTED_ATTACHMENT_TITLES).map((t) => `"${t}"`).join(', ');
+    const more = probe.attachmentTitles.length > MAX_HINTED_ATTACHMENT_TITLES
+      ? ` (+${probe.attachmentTitles.length - MAX_HINTED_ATTACHMENT_TITLES} more)` : '';
     bits.push(`paperclip attachments — ${titles}${more} (fetch via \`mcp__linear-server__get_issue\` then \`mcp__linear-server__get_attachment\`)`);
   }
   if (probe.projectHasDocuments && probe.projectName) {
