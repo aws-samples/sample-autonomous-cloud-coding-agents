@@ -17,12 +17,12 @@
  *  SOFTWARE.
  */
 
-import { AttributeValue, DynamoDBClient, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { AttributeValue, QueryCommand } from '@aws-sdk/client-dynamodb';
 import {
-  DynamoDBDocumentClient,
   QueryCommand as DocQueryCommand,
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { documentClient, lowLevelClient } from './dynamo-clients';
 
 /** Align with ``reconcile-stranded-tasks.ts`` defaults. */
 export const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
@@ -51,14 +51,6 @@ export interface ConcurrencyRow {
   readonly drift: number | null;
   /** Set when the per-user TaskTable query failed; the row is still reported. */
   readonly error?: string;
-}
-
-function documentClient(region: string): DynamoDBDocumentClient {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-}
-
-function lowLevelClient(region: string): DynamoDBClient {
-  return new DynamoDBClient({ region });
 }
 
 function isoCutoff(secondsAgo: number): string {

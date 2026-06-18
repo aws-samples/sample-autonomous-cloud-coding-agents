@@ -19,15 +19,33 @@
 
 import { Command } from 'commander';
 import { CliError } from '../errors';
-import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
+import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
 import {
   buildRepoShowLines,
   formatRepoConfigForDisplay,
 } from '../repo-display';
-import { assertRepoFormat, listRepoConfigs, loadRepoConfig } from '../repo-lookup';
+import {
+  assertRepoFormat,
+  listRepoConfigs,
+  loadRepoConfig,
+  type RepoConfigRow,
+} from '../repo-lookup';
 import { offboardRepo, onboardRepo } from '../repo-onboard';
 import { buildRepoOnboardNotes } from '../repo-onboard-notes';
 import { getStackOutput } from '../stack-outputs';
+
+/**
+ * Redact the per-repo secret ARN before a `RepoConfigRow` is serialized to JSON.
+ * `repo show` redacts this field via {@link formatRepoConfigForDisplay}; the
+ * `list`/`onboard`/`offboard` JSON paths emit raw rows, so they must apply the
+ * same redaction to honor the command's "secret ARNs redacted" contract.
+ */
+function redactRepoRow(row: RepoConfigRow): RepoConfigRow {
+  if (!row.github_token_secret_arn) {
+    return row;
+  }
+  return { ...row, github_token_secret_arn: redactSecretArn(row.github_token_secret_arn) };
+}
 
 const REPO_COLUMN_WIDTH = 36;
 const STATUS_COLUMN_WIDTH = 10;
@@ -61,7 +79,7 @@ export function makeRepoCommand(): Command {
         }
 
         if (opts.output === 'json') {
-          console.log(JSON.stringify({ repos }, null, 2));
+          console.log(JSON.stringify({ repos: repos.map(redactRepoRow) }, null, 2));
           return;
         }
 
@@ -174,7 +192,7 @@ export function makeRepoCommand(): Command {
         });
 
         if (opts.output === 'json') {
-          console.log(JSON.stringify({ repo: config, notes }, null, 2));
+          console.log(JSON.stringify({ repo: redactRepoRow(config), notes }, null, 2));
           return;
         }
 
@@ -206,7 +224,7 @@ export function makeRepoCommand(): Command {
         const config = await offboardRepo(region, tableName, repoId);
 
         if (opts.output === 'json') {
-          console.log(JSON.stringify({ repo: config }, null, 2));
+          console.log(JSON.stringify({ repo: redactRepoRow(config) }, null, 2));
           return;
         }
 

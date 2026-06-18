@@ -482,7 +482,7 @@ bgagent github set-token
 bgagent github set-token --repo owner/repo
 ```
 
-All operator commands accept `--output json`. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
 
 ### Submitting a task
 

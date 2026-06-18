@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { documentClient } from './dynamo-clients';
 import { CliError } from './errors';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
@@ -61,10 +61,6 @@ export class RepoNotOnboardedError extends CliError {
     this.name = 'RepoNotOnboardedError';
     this.repo = repo;
   }
-}
-
-function documentClient(region: string): DynamoDBDocumentClient {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 }
 
 /** Validate owner/repo format (matches Blueprint construct). */

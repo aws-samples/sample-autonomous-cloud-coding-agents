@@ -3,7 +3,7 @@
 Before users can submit tasks for a repository, that repository must be onboarded to the platform. Onboarding registers the repo and produces a per-repo configuration that the orchestrator uses at task time: compute strategy, model, credentials, networking, and pipeline customizations. If a user submits a task for a non-onboarded repo, the API returns `422 REPO_NOT_ONBOARDED`.
 
 - **Use this doc for:** the Blueprint construct interface, RepoConfig schema, override precedence, compute strategy interface, and pipeline customization model.
-- **For practical usage:** see [Quick Start](../guides/QUICK_START.md) for onboarding your first repo and [User Guide](../guides/USER_GUIDE.md) for per-repo overrides.
+- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](../guides/USER_GUIDE.md) for per-repo overrides.
 - **Related docs:** [ORCHESTRATOR.md](./ORCHESTRATOR.md) for how the orchestrator consumes blueprint config, [COMPUTE.md](./COMPUTE.md) for compute backends, [SECURITY.md](./SECURITY.md) for custom step trust boundaries.
 
 ## Why onboarding?

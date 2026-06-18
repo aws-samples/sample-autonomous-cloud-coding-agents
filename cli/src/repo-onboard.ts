@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { documentClient } from './dynamo-clients';
 import {
   assertRepoFormat,
   loadRepoConfig,
@@ -37,10 +37,6 @@ export interface OnboardRepoOptions {
   readonly maxTurns?: number;
   readonly githubTokenSecretArn?: string;
   readonly pollIntervalMs?: number;
-}
-
-function documentClient(region: string): DynamoDBDocumentClient {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 }
 
 /** Register or re-activate a repository in RepoTable (operator path). */

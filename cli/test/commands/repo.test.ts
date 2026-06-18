@@ -18,8 +18,11 @@
  */
 
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { makeRepoCommand } from '../../src/commands/repo';
 import { CliError } from '../../src/errors';
 import { listRepoConfigs, parseRepoConfigRow } from '../../src/repo-lookup';
+import { offboardRepo, onboardRepo } from '../../src/repo-onboard';
+import { getStackOutput } from '../../src/stack-outputs';
 
 const ddbSend = jest.fn();
 
@@ -32,6 +35,16 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
     },
   };
 });
+
+jest.mock('../../src/stack-outputs', () => {
+  const actual = jest.requireActual('../../src/stack-outputs');
+  return { ...actual, getStackOutput: jest.fn() };
+});
+jest.mock('../../src/repo-onboard');
+
+const getStackOutputMock = getStackOutput as jest.Mock;
+const onboardRepoMock = onboardRepo as jest.Mock;
+const offboardRepoMock = offboardRepo as jest.Mock;
 
 describe('listRepoConfigs', () => {
   beforeEach(() => {
@@ -73,6 +86,102 @@ describe('listRepoConfigs', () => {
     });
 
     await expect(listRepoConfigs('us-east-1', 'RepoTable-dev')).rejects.toThrow(/unexpected status/);
+  });
+});
+
+describe('repo command JSON output', () => {
+  let consoleSpy: jest.SpiedFunction<typeof console.log>;
+  const RAW_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:acme-token-AbCdEf';
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+    getStackOutputMock.mockReset().mockResolvedValue('RepoTable-dev');
+    onboardRepoMock.mockReset();
+    offboardRepoMock.mockReset();
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  test('repo list --output json renders rows and redacts the per-repo secret ARN', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ repo: 'acme/a', status: 'active', github_token_secret_arn: RAW_ARN }],
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync(['node', 'test', 'list', '--region', 'us-east-1', '--output', 'json']);
+
+    const out = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+    expect(out).not.toContain(RAW_ARN);
+    const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(payload.repos[0].repo).toBe('acme/a');
+    expect(payload.repos[0].github_token_secret_arn).toContain('****');
+  });
+
+  test('repo list text mode prints a header row and the repo', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ repo: 'acme/a', status: 'active', compute_type: 'agentcore' }],
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync(['node', 'test', 'list', '--region', 'us-east-1']);
+
+    const out = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+    expect(out).toContain('REPO');
+    expect(out).toContain('acme/a');
+    expect(out).toContain('agentcore');
+  });
+
+  test('repo show --output json redacts the secret ARN (via display object)', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: { repo: 'acme/a', status: 'active', github_token_secret_arn: RAW_ARN },
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync(['node', 'test', 'show', 'acme/a', '--region', 'us-east-1', '--output', 'json']);
+
+    const out = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+    expect(out).not.toContain(RAW_ARN);
+    expect(out).toContain('****');
+  });
+
+  test('repo onboard --output json redacts the per-repo secret ARN', async () => {
+    onboardRepoMock.mockResolvedValue({
+      repo: 'acme/a',
+      status: 'active',
+      github_token_secret_arn: RAW_ARN,
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a',
+      '--region', 'us-east-1', '--token-secret-arn', RAW_ARN, '--output', 'json',
+    ]);
+
+    const out = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+    expect(out).not.toContain(RAW_ARN);
+    const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(payload.repo.github_token_secret_arn).toContain('****');
+  });
+
+  test('repo offboard --output json redacts the per-repo secret ARN', async () => {
+    offboardRepoMock.mockResolvedValue({
+      repo: 'acme/a',
+      status: 'removed',
+      github_token_secret_arn: RAW_ARN,
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'offboard', 'acme/a', '--region', 'us-east-1', '--output', 'json',
+    ]);
+
+    const out = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+    expect(out).not.toContain(RAW_ARN);
+    const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(payload.repo.github_token_secret_arn).toContain('****');
   });
 });
 

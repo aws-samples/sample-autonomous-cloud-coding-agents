@@ -168,7 +168,7 @@ bgagent webhook revoke <webhook-id> \
 
 ## Operator commands
 
-These commands support day-2 operations using **operator AWS credentials** (IAM profile or environment). They read CloudFormation outputs, DynamoDB, and Secrets Manager directly — no Cognito login required. All support `--output json` for scripting.
+These commands support day-2 operations using **operator AWS credentials** (IAM profile or environment). They read CloudFormation outputs, DynamoDB, and Secrets Manager directly — no Cognito login required. The read-only and introspection commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) support `--output json` for scripting; the credential-writing commands (`github set-token`/`set-webhook-secret`, `admin invite-user`/`delete-user`/`reset-password`) do not.
 
 Shared flags:
 

@@ -107,17 +107,29 @@ export function makeWebhookCommand(): Command {
 
         let repo = opts.repo as string | undefined;
         if (repo) {
-          // Operator named a repo explicitly: validate it against RepoTable when
-          // the table is resolvable, but don't claim validation we didn't do —
-          // warn rather than silently skip when the stack output is absent.
-          const { region, stackName } = resolveOperatorContext(opts);
-          const repoTable = await getStackOutput(region, stackName, 'RepoTableName');
-          if (repoTable) {
-            await loadActiveRepoConfig(region, repoTable, repo);
-          } else {
+          // Operator named a repo explicitly: validate it against RepoTable as a
+          // best effort. With --api-url + --secret + --repo this command needs no
+          // AWS access at all, so a missing stack output or absent credentials
+          // degrades to a warning rather than aborting the manual path — but we
+          // never silently claim validation we didn't perform.
+          try {
+            const { region, stackName } = resolveOperatorContext(opts);
+            const repoTable = await getStackOutput(region, stackName, 'RepoTableName');
+            if (repoTable) {
+              await loadActiveRepoConfig(region, repoTable, repo);
+            } else {
+              console.warn(
+                `⚠ Could not read 'RepoTableName' from stack '${stackName}' — `
+                + `sending the test for '${repo}' without verifying it is an active onboarded repo.`,
+              );
+            }
+          } catch (err) {
+            if (err instanceof CliError && err.message.includes('is onboarded but status')) {
+              throw err; // The repo was found and is genuinely not active — surface it.
+            }
             console.warn(
-              `⚠ Could not read 'RepoTableName' from stack '${stackName}' — `
-              + `sending the test for '${repo}' without verifying it is an active onboarded repo.`,
+              `⚠ Could not verify '${repo}' against RepoTable (${err instanceof Error ? err.message : String(err)}) — `
+              + 'sending the test anyway.',
             );
           }
         } else {
