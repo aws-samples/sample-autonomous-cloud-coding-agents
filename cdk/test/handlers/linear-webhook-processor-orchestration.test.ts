@@ -50,6 +50,7 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 
 const reportIssueFailureMock = jest.fn();
 const swapIssueReactionMock = jest.fn();
+const swapCommentReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const reactToCommentMock = jest.fn();
@@ -57,6 +58,7 @@ const replyToCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
+  swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
@@ -64,6 +66,7 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
   EMOJI_FAILURE: 'x',
+  EMOJI_NEEDS_INPUT: 'question',
 }));
 
 const resolveLinearOauthTokenMock = jest.fn();
@@ -138,6 +141,7 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     resolveLinearOauthTokenMock.mockReset();
     discoverOrchestrationMock.mockReset();
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    swapCommentReactionMock.mockReset().mockResolvedValue(true);
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-status-1');
     fetchIssueParentIdMock.mockReset();
@@ -628,6 +632,8 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(replyBody).toContain('ABCA-305');
       expect(replyBody).toContain('ABCA-306');
       expect(replyBody.toLowerCase()).toContain('new work'); // the create-a-sub-issue path
+      // #247 UX-1: a question is not work-in-progress — the 👀 is swapped to ❓.
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'question');
     });
 
     test('no-match comment on the epic → 👀 + reply (never a silent drop), no task', async () => {
@@ -636,6 +642,8 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'eyes');
       expect(createTaskCoreMock).not.toHaveBeenCalled();
       expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      // #247 UX-1: 👀 → ❓ once we know we're only asking, not working.
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'question');
     });
 
     test('#247 UX.20: webhook REDELIVERY of the same parent comment posts EXACTLY ONE reply (no spam)', async () => {
