@@ -34,6 +34,27 @@ class TestResolveVerifyArgv:
             "target with spaces",
         ]
 
+    def test_chained_command_runs_through_a_shell(self):
+        # #72: a && / | / ; chain must run via `bash -lc` so the WHOLE chain
+        # executes. Previously shlex-split into one `npm` call with `&&`/`npm`/…
+        # as bogus args — `npm ci` ran, ignored the rest, exited 0, and a broken
+        # lint/test in the chain NEVER ran (false "build OK").
+        assert resolve_verify_argv("npm ci && npm run lint && npm test", "") == [
+            "bash",
+            "-lc",
+            "npm ci && npm run lint && npm test",
+        ]
+
+    def test_other_shell_operators_also_wrap(self):
+        for cmd in ("eslint . | tee out.txt", "make build; make test", "tsc > /dev/null"):
+            argv = resolve_verify_argv(cmd, "")
+            assert argv[:2] == ["bash", "-lc"], cmd
+            assert argv[2] == cmd
+
+    def test_plain_command_still_direct_argv(self):
+        # No operators → still a direct exec (no shell wrapper).
+        assert resolve_verify_argv("npm run build", "") == ["npm", "run", "build"]
+
 
 class TestVerifyBuildHonorsCommand:
     def _capture_argv(self, monkeypatch):
