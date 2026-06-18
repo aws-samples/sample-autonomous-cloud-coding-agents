@@ -43,6 +43,11 @@ const REQUEST_TIMEOUT_MS = 5000;
 export const EMOJI_STARTED = 'eyes';
 export const EMOJI_SUCCESS = 'white_check_mark';
 export const EMOJI_FAILURE = 'x';
+// #247 UX-1: a parent-epic comment we couldn't route to a single sub-issue is a
+// QUESTION, not work-in-progress — leaving the 👀 (EMOJI_STARTED) on it makes it
+// look like the agent is still working. Swap to ❓ so the reaction matches the
+// "I need you to clarify / pick a sub-issue" disambiguation reply.
+export const EMOJI_NEEDS_INPUT = 'question';
 
 const COMMENT_CREATE_MUTATION = `
 mutation CreateComment($issueId: String!, $body: String!) {
@@ -139,7 +144,9 @@ query CommentReactions($commentId: String!) {
  * ever deleted by {@link swapIssueReaction} — a human's reaction is never
  * touched.
  */
-const BGAGENT_EMOJIS: ReadonlySet<string> = new Set([EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE]);
+const BGAGENT_EMOJIS: ReadonlySet<string> = new Set([
+  EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE, EMOJI_NEEDS_INPUT,
+]);
 
 /**
  * Fetch the workflow states for the TEAM that owns ``issueId``, so we can

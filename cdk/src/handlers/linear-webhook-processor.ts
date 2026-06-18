@@ -21,7 +21,14 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
-import { reactToComment, replyToComment, reportIssueFailure, EMOJI_STARTED } from './shared/linear-feedback';
+import {
+  reactToComment,
+  replyToComment,
+  reportIssueFailure,
+  swapCommentReaction,
+  EMOJI_STARTED,
+  EMOJI_NEEDS_INPUT,
+} from './shared/linear-feedback';
 import {
   probeLinearIssueContext,
   renderIssueContextHint,
@@ -32,7 +39,12 @@ import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task
 import { logger } from './shared/logger';
 import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
-import { parseParentNodeReference, renderParentDisambiguationReply, suggestClosestNode } from './shared/orchestration-parent-comment';
+import {
+  parseParentNodeReference,
+  renderParentDisambiguationReply,
+  suggestClosestNode,
+  looksLikeNewWork,
+} from './shared/orchestration-parent-comment';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
@@ -786,8 +798,15 @@ async function handleParentEpicCommentTrigger(args: {
     // No confident single match (or matched a not-yet-started node) → ask.
     const reason = match.reason === 'ambiguous' ? 'ambiguous' : 'none';
     const suggestion = reason === 'none' ? suggestClosestNode(trigger.instruction, snapshot.children) : null;
-    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion);
+    // #247 UX-2: if it reads like NEW work AND we found no close existing node,
+    // lead with the create-a-sub-issue path rather than the generic "couldn't
+    // tell". A close suggestion takes precedence (more likely a vague edit).
+    const newWork = reason === 'none' && !suggestion && looksLikeNewWork(trigger.instruction);
+    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork);
     await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
+    // #247 UX-1: this is a QUESTION, not work-in-progress. Swap the 👀 we put
+    // on receipt to ❓ so the comment doesn't look like it's still being worked.
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
     logger.info('A6 comment (parent epic): no single iterable sub-issue matched — asked', {
       orchestration_id: orchestrationId, reason, match_count: match.matches.length,
     });
@@ -798,6 +817,9 @@ async function handleParentEpicCommentTrigger(args: {
   if (prNumber === null) {
     const body = renderParentDisambiguationReply('none', snapshot.children, target);
     await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
+    // #247 UX-1: matched a node but it has no PR yet — also a "wait / clarify"
+    // state, not active work; swap 👀 → ❓.
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
     logger.info('A6 comment (parent epic): matched sub-issue has no PR yet — asked', {
       orchestration_id: orchestrationId, sub_issue_id: target.sub_issue_id,
     });

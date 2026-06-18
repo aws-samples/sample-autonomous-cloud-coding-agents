@@ -22,6 +22,7 @@ import {
   parseParentNodeReference,
   renderParentDisambiguationReply,
   suggestClosestNode,
+  looksLikeNewWork,
 } from '../../../src/handlers/shared/orchestration-parent-comment';
 
 const NODES: ParentCommentNode[] = [
@@ -138,5 +139,76 @@ describe('renderParentDisambiguationReply', () => {
   test('ambiguous vs none give different lead copy', () => {
     expect(renderParentDisambiguationReply('ambiguous', NODES)).toContain('more than one');
     expect(renderParentDisambiguationReply('none', NODES)).toContain("couldn't tell");
+  });
+
+  test('#247 UX-2: new-work flag leads with the create-a-sub-issue path', () => {
+    const body = renderParentDisambiguationReply('none', NODES, null, true);
+    expect(body).toContain('new work');
+    expect(body).toContain('create a new sub-issue');
+    // Leads with the new-work framing, not the generic "couldn't tell".
+    expect(body).not.toContain("couldn't tell");
+    // Still lists the existing sub-issues for context.
+    expect(body).toContain('ABCA-305');
+    expect(body).toContain('ABCA-306');
+  });
+});
+
+describe('#247 UX-2: suggestClosestNode scores descriptions (not just titles)', () => {
+  // The header node's TITLE has no "blue"/"color"/"yellow"; only its
+  // DESCRIPTION does. The "header color to yellow instead of blue" class of
+  // comment should still surface it as a did-you-mean, the gap that produced a
+  // generic "couldn't tell" in the live UX stress test.
+  const DESC_NODES: ParentCommentNode[] = [
+    {
+      sub_issue_id: 'uuid-h',
+      linear_identifier: 'ABCA-401',
+      title: 'Add a top bar with the site title',
+      description: 'Solid blue (#2563EB) background with white title text.',
+      child_task_id: 't1',
+    },
+    {
+      sub_issue_id: 'uuid-f',
+      linear_identifier: 'ABCA-402',
+      title: 'Add a footer with a copyright line',
+      description: 'Dark background, centered copyright.',
+      child_task_id: 't2',
+    },
+  ];
+
+  test('description word ("blue") surfaces the right node when titles miss', () => {
+    const s = suggestClosestNode('change the color to yellow instead of blue', DESC_NODES);
+    expect(s?.linear_identifier).toBe('ABCA-401');
+  });
+
+  test('a title hit outranks a description-only hit', () => {
+    // "footer" is a significant TITLE word of 402; "blue" is only a DESC word of
+    // 401. Title weight must win.
+    const s = suggestClosestNode('the footer, but more blue', DESC_NODES);
+    expect(s?.linear_identifier).toBe('ABCA-402');
+  });
+
+  test('still returns null when nothing overlaps title or description', () => {
+    expect(suggestClosestNode('ship it when ready', DESC_NODES)).toBeNull();
+  });
+});
+
+describe('#247 UX-2: looksLikeNewWork', () => {
+  test('leading additive verbs are new work', () => {
+    expect(looksLikeNewWork('add a testimonials section with 3 cards')).toBe(true);
+    expect(looksLikeNewWork('also add a pricing table')).toBe(true);
+    expect(looksLikeNewWork('can you create a contact form')).toBe(true);
+    expect(looksLikeNewWork('please build a dark mode toggle')).toBe(true);
+  });
+
+  test('change/edit verbs are NOT new work', () => {
+    expect(looksLikeNewWork('change the footer text to bigger')).toBe(false);
+    expect(looksLikeNewWork('make the colors pop more')).toBe(false);
+    expect(looksLikeNewWork('the footer should be centered')).toBe(false);
+    expect(looksLikeNewWork('ABCA-305: update the copyright')).toBe(false);
+  });
+
+  test('empty / noise instruction is not new work', () => {
+    expect(looksLikeNewWork('')).toBe(false);
+    expect(looksLikeNewWork('looks good, thanks')).toBe(false);
   });
 });
