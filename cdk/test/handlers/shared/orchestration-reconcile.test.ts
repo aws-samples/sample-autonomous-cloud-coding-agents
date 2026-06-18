@@ -19,6 +19,7 @@
 
 import {
   computeReconcilePlan,
+  computeRecoveryPlan,
   type ReconcileChild,
   type TerminalOutcome,
 } from '../../../src/handlers/shared/orchestration-reconcile';
@@ -172,5 +173,107 @@ describe('computeReconcilePlan — orchestrationComplete', () => {
     const plan = computeReconcilePlan({ sub_issue_id: 'A', status: 'FAILED' }, children);
     // A→failed, B→skipped → all terminal.
     expect(plan.orchestrationComplete).toBe(true);
+  });
+});
+
+/** Helper: map sub_issue_id → new status from a recovery plan's updates. */
+function recoveryUpdatesById(
+  plan: ReturnType<typeof computeRecoveryPlan>,
+): Record<string, ChildStatus> {
+  return Object.fromEntries(plan.statusUpdates.map((u) => [u.sub_issue_id, u.child_status]));
+}
+
+describe('computeRecoveryPlan (#75 — comment-fix a failed child re-releases skipped deps)', () => {
+  test('the demo case: BAD failed, DEP skipped → fixing BAD un-fails it + re-releases DEP', () => {
+    // OK succeeded, BAD failed, DEP (deps=BAD) was transitively skipped.
+    const children = [
+      row('OK', 'succeeded'),
+      row('BAD', 'failed'),
+      row('DEP', 'skipped', ['BAD']),
+    ];
+    const plan = computeRecoveryPlan('BAD', children);
+    const u = recoveryUpdatesById(plan);
+    expect(u.BAD).toBe('succeeded'); // un-failed
+    expect(u.DEP).toBe('ready'); // un-skipped, now releasable
+    expect(plan.toRelease).toEqual(['DEP']);
+  });
+
+  test('no-op when the node is not currently failed (healthy iteration)', () => {
+    const children = [row('A', 'succeeded'), row('B', 'released', ['A'])];
+    const plan = computeRecoveryPlan('A', children);
+    expect(plan.statusUpdates).toHaveLength(0);
+    expect(plan.toRelease).toHaveLength(0);
+  });
+
+  test('no-op for an unknown node id', () => {
+    const plan = computeRecoveryPlan('ghost', [row('A', 'failed')]);
+    expect(plan.statusUpdates).toHaveLength(0);
+    expect(plan.toRelease).toHaveLength(0);
+  });
+
+  test('a dependent with ANOTHER still-failed predecessor stays skipped', () => {
+    // D depends on both B and C. B is being fixed, but C is still failed →
+    // D must NOT release (recovery is gated the same as the original).
+    const children = [
+      row('B', 'failed'),
+      row('C', 'failed'),
+      row('D', 'skipped', ['B', 'C']),
+    ];
+    const plan = computeRecoveryPlan('B', children);
+    const u = recoveryUpdatesById(plan);
+    expect(u.B).toBe('succeeded');
+    expect(u.D).toBeUndefined(); // not touched — C still failed
+    expect(plan.toRelease).toEqual([]);
+  });
+
+  test('diamond: fixing the apex re-releases BOTH skipped legs (predecessors satisfied)', () => {
+    // A succeeded feeds B and C; ROOT failed also feeds B and C; D depends on B,C.
+    // Actually model: A(apex) failed, B & C skipped (deps=A), D skipped (deps=B,C).
+    const children = [
+      row('A', 'failed'),
+      row('B', 'skipped', ['A']),
+      row('C', 'skipped', ['A']),
+      row('D', 'skipped', ['B', 'C']),
+    ];
+    const plan = computeRecoveryPlan('A', children);
+    const u = recoveryUpdatesById(plan);
+    expect(u.A).toBe('succeeded');
+    // B and C release now (A succeeded). D does NOT — B/C are only 'ready',
+    // not yet 'succeeded'; D releases later via the forward cascade when B & C land.
+    expect(u.B).toBe('ready');
+    expect(u.C).toBe('ready');
+    expect(u.D).toBeUndefined();
+    expect(plan.toRelease.sort()).toEqual(['B', 'C']);
+  });
+
+  test('chain: fixing the head re-releases only the immediate next node, not the whole chain', () => {
+    // A failed → B,C skipped (B deps A, C deps B). Fixing A frees B only; C waits
+    // for B to actually succeed (forward cascade), not just be released.
+    const children = [
+      row('A', 'failed'),
+      row('B', 'skipped', ['A']),
+      row('C', 'skipped', ['B']),
+    ];
+    const plan = computeRecoveryPlan('A', children);
+    const u = recoveryUpdatesById(plan);
+    expect(u.A).toBe('succeeded');
+    expect(u.B).toBe('ready');
+    expect(u.C).toBeUndefined(); // B is only 'ready', not 'succeeded' → C still waits
+    expect(plan.toRelease).toEqual(['B']);
+  });
+
+  test('integration node re-releases once all its (now-recovered) leaf deps succeeded', () => {
+    // Two leaves: GOOD succeeded, BAD failed; integration (deps GOOD,BAD) skipped.
+    // Fixing BAD makes both leaves succeeded → integration releases.
+    const children = [
+      row('GOOD', 'succeeded'),
+      row('BAD', 'failed'),
+      row('INTEG', 'skipped', ['GOOD', 'BAD']),
+    ];
+    const plan = computeRecoveryPlan('BAD', children);
+    const u = recoveryUpdatesById(plan);
+    expect(u.BAD).toBe('succeeded');
+    expect(u.INTEG).toBe('ready'); // both deps now succeeded
+    expect(plan.toRelease).toEqual(['INTEG']);
   });
 });
