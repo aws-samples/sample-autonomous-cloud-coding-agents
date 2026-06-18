@@ -53,6 +53,7 @@ import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
 import {
   computeReconcilePlan,
+  computeRecoveryPlan,
   type ReconcileChild,
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
@@ -533,6 +534,14 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     return;
   }
 
+  // #247 #75 — RECOVERY cascade. If this successful iteration was a fix on a
+  // node that is currently ``failed`` (a human commented a fix on a ❌ sub-issue),
+  // un-fail it and re-release the dependents that were transitively ``skipped``
+  // when it first failed — so the WHOLE epic can recover, not just this one PR.
+  // No-ops cleanly when the node wasn't failed (the normal forward cascade below
+  // handles a healthy iteration's dependents).
+  await maybeRecoverFailedNode(orchestrationId, snapshot, changedSubIssueId, now);
+
   const steps = planDirectRestack(snapshot.children, changedSubIssueId);
   if (steps.length === 0) {
     logger.info('A6 cascade: no started direct dependents to re-stack', {
@@ -616,6 +625,96 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
         && { channelSource: meta.release_context.channel_source as ChannelSource }),
     });
   }
+}
+
+/**
+ * #247 #75 — RECOVERY cascade. A successful iteration on a node that is
+ * currently ``failed`` (a human commented a fix on a ❌ sub-issue). Un-fail the
+ * node and re-release the dependents that were transitively ``skipped`` when it
+ * first failed, so the whole epic can recover rather than stranding at "finished
+ * with failures". No-ops when the node isn't failed.
+ *
+ * Mirrors {@link reconcileTerminalChild}'s persist-then-release shape:
+ *  1. {@link computeRecoveryPlan} decides the un-fail + un-skip writes.
+ *  2. Persist each conditionally (skip the ones release will flip).
+ *  3. Re-release the freed children via {@link releaseReadyChildren}, honoring
+ *     the user's concurrency budget exactly like the forward path.
+ * Best-effort + idempotent: a redelivered iteration event finds the node already
+ * ``succeeded`` (recovery plan empty) and no-ops.
+ */
+async function maybeRecoverFailedNode(
+  orchestrationId: string,
+  snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>,
+  recoveredSubIssueId: string,
+  now: string,
+): Promise<void> {
+  const children: ReconcileChild[] = snapshot.children.map((c) => ({
+    sub_issue_id: c.sub_issue_id,
+    depends_on: c.depends_on,
+    child_status: c.child_status,
+  }));
+  const plan = computeRecoveryPlan(recoveredSubIssueId, children);
+  if (plan.statusUpdates.length === 0) return; // node wasn't failed — nothing to recover
+
+  logger.info('A6 recovery: un-failing node + re-releasing skipped dependents', {
+    orchestration_id: orchestrationId,
+    recovered_sub_issue_id: recoveredSubIssueId,
+    re_releasing: plan.toRelease.length,
+  });
+
+  // 1. Persist the un-fail + un-skip writes. Release flips the freed rows to
+  //    'released' itself, so skip those here (avoid a double-write race), exactly
+  //    as reconcileTerminalChild does for its toRelease set.
+  for (const update of plan.statusUpdates) {
+    if (plan.toRelease.includes(update.sub_issue_id)) continue;
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+        UpdateExpression: 'SET child_status = :s, updated_at = :now',
+        ConditionExpression: 'child_status <> :s',
+        ExpressionAttributeValues: { ':s': update.child_status, ':now': now },
+      }));
+    } catch (err) {
+      if (isConditionalCheckFailed(err)) continue;
+      throw err;
+    }
+  }
+
+  if (plan.toRelease.length === 0) return;
+
+  // 2. Re-release the freed children against a FRESH read (the un-fail write
+  //    above must be visible), gated on the concurrency budget like the forward
+  //    path. A freed row is currently 'skipped' in the store; releaseReadyChildren
+  //    flips ready→released, so present them as ready.
+  const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  const freshChildren = fresh?.children ?? snapshot.children;
+  const releasableRows = freshChildren
+    .filter((c) => plan.toRelease.includes(c.sub_issue_id))
+    .map((c) => ({ ...c, child_status: 'ready' as const }));
+  if (releasableRows.length === 0) return;
+
+  const releaseCtx = (fresh ?? snapshot).meta.release_context;
+  const budget = USER_CONCURRENCY_TABLE
+    ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
+    : undefined;
+  const results = await releaseReadyChildren(
+    ddb,
+    ORCHESTRATION_TABLE,
+    releasableRows,
+    releaseCtx,
+    createTaskCore,
+    now,
+    freshChildren,
+    'main',
+    budget,
+  );
+  logger.info('A6 recovery: re-released children', {
+    orchestration_id: orchestrationId,
+    recovered_sub_issue_id: recoveredSubIssueId,
+    released: results.filter((r) => r.kind === 'released').length,
+    requested: releasableRows.length,
+  });
 }
 
 /**

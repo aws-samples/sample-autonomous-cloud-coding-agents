@@ -182,3 +182,84 @@ export function computeReconcilePlan(
     orchestrationComplete,
   };
 }
+
+export interface RecoveryPlan {
+  /** Status writes to apply (the un-failed node + any un-skipped dependents). */
+  readonly statusUpdates: readonly StatusUpdate[];
+  /** Sub-issue ids now releasable (un-skipped because predecessors all succeeded). */
+  readonly toRelease: readonly string[];
+}
+
+/**
+ * #247 #75 — RECOVERY cascade. A human fixed a previously-FAILED sub-issue via a
+ * comment (``@bgagent …``), its iteration task just succeeded. The forward
+ * cascade ({@link computeReconcilePlan}) only handles a child reaching terminal
+ * for the FIRST time; it has no path to *un-fail* a child and re-release the
+ * dependents that were transitively ``skipped`` when it first failed. This
+ * computes that recovery:
+ *
+ *   1. Flip the recovered node ``failed`` → ``succeeded``.
+ *   2. Walk its (formerly-skipped) descendants. Any ``skipped`` child whose
+ *      predecessors are now ALL ``succeeded`` becomes releasable (``ready``).
+ *      A descendant with another still-failed/-skipped predecessor stays
+ *      ``skipped`` — recovery is gated the same way the original release was.
+ *   3. Releasing a child can in turn unblock ITS descendants, so this iterates
+ *      to a fixed point (a chain A→B→C recovered at A re-releases B, then B's
+ *      success later re-releases C via the normal forward cascade — but a
+ *      diamond where the fixed node feeds multiple skipped leaves re-releases
+ *      all whose predecessors are satisfied here in one pass).
+ *
+ * Returns empty updates when the node wasn't actually ``failed`` (nothing to
+ * recover — the normal cascade handles a healthy iteration) so the caller can
+ * cheaply no-op. Pure (no I/O); the handler persists + releases.
+ *
+ * @param recoveredSubIssueId the node whose fix-iteration just succeeded.
+ * @param children            current orchestration rows.
+ */
+export function computeRecoveryPlan(
+  recoveredSubIssueId: string,
+  children: readonly ReconcileChild[],
+): RecoveryPlan {
+  const current = children.find((c) => c.sub_issue_id === recoveredSubIssueId);
+  // Only meaningful when the node is currently failed. A healthy iteration on a
+  // succeeded node is the forward cascade's job, not recovery.
+  if (!current || current.child_status !== 'failed') {
+    return { statusUpdates: [], toRelease: [] };
+  }
+
+  const statusOf = new Map<string, ChildStatus>(
+    children.map((c) => [c.sub_issue_id, c.child_status]),
+  );
+  const updates: StatusUpdate[] = [];
+  const setStatus = (id: string, s: ChildStatus): void => {
+    statusOf.set(id, s);
+    updates.push({ sub_issue_id: id, child_status: s });
+  };
+
+  // 1. Un-fail the recovered node.
+  setStatus(recoveredSubIssueId, 'succeeded');
+
+  // 2/3. Re-release skipped descendants whose predecessors are now all
+  //      succeeded, iterating to a fixed point (a freed child can satisfy the
+  //      next one's predecessors in the same pass).
+  const toRelease: string[] = [];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const c of children) {
+      if (statusOf.get(c.sub_issue_id) !== 'skipped') continue;
+      const allSucceeded = c.depends_on.every((dep) => statusOf.get(dep) === 'succeeded');
+      if (allSucceeded) {
+        // A freed child isn't 'succeeded' yet — it must actually run. Mark it
+        // 'ready' here so a downstream sibling in this same pass doesn't treat
+        // it as a satisfied predecessor (it'll flip to 'released' on spawn, then
+        // 'succeeded' when its task lands and the forward cascade frees ITS deps).
+        setStatus(c.sub_issue_id, 'ready');
+        toRelease.push(c.sub_issue_id);
+        changed = true;
+      }
+    }
+  }
+
+  return { statusUpdates: updates, toRelease };
+}
