@@ -1021,7 +1021,18 @@ def run_task(
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
                 build_passed = verify_build(setup.repo_dir, config.build_command)
-                lint_passed = verify_lint(setup.repo_dir, config.lint_command)
+                # #72: when lint is INERT for this repo (no runnable lint task and
+                # no configured lint_command — see repo.py setup), running the
+                # default `mise run lint` would just fail "no such task" and
+                # record a misleading lint_passed=False. Skip the post-agent lint
+                # run entirely in that case and treat lint as passing (it never
+                # gates the verdict regardless; this keeps the persisted signal
+                # honest rather than a false red).
+                if getattr(setup, "lint_gate_inert", False):
+                    log("POST", "Skipping post-agent lint verification (lint gating is INERT for this repo)")
+                    lint_passed = True
+                else:
+                    lint_passed = verify_lint(setup.repo_dir, config.lint_command)
                 pr_url = ensure_pr(
                     config,
                     setup,

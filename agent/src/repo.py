@@ -204,6 +204,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         build_before = True
 
     # Initial lint baseline (record whether lint passes before agent changes)
+    lint_gate_inert = False
     lint_argv = resolve_verify_argv(config.lint_command, DEFAULT_LINT_COMMAND)
     lint_cmd_str = " ".join(lint_argv)
     log("SETUP", f"Running initial lint ({lint_cmd_str})...")
@@ -214,9 +215,24 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         check=False,
     )
     if result.returncode != 0:
-        note = f"Initial lint ({lint_cmd_str}) FAILED before agent changes"
-        notes.append(note)
-        lint_before = False
+        # #72: distinguish "lint couldn't RUN" (no `mise run lint` task and no
+        # configured lint_command — the default fired and the task doesn't exist)
+        # from a genuine lint failure. The former is INERT: recording it as a
+        # red lint baseline is misleading (e.g. a Node repo with no mise lint
+        # task perpetually shows lint FAIL). Only flag inert for the
+        # unconfigured-default case, mirroring build_gate_inert.
+        if not config.lint_command and is_verify_command_inert(result.returncode, result.stderr):
+            lint_gate_inert = True
+            lint_before = True  # no real lint baseline → don't treat as a regression source
+            notes.append(
+                f"Initial lint ({lint_cmd_str}) did not run (no runnable lint task); "
+                "lint verification is INERT for this repo. Set pipeline.lintCommand in the "
+                "repo's blueprint (e.g. 'npm run lint') to enable lint reporting."
+            )
+        else:
+            note = f"Initial lint ({lint_cmd_str}) FAILED before agent changes"
+            notes.append(note)
+            lint_before = False
     else:
         notes.append(f"Initial lint ({lint_cmd_str}): OK")
         lint_before = True
@@ -239,6 +255,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         lint_before=lint_before,
         default_branch=default_branch,
         build_gate_inert=build_gate_inert,
+        lint_gate_inert=lint_gate_inert,
     )
 
 

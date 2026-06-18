@@ -313,6 +313,15 @@ class RepoSetup(BaseModel):
     # surfaces a one-time warning on the PR. Distinct from a genuinely red build
     # (command ran, exited non-zero), which IS meaningful gating signal.
     build_gate_inert: bool = False
+    # #72: same notion for lint. True when the lint verification command is INERT
+    # — could not run at all (no lint task / command not found) AND no explicit
+    # lint_command was configured. In that state lint verification is meaningless
+    # (the default ``mise run lint`` fails for "no such task", not a real lint
+    # error), so lint_passed is treated as inert rather than a genuine FAIL.
+    # Mirrors build_gate_inert. Lint never gates the task verdict regardless
+    # (only a workflow declaring a gating verify_lint step opts in), so this
+    # affects reporting + the persisted lint_passed signal, not pass/fail gating.
+    lint_gate_inert: bool = False
 
 
 class TokenUsage(BaseModel):
