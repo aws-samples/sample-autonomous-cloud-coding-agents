@@ -294,6 +294,16 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("memory_written") is not None:
                 update_parts.append("memory_written = :mw")
                 expr_values[":mw"] = result["memory_written"]
+            # Persist the post-hook verify outcomes so they're observable on the
+            # task record (and visible to the orchestration reconciler / dashboards),
+            # not just consumed in-process by the gate. Absent these, a consumer
+            # can see only `status` and not WHY a task passed/failed verification.
+            if result.get("build_passed") is not None:
+                update_parts.append("build_passed = :bp")
+                expr_values[":bp"] = bool(result["build_passed"])
+            if result.get("lint_passed") is not None:
+                update_parts.append("lint_passed = :lp")
+                expr_values[":lp"] = bool(result["lint_passed"])
             # --trace artifact URI (design §10.1). Written atomically
             # with the terminal-status transition so a consumer that
             # reads TaskRecord.trace_s3_uri immediately after
