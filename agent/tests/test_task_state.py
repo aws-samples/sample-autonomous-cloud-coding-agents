@@ -347,6 +347,62 @@ class TestWriteTerminalArtifactUri:
         )
         assert "artifact_uri" not in calls[0]["UpdateExpression"]
 
+
+class TestWriteTerminalVerifyFlags:
+    """#72: write_terminal persists build_passed / lint_passed onto the task
+    record so post-hook verify outcomes are observable (reconciler, dashboards),
+    not just consumed in-process by the gate. Before this, the fields were
+    absent from the record entirely — a consumer could see only ``status``,
+    never WHY a task passed/failed verification (root-caused on the linear-vercel
+    stress battery: a failed-lint task showed COMPLETED with no verify fields)."""
+
+    def test_build_and_lint_passed_persisted(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-verify",
+            "COMPLETED",
+            {"build_passed": True, "lint_passed": False},
+        )
+        expr = calls[0]["UpdateExpression"]
+        values = calls[0]["ExpressionAttributeValues"]
+        assert "build_passed = :bp" in expr
+        assert "lint_passed = :lp" in expr
+        assert values[":bp"] is True
+        assert values[":lp"] is False
+
+    def test_verify_flags_omitted_when_absent(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-noverify", "COMPLETED", {"pr_url": "x"})
+        expr = calls[0]["UpdateExpression"]
+        assert "build_passed" not in expr
+        assert "lint_passed" not in expr
+
+    def test_false_build_passed_is_persisted_not_skipped(self, monkeypatch):
+        # Guard: build_passed=False must be written (it's the gating signal),
+        # not dropped by a truthiness check — the writer keys off `is not None`.
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-redbuild", "FAILED", {"build_passed": False})
+        assert "build_passed = :bp" in calls[0]["UpdateExpression"]
+        assert calls[0]["ExpressionAttributeValues"][":bp"] is False
+
     def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
         self,
         monkeypatch,
