@@ -42,6 +42,7 @@ import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
 import { ApiError, CliError } from '../errors';
+import { applyDefaultAppId } from '../ua';
 
 const program = new Command();
 
@@ -87,6 +88,10 @@ program.addCommand(makeAdminCommand());
 // program object. Commands under ``cli/src/commands/*`` already export
 // ``makeXxxCommand()`` factories for direct invocation in tests.
 if (require.main === module) {
+  // Default the SDK solution-attribution app-id for this process (#319) before
+  // any AWS SDK client is constructed. Only sets it when unset, so an operator
+  // exporting AWS_SDK_UA_APP_ID='' (or any value) keeps full control.
+  applyDefaultAppId();
   program
     .parseAsync(process.argv)
     .catch((err: unknown) => {

@@ -128,6 +128,8 @@ def _build_scoped_session(role_arn: str) -> Any:
     )
     from botocore.session import get_session as get_botocore_session
 
+    import ua
+
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     task_id = _tags.get("task_id", "")
     # Role session name must be <=64 chars and match [\w+=,.@-]. task_id is a
@@ -138,8 +140,9 @@ def _build_scoped_session(role_arn: str) -> Any:
 
     # A dedicated STS client built from the *ambient* (compute-role) chain.
     # This is the role-chaining caller; the assumed SessionRole credentials it
-    # returns must NOT be used to build it, or refresh would recurse.
-    sts_client = boto3.client("sts", region_name=region)
+    # returns must NOT be used to build it, or refresh would recurse. Carries
+    # the static md/ UA segment so the assume-role call is attributed too.
+    sts_client = boto3.client("sts", region_name=region, config=ua.client_config())
 
     def _refresh() -> dict[str, str]:
         resp = sts_client.assume_role(
@@ -158,6 +161,10 @@ def _build_scoped_session(role_arn: str) -> Any:
         }
 
     botocore_session = get_botocore_session()
+    # Static md/ solution-attribution segment at the session level: it
+    # propagates to every client AND resource derived from this session, so
+    # all tenant-data calls carry it. (#319)
+    botocore_session.user_agent_extra = ua.static_user_agent_extra()
     # Deferred: the first assume_role happens on first credential use, not now,
     # so a transient STS hiccup at startup doesn't crash the agent before it
     # has even begun.
@@ -209,10 +216,19 @@ def get_session() -> Any:
                 ) from exc
         else:
             # Scoping not requested (local/dev/tests, or pre-provisioning):
-            # plain ambient session, behaviorally identical to pre-feature code.
-            _session = boto3.Session(
-                region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-            )
+            # plain ambient session. Built from an explicit botocore session so
+            # the static md/ solution-attribution segment rides every derived
+            # client/resource (propagation requires the botocore session). (#319)
+            from botocore.session import get_session as get_botocore_session
+
+            import ua
+
+            botocore_session = get_botocore_session()
+            botocore_session.user_agent_extra = ua.static_user_agent_extra()
+            region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+            if region:
+                botocore_session.set_config_variable("region", region)
+            _session = boto3.Session(botocore_session=botocore_session)
             _scoped = False
         return _session
 
@@ -224,20 +240,35 @@ def is_scoped() -> bool:
     return bool(_scoped)
 
 
+def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return ``kwargs`` with the static md/ UA merged into any ``config``.
+
+    Preserves a caller-supplied ``botocore.config.Config`` by merging rather
+    than overwriting; supplies one carrying just the UA otherwise. (#319)
+    """
+    import ua
+
+    ua_config = ua.client_config()
+    existing = kwargs.get("config")
+    kwargs["config"] = existing.merge(ua_config) if existing is not None else ua_config
+    return kwargs
+
+
 def tenant_client(service_name: str, **kwargs: Any) -> Any:
     """boto3 client for tenant data.
 
     When the per-task SessionRole is configured, the client is built from the
-    tag-scoped, refreshable session. Otherwise it delegates directly to
-    ``boto3.client`` — behaviorally identical to the pre-feature code path
-    (and transparent to callers/tests that mock ``boto3.client``).
+    tag-scoped, refreshable session (which already carries the static md/ UA at
+    the session level). Otherwise it delegates directly to ``boto3.client`` —
+    behaviorally identical to the pre-feature code path (transparent to
+    callers/tests that mock ``boto3.client``) but with the md/ UA merged in.
     """
     session = get_session()
     if is_scoped():
         return session.client(service_name, **kwargs)
     import boto3
 
-    return boto3.client(service_name, **kwargs)
+    return boto3.client(service_name, **_merge_ua_config(kwargs))
 
 
 def tenant_resource(service_name: str, **kwargs: Any) -> Any:
@@ -247,4 +278,18 @@ def tenant_resource(service_name: str, **kwargs: Any) -> Any:
         return session.resource(service_name, **kwargs)
     import boto3
 
-    return boto3.resource(service_name, **kwargs)
+    return boto3.resource(service_name, **_merge_ua_config(kwargs))
+
+
+def platform_client(service_name: str, **kwargs: Any) -> Any:
+    """boto3 client for **platform** (non-tenant) calls on the ambient chain.
+
+    For the direct ``boto3.client(...)`` sites that deliberately bypass the
+    scoped session (CloudWatch Logs, Secrets Manager, bedrock-agentcore): they
+    talk to platform resources, not tenant data, so they use the compute role's
+    ambient credentials — but should still carry the static md/ solution
+    attribution. Merges the UA into any caller ``config``. (#319)
+    """
+    import boto3
+
+    return boto3.client(service_name, **_merge_ua_config(kwargs))

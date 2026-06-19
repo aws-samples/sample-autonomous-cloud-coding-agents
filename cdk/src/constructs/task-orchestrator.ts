@@ -241,6 +241,8 @@ export class TaskOrchestrator extends Construct {
         retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),
       },
       environment: {
+        // Solution-attribution component label (#319): orchestration plane.
+        ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,

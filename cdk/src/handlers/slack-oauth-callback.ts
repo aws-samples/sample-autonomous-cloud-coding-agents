@@ -23,9 +23,10 @@ import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
+import { abcaUserAgent } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const sm = new SecretsManagerClient({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const sm = new SecretsManagerClient({ ...abcaUserAgent() });
 
 const TABLE_NAME = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const CLIENT_ID_SECRET_ARN = process.env.SLACK_CLIENT_ID_SECRET_ARN!;

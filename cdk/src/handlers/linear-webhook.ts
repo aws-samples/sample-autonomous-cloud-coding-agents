@@ -27,9 +27,10 @@ import {
   verifyLinearRequestForWorkspace,
 } from './shared/linear-verify';
 import { logger } from './shared/logger';
+import { abcaUserAgent } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = new LambdaClient({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const lambdaClient = new LambdaClient({ ...abcaUserAgent() });
 
 const WEBHOOK_SECRET_ARN = process.env.LINEAR_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME!;

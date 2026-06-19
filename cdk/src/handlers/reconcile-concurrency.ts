@@ -19,8 +19,9 @@
 
 import { DynamoDBClient, ScanCommand, QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { logger } from './shared/logger';
+import { abcaUserAgent } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
+const ddb = new DynamoDBClient({ ...abcaUserAgent() });
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;
 

@@ -23,6 +23,7 @@ import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
 import { sanitizeExternalContent } from './sanitization';
 import { type TaskRecord } from './types';
+import { abcaUserAgent } from './ua';
 import { workflowIsReadOnly, workflowUsesPr } from './workflows';
 
 // ---------------------------------------------------------------------------
@@ -130,7 +131,7 @@ const USER_PROMPT_TOKEN_BUDGET = Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? 
 const GITHUB_API_TIMEOUT_MS = 30_000;
 const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
 const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
-const bedrockClient = (GUARDRAIL_ID && GUARDRAIL_VERSION) ? new BedrockRuntimeClient({}) : undefined;
+const bedrockClient = (GUARDRAIL_ID && GUARDRAIL_VERSION) ? new BedrockRuntimeClient({ ...abcaUserAgent() }) : undefined;
 if (GUARDRAIL_ID && !GUARDRAIL_VERSION) {
   logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
     metric_type: 'guardrail_misconfiguration',
@@ -314,7 +315,7 @@ const tokenCache = new Map<string, { token: string; expiresAt: number }>();
 const SECRET_CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = SECRET_CACHE_TTL_MINUTES * 60 * 1000; // 5 minutes
 
-const smClient = new SecretsManagerClient({});
+const smClient = new SecretsManagerClient({ ...abcaUserAgent() });
 
 /**
  * Resolve the GitHub token from Secrets Manager with per-ARN caching.

@@ -53,6 +53,7 @@ import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
 
 // Re-export the shared types so existing test imports (and any future
@@ -362,7 +363,7 @@ export function shouldFanOut(event: FanOutEvent, overrides?: TaskNotificationsCo
  * internally (the Slack API rejecting a message — e.g.
  * ``channel_not_found`` — is not recoverable by a Lambda retry).
  */
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 
 /**
  * Slack dispatcher — hands the event to the in-module

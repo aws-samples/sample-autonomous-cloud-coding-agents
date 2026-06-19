@@ -149,6 +149,16 @@ describe('TaskApi construct', () => {
     }
   });
 
+  test('REST API Lambdas carry the ABCA_COMPONENT=api solution-attribution label (#319)', () => {
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const fnIds = Object.keys(functions);
+    expect(fnIds.length).toBeGreaterThan(0);
+    for (const fnId of fnIds) {
+      const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
+      expect(envVars).toHaveProperty('ABCA_COMPONENT', 'api');
+    }
+  });
+
   test('creates API resources for /tasks and /tasks/{task_id}', () => {
     baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'tasks',

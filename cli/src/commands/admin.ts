@@ -29,6 +29,7 @@ import { Command } from 'commander';
 import { getConfigDir, loadConfig, SECRET_FILE_MODE } from '../config';
 import { CliError } from '../errors';
 import { CliConfig } from '../types';
+import { abcaUserAgent } from '../ua';
 
 /**
  * Generate a strong temporary password meeting Cognito's default policy:
@@ -151,7 +152,7 @@ export function makeAdminCommand(): Command {
 
         const tempPassword = opts.tempPassword ?? generateTempPassword();
 
-        const cognito = new CognitoIdentityProviderClient({ region });
+        const cognito = new CognitoIdentityProviderClient({ region, ...abcaUserAgent() });
         try {
           await cognito.send(new AdminCreateUserCommand({
             UserPoolId: config.user_pool_id,

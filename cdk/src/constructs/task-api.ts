@@ -474,6 +474,10 @@ export class TaskApi extends Construct {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
+      // Solution-attribution component label (#319): the `md/` segment for the
+      // REST API surface. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
+      // set separately by the stack-level SolutionUaAspect.
+      ABCA_COMPONENT: 'api',
     };
     // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
     // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
@@ -962,6 +966,9 @@ export class TaskApi extends Construct {
       const webhookEnv: Record<string, string> = {
         WEBHOOK_TABLE_NAME: props.webhookTable.tableName,
         WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
+        // Solution-attribution component label (#319): webhook ingest surface.
+        // (webhookEnv does NOT spread commonEnv, so set it explicitly here.)
+        ABCA_COMPONENT: 'webhook',
       };
 
       // --- Webhook management Lambdas (Cognito-authenticated) ---

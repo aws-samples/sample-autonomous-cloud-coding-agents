@@ -32,8 +32,9 @@ import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-li
 import { checkRepoOnboarded, loadRepoConfig } from './shared/repo-config';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPoliciesResponse, PolicyRuleSummary } from './shared/types';
+import { abcaUserAgent } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const POLICIES_RATE_LIMIT_PER_MINUTE = Number(process.env.POLICIES_RATE_LIMIT_PER_MINUTE ?? '30');
 
