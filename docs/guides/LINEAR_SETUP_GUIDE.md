@@ -184,22 +184,16 @@ If you apply the trigger label to a **parent issue that has sub-issues**, ABCA o
 4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
 5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
 
-Notes and current limitations:
+### Adding a sub-issue to a running (or finished) epic
 
-- The parent issue itself spawns **no task** — a human-authored sub-issue graph is treated as consent to execute.
-- **No "cancel the whole epic" button yet.** Cancelling an individual sub-issue's task (`bgagent cancel <task-id>`) stops it and skips its dependents, but there is no single command to cancel a whole in-flight orchestration. Tracked as a follow-up.
-- A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
-- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
+The graph is read **at trigger time**, so a sub-issue created after the epic started is *not* picked up automatically. To fold it in:
 
-## Parent/sub-issue orchestration
+1. Create the new sub-issue under the same parent, with its `blocked by` edges to any sub-issues it depends on.
+2. **Re-apply the trigger label to the parent** (remove it and add it again, or add it if it was removed).
 
-If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:
+ABCA diffs the current Linear graph against what it already has, adds only the genuinely-new node(s), and releases any that are immediately runnable (their predecessors already succeeded); the rest wait their turn. Re-applying the label with no new sub-issues is a safe no-op.
 
-1. **Discovery** — it reads the sub-issues and their `blocked by` / `blocking` relations, builds a dependency graph (DAG), and rejects cycles with a terminal comment on the parent.
-2. **Dependency-ordered execution** — root sub-issues (no blockers) start immediately; a blocked sub-issue does not start until **all** its blockers reach terminal-success (a sub-issue that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
-3. **Stacked PRs** — a sub-issue with a single predecessor branches from that predecessor's branch (so it sees its code before merge); a sub-issue with multiple predecessors branches from the default branch and merges all predecessor branches in. Review/merge the resulting stack bottom-up.
-4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
-5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
+> **Why it isn't automatic:** re-applying the label is the explicit "execute this" signal — the same consent model as the initial trigger — so newly-drafted sub-issues don't start running the instant you create them. Automatic pickup on sub-issue creation is a possible future enhancement.
 
 Notes and current limitations:
 
