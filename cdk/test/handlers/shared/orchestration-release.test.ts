@@ -368,6 +368,73 @@ describe('releaseReadyChildren — #331 concurrency throttle', () => {
   });
 });
 
+describe('releaseReadyChildren — #76 concurrent batch release', () => {
+  const readyRows = (n: number): OrchestrationChildRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeRow({ sub_issue_id: `L${String(i).padStart(2, '0')}`, child_status: 'ready', depends_on: [] }));
+
+  test('releases the batch CONCURRENTLY, not serially (createTaskCore calls overlap)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    let inFlight = 0;
+    let maxInFlight = 0;
+    // Each createTaskCore holds for a tick; if releases were serial, maxInFlight
+    // would never exceed 1. Concurrent release drives it to the batch size.
+    let i = 0;
+    const createTaskCore = jest.fn().mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return { statusCode: 201, body: JSON.stringify({ data: { task_id: `T-${i++}` } }) };
+    });
+    const rows = readyRows(5);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', undefined,
+    );
+    expect(results.filter((r) => r.kind === 'released')).toHaveLength(5);
+    expect(maxInFlight).toBeGreaterThan(1); // proves concurrency (serial would be 1)
+  });
+
+  test('one child failing does NOT reject the batch — others still release (isolation preserved)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    // 2nd createTaskCore returns a 400 (create_failed); 1st + 3rd succeed.
+    let n = 0;
+    const createTaskCore = jest.fn().mockImplementation(() => {
+      const idx = n++;
+      if (idx === 1) return Promise.resolve({ statusCode: 400, body: '{"error":"bad"}' });
+      return Promise.resolve({ statusCode: 201, body: JSON.stringify({ data: { task_id: `T-${idx}` } }) });
+    });
+    const rows = readyRows(3);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', undefined,
+    );
+    // Batch resolved (no throw); 2 released, 1 create_failed.
+    expect(results).toHaveLength(3);
+    expect(results.filter((r) => r.kind === 'released')).toHaveLength(2);
+    expect(results.filter((r) => r.kind === 'create_failed')).toHaveLength(1);
+  });
+
+  test('a createTaskCore that THROWS still does not reject the batch (returns kind=error)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    let n = 0;
+    const createTaskCore = jest.fn().mockImplementation(() => {
+      const idx = n++;
+      if (idx === 0) return Promise.reject(new Error('network blip'));
+      return Promise.resolve({ statusCode: 201, body: JSON.stringify({ data: { task_id: `T-${idx}` } }) });
+    });
+    const rows = readyRows(2);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', undefined,
+    );
+    expect(results).toHaveLength(2);
+    expect(results.filter((r) => r.kind === 'error')).toHaveLength(1);
+    expect(results.filter((r) => r.kind === 'released')).toHaveLength(1);
+  });
+});
+
 describe('readConcurrencyBudget — #331', () => {
   test('free budget = cap - active_count', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({ Item: { active_count: 3 } }) };
