@@ -64,6 +64,16 @@ import type { ChannelSource } from './types';
 const DEFAULT_ORCHESTRATION_CHANNEL: ChannelSource = 'linear';
 
 /**
+ * #247 perf (#76): max children released in parallel per chunk. Bounds the
+ * simultaneous createTaskCore + conditional-write fan-out so a very wide epic
+ * doesn't fire dozens of concurrent calls (DDB write throttling / downstream
+ * pressure), while still collapsing the old serial (N-1)·RTT release latency.
+ * Matches the typical per-user concurrency cap (#331) so we never release more
+ * at once than admission would let run anyway.
+ */
+const RELEASE_PARALLELISM = 10;
+
+/**
  * #331: read a user's free concurrency budget (``cap - active_count``) so a
  * release pass throttles to it instead of over-releasing children that admission
  * control would then hard-fail. Best-effort: on any read error returns the full
@@ -358,8 +368,20 @@ export async function releaseReadyChildren(
       budget: maxToRelease,
     });
   }
-  const results: ReleaseChildResult[] = [];
-  for (const row of releasable) {
+  // #247 perf (#76): release the batch CONCURRENTLY but BOUNDED. Each releasable
+  // child is independent — its base branch derives from its predecessors'
+  // ALREADY-PERSISTED ``child_branch_name`` (read into ``branchOf`` above), never
+  // from a sibling released in this same batch. Proof: any row that depended on
+  // another row in this batch would still be ``blocked`` (its predecessor isn't
+  // ``succeeded`` yet), not ``ready`` — so it wouldn't be in ``releasable``.
+  // Serial awaiting N createTaskCore round-trips delayed the LAST leaf's start by
+  // (N-1)·RTT on a wide fan-out; releasing in parallel collapses that. We bound
+  // the parallelism (chunks of RELEASE_PARALLELISM) rather than an unbounded
+  // Promise.all so a 50-leaf epic doesn't fire 50 simultaneous createTaskCore +
+  // DDB writes (throttling / downstream pressure). Each release is already
+  // failure-isolated (releaseChild returns a result, never throws), so one
+  // child's create_failed never rejects the batch.
+  const releaseOne = (row: OrchestrationChildRow): Promise<ReleaseChildResult> => {
     // Derive the base from this child's predecessors' persisted branches.
     const selection = selectBaseBranch({
       predecessors: row.depends_on.map((sub) => ({
@@ -368,7 +390,7 @@ export async function releaseReadyChildren(
       })),
       defaultBranch,
     });
-    results.push(await releaseChild({
+    return releaseChild({
       ddb,
       tableName,
       row,
@@ -393,7 +415,14 @@ export async function releaseReadyChildren(
       ...(selection.merge_branches.length > 0 && { mergeBranches: selection.merge_branches }),
       createTaskCore,
       now,
-    }));
+    });
+  };
+
+  const results: ReleaseChildResult[] = [];
+  for (let i = 0; i < releasable.length; i += RELEASE_PARALLELISM) {
+    const chunk = releasable.slice(i, i + RELEASE_PARALLELISM);
+    // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism -- bounded: chunk size is RELEASE_PARALLELISM (a fixed constant), not program input
+    results.push(...await Promise.all(chunk.map(releaseOne)));
   }
   return results;
 }
