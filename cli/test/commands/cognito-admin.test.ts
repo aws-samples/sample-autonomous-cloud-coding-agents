@@ -203,6 +203,22 @@ describe('resolveCognitoUsername', () => {
     await expect(resolveCognitoUsername(client, 'pool', 'missing@example.com'))
       .rejects.toThrow(/not found/);
   });
+
+  test('rejects emails containing a double-quote', async () => {
+    const client = { send: cognitoSend } as never;
+
+    await expect(resolveCognitoUsername(client, 'pool', 'bad"@example.com'))
+      .rejects.toThrow(/quote or backslash/);
+    expect(cognitoSend).not.toHaveBeenCalled();
+  });
+
+  test('rejects emails containing a backslash', async () => {
+    const client = { send: cognitoSend } as never;
+
+    await expect(resolveCognitoUsername(client, 'pool', 'bad\\@example.com'))
+      .rejects.toThrow(/quote or backslash/);
+    expect(cognitoSend).not.toHaveBeenCalled();
+  });
 });
 
 describe('assertLikelyEmail', () => {

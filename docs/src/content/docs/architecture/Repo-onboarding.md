@@ -21,9 +21,26 @@ Repositories vary in ways that affect how the agent works: different languages, 
 
 ## Onboarding mechanism
 
-Onboarding is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no runtime API for repo CRUD.
+The **canonical** onboarding path is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no **task-submitter** REST API for repo CRUD — the orchestrator gate reads `RepoTable` at runtime.
 
 This treats blueprints as infrastructure, not runtime config. Each repo's blueprint defines AWS resources (compute, networking, credentials). CDK manages the lifecycle. The gate (rejecting tasks for non-onboarded repos) reads DynamoDB at runtime, keeping the runtime path simple.
+
+### Operator CLI path (day-2)
+
+For operators with IAM access to the deployed stack, `bgagent repo onboard` and `bgagent repo offboard` write `RepoTable` directly (no Cognito login, no CDK redeploy). This path ships in [#378](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/378) / PR [#385](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/385) ahead of a future `POST /v1/repos` API.
+
+| Aspect | CDK `Blueprint` | `bgagent repo onboard` / `offboard` |
+|--------|-----------------|-------------------------------------|
+| **Who** | Deploy role at `mise //cdk:deploy` | Operator AWS credentials (`operator-context`) |
+| **What it writes** | Full `RepoConfig` + supporting AWS resources | `RepoTable` row only (same schema) |
+| **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
+| **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
+| **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
+| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/architecture/adr-017-operator-cli-repo-onboarding)) |
+
+Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
+
+See also: [Using the CLI — operator commands](/using/overview#operator-commands-stack-admin) and [ADR-017](/architecture/adr-017-operator-cli-repo-onboarding).
 
 ### Blueprint construct
 

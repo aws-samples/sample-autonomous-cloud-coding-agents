@@ -287,11 +287,13 @@ export async function resolveCognitoUsername(
     return emailOrUsername;
   }
 
-  // Guard the ListUsers Filter interpolation: a double-quote would break the
-  // filter syntax (and is never valid in an email). Command-level callers run
-  // assertLikelyEmail, but this is exported, so defend it independently.
-  if (emailOrUsername.includes('"')) {
-    throw new CliError(`Invalid email '${emailOrUsername}': contains a quote character.`);
+  // Guard the ListUsers Filter interpolation: double-quote and backslash are
+  // filter metacharacters (and never valid in an email). Command-level callers
+  // run assertLikelyEmail, but this is exported, so defend it independently.
+  if (emailOrUsername.includes('"') || emailOrUsername.includes('\\')) {
+    throw new CliError(
+      `Invalid email '${emailOrUsername}': contains a quote or backslash character.`,
+    );
   }
 
   const result = await client.send(new ListUsersCommand({
