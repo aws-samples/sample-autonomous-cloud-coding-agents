@@ -35,6 +35,7 @@ import {
   ErrorResponse,
   GetPendingResponse,
   GetPoliciesResponse,
+  JiraLinkResponse,
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
@@ -435,6 +436,17 @@ export class ApiClient {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
     const res = await this.request<SuccessResponse<LinearLinkResponse>>('POST', '/linear/link', body);
+    return res.data;
+  }
+
+  /** POST /jira/link — link a Jira account using a verification code.
+   *
+   * `dryRun: true` returns the identity attached to the code without
+   * writing the mapping. Mirrors linearLink. */
+  async jiraLink(code: string, opts: { dryRun?: boolean } = {}): Promise<JiraLinkResponse> {
+    const body: Record<string, unknown> = { code };
+    if (opts.dryRun) body.dry_run = true;
+    const res = await this.request<SuccessResponse<JiraLinkResponse>>('POST', '/jira/link', body);
     return res.data;
   }
 }

@@ -52,14 +52,29 @@
         "lambda:GetProvisionedConcurrencyConfig",
         "lambda:GetRuntimeManagementConfig",
         "lambda:ListVersionsByFunction",
-        "lambda:InvokeFunction"
+        "lambda:InvokeFunction",
+        "lambda:PublishLayerVersion",
+        "lambda:DeleteLayerVersion",
+        "lambda:GetLayerVersion"
       ],
       "Effect": "Allow",
       "Resource": [
         "arn:aws:lambda:*:*:function:backgroundagent-dev-*",
-        "arn:aws:lambda:*:*:function:backgroundagent-dev-AWS*"
+        "arn:aws:lambda:*:*:function:backgroundagent-dev-AWS*",
+        "arn:aws:lambda:*:*:layer:*"
       ],
       "Sid": "Lambda"
+    },
+    {
+      "Action": [
+        "lambda:CreateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping",
+        "lambda:UpdateEventSourceMapping",
+        "lambda:GetEventSourceMapping"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "LambdaEventSourceMappings"
     },
     {
       "Action": [
@@ -139,6 +154,39 @@
     },
     {
       "Action": [
+        "sqs:CreateQueue",
+        "sqs:DeleteQueue",
+        "sqs:GetQueueAttributes",
+        "sqs:SetQueueAttributes",
+        "sqs:TagQueue",
+        "sqs:UntagQueue",
+        "sqs:GetQueueUrl",
+        "sqs:ListQueueTags"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*",
+      "Sid": "SQS"
+    },
+    {
+      "Action": [
+        "cloudfront:CreateDistribution",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:GetDistribution",
+        "cloudfront:TagResource",
+        "cloudfront:UntagResource",
+        "cloudfront:ListTagsForResource",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:UpdateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:GetOriginAccessControl"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "CloudFront"
+    },
+    {
+      "Action": [
         "secretsmanager:CreateSecret",
         "secretsmanager:DeleteSecret",
         "secretsmanager:DescribeSecret",
@@ -154,7 +202,11 @@
       "Effect": "Allow",
       "Resource": [
         "arn:aws:secretsmanager:*:*:secret:backgroundagent-*",
-        "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*"
+        "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*",
+        "arn:aws:secretsmanager:*:*:secret:SlackIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:LinearIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*",
+        "arn:aws:secretsmanager:*:*:secret:bgagent/*"
       ],
       "Sid": "SecretsManager"
     },

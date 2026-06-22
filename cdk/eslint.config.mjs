@@ -158,9 +158,8 @@ export default [
       // TypeScript rules
       // AI007 guard (#258): inline numeric literals should be named constants.
       // Values shared across Python/TypeScript belong in contracts/constants.json
-      // (see contracts/constants.md). Advisory ('warn') until the existing
-      // baseline is cleaned up, then this becomes 'error' like in cli/.
-      '@typescript-eslint/no-magic-numbers': ['warn', {
+      // (see contracts/constants.md). Baseline cleaned in #312; blocking like cli/.
+      '@typescript-eslint/no-magic-numbers': ['error', {
         ignore: [
           // Identity / trivial arithmetic
           -1, 0, 1, 2,

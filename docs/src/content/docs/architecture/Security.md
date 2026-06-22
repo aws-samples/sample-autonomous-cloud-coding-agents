@@ -7,7 +7,7 @@ title: Security
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 
 - **Use this doc for:** understanding the security boundaries, what can go wrong, and how the platform mitigates each threat.
-- **Related docs:** [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for runtime isolation details, [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/sample-autonomous-cloud-coding-agents/architecture/input-gateway) for authentication flows.
+- **Related docs:** [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for runtime isolation details, [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/sample-autonomous-cloud-coding-agents/architecture/input-gateway) for authentication flows, [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) for the worked identity/auth examples and the credential-plane direction.
 
 ## Design principle
 
@@ -40,7 +40,7 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 **Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap)).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap), the [ADR-016](/sample-autonomous-cloud-coding-agents/architecture/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) worked examples).
 
 **Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole` or the ECS Fargate task role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
 

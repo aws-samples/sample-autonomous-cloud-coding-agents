@@ -195,8 +195,9 @@ class TaskConfig(BaseModel):
     pr_number: str = ""
     task_id: str = ""
     # Inbound channel the task was submitted from (mirrors ChannelSource in
-    # cdk/src/handlers/shared/types.ts). Gates channel-specific MCP wiring and
-    # prompt additions. Empty string means "no channel context" (legacy / local).
+    # cdk/src/handlers/shared/types.ts: api | webhook | slack | linear | jira).
+    # Gates channel-specific MCP wiring and prompt additions. Empty string means
+    # "no channel context" (legacy / local).
     channel_source: str = ""
     channel_metadata: dict[str, str] = Field(default_factory=dict)
     # Platform user_id (Cognito ``sub``) threaded from the orchestrator

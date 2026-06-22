@@ -74,7 +74,7 @@ export function tryLoadConfig(): CliConfig | null {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf-8')) as CliConfig;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- corrupt config file treated as absent; caller falls back to configure flow
   }
 }
 

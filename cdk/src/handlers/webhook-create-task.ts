@@ -34,7 +34,11 @@ const SECRET_PREFIX = 'bgagent/webhook/';
 
 // In-memory secret cache with 5-minute TTL
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+
+/** Length of the ``sha256=`` prefix GitHub-style signatures carry. */
+const SIGNATURE_PREFIX_LENGTH = 'sha256='.length;
 
 async function getSecret(webhookId: string): Promise<string | null> {
   const now = Date.now();
@@ -59,7 +63,7 @@ async function getSecret(webhookId: string): Promise<string | null> {
     const errorName = (err as Error)?.name;
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Webhook secret not found in Secrets Manager', { webhook_id: webhookId });
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing per-webhook secret is an expected config state; other SM errors rethrow below
     }
     logger.error('Failed to fetch webhook secret from Secrets Manager', {
       webhook_id: webhookId,
@@ -77,7 +81,7 @@ function verifySignature(body: string, secret: string, signature: string): boole
     return false;
   }
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-  const providedHex = signature.startsWith('sha256=') ? signature.slice(7) : signature;
+  const providedHex = signature.startsWith('sha256=') ? signature.slice(SIGNATURE_PREFIX_LENGTH) : signature;
 
   try {
     return crypto.timingSafeEqual(
