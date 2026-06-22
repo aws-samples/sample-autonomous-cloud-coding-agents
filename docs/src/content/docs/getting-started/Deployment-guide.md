@@ -4,7 +4,7 @@ title: Deployment guide
 
 # Deployment guide
 
-This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/developer-guide/introduction). For a quick first deployment, see the [Quick start](/getting-started/quick-start). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/architecture/deployment-roles).
+This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/developer-guide/introduction). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/architecture/deployment-roles).
 
 ## Architecture overview
 
@@ -228,7 +228,7 @@ For users without AWS CLI access.
 
 ## Related docs
 
-- [Quick start](/getting-started/quick-start) -- Zero-to-first-PR in 6 steps.
+- [Quick start](./QUICK_START.mdx) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](/developer-guide/introduction) -- Local development, testing, repository onboarding.
 - [User guide](/using/overview) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.

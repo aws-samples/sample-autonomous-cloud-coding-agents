@@ -18,7 +18,7 @@ Describe what you intend to contribute. This avoids duplicate work and gives mai
 
 ### 2. Set up your environment
 
-Follow the [Quick Start](/getting-started/quick-start) to clone, install, and build the project. See the [Developer guide](/developer-guide/introduction) for local testing and the development workflow.
+Follow the [Quick Start](./docs/guides/QUICK_START.mdx) to clone, install, and build the project. See the [Developer guide](/developer-guide/introduction) for local testing and the development workflow.
 
 Use **[AGENTS.md](/architecture/agents)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks).
 
