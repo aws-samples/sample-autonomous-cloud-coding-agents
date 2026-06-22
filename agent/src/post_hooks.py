@@ -445,8 +445,7 @@ def post_self_review_comment(repo_dir: str, pr_url: str, config: TaskConfig) -> 
         stderr = result.stderr.strip()[:200] if result.stderr else ""
         log(
             "WARN",
-            f"post_self_review_comment: gh pr comment failed "
-            f"(rc={result.returncode}): {stderr}",
+            f"post_self_review_comment: gh pr comment failed (rc={result.returncode}): {stderr}",
         )
         return False
     except (subprocess.TimeoutExpired, OSError) as e:

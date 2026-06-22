@@ -375,6 +375,10 @@ def _milestone(ctx: StepContext, milestone: str) -> None:
 # pipeline.py) to avoid pulling the SDK / boto3 at module import and to keep the
 # orchestration core importable in isolation for tests.
 
+# Default turn cap for a self_review step that omits max_turns (kept in sync
+# with the schema's self_review max_turns default and self_review.py).
+_DEFAULT_SELF_REVIEW_MAX_TURNS = 5
+
 
 def _handle_clone_repo(step: Step, ctx: StepContext) -> StepOutcome:
     """Clone + prepare the repo (replaces the inline ``setup_repo`` call).
@@ -560,6 +564,72 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
     )
 
 
+def _handle_self_review(step: Step, ctx: StepContext) -> StepOutcome:
+    """Have the agent critique its own diff and fix issues before the PR opens.
+
+    Declaring a ``self_review`` step in the workflow *is* the enablement — there
+    is no separate feature flag. The step runs a second, review-focused
+    ``run_agent`` loop over the cumulative branch diff (``self_review.run_self_review``),
+    capped at ``step.max_turns`` turns (default 5) drawn from the task's
+    remaining turn/budget allowance, and accumulates the review's turns/cost back
+    onto ``ctx.agent_result`` so the terminal result reflects the full task.
+
+    Authored as an advisory step (``on_failure: continue``): a review that is
+    skipped (read-only, no diff, no remaining turns) or fails is recorded but
+    never blocks PR creation — matching the original fail-open design. The
+    summary the review agent writes is posted as a PR comment by the pipeline
+    after ``ensure_pr`` (``self_review_ran`` in this outcome's data signals it).
+    """
+    if ctx.setup is None:
+        return StepOutcome(
+            kind=step.kind,
+            name=_step_key(step),
+            status="failed",
+            error="self_review requires a cloned repo (no clone_repo step ran)",
+        )
+    if ctx.agent_result is None:
+        return StepOutcome(
+            kind=step.kind,
+            name=_step_key(step),
+            status="failed",
+            error="self_review requires a prior run_agent result to size its turn budget",
+        )
+
+    from self_review import run_self_review
+
+    review_result = run_self_review(
+        ctx.config,
+        ctx.setup,
+        ctx.agent_result,
+        ctx.trajectory,
+        ctx.progress,
+        max_turns=step.max_turns or _DEFAULT_SELF_REVIEW_MAX_TURNS,
+    )
+    if review_result is None:
+        # Skipped (read-only / empty diff / no remaining turns) — not a failure.
+        return StepOutcome(
+            kind=step.kind,
+            name=_step_key(step),
+            status="succeeded",
+            data={"self_review_ran": False},
+        )
+
+    # Accumulate the review phase's turns/cost onto the running agent result so
+    # the terminal TaskResult reflects the whole task (implement + review).
+    ar = ctx.agent_result
+    ar.turns += review_result.turns
+    ar.num_turns += review_result.num_turns or review_result.turns
+    if review_result.cost_usd is not None:
+        ar.cost_usd = (ar.cost_usd or 0.0) + review_result.cost_usd
+
+    return StepOutcome(
+        kind=step.kind,
+        name=_step_key(step),
+        status="succeeded",
+        data={"self_review_ran": True, "review_status": review_result.status},
+    )
+
+
 def _handle_ensure_pr(step: Step, ctx: StepContext) -> StepOutcome:
     """Create / push+resolve / resolve a PR per the step's ``strategy``.
 
@@ -645,6 +715,7 @@ STEP_HANDLERS: dict[str, StepHandler] = {
     "run_agent": _handle_run_agent,
     "verify_build": _handle_verify_build,
     "verify_lint": _handle_verify_lint,
+    "self_review": _handle_self_review,
     "ensure_pr": _handle_ensure_pr,
     "post_review": _handle_post_review,
     "deliver_artifact": _handle_deliver_artifact,

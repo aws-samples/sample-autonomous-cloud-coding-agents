@@ -240,9 +240,6 @@ class TaskConfig(BaseModel):
     # Attachments from the orchestrator payload (Phase 3). Validated as
     # AttachmentConfig models. Empty list for tasks without attachments.
     attachments: list[AttachmentConfig] = Field(default_factory=list)
-    # Self-review: optional LLM diff critique before PR creation.
-    self_review_enabled: bool = False
-    self_review_max_turns: int = 5  # Cap on turns allocated to self-review
 
     @model_validator(mode="after")
     def _validate_trace_requires_user_id(self) -> Self:

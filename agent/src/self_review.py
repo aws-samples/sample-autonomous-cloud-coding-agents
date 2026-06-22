@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 # Diff truncation limit (characters). Large diffs are cut at hunk boundaries.
 _MAX_DIFF_CHARS = 60_000
 
+# Default cap on review-loop turns when the ``self_review`` step omits max_turns.
+_DEFAULT_REVIEW_MAX_TURNS = 5
+
 # Minimal system prompt for the self-review agent invocation.
 _REVIEW_SYSTEM_PROMPT = """\
 You are a code reviewer working inside the repository {repo_url} on branch {branch_name}.
@@ -90,23 +93,31 @@ def _build_review_system_prompt(config: TaskConfig, setup: RepoSetup) -> str:
     )
 
 
+def _milestone(progress: _ProgressWriter | None, name: str, detail: str) -> None:
+    """Emit a progress milestone if a writer is wired up (no-op otherwise)."""
+    if progress is not None:
+        progress.write_agent_milestone(name, detail)
+
+
 def run_self_review(
     config: TaskConfig,
     setup: RepoSetup,
     agent_result: AgentResult,
-    trajectory: _TrajectoryWriter,
-    progress: _ProgressWriter,
+    trajectory: _TrajectoryWriter | None,
+    progress: _ProgressWriter | None,
+    *,
+    max_turns: int = _DEFAULT_REVIEW_MAX_TURNS,
 ) -> AgentResult | None:
     """Run the self-review phase: LLM critiques its own diff and fixes issues.
+
+    Invoked by the ``self_review`` workflow step handler. The step's presence in
+    the resolved workflow is the enablement signal — there is no separate
+    feature flag; ``max_turns`` comes from the step (``self_review.max_turns``,
+    default 5) and caps the review loop within the task's remaining allowance.
 
     Returns the AgentResult from the review phase, or None if skipped.
     Fail-open: errors are logged but never block the pipeline.
     """
-    # Skip condition: feature disabled
-    if not config.self_review_enabled:
-        log("TASK", "self_review: disabled (self_review_enabled=False)")
-        return None
-
     # Skip condition: read-only workflows produce no diff to review
     if config.read_only:
         log("TASK", "self_review: skipped for read-only workflow")
@@ -115,7 +126,7 @@ def run_self_review(
     # Compute remaining turns
     used_turns = agent_result.turns or 0
     remaining_turns = config.max_turns - used_turns
-    review_turns = min(remaining_turns, config.self_review_max_turns)
+    review_turns = min(remaining_turns, max_turns)
     if review_turns <= 0:
         log("TASK", f"self_review: no remaining turns (used={used_turns}, max={config.max_turns})")
         return None
@@ -162,7 +173,8 @@ def run_self_review(
         f"budget={'$' + f'{review_budget:.2f}' if review_budget else 'unlimited'}, "
         f"diff_chars={len(diff)})",
     )
-    progress.write_agent_milestone(
+    _milestone(
+        progress,
         "self_review_started",
         f"turns={review_turns} diff_chars={len(diff)}",
     )
@@ -182,7 +194,8 @@ def run_self_review(
     except Exception as e:
         # Fail-open: self-review errors never block the pipeline
         log("WARN", f"self_review: agent execution failed: {type(e).__name__}: {e}")
-        progress.write_agent_milestone(
+        _milestone(
+            progress,
             "self_review_complete",
             f"status=error error={type(e).__name__}: {e}",
         )
@@ -193,7 +206,8 @@ def run_self_review(
         f"self_review: complete (status={review_result.status}, "
         f"turns={review_result.turns}, cost=${review_result.cost_usd or 0:.4f})",
     )
-    progress.write_agent_milestone(
+    _milestone(
+        progress,
         "self_review_complete",
         f"status={review_result.status} turns={review_result.turns}",
     )

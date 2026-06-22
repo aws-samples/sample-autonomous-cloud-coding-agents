@@ -1,6 +1,5 @@
 """Unit tests for self_review.py — self-review orchestration module."""
 
-import os
 from unittest.mock import MagicMock, patch
 
 from models import AgentResult, RepoSetup, TaskConfig
@@ -16,63 +15,42 @@ from self_review import (
 
 def _make_config(**overrides) -> TaskConfig:
     """Create a minimal TaskConfig for testing."""
-    defaults = {
-        "repo_url": "owner/repo",
-        "github_token": "ghp_test123",
-        "aws_region": "us-east-1",
-        "task_description": "Fix the bug",
-        "max_turns": 10,
-        "self_review_enabled": True,
-        "self_review_max_turns": 5,
-        "task_type": "new_task",
-    }
-    defaults.update(overrides)
-    return TaskConfig(**defaults)
+    base = TaskConfig(
+        repo_url="owner/repo",
+        github_token="ghp_test123",
+        aws_region="us-east-1",
+        task_description="Fix the bug",
+        max_turns=10,
+    )
+    return base.model_copy(update=overrides) if overrides else base
 
 
 def _make_setup(**overrides) -> RepoSetup:
     """Create a minimal RepoSetup for testing."""
-    defaults = {
-        "repo_dir": "/workspace/repo",
-        "branch": "feat/123-fix",
-        "default_branch": "main",
-    }
-    defaults.update(overrides)
-    return RepoSetup(**defaults)
+    base = RepoSetup(
+        repo_dir="/workspace/repo",
+        branch="feat/123-fix",
+        default_branch="main",
+    )
+    return base.model_copy(update=overrides) if overrides else base
 
 
 def _make_agent_result(**overrides) -> AgentResult:
     """Create a minimal AgentResult for testing."""
-    defaults = {
-        "status": "success",
-        "turns": 5,
-        "num_turns": 5,
-        "cost_usd": 0.50,
-    }
-    defaults.update(overrides)
-    return AgentResult(**defaults)
+    base = AgentResult(
+        status="success",
+        turns=5,
+        num_turns=5,
+        cost_usd=0.50,
+    )
+    return base.model_copy(update=overrides) if overrides else base
 
 
 class TestSkipConditions:
     """Test all conditions that cause self-review to be skipped."""
 
-    def test_skip_when_disabled(self):
-        config = _make_config(self_review_enabled=False)
-        setup = _make_setup()
-        agent_result = _make_agent_result()
-        trajectory = MagicMock()
-        progress = MagicMock()
-
-        result = run_self_review(config, setup, agent_result, trajectory, progress)
-        assert result is None
-
-    def test_skip_for_pr_review_task_type(self):
-        config = _make_config(
-            task_type="pr_review",
-            pr_number="42",
-            task_description="",
-            issue_number="",
-        )
+    def test_skip_for_read_only_workflow(self):
+        config = _make_config(read_only=True)
         setup = _make_setup()
         agent_result = _make_agent_result()
         trajectory = MagicMock()
@@ -82,13 +60,13 @@ class TestSkipConditions:
         assert result is None
 
     def test_skip_when_no_remaining_turns(self):
-        config = _make_config(max_turns=5, self_review_max_turns=5)
+        config = _make_config(max_turns=5)
         setup = _make_setup()
         agent_result = _make_agent_result(turns=5)
         trajectory = MagicMock()
         progress = MagicMock()
 
-        result = run_self_review(config, setup, agent_result, trajectory, progress)
+        result = run_self_review(config, setup, agent_result, trajectory, progress, max_turns=5)
         assert result is None
 
     def test_skip_when_no_remaining_budget(self):
@@ -208,17 +186,17 @@ class TestBudgetAndTurnComputation:
 
     @patch("self_review._get_diff", return_value="diff --git a/f\n+line\n")
     @patch("self_review.asyncio.run")
-    def test_review_turns_capped_at_self_review_max_turns(self, mock_asyncio_run, mock_diff):
+    def test_review_turns_capped_at_step_max_turns(self, mock_asyncio_run, mock_diff):
         mock_asyncio_run.return_value = AgentResult(status="success", turns=2, num_turns=2)
-        config = _make_config(max_turns=100, self_review_max_turns=3)
+        config = _make_config(max_turns=100)
         setup = _make_setup()
         agent_result = _make_agent_result(turns=5)
         trajectory = MagicMock()
         progress = MagicMock()
 
-        run_self_review(config, setup, agent_result, trajectory, progress)
+        # The step's max_turns (3) caps the review even though 95 turns remain.
+        run_self_review(config, setup, agent_result, trajectory, progress, max_turns=3)
 
-        # The review config passed to run_agent should have max_turns=3
         call_args = mock_asyncio_run.call_args
         coro = call_args[0][0]
         # Close the coroutine to avoid warnings
@@ -228,15 +206,15 @@ class TestBudgetAndTurnComputation:
     @patch("self_review.asyncio.run")
     def test_review_turns_uses_remaining_when_less_than_cap(self, mock_asyncio_run, mock_diff):
         mock_asyncio_run.return_value = AgentResult(status="success", turns=1, num_turns=1)
-        config = _make_config(max_turns=8, self_review_max_turns=5)
+        config = _make_config(max_turns=8)
         setup = _make_setup()
         agent_result = _make_agent_result(turns=6)  # Only 2 remaining
         trajectory = MagicMock()
         progress = MagicMock()
 
-        run_self_review(config, setup, agent_result, trajectory, progress)
+        # Should use min(2 remaining, 5 cap) = 2 turns
+        run_self_review(config, setup, agent_result, trajectory, progress, max_turns=5)
 
-        # Should use min(2, 5) = 2 turns
         call_args = mock_asyncio_run.call_args
         coro = call_args[0][0]
         coro.close()
@@ -248,9 +226,7 @@ class TestHappyPath:
     @patch("self_review._get_diff", return_value="diff --git a/file.py\n+new code\n")
     @patch("self_review.asyncio.run")
     def test_returns_review_result(self, mock_asyncio_run, mock_diff):
-        review_agent_result = AgentResult(
-            status="success", turns=2, num_turns=2, cost_usd=0.10
-        )
+        review_agent_result = AgentResult(status="success", turns=2, num_turns=2, cost_usd=0.10)
         mock_asyncio_run.return_value = review_agent_result
 
         config = _make_config()
@@ -482,3 +458,121 @@ class TestPostSelfReviewComment:
         body = call_args[body_idx]
         assert "Self-Review Summary" in body
         assert "**Findings:** 0" in body
+
+
+class TestSelfReviewStepHandler:
+    """Tests for the workflow ``self_review`` step handler (workflow/runner.py).
+
+    The step's presence in a workflow is the enablement signal; the handler
+    wraps ``run_self_review`` and accumulates the review's turns/cost onto the
+    shared ``ctx.agent_result``.
+    """
+
+    def _ctx(self, *, setup, agent_result):
+        from workflow import Step, StepContext, Workflow
+
+        wf = Workflow.model_validate(
+            {
+                "id": "coding/new-task-v1",
+                "version": "1.0.0",
+                "domain": "coding",
+                "prompt": {"template": "registry://prompt/x"},
+                "hydration": {"sources": ["task_description"]},
+                "agent_config": {"tier": "standard", "allowed_tools": ["Bash"]},
+                "steps": [
+                    {"kind": "run_agent"},
+                    {"kind": "self_review", "name": "review", "max_turns": 4},
+                ],
+                "terminal_outcomes": {"primary": "pr_url"},
+                "status": "production",
+            }
+        )
+        step = next(s for s in wf.steps if s.kind == "self_review")
+        ctx = StepContext(
+            workflow=wf,
+            config=_make_config(),
+            setup=setup,
+            agent_result=agent_result,
+            trajectory=MagicMock(),
+            progress=MagicMock(),
+        )
+        return step, ctx, Step
+
+    def test_passes_step_max_turns_and_accumulates(self):
+        from workflow.runner import _handle_self_review
+
+        setup = _make_setup()
+        agent_result = _make_agent_result(turns=5, num_turns=5, cost_usd=0.50)
+        step, ctx, _ = self._ctx(setup=setup, agent_result=agent_result)
+
+        review = AgentResult(status="success", turns=2, num_turns=2, cost_usd=0.10)
+        with patch("self_review.run_self_review", return_value=review) as mock_review:
+            outcome = _handle_self_review(step, ctx)
+
+        # The step's max_turns (4) is forwarded to run_self_review.
+        assert mock_review.call_args.kwargs["max_turns"] == 4
+        assert outcome.status == "succeeded"
+        assert outcome.data["self_review_ran"] is True
+        # Review turns/cost accumulated onto the shared agent_result.
+        assert ctx.agent_result.turns == 7
+        assert ctx.agent_result.num_turns == 7
+        assert abs(ctx.agent_result.cost_usd - 0.60) < 1e-9
+
+    def test_skipped_review_records_not_ran(self):
+        from workflow.runner import _handle_self_review
+
+        setup = _make_setup()
+        agent_result = _make_agent_result(turns=5)
+        step, ctx, _ = self._ctx(setup=setup, agent_result=agent_result)
+
+        with patch("self_review.run_self_review", return_value=None):
+            outcome = _handle_self_review(step, ctx)
+
+        assert outcome.status == "succeeded"
+        assert outcome.data["self_review_ran"] is False
+        # No accumulation when the review was skipped.
+        assert ctx.agent_result.turns == 5
+
+    def test_fails_without_clone(self):
+        from workflow.runner import _handle_self_review
+
+        agent_result = _make_agent_result()
+        step, ctx, _ = self._ctx(setup=None, agent_result=agent_result)
+
+        outcome = _handle_self_review(step, ctx)
+        assert outcome.status == "failed"
+        assert "cloned repo" in (outcome.error or "")
+
+    def test_default_max_turns_when_step_omits_it(self):
+        from workflow import Step, StepContext, Workflow
+        from workflow.runner import _DEFAULT_SELF_REVIEW_MAX_TURNS, _handle_self_review
+
+        wf = Workflow.model_validate(
+            {
+                "id": "coding/new-task-v1",
+                "version": "1.0.0",
+                "domain": "coding",
+                "prompt": {"template": "registry://prompt/x"},
+                "hydration": {"sources": ["task_description"]},
+                "agent_config": {"tier": "standard", "allowed_tools": ["Bash"]},
+                "steps": [{"kind": "run_agent"}, {"kind": "self_review"}],
+                "terminal_outcomes": {"primary": "pr_url"},
+                "status": "production",
+            }
+        )
+        step = next(s for s in wf.steps if s.kind == "self_review")
+        assert step.max_turns is None
+        ctx = StepContext(
+            workflow=wf,
+            config=_make_config(),
+            setup=_make_setup(),
+            agent_result=_make_agent_result(turns=2),
+            trajectory=MagicMock(),
+            progress=MagicMock(),
+        )
+        review = AgentResult(status="success", turns=1, num_turns=1)
+        with patch("self_review.run_self_review", return_value=review) as mock_review:
+            _handle_self_review(step, ctx)
+        assert mock_review.call_args.kwargs["max_turns"] == _DEFAULT_SELF_REVIEW_MAX_TURNS
+        # Step model unused beyond fixture; keep import referenced.
+        assert Step is not None
