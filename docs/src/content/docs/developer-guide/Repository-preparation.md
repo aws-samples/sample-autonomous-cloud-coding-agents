@@ -2,7 +2,7 @@
 title: Repository preparation
 ---
 
-The [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
+The [Quick Start](./QUICK_START.mdx) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
 
 ### Pre-flight checks
 

@@ -143,7 +143,8 @@ function mirrorMarkdownFile(sourcePath, targetRelativePath) {
     return;
   }
   const raw = fs.readFileSync(sourcePath, 'utf8');
-  const stem = path.basename(sourcePath, '.md');
+  const ext = path.extname(sourcePath);
+  const stem = path.basename(sourcePath, ext);
   const fallbackTitle = normalizeFileStem(stem).replace(/-/g, ' ');
   const out = ensureFrontmatter(raw, fallbackTitle);
   writeFile(path.join(docsRoot, targetRelativePath), out);
@@ -240,10 +241,10 @@ for (const page of orphanedPages) {
   }
 }
 
-// --- Quick Start: mirror to getting-started/ ---
+// --- Quick Start: mirror to getting-started/ (MDX for Starlight Tabs) ---
 mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'QUICK_START.md'),
-  path.join('src', 'content', 'docs', 'getting-started', 'Quick-start.md'),
+  path.join(docsRoot, 'guides', 'QUICK_START.mdx'),
+  path.join('src', 'content', 'docs', 'getting-started', 'Quick-start.mdx'),
 );
 
 // --- Deployment Guide: mirror to getting-started/ ---

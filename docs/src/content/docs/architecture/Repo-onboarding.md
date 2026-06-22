@@ -7,7 +7,7 @@ title: Repo onboarding
 Before users can submit tasks for a repository, that repository must be onboarded to the platform. Onboarding registers the repo and produces a per-repo configuration that the orchestrator uses at task time: compute strategy, model, credentials, networking, and pipeline customizations. If a user submits a task for a non-onboarded repo, the API returns `422 REPO_NOT_ONBOARDED`.
 
 - **Use this doc for:** the Blueprint construct interface, RepoConfig schema, override precedence, compute strategy interface, and pipeline customization model.
-- **For practical usage:** see [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
+- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
 - **Related docs:** [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the orchestrator consumes blueprint config, [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for compute backends, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for custom step trust boundaries.
 
 ## Why onboarding?
@@ -21,9 +21,26 @@ Repositories vary in ways that affect how the agent works: different languages, 
 
 ## Onboarding mechanism
 
-Onboarding is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no runtime API for repo CRUD.
+The **canonical** onboarding path is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no **task-submitter** REST API for repo CRUD — the orchestrator gate reads `RepoTable` at runtime.
 
 This treats blueprints as infrastructure, not runtime config. Each repo's blueprint defines AWS resources (compute, networking, credentials). CDK manages the lifecycle. The gate (rejecting tasks for non-onboarded repos) reads DynamoDB at runtime, keeping the runtime path simple.
+
+### Operator CLI path (day-2)
+
+For operators with IAM access to the deployed stack, `bgagent repo onboard` and `bgagent repo offboard` write `RepoTable` directly (no Cognito login, no CDK redeploy). This path ships in [#378](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/378) / PR [#385](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/385) ahead of a future `POST /v1/repos` API.
+
+| Aspect | CDK `Blueprint` | `bgagent repo onboard` / `offboard` |
+|--------|-----------------|-------------------------------------|
+| **Who** | Deploy role at `mise //cdk:deploy` | Operator AWS credentials (`operator-context`) |
+| **What it writes** | Full `RepoConfig` + supporting AWS resources | `RepoTable` row only (same schema) |
+| **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
+| **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
+| **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
+| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding)) |
+
+Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
+
+See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/overview#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding).
 
 ### Blueprint construct
 
