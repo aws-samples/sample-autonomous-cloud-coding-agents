@@ -148,6 +148,38 @@ describe('IaCRole-ABCA-Application', () => {
       ]),
     );
   });
+
+  it('SecretsManager statement allow-lists a secret pattern for every integration that creates a secret', () => {
+    // Regression guard for #402: each integration construct that creates a
+    // Secrets Manager secret (GitHub token, Slack, Linear, Jira, GitHub
+    // screenshot) names it after its construct id, so the CFN exec role's
+    // scoped CreateSecret allow-list must carry a matching prefix. A missing
+    // pattern is invisible to the service-prefix check above (it's still
+    // `secretsmanager:`) but fails the deploy with AccessDenied at
+    // CreateSecret time. Jira shipped without its pattern; this locks the
+    // contract so the next integration can't repeat it.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Resource?: string | string[];
+    }>;
+    const secretsStatement = statements.find((s) => s.Sid === 'SecretsManager');
+    expect(secretsStatement).toBeDefined();
+
+    const resources = Array.isArray(secretsStatement!.Resource)
+      ? secretsStatement!.Resource
+      : [secretsStatement!.Resource];
+
+    for (const prefix of [
+      'GitHubTokenSecret',
+      'SlackIntegration',
+      'LinearIntegration',
+      'JiraIntegration',
+      'GitHubScreenshot',
+    ]) {
+      expect(resources).toContain(`arn:aws:secretsmanager:*:*:secret:${prefix}*`);
+    }
+  });
 });
 
 describe('IaCRole-ABCA-Observability', () => {

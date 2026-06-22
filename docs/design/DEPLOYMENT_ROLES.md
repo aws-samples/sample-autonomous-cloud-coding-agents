@@ -473,6 +473,7 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*",
         "arn:aws:secretsmanager:*:*:secret:SlackIntegration*",
         "arn:aws:secretsmanager:*:*:secret:LinearIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:JiraIntegration*",
         "arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*",
         "arn:aws:secretsmanager:*:*:secret:bgagent/*"
       ]
