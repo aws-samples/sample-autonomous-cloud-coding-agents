@@ -107,10 +107,12 @@ function ensureFrontmatter(content, title) {
       // must carry that prefix — otherwise they resolve to the domain root
       // and 404. Starlight prefixes its own nav links automatically, but our
       // rewritten body links are raw markdown and need it added explicitly
-      // (same reason the image rewrites above include docsBase). Anchors
-      // (`#…`) stay untouched. (Fixes the broken in-body design-doc links.)
-      const prefixed = rewritten.startsWith('#') ? rewritten : `${docsBase}${rewritten}`;
-      return `[${label}](${prefixed})`;
+      // (same reason the image rewrites above include docsBase). Every
+      // non-undefined return from rewriteDocsLinkTarget is a `/…` route (bare
+      // `#…` anchors and external links return undefined and keep their
+      // original text above), so the prefix always applies.
+      // (Fixes the broken in-body design-doc links.)
+      return `[${label}](${docsBase}${rewritten})`;
     });
 
   const trimmed = normalized.trimStart();
