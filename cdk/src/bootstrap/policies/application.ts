@@ -106,6 +106,12 @@ export function applicationPolicy(): iam.PolicyDocument {
           'lambda:DeleteEventSourceMapping',
           'lambda:UpdateEventSourceMapping',
           'lambda:GetEventSourceMapping',
+          // CDK event-source constructs (e.g. DynamoDBEventSource) tag the
+          // created mapping, so the exec role needs Tag/UntagResource on
+          // event-source-mapping:* (the function:*/layer:*-scoped TagResource
+          // grant elsewhere in this policy does not cover mappings).
+          'lambda:TagResource',
+          'lambda:UntagResource',
         ],
         resources: ['*'],
       }),
