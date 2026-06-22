@@ -460,6 +460,30 @@ node lib/bin/bgagent.js configure \
 node lib/bin/bgagent.js login --username user@example.com
 ```
 
+### Operator commands (stack admin)
+
+Stack admins can introspect deployment state and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
+
+```bash
+# Print stack outputs (ApiUrl, UserPoolId, AppClientId, GitHubTokenSecretArn, …)
+bgagent platform outputs --stack-name backgroundagent-dev
+
+# Smoke-check API, Cognito, GitHub token, Bedrock model, onboarded repos
+bgagent platform doctor --stack-name backgroundagent-dev
+
+# List onboarded repositories
+bgagent repo list
+
+# Show RepoConfig for one repo (secret ARNs redacted)
+bgagent repo show owner/repo
+
+# Store the platform GitHub PAT (or a per-blueprint secret via --repo)
+bgagent github set-token
+bgagent github set-token --repo owner/repo
+```
+
+The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+
 ### Submitting a task
 
 ```bash
