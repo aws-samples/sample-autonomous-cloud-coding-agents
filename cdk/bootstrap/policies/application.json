@@ -50,6 +50,8 @@
         "lambda:GetFunctionCodeSigningConfig",
         "lambda:GetFunctionRecursionConfig",
         "lambda:GetProvisionedConcurrencyConfig",
+        "lambda:PutProvisionedConcurrencyConfig",
+        "lambda:DeleteProvisionedConcurrencyConfig",
         "lambda:GetRuntimeManagementConfig",
         "lambda:ListVersionsByFunction",
         "lambda:InvokeFunction",
@@ -70,7 +72,9 @@
         "lambda:CreateEventSourceMapping",
         "lambda:DeleteEventSourceMapping",
         "lambda:UpdateEventSourceMapping",
-        "lambda:GetEventSourceMapping"
+        "lambda:GetEventSourceMapping",
+        "lambda:TagResource",
+        "lambda:UntagResource"
       ],
       "Effect": "Allow",
       "Resource": "*",
@@ -205,6 +209,7 @@
         "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*",
         "arn:aws:secretsmanager:*:*:secret:SlackIntegration*",
         "arn:aws:secretsmanager:*:*:secret:LinearIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:JiraIntegration*",
         "arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*",
         "arn:aws:secretsmanager:*:*:secret:bgagent/*"
       ],
