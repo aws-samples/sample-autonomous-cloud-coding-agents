@@ -66,12 +66,19 @@ function toAdfDocument(message: string): Record<string, unknown> {
   };
 }
 
+/**
+ * Outcome of a single comment POST. We distinguish auth rejection (401/403)
+ * from other failures so the caller can react to the former with a forced
+ * token refresh + retry, and treat the latter as terminal.
+ */
+type PostOutcome = 'ok' | 'auth' | 'error';
+
 async function postComment(
   accessToken: string,
   cloudId: string,
   issueIdOrKey: string,
   message: string,
-): Promise<boolean> {
+): Promise<PostOutcome> {
   // The 3LO token (audience=api.atlassian.com) is only valid against the
   // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
   // site host (`*.atlassian.net`) would 401. Both path segments are
@@ -92,17 +99,20 @@ async function postComment(
       body: JSON.stringify({ body: toAdfDocument(message) }),
       signal: controller.signal,
     });
-    if (!resp.ok) {
-      logger.warn('Jira feedback REST non-2xx', { status: resp.status, url });
-      return false;
-    }
-    return true;
+    if (resp.ok) return 'ok';
+    // 401/403 are recoverable: the stored access token may be dead despite a
+    // not-yet-reached `expires_at` (server-side revocation, scope re-issue, or
+    // a value cached past its out-of-band rotation). Signal the caller to
+    // force-refresh and retry once. Any other non-2xx is terminal.
+    const outcome: PostOutcome = resp.status === 401 || resp.status === 403 ? 'auth' : 'error';
+    logger.warn('Jira feedback REST non-2xx', { status: resp.status, url, outcome });
+    return outcome;
   } catch (err) {
     logger.warn('Jira feedback request failed', {
       error: err instanceof Error ? err.message : String(err),
       url,
     });
-    return false;
+    return 'error';
   } finally {
     clearTimeout(timer);
   }
@@ -123,14 +133,20 @@ export interface JiraFeedbackContext {
 
 async function resolveTenantToken(
   ctx: JiraFeedbackContext,
+  forceRefresh = false,
 ): Promise<{ accessToken: string } | null> {
   try {
-    const resolved = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName);
+    const resolved = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName, { forceRefresh });
     if (!resolved) return null;
     return { accessToken: resolved.accessToken };
   } catch (err) {
+    // `force_refresh` discriminates the initial resolve from the post-401
+    // retry resolve: a failure here on the retry is an infra error (DDB/SM),
+    // distinct from "refresh-token revoked", and triage needs to tell them
+    // apart.
     logger.warn('Jira feedback could not resolve OAuth token', {
       jira_cloud_id: ctx.cloudId,
+      force_refresh: forceRefresh,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
@@ -141,6 +157,17 @@ async function resolveTenantToken(
  * Post a comment onto a Jira issue. Returns true on success, false on any
  * failure (network, auth, REST errors). Never throws — callers proceed
  * regardless.
+ *
+ * Auth resilience: the access token from the resolver can already be stale
+ * (cached within its TTL, or revoked/re-issued server-side before its
+ * advertised `expires_at`). The proactive expiry check can't catch those, so
+ * a 401/403 on the first POST triggers exactly one forced token refresh
+ * (`forceRefresh: true`) and one retry. This is the path that makes feedback
+ * comments — the only operator-visible failure signal — actually land after a
+ * token goes bad, rather than silently 401ing (issue #370). The retry is
+ * bounded at one attempt: a second 401 means the credential is genuinely
+ * unusable (refresh-token revoked, scope removed), so we stop and let the
+ * caller no-op.
  */
 export async function postIssueComment(
   ctx: JiraFeedbackContext,
@@ -149,7 +176,30 @@ export async function postIssueComment(
 ): Promise<boolean> {
   const resolved = await resolveTenantToken(ctx);
   if (!resolved) return false;
-  return postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
+
+  const outcome = await postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
+  if (outcome === 'ok') return true;
+  if (outcome === 'error') return false;
+
+  // outcome === 'auth': the stored access token was rejected. Force a refresh
+  // (bypassing the resolver's cache and proactive-expiry short-circuit) and
+  // retry once with the freshly-minted token.
+  logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', {
+    jira_cloud_id: ctx.cloudId,
+    issue_id_or_key: issueIdOrKey,
+  });
+  const refreshed = await resolveTenantToken(ctx, true);
+  if (!refreshed) return false;
+  // If the refresh handed back the same access token, the retry can only
+  // reproduce the 401 — skip the redundant network call.
+  if (refreshed.accessToken === resolved.accessToken) {
+    logger.warn('Jira feedback refresh returned an unchanged token — not retrying', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+    });
+    return false;
+  }
+  return (await postComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body)) === 'ok';
 }
 
 /**
