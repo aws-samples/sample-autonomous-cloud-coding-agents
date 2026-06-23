@@ -49,6 +49,7 @@ import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration'
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
+import { renderIterationSuccessReply } from './shared/iteration-reply';
 import { postIssueComment, replyToComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
@@ -1161,7 +1162,13 @@ async function replyToStandaloneTrigger(
     ? task.pr_number
     : (typeof task.pr_url === 'string' ? Number(task.pr_url.match(/\/pull\/(\d+)\b/)?.[1]) || null : null);
   const body = succeeded
-    ? (prNumber !== null ? `✅ Updated — PR #${prNumber}.` : '✅ Updated.')
+    ? renderIterationSuccessReply({
+      // A6/#299: a no-change iteration (a question) → "💬 <answer>" not a false
+      // "✅ Updated". codeChanged undefined (pre-fix) keeps the "✅ Updated" path.
+      ...(typeof task.code_changed === 'boolean' && { codeChanged: task.code_changed }),
+      prNumber,
+      ...(typeof task.answer_text === 'string' && { answerText: task.answer_text }),
+    })
     : renderFailureReply({
       // Preserve COMPLETED (so a completed-but-build-failed task reads as a
       // build/test failure, not an agent crash); a non-completed terminal

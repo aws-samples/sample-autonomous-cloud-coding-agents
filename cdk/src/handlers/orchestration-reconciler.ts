@@ -47,7 +47,8 @@ import {
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply } from './shared/failure-reply';
-import { EMOJI_FAILURE, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState } from './shared/linear-feedback';
+import { isNoChangeIteration, renderIterationSuccessReply } from './shared/iteration-reply';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
@@ -135,6 +136,14 @@ interface TerminalTaskEvent {
    * the sub-issue id (the prior behavior).
    */
   readonly triggerCommentIssueId?: string;
+  /**
+   * A6/#299: whether this iteration advanced the PR branch (a real commit) vs.
+   * ran with no change (a question-only comment). ``undefined`` for pre-fix
+   * tasks / non-iterations → the success reply defaults to "✅ Updated".
+   */
+  readonly codeChanged?: boolean;
+  /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
+  readonly answerText?: string;
 }
 
 /**
@@ -168,6 +177,9 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
 
   const buildPassed = img.build_passed?.BOOL;
   const errorMessage = img.error_message?.S;
+  // A6/#299: did this iteration commit anything, and (if not) what did the agent say?
+  const codeChanged = img.code_changed?.BOOL;
+  const answerText = img.answer_text?.S;
 
   // A6 cascade marker: an iteration/restack task names the node it acted on
   // via channel_metadata. A restack task also carries
@@ -198,6 +210,8 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(cascadeSubIssueId !== undefined && { cascadeIsIteration: isIteration }),
     ...(triggerCommentId !== undefined && { triggerCommentId }),
     ...(triggerCommentIssueId !== undefined && { triggerCommentIssueId }),
+    ...(codeChanged !== undefined && { codeChanged }),
+    ...(answerText !== undefined && { answerText }),
   };
 }
 
@@ -820,18 +834,33 @@ async function replyToIterationComment(
   //     failure, leave the state (the ❌ + reply convey it). Never demote.
   // Best-effort + idempotent (the ack_replied_at claim above already gates this
   // to once per iteration; swapCommentReaction/transition re-converge anyway).
-  await swapCommentReaction(ctx, commentId, succeeded ? EMOJI_SUCCESS : EMOJI_FAILURE);
-  if (succeeded) {
+  // A6/#299: a no-change iteration (a question) is neither a success-edit nor a
+  // failure — it's an answer. Don't stamp ✅ (implies "PR updated, merge-worthy")
+  // and don't advance the sub-issue to In Review (nothing changed). Use 💬 and
+  // leave the state untouched. A real edit keeps the ✅ + In Review convention.
+  const noChange = succeeded && isNoChangeIteration(evt.codeChanged);
+  await swapCommentReaction(
+    ctx, commentId,
+    noChange ? EMOJI_NEEDS_INPUT : (succeeded ? EMOJI_SUCCESS : EMOJI_FAILURE),
+  );
+  if (succeeded && !noChange) {
     await transitionIssueState(ctx, changedSubIssueId, 'started', ['In Review']);
   }
 }
 
-/** Build the ✅ ack reply, linking the (re-pushed) PR when resolvable. */
+/**
+ * Build the iteration ack reply. A6/#299: a real edit → "✅ Updated — PR #N";
+ * a no-change iteration (a question) → "💬 <agent's answer>" instead of a false
+ * "✅ Updated". ``codeChanged === undefined`` (pre-fix / non-iteration) keeps
+ * the "✅ Updated" behaviour.
+ */
 async function buildIterationAckSuccess(evt: TerminalTaskEvent): Promise<string> {
   const prNumber = await resolvePrNumber(evt.taskId);
-  return prNumber !== null
-    ? `✅ Updated — PR #${prNumber}.`
-    : '✅ Updated.';
+  return renderIterationSuccessReply({
+    ...(evt.codeChanged !== undefined && { codeChanged: evt.codeChanged }),
+    prNumber,
+    ...(evt.answerText !== undefined && { answerText: evt.answerText }),
+  });
 }
 
 /**

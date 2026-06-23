@@ -83,6 +83,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     )
 
     # Branch setup
+    head_sha_before = ""
     if config.is_pr_workflow and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
         run_cmd(
@@ -95,6 +96,22 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
             label="checkout-pr-branch",
             cwd=repo_dir,
         )
+        # A6/#299: snapshot the branch HEAD BEFORE the agent runs. The post-hooks
+        # compare the final HEAD to this to tell a real edit (HEAD advanced) from
+        # a question-only iteration (HEAD unchanged → no commit), so the platform
+        # reports "answered / no change" rather than a false "✅ Updated". Capture
+        # AFTER any predecessor merges would advance HEAD — but pr_iteration /
+        # pr_review pass no merge_branches, so the checkout HEAD is the baseline.
+        # (Restack DOES merge predecessors and isn't a comment-iteration, so its
+        # HEAD-advance is expected and never reaches the no-op reply path.)
+        sha_res = run_cmd(
+            ["git", "rev-parse", "HEAD"],
+            label="head-sha-before",
+            cwd=repo_dir,
+            check=False,
+        )
+        if sha_res.returncode == 0:
+            head_sha_before = sha_res.stdout.strip()
         # #305 A6 re-stack: a predecessor branch changed; merge its UPDATED
         # code into this existing PR branch so the child is no longer stale.
         # (pr_iteration / pr_review pass no merge_branches, so this is a no-op
@@ -256,6 +273,7 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         default_branch=default_branch,
         build_gate_inert=build_gate_inert,
         lint_gate_inert=lint_gate_inert,
+        head_sha_before=head_sha_before,
     )
 
 
