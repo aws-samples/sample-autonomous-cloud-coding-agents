@@ -26,6 +26,7 @@ import {
   replyToComment,
   reportIssueFailure,
   swapCommentReaction,
+  upsertStatusComment,
   EMOJI_STARTED,
   EMOJI_NEEDS_INPUT,
 } from './shared/linear-feedback';
@@ -34,11 +35,27 @@ import {
   renderIssueContextHint,
 } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
-import { fetchIssueParentId } from './shared/linear-subissue-fetch';
+import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
-import { buildIterationInstruction, parseCommentTrigger, type CommentTrigger } from './shared/orchestration-comment-trigger';
+import { buildIterationInstruction, parseCommentTrigger, parsePlanVerdict, type CommentTrigger } from './shared/orchestration-comment-trigger';
+import { readProjectCaps } from './shared/orchestration-decomposition-caps';
+import {
+  runDecompositionProposal,
+  runPlanVerdict,
+  type DecompositionEffects,
+} from './shared/orchestration-decomposition-flow';
+import { parseDecompositionMode, triggerLabelVariants } from './shared/orchestration-decomposition-mode';
+import { bedrockInvokeModel } from './shared/orchestration-decomposition-planner';
+import {
+  consumePendingPlan as consumePendingPlanRow,
+  discardPendingPlan as discardPendingPlanRow,
+  getPendingPlan,
+  putPendingPlan as putPendingPlanRow,
+} from './shared/orchestration-decomposition-store';
+import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
+import { declarativeGraphSource } from './shared/orchestration-graph-source';
 import {
   parseParentNodeReference,
   renderParentDisambiguationReply,
@@ -64,6 +81,12 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
 // budget. Unset → release all roots (back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
+// #299 Mode B: model id for the decomposition judge+planner. Defaults inside
+// bedrockInvokeModel to the platform-standard Sonnet inference profile.
+const DECOMPOSITION_MODEL_ID = process.env.DECOMPOSITION_MODEL_ID;
+// #299 Mode B: TTL (seconds) for a persisted pending plan awaiting approval. A
+// week is ample for a human to approve; the row self-expires after.
+const PENDING_PLAN_TTL_SECONDS = 604_800;
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // are sliced to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -292,6 +315,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
   const repo = mappingItem.repo as string;
+
+  // #299 Mode B: classify the trigger label. ``:decompose``/``:auto`` on an
+  // UNDECOMPOSED issue runs the planner; otherwise this is unchanged Mode A /
+  // single-task. ``hasSubIssues`` is determined authoritatively by
+  // discoverOrchestration below (seeded/extended ⇒ it had a graph), so here we
+  // only need the suffix intent — pass hasSubIssues=false and let discovery's
+  // result decide. The caps come from the same mapping row.
+  const decompositionDecision = parseDecompositionMode(
+    (issue.labels ?? []).map((l) => l?.name),
+    /* hasSubIssues (refined by discovery) */ false,
+    labelFilter,
+  );
+  const decompositionCaps = readProjectCaps(mappingItem);
 
   // Resolve the actor → platform user. Fall back to creator if the actor is missing
   // (e.g. automation that set the label). If neither resolves, we cannot attribute
@@ -594,8 +630,51 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
       return;
     }
-    // discovery.kind === 'single_task' → fall through to the single-task
-    // path below (issue had no sub-issues).
+    // discovery.kind === 'single_task' → the issue had no sub-issues.
+    //
+    // #299 Mode B: if it carried a ``:decompose``/``:auto`` label, run the
+    // planner now. On 'seed' we hand the planner's (now real-Linear-id) graph
+    // to the SAME discovery+release path (Mode A) — single source of truth. On
+    // 'handled'/'noop' a comment was posted (awaiting approval, rejected,
+    // over-cap, write-back error) and we must NOT also create a task. On
+    // 'single_task' the planner declined → fall through to the single task.
+    if (
+      resolvedAccessToken
+      && (decompositionDecision.mode === 'decompose' || decompositionDecision.mode === 'auto')
+    ) {
+      const effects = buildDecompositionEffects(issue.id, workspaceId, repo, platformUserId, projectId, channelMetadata, resolvedAccessToken);
+      const flow = await runDecompositionProposal({
+        parentIssueId: issue.id,
+        plannerInput: {
+          title: issue.title ?? issue.identifier ?? issue.id,
+          description: issue.description ?? '',
+          repo,
+          maxSubIssues: decompositionCaps.max_sub_issues,
+        },
+        caps: decompositionCaps,
+        autoRun: decompositionDecision.mode === 'auto',
+        effects,
+      });
+      logger.info('Mode B decomposition flow result', { issue_id: issue.id, mode: decompositionDecision.mode, kind: flow.kind, reason: 'reason' in flow ? flow.reason : undefined });
+      if (flow.kind === 'seed') {
+        await seedAndReleaseFromGraph({
+          parentIssueId: issue.id,
+          workspaceId,
+          repo,
+          projectId,
+          platformUserId,
+          channelMetadata,
+          children: flow.children,
+        });
+        return;
+      }
+      if (flow.kind === 'handled' || flow.kind === 'noop') {
+        // A proposal/rejection/error comment was posted (or a redelivery
+        // no-op). The parent spawns no task here.
+        return;
+      }
+      // flow.kind === 'single_task' → planner declined; fall through.
+    }
   }
 
   const taskDescription = buildTaskDescription(issue, contextHint);
@@ -642,6 +721,135 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 }
 
 /**
+ * #299 Mode B — build the {@link DecompositionEffects} the flow needs, binding
+ * the injected boundaries to this request's real helpers (Bedrock, the Linear
+ * GraphQL transport, the feedback comment poster, the pending-plan store).
+ * Kept as a factory so the flow stays free of module-global wiring and is
+ * unit-testable in isolation.
+ */
+function buildDecompositionEffects(
+  parentIssueId: string,
+  workspaceId: string,
+  repo: string,
+  platformUserId: string,
+  projectId: string,
+  channelMetadata: Record<string, string>,
+  accessToken: string,
+): DecompositionEffects {
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE! };
+  return {
+    invokeModel: bedrockInvokeModel(DECOMPOSITION_MODEL_ID),
+    graphql: linearGraphqlFn(accessToken),
+    postComment: async (issueId, body) =>
+      WORKSPACE_REGISTRY_TABLE ? upsertStatusComment(feedbackCtx, issueId, body) : null,
+    putPendingPlan: async ({ nodes, proposalCommentId }) => putPendingPlanRow({
+      ddb,
+      tableName: ORCHESTRATION_TABLE!,
+      parentLinearIssueId: parentIssueId,
+      linearWorkspaceId: workspaceId,
+      repo,
+      ...(projectId && { linearProjectId: projectId }),
+      nodes,
+      platformUserId,
+      ...(proposalCommentId !== undefined && { proposalCommentId }),
+      now: new Date().toISOString(),
+      ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
+    }),
+    consumePendingPlan: async () => {
+      const taken = await consumePendingPlanRow(ddb, ORCHESTRATION_TABLE!, parentIssueId);
+      return taken ? { nodes: taken.nodes } : null;
+    },
+    discardPendingPlan: async () => { await discardPendingPlanRow(ddb, ORCHESTRATION_TABLE!, parentIssueId); },
+  };
+}
+
+/**
+ * #299 Mode B — seed the #247 executor from a planner-produced graph (real
+ * Linear sub-issue ids) and release roots. Reuses the SAME discovery → release
+ * → panel path as Mode A by passing a ``declarativeGraphSource`` rather than
+ * re-reading Linear (the issues were just created; declarative avoids the
+ * eventual-consistency race). On the seed result it releases roots + posts the
+ * maturing panel exactly like the native-graph path.
+ */
+async function seedAndReleaseFromGraph(args: {
+  parentIssueId: string;
+  workspaceId: string;
+  repo: string;
+  projectId: string;
+  platformUserId: string;
+  channelMetadata: Record<string, string>;
+  children: readonly SubIssueNode[];
+}): Promise<void> {
+  if (!ORCHESTRATION_TABLE) return;
+  const { parentIssueId, workspaceId, repo, projectId, platformUserId, channelMetadata, children } = args;
+  const releaseContext: OrchestrationReleaseContext = {
+    platform_user_id: platformUserId,
+    channel_source: 'linear',
+    ...(channelMetadata.linear_oauth_secret_arn && { linear_oauth_secret_arn: channelMetadata.linear_oauth_secret_arn }),
+    ...(channelMetadata.linear_workspace_slug && { linear_workspace_slug: channelMetadata.linear_workspace_slug }),
+    linear_project_id: projectId,
+  };
+
+  const discovery = await discoverOrchestration({
+    ddb,
+    tableName: ORCHESTRATION_TABLE,
+    // accessToken unused — graphSource is supplied — but the param is required.
+    accessToken: '',
+    parentLinearIssueId: parentIssueId,
+    linearWorkspaceId: workspaceId,
+    repo,
+    now: new Date().toISOString(),
+    releaseContext,
+    graphSource: declarativeGraphSource(children),
+  });
+
+  if (discovery.kind !== 'seeded') {
+    // 'rejected'/'error' shouldn't happen (we just built a valid DAG), but a
+    // replay can return 'extended'/'single_task'; in all cases the reconciler
+    // (or a prior pass) owns the children. Log + return without double-acting.
+    logger.info('Mode B seed: discovery returned non-seeded', { parent_issue_id: parentIssueId, kind: discovery.kind });
+    if (discovery.kind === 'rejected' || discovery.kind === 'error') {
+      await safeReportIssueFailure(parentIssueId, workspaceId, `❌ ${discovery.message}`);
+    }
+    return;
+  }
+
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+  if (snapshot) {
+    const budget = USER_CONCURRENCY_TABLE
+      ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, snapshot.meta.release_context.platform_user_id, MAX_CONCURRENT)
+      : undefined;
+    await releaseReadyChildren(
+      ddb, ORCHESTRATION_TABLE, snapshot.children, snapshot.meta.release_context,
+      createTaskCore, new Date().toISOString(), snapshot.children, 'main', budget,
+    );
+  }
+  // Post the maturing panel (same as the native-graph seed path).
+  if (WORKSPACE_REGISTRY_TABLE) {
+    try {
+      const postRelease = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      if (postRelease) {
+        const commentId = await upsertEpicPanel({
+          ctx: { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+          parentLinearIssueId: parentIssueId,
+          children: postRelease.children,
+          inProgress: true,
+          mirrorParentState: true,
+        });
+        if (commentId) await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
+      }
+    } catch (err) {
+      logger.warn('Mode B seed: failed to post panel (non-fatal)', {
+        parent_issue_id: parentIssueId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  logger.info('Mode B: orchestration seeded from planner graph', {
+    parent_issue_id: parentIssueId, orchestration_id: discovery.orchestrationId, child_count: discovery.childCount,
+  });
+}
+
+/**
  * #247 A6 comment trigger. A Linear comment with an ``@bgagent`` mention on an
  * orchestrated sub-issue runs a ``coding/pr-iteration-v1`` task on that
  * sub-issue's PR; the comment text is the instruction. When that task
@@ -684,6 +892,57 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // is the root; otherwise the comment IS the root. The 👀 still goes on the
   // actual comment the human wrote (reactions work at any thread depth).
   const replyTargetId = payload.data.parentId ?? commentId;
+
+  // #299 Mode B: an ``@bgagent approve``/``reject`` on a parent that has a
+  // PENDING plan (proposed but not yet executed). This is checked BEFORE the
+  // A6 routing because at this point NO orchestration is seeded yet — the
+  // parent has only a pending-plan row, so loadOrchestration would miss it. A
+  // verdict with no pending plan returns 'noop' and falls through to the normal
+  // comment paths (so "approve" said on a normal sub-issue isn't hijacked).
+  const verdict = parsePlanVerdict(trigger.instruction);
+  if (verdict !== 'none') {
+    const pending = await getPendingPlan(ddb, ORCHESTRATION_TABLE, commentedIssueId);
+    if (pending) {
+      // Claim-once on this comment so a webhook redelivery doesn't double-seed
+      // (the consume is also atomic, but this skips the duplicate 👀/work).
+      const ttl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
+      const won = await claimCommentAck(
+        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId, new Date().toISOString(), ttl,
+      );
+      if (!won) {
+        logger.info('Mode B verdict: redelivery already handled this comment — skipping', { comment_id: commentId });
+        return;
+      }
+      await reactToComment({ linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE }, commentId, EMOJI_STARTED);
+      // Rebuild the release context's OAuth metadata from the resolved token so
+      // the released children can post back to Linear (the pending plan stores
+      // only ids, not the secret arn — which rotates).
+      const verdictChannelMetadata: Record<string, string> = {
+        linear_oauth_secret_arn: resolved.oauthSecretArn,
+        linear_workspace_slug: resolved.workspaceSlug,
+      };
+      const verdictProjectId = pending.linear_project_id ?? '';
+      const effects = buildDecompositionEffects(
+        commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
+        verdictProjectId, verdictChannelMetadata, resolved.accessToken,
+      );
+      const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
+      if (flow.kind === 'seed') {
+        await seedAndReleaseFromGraph({
+          parentIssueId: commentedIssueId,
+          workspaceId,
+          repo: pending.repo,
+          projectId: verdictProjectId,
+          platformUserId: pending.platform_user_id,
+          channelMetadata: verdictChannelMetadata,
+          children: flow.children,
+        });
+      }
+      logger.info('Mode B verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
+      return;
+    }
+    // No pending plan → not a Mode B verdict; fall through to A6 paths.
+  }
 
   // #247 UX.18: is the commented issue itself a PARENT epic? deriveOrchestrationId
   // is a pure hash of the issue id, so the parent's own id maps to ITS
@@ -1069,7 +1328,14 @@ async function resolveChildPrNumber(taskId: string): Promise<number | null> {
  */
 function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean {
   const current = payload.data.labels ?? [];
-  const hasLabel = current.some((l) => l?.name?.toLowerCase() === labelFilter.toLowerCase());
+  // #299 Mode B: the trigger fires on the base label OR a decompose suffix
+  // (``bgagent:decompose`` / ``bgagent:auto``). Match against ALL variants so a
+  // suffix-only issue still triggers; ``parseDecompositionMode`` later decides
+  // which mode it is.
+  const variants = new Set(triggerLabelVariants(labelFilter));
+  const isTriggerLabel = (name: string | undefined | null): boolean =>
+    !!name && variants.has(name.toLowerCase());
+  const hasLabel = current.some((l) => isTriggerLabel(l?.name));
 
   if (payload.action === 'create') {
     return hasLabel;
@@ -1082,12 +1348,12 @@ function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean 
     const updatedFrom = payload.updatedFrom ?? {};
     const labelIdsChanged = Object.prototype.hasOwnProperty.call(updatedFrom, 'labelIds');
     if (!labelIdsChanged) return false;
-    // The label must have just been added, not removed. If it was present before,
-    // another Linear user probably toggled a different label — avoid re-triggering.
+    // A trigger label must have just been ADDED, not removed. Re-trigger only
+    // when a currently-present trigger-variant label was absent before. (Covers
+    // re-applying the label to extend an epic, and adding a suffix variant.)
     const previousIds = new Set((updatedFrom.labelIds as string[] | undefined) ?? []);
-    const currentLabelId = current.find((l) => l?.name?.toLowerCase() === labelFilter.toLowerCase())?.id;
-    if (!currentLabelId) return false;
-    return !previousIds.has(currentLabelId);
+    const addedTriggerLabel = current.some((l) => isTriggerLabel(l?.name) && l?.id && !previousIds.has(l.id));
+    return addedTriggerLabel;
   }
 
   return false;

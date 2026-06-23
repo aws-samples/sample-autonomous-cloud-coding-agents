@@ -43,6 +43,15 @@ const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
 const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
 /**
+ * #299 Mode B: foundation model for the decomposition judge+planner. The
+ * processor invokes it via the ``us.``-prefixed cross-region inference profile
+ * (platform standard — parity with ecs-agent-cluster.ts). Kept in sync with the
+ * handler's ``bedrockInvokeModel`` default.
+ */
+const DECOMPOSITION_MODEL = 'anthropic.claude-sonnet-4-6';
+const DECOMPOSITION_MODEL_ID = `us.${DECOMPOSITION_MODEL}`;
+
+/**
  * Properties for LinearIntegration construct.
  */
 export interface LinearIntegrationProps {
@@ -250,6 +259,10 @@ export class LinearIntegration extends Construct {
           USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
+        // #299 Mode B: decomposition judge+planner model id. Only wired when
+        // orchestration is enabled (the planner shares that gated path); the
+        // handler defaults to the platform Sonnet profile if unset.
+        ...(props.orchestrationTable && { DECOMPOSITION_MODEL_ID }),
       },
       bundling: commonBundling,
     });
@@ -299,6 +312,33 @@ export class LinearIntegration extends Construct {
             service: 'bedrock',
             resource: 'guardrail',
             resourceName: props.guardrailId,
+          }),
+        ],
+      }));
+    }
+    // #299 Mode B: the decomposition judge+planner calls bedrock:InvokeModel.
+    // Scoped to the explicit foundation-model + ``us.``-prefixed cross-region
+    // inference-profile ARNs (parity with ecs-agent-cluster.ts — no wildcard
+    // resource). Only granted when orchestration is enabled (the planner runs
+    // only on that path).
+    if (props.orchestrationTable) {
+      const stack = Stack.of(this);
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [
+          stack.formatArn({
+            service: 'bedrock',
+            region: '*',
+            account: '',
+            resource: 'foundation-model',
+            resourceName: DECOMPOSITION_MODEL,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+          stack.formatArn({
+            service: 'bedrock',
+            resource: 'inference-profile',
+            resourceName: DECOMPOSITION_MODEL_ID,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
           }),
         ],
       }));
