@@ -41,6 +41,102 @@
 /** Max chars of the agent's answer surfaced inline before truncation. */
 const MAX_ANSWER_CHARS = 1500;
 
+/**
+ * The maturing iteration reply (iteration-UX redesign). One threaded reply per
+ * ``@bgagent`` comment that EDITS IN PLACE through these states instead of
+ * posting ~5 separate top-level comments per round. Mirrors the #247 epic panel.
+ *
+ *  - ``on_it``    — posted synchronously at trigger time (kills the silence).
+ *  - ``working``  — the agent opened/updated the PR (pr_created milestone).
+ *  - ``updated``  — terminal success WITH a commit → the ✅ + cost + total.
+ *  - ``answered`` — terminal success, NO commit (a question) → 💬 + the answer.
+ *  - ``failed``   — terminal failure.
+ */
+export type IterationState = 'on_it' | 'working' | 'updated' | 'answered' | 'failed';
+
+export interface MaturingReplyInput {
+  readonly state: IterationState;
+  readonly prNumber?: number | null;
+  /** Agent's answer (answered state). */
+  readonly answerText?: string;
+  /** This iteration's cost (USD) — shown on terminal states. */
+  readonly costUsd?: number | null;
+  /** Wall-clock seconds for this iteration — shown on terminal states. */
+  readonly durationS?: number | null;
+  /** Cumulative cost across ALL iterations on this PR/issue (incl. this one). */
+  readonly runningTotalUsd?: number | null;
+  /** Deploy-preview screenshot URL, folded in as a link (not a standalone comment). */
+  readonly screenshotUrl?: string | null;
+  /** Sanitized failure reason (failed state). */
+  readonly failureReason?: string;
+}
+
+/** Format a USD cost as "$X.XX", or "" when unknown. */
+function usd(n: number | null | undefined): string {
+  return typeof n === 'number' && Number.isFinite(n) ? `$${n.toFixed(2)}` : '';
+}
+
+/** Compact "Ns"/"Nm Ns" duration, or "" when unknown. */
+function dur(s: number | null | undefined): string {
+  if (typeof s !== 'number' || !Number.isFinite(s) || s < 0) return '';
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return rem ? `${m}m ${rem}s` : `${m}m`;
+}
+
+/**
+ * Render the maturing iteration reply for a given {@link IterationState}. Pure.
+ * The metadata line (cost · duration · running total) appears only on terminal
+ * states and only for the fields that are known. The screenshot is a link, not
+ * an embed, so the reply stays compact across many rounds.
+ */
+export function renderMaturingReply(input: MaturingReplyInput): string {
+  const meta = terminalMetaLine(input);
+  const screenshot = input.screenshotUrl ? ` · [preview](${input.screenshotUrl})` : '';
+
+  switch (input.state) {
+    case 'on_it':
+      return '👀 On it — reading the PR…';
+    case 'working':
+      return input.prNumber != null
+        ? `🔄 Working — updating PR #${input.prNumber}…`
+        : '🔄 Working…';
+    case 'updated': {
+      const head = input.prNumber != null ? `✅ Updated — PR #${input.prNumber}.` : '✅ Updated.';
+      // Second line carries metadata + preview link (when present). The preview
+      // joins onto the meta line with " · ", or stands alone (its leading " · "
+      // trimmed) when there's no metadata.
+      const tail = meta ? `${meta}${screenshot}` : screenshot.replace(/^ · /, '');
+      return tail ? `${head}\n${tail}` : head;
+    }
+    case 'answered': {
+      const answer = (input.answerText ?? '').trim();
+      const head = answer
+        ? `💬 ${truncate(answer, MAX_ANSWER_CHARS)}`
+        : '💬 No code change was needed — nothing to update on this PR.';
+      return meta ? `${head}\n${meta}` : head;
+    }
+    case 'failed': {
+      const reason = (input.failureReason ?? '').trim();
+      const head = reason ? `❌ ${truncate(reason, MAX_ANSWER_CHARS)}` : '❌ The iteration failed.';
+      return meta ? `${head}\n${meta}` : head;
+    }
+  }
+}
+
+/** "cost: $X · 2m 3s · total this PR: $Y" — only the known parts. */
+function terminalMetaLine(input: MaturingReplyInput): string {
+  const parts: string[] = [];
+  const c = usd(input.costUsd);
+  if (c) parts.push(c);
+  const d = dur(input.durationS);
+  if (d) parts.push(d);
+  const t = usd(input.runningTotalUsd);
+  if (t) parts.push(`total this PR: ${t}`);
+  return parts.length ? `_${parts.join(' · ')}_` : '';
+}
+
 export interface IterationReplyInput {
   /**
    * Did the iteration advance the PR branch (a real commit landed)?
