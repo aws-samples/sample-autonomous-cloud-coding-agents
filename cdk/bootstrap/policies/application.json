@@ -70,7 +70,9 @@
         "lambda:CreateEventSourceMapping",
         "lambda:DeleteEventSourceMapping",
         "lambda:UpdateEventSourceMapping",
-        "lambda:GetEventSourceMapping"
+        "lambda:GetEventSourceMapping",
+        "lambda:TagResource",
+        "lambda:UntagResource"
       ],
       "Effect": "Allow",
       "Resource": "*",

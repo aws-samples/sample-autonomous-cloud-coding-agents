@@ -339,7 +339,9 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "lambda:CreateEventSourceMapping",
         "lambda:DeleteEventSourceMapping",
         "lambda:UpdateEventSourceMapping",
-        "lambda:GetEventSourceMapping"
+        "lambda:GetEventSourceMapping",
+        "lambda:TagResource",
+        "lambda:UntagResource"
       ],
       "Resource": "*"
     },

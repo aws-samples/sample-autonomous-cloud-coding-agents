@@ -149,6 +149,22 @@ describe('IaCRole-ABCA-Application', () => {
     );
   });
 
+  it('LambdaEventSourceMappings grants tagging (CDK event-source constructs tag the mapping)', () => {
+    // Regression guard for #407: DynamoDBEventSource (and peers) tag the
+    // created event source mapping, so the exec role needs Tag/UntagResource
+    // on event-source-mapping:*. The TagResource granted elsewhere is scoped
+    // to function:*/layer:* and does not cover mappings, so a fresh deploy
+    // rolled back with AccessDenied on lambda:TagResource. Lock the contract.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
+    const esm = statements.find((s) => s.Sid === 'LambdaEventSourceMappings');
+    expect(esm).toBeDefined();
+
+    const actions = Array.isArray(esm!.Action) ? esm!.Action : [esm!.Action];
+    expect(actions).toContain('lambda:TagResource');
+    expect(actions).toContain('lambda:UntagResource');
+  });
+
   it('SecretsManager statement allow-lists a secret pattern for every integration that creates a secret', () => {
     // Regression guard for #402: each integration construct that creates a
     // Secrets Manager secret (GitHub token, Slack, Linear, Jira, GitHub

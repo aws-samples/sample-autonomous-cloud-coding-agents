@@ -1019,6 +1019,8 @@ Resources:
               - lambda:DeleteEventSourceMapping
               - lambda:UpdateEventSourceMapping
               - lambda:GetEventSourceMapping
+              - lambda:TagResource
+              - lambda:UntagResource
             Effect: Allow
             Resource: '*'
             Sid: LambdaEventSourceMappings
