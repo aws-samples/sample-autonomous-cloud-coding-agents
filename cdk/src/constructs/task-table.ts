@@ -152,13 +152,13 @@ export class TaskTable extends Construct {
       partitionKey: { name: 'linear_issue_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.INCLUDE,
-      // iteration-UX: cost_usd + screenshot_url + code_changed/answer_text added so
-      // the maturing iteration reply can sum a running cost total across rounds and
-      // fold in the preview/answer without a per-task GetItem fan-out.
-      nonKeyAttributes: [
-        'pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata',
-        'cost_usd', 'screenshot_url', 'code_changed', 'answer_text',
-      ],
+      // NOTE: a GSI's projection CANNOT be changed in place — DynamoDB rejects it
+      // ("Cannot update GSI's properties other than Provisioned Throughput…";
+      // live-caught on the iteration-UX deploy, 2026-06-23). So the iteration-UX
+      // running-total query does a per-task GetItem for cost_usd rather than
+      // widening this projection. Keep this list as-is unless you create a NEW
+      // index with a different name.
+      nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
     });
   }
 }

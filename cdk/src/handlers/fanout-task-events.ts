@@ -1243,28 +1243,37 @@ async function replyToStandaloneTrigger(
 
 /**
  * Iteration-UX: sum ``cost_usd`` across ALL Linear-iteration tasks on one issue
- * (the running total shown on the reply). Queries the LinearIssueIndex GSI for
- * every task on the issue and sums the costs; ``current`` is the terminal task
- * whose own ``cost_usd`` may not yet be readable via the index's eventually-
- * consistent projection, so it is added explicitly (deduped by task_id). Best-
- * effort: on any read failure returns just this task's cost (never throws).
+ * (the running total shown on the reply). The LinearIssueIndex GSI lists every
+ * task_id for the issue (its projection deliberately does NOT include cost_usd —
+ * a GSI projection can't be changed in place, see task-table.ts), so we GetItem
+ * each task's cost from the base table. Iteration counts per issue are small, so
+ * the per-task reads are bounded. ``current``'s own cost is added explicitly in
+ * case the index hasn't caught up (deduped by task_id). Best-effort: on any read
+ * failure returns just this task's cost (never throws).
  */
 async function sumIterationCostForIssue(issueId: string, current: TaskRecord): Promise<number | null> {
   const tableName = process.env.TASK_TABLE_NAME;
   const currentCost = coerceNumericOrNull(current.cost_usd, { field: 'cost_usd', task_id: current.task_id }, logger) ?? 0;
   if (!tableName || !issueId) return currentCost || null;
   try {
-    const res = await ddb.send(new QueryCommand({
+    const listed = await ddb.send(new QueryCommand({
       TableName: tableName,
       IndexName: 'LinearIssueIndex',
       KeyConditionExpression: 'linear_issue_id = :iid',
+      ProjectionExpression: 'task_id',
       ExpressionAttributeValues: { ':iid': issueId },
     }));
+    const taskIds = ((listed.Items ?? []) as { task_id?: string }[])
+      .map((i) => i.task_id)
+      .filter((t): t is string => typeof t === 'string');
     let total = 0;
     let sawCurrent = false;
-    for (const item of (res.Items ?? []) as TaskRecord[]) {
-      if (item.task_id === current.task_id) sawCurrent = true;
-      const c = coerceNumericOrNull(item.cost_usd, { field: 'cost_usd', task_id: item.task_id }, logger);
+    for (const taskId of taskIds) {
+      if (taskId === current.task_id) { sawCurrent = true; total += currentCost; continue; }
+      const got = await ddb.send(new GetCommand({
+        TableName: tableName, Key: { task_id: taskId }, ProjectionExpression: 'cost_usd',
+      }));
+      const c = coerceNumericOrNull(got.Item?.cost_usd, { field: 'cost_usd', task_id: taskId }, logger);
       if (typeof c === 'number') total += c;
     }
     if (!sawCurrent) total += currentCost; // index lag — add this task explicitly

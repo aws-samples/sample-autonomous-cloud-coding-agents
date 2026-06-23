@@ -895,19 +895,28 @@ async function sumIterationCostForIssue(
   thisCost?: number,
 ): Promise<number | null> {
   const base = typeof thisCost === 'number' && Number.isFinite(thisCost) ? thisCost : 0;
+  const parseCost = (v: unknown): number =>
+    typeof v === 'number' ? v : (typeof v === 'string' ? Number(v) : NaN);
   try {
-    const res = await ddb.send(new QueryCommand({
+    // The GSI lists task_ids for the issue but does NOT project cost_usd (a GSI
+    // projection can't be changed in place — see task-table.ts), so GetItem each
+    // task's cost. Iteration counts per issue are small → bounded reads.
+    const listed = await ddb.send(new QueryCommand({
       TableName: TASK_TABLE,
       IndexName: TaskTable.LINEAR_ISSUE_INDEX,
       KeyConditionExpression: 'linear_issue_id = :iid',
+      ProjectionExpression: 'task_id',
       ExpressionAttributeValues: { ':iid': subIssueId },
     }));
     let total = 0;
     let sawThis = false;
-    for (const item of (res.Items ?? []) as Array<{ task_id?: string; cost_usd?: unknown }>) {
-      if (item.task_id === thisTaskId) sawThis = true;
-      const c = typeof item.cost_usd === 'number' ? item.cost_usd
-        : (typeof item.cost_usd === 'string' ? Number(item.cost_usd) : NaN);
+    for (const item of (listed.Items ?? []) as Array<{ task_id?: string }>) {
+      if (!item.task_id) continue;
+      if (item.task_id === thisTaskId) { sawThis = true; total += base; continue; }
+      const got = await ddb.send(new GetCommand({
+        TableName: TASK_TABLE, Key: { task_id: item.task_id }, ProjectionExpression: 'cost_usd',
+      }));
+      const c = parseCost(got.Item?.cost_usd);
       if (Number.isFinite(c)) total += c;
     }
     if (!sawThis) total += base;
