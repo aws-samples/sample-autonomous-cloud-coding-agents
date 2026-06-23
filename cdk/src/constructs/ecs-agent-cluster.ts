@@ -147,8 +147,7 @@ export class EcsAgentCluster extends Construct {
     // that tag-scoped role and the task role only needs to assume it. Without
     // one (isolated construct tests / legacy), grant the task role directly.
     if (props.agentSessionRole) {
-      props.agentSessionRole.addAssumingRole(taskRole);
-      props.agentSessionRole.grantAssumeToComputeRole(taskRole);
+      props.agentSessionRole.admitComputeRole(taskRole);
     } else {
       props.taskTable.grantReadWriteData(taskRole);
       props.taskEventsTable.grantReadWriteData(taskRole);
