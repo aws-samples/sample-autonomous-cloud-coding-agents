@@ -38,6 +38,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockDdbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
 }));
 
 const mockUpsertTaskComment: jest.Mock = jest.fn();
@@ -104,6 +105,10 @@ const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true }
 // the human's @bgagent comment, on top of the metrics comment. replyToComment
 // returns the new reply's comment-id string (or null), NOT a LinearPostResult.
 const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
+// iteration-UX: the standalone iteration now MATURES a threaded reply (edit in
+// place) via upsertThreadedReply(ctx, issueId, parentCommentId, body, existingId?)
+// rather than posting a fresh replyToComment.
+const mockUpsertThreadedReply: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
@@ -116,6 +121,13 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
     parentCommentId: string,
     body: string,
   ) => mockReplyToComment(ctx, issueId, parentCommentId, body),
+  upsertThreadedReply: (
+    ctx: { linearWorkspaceId: string; registryTableName: string },
+    issueId: string,
+    parentCommentId: string,
+    body: string,
+    existingReplyId?: string,
+  ) => mockUpsertThreadedReply(ctx, issueId, parentCommentId, body, existingReplyId),
 }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
@@ -1353,6 +1365,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
     mockReplyToComment.mockReset().mockResolvedValue('reply-id');
+    mockUpsertThreadedReply.mockReset().mockResolvedValue('reply-id');
     // Slack/GitHub mocks aren't asserted here but leaving them
     // un-reset would let prior-test rejections bleed in.
     mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
@@ -1645,24 +1658,27 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       pr_url: 'https://github.com/owner/repo/pull/13',
     };
 
-    test('task_completed → ✅ threaded reply to the triggering comment, linking the PR', async () => {
+    test('task_completed → ✅ MATURED threaded reply (not a fresh comment, no top-level metrics comment)', async () => {
       mockGet(STANDALONE);
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
 
-      expect(mockReplyToComment).toHaveBeenCalledTimes(1);
-      // Signature: replyToComment(ctx, issueId, parentCommentId, body).
-      const [, issueId, parentCommentId, body] = mockReplyToComment.mock.calls[0];
+      // iteration-UX: matures the reply via upsertThreadedReply, NOT replyToComment.
+      expect(mockUpsertThreadedReply).toHaveBeenCalledTimes(1);
+      // Signature: upsertThreadedReply(ctx, issueId, parentCommentId, body, existingId?).
+      const [, issueId, parentCommentId, body] = mockUpsertThreadedReply.mock.calls[0];
       expect(issueId).toBe('issue-uuid-42'); // the issue the comment lives on
       expect(parentCommentId).toBe('human-cmt-7');
       expect(body).toMatch(/^✅ Updated — PR #13\./);
-      // The metrics comment is still posted too.
-      expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+      // iteration-UX: the separate top-level "Task completed" metrics comment is
+      // SUPPRESSED for iterations (its cost folds into the reply) — that's the
+      // clutter we removed.
+      expect(mockPostIssueComment).not.toHaveBeenCalled();
     });
 
     test('task_failed (agent crash) → ❌ reply with classified reason + CloudWatch task id (UX.5)', async () => {
       mockGet({ ...STANDALONE, error_message: 'agent_status="error_max_turns"' });
       await handler({ Records: [mkEvent('task_failed', 't-lin')] });
-      const [, , , body] = mockReplyToComment.mock.calls[0];
+      const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
       expect(body).toMatch(/^❌/);
       expect(body).toMatch(/Exceeded max turns/i); // classified
       expect(body).toMatch(/CloudWatch for task `t-lin`/);
@@ -1672,7 +1688,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     test('task_completed but build_passed=false → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
       mockGet({ ...STANDALONE, build_passed: false, error_message: undefined });
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
-      const [, , , body] = mockReplyToComment.mock.calls[0];
+      const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
       expect(body).toMatch(/build\/tests didn't pass/i);
       expect(body).toMatch(/PR's checks/i);
       expect(body).not.toMatch(/CloudWatch/i);
@@ -1684,13 +1700,13 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
         channel_metadata: { ...STANDALONE.channel_metadata, orchestration_iteration: 'true' },
       });
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
-      expect(mockReplyToComment).not.toHaveBeenCalled();
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
     });
 
     test('a plain Linear task WITHOUT trigger_comment_id gets no threaded reply', async () => {
       mockGet(TASK_RECORD_LINEAR); // no trigger_comment_id
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
-      expect(mockReplyToComment).not.toHaveBeenCalled();
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
     });
 
     test('idempotent: a redelivered terminal event that loses the ack claim does not double-reply', async () => {
@@ -1705,7 +1721,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
         return Promise.resolve({});
       });
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
-      expect(mockReplyToComment).not.toHaveBeenCalled();
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
     });
   });
 });

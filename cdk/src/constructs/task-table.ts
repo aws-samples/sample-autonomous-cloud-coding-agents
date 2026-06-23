@@ -152,7 +152,13 @@ export class TaskTable extends Construct {
       partitionKey: { name: 'linear_issue_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.INCLUDE,
-      nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
+      // iteration-UX: cost_usd + screenshot_url + code_changed/answer_text added so
+      // the maturing iteration reply can sum a running cost total across rounds and
+      // fold in the preview/answer without a per-task GetItem fan-out.
+      nonKeyAttributes: [
+        'pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata',
+        'cost_usd', 'screenshot_url', 'code_changed', 'answer_text',
+      ],
     });
   }
 }
