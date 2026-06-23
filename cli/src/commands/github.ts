@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
@@ -26,19 +25,27 @@ import {
 import { Command } from 'commander';
 import { loadConfig } from '../config';
 import { CliError } from '../errors';
+import {
+  isGithubTokenConfigured,
+  putGithubToken,
+  resolveGithubTokenSecretArn,
+} from '../github-token';
+import { DEFAULT_STACK_NAME } from '../operator-context';
+import { promptSecret } from '../prompt-secret';
+import { getStackOutput } from '../stack-outputs';
 
 /** Width of the `═` banner rules printed around webhook-info output. */
 const BANNER_WIDTH = 72;
 
 export function makeGithubCommand(): Command {
   const github = new Command('github')
-    .description('Manage GitHub integration (deployment-status webhook for preview-deploy screenshots)');
+    .description('Manage GitHub integration (PAT storage, deployment-status webhook for preview-deploy screenshots)');
 
   github.addCommand(
     new Command('webhook-info')
       .description('Print the GitHub webhook URL + values to paste into a repo\'s webhook config')
       .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .action(async (opts) => {
         // Read-only convenience — surfaces the values an operator needs
         // to wire a GitHub repo's webhook to the screenshot pipeline.
@@ -95,7 +102,7 @@ export function makeGithubCommand(): Command {
     new Command('set-webhook-secret')
       .description('Mirror the GitHub webhook signing secret into Secrets Manager')
       .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .action(async (opts) => {
         // Companion to `webhook-info`: after the operator pastes the
         // webhook config into GitHub, this command captures the
@@ -160,74 +167,61 @@ export function makeGithubCommand(): Command {
       }),
   );
 
-  return github;
-}
+  github.addCommand(
+    new Command('set-token')
+      .description('Store a GitHub personal access token in Secrets Manager')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
+      .option('--repo <owner/repo>', 'Target a blueprint\'s per-repo token secret (when configured)')
+      .option('--secret-arn <arn>', 'Write to an explicit Secrets Manager ARN (instead of stack outputs)')
+      .action(async (opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
 
-// ─── Stack-output helper ─────────────────────────────────────────────────────
+        const resolved = await resolveGithubTokenSecretArn({
+          region,
+          stackName,
+          repo: opts.repo,
+          secretArn: opts.secretArn,
+        });
 
-async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
-  const cf = new CloudFormationClient({ region });
-  try {
-    const result = await cf.send(new DescribeStacksCommand({ StackName: stackName }));
-    const stack = result.Stacks?.[0];
-    if (!stack) return null;
-    return stack.Outputs?.find((o) => o.OutputKey === outputKey)?.OutputValue ?? null;
-  } catch (err) {
-    throw new CliError(
-      `Could not describe stack '${stackName}' in ${region}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-}
-
-// ─── Secret prompt (raw-mode, masked) ────────────────────────────────────────
-
-function promptSecret(label: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    process.stderr.write(label);
-
-    if (!process.stdin.isTTY) {
-      let buf = '';
-      process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (chunk) => {
-        buf += chunk.toString();
-      });
-      process.stdin.on('end', () => resolve(buf.trim()));
-      process.stdin.on('error', reject);
-      return;
-    }
-
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    let value = '';
-    const onData = (chunk: Buffer) => {
-      const str = chunk.toString();
-      for (const char of str) {
-        if (char === '\n' || char === '\r') {
-          cleanup();
-          process.stderr.write('\n');
-          resolve(value.trim());
-          return;
-        } else if (char === '') {
-          cleanup();
-          process.stderr.write('\n');
-          reject(new Error('Cancelled.'));
-          return;
-        } else if (char === '' || char === '\b') {
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            process.stderr.write('\b \b');
-          }
-        } else {
-          value += char;
-          process.stderr.write('*');
+        if (resolved.repoUsesPlatformDefault) {
+          console.log(
+            `  ℹ Repository '${opts.repo}' has no credentials.githubTokenSecretArn override; `
+            + 'using the platform default secret.',
+          );
+          console.log(
+            '    To use a dedicated secret per blueprint, create a Secrets Manager secret, '
+            + 'wire credentials.githubTokenSecretArn on the Blueprint, redeploy, then re-run with --repo.',
+          );
+          console.log();
+        } else if (resolved.source === 'blueprint') {
+          console.log(`  Target: per-blueprint secret for '${opts.repo}'`);
+          console.log(`  Secret ARN: ${resolved.secretArn}`);
+          console.log();
+        } else if (resolved.source === 'platform') {
+          console.log('  Target: platform default GitHub token secret');
+          console.log(`  Secret ARN: ${resolved.secretArn}`);
+          console.log();
         }
-      }
-    };
-    const cleanup = () => {
-      process.stdin.removeListener('data', onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    };
-    process.stdin.on('data', onData);
-  });
+
+        const alreadyConfigured = await isGithubTokenConfigured(region, resolved.secretArn);
+        if (alreadyConfigured) {
+          console.log('  ⚠ A GitHub token is already configured in this secret. This command will OVERWRITE it.');
+          console.log();
+        }
+
+        const token = (await promptSecret('GitHub personal access token: ')).trim();
+        if (!token) {
+          throw new CliError('GitHub personal access token is required.');
+        }
+
+        await putGithubToken(region, resolved.secretArn, token);
+        console.log();
+        console.log('✅ Stored GitHub personal access token.');
+      }),
+  );
+
+  return github;
 }

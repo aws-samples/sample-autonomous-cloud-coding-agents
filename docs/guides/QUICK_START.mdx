@@ -1,6 +1,14 @@
+---
+title: Quick start
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 # Quick start
 
 Go from zero to your first agent-created pull request in about 30 minutes. This guide covers only the minimum path - see the [Developer guide](./DEVELOPER_GUIDE.md) and [User guide](./USER_GUIDE.md) for the full details.
+
+Steps 4–6 offer **ABCA CLI** and **AWS CLI** tabs on each step (ABCA CLI is the default). Steps 4–5 share the same tab choice; Step 6 uses a separate tab group because submit adds a REST API call via `curl` on the AWS CLI path.
 
 ## Prerequisites
 
@@ -12,6 +20,7 @@ Install these before you begin:
 - **Node.js** v20 or later (Node 24 is the supported maximum — see CI matrix)
 - **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
 - **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
+- **GitHub account** — You need a [GitHub profile](https://github.com/join) to fork the sample repository and create a **fine-grained personal access token (PAT)** the agent uses to push branches and open pull requests. A free github.com account is sufficient.
 
 ## Step 1 - Clone and install
 
@@ -37,30 +46,38 @@ mise run build
 
 `mise run install` installs all JavaScript and Python dependencies across the monorepo. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
 
+:::note[ABCA CLI commands in this guide]
+
+This Quick Start does **not** assume a global `bgagent` install (`npm install -g …`). Step 1 compiles the CLI into `cli/lib/`. On every **ABCA CLI** tab below, run from the `cli/` directory:
+
+`cd cli` then `node lib/bin/bgagent.js <command> …`
+
+If `lib/bin/bgagent.js` is missing, run `mise run build` from `cli/` (or repeat Step 1's full build from the repo root).
+
+:::
+
 > **Note:** `mise run build` includes CDK synthesis, which queries AWS for availability zones. Your active AWS credentials must have at least `ec2:DescribeAvailabilityZones` permission, or the build will fail. If you use named profiles, make sure `AWS_PROFILE` is set before running the build.
 
 ## Step 2 - Prepare a repository
 
-The agent works by cloning a GitHub repository, creating a branch, making code changes, running the build and tests, and opening a pull request. This means it needs **write access** to a real repository.
+The agent works by cloning a GitHub repository, creating a branch, making code changes, running the build and tests, and opening a pull request. This means it needs **write access** to a real repository you control.
 
-The easiest way to start is to **fork** [`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins) - a lightweight sample repo designed for testing the platform.
+The Quick Start uses [`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins) — a lightweight sample repo designed for testing the platform. **You must fork it to your own GitHub account** before continuing; do not point the platform at the upstream `awslabs/agent-plugins` repo unless you have direct write access there (most users do not).
 
-### Create a GitHub personal access token
+:::danger[Fork the sample repo — do not skip]
 
-The agent authenticates to GitHub using a **fine-grained personal access token (PAT)**. Go to GitHub > **Settings** > **Developer settings** > **Fine-grained tokens**. Scope it to **only your fork** with these permissions:
+The agent pushes branches and opens pull requests on whichever `owner/repo` you register in the Blueprint. If you skip forking and keep the default `awslabs/agent-plugins` name, or your PAT is scoped to a different repository, tasks fail with permission errors that look like platform bugs but are really a repo/token mismatch.
 
-| Permission | Access | Why |
-|---|---|---|
-| **Contents** | Read and write | Clone the repo and push branches |
-| **Pull requests** | Read and write | Create and update pull requests |
-| **Issues** | Read | Read issue context for tasks that reference an issue |
-| **Metadata** | Read (default) | Required by GitHub for all fine-grained tokens |
+:::
 
-Keep the token value - you will store it in AWS Secrets Manager after deploying.
+### Fork the sample repository
 
-> **Collaborator or cross-org repos?** Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](../../agent/README.md#github-pat--minimal-permissions) for details.
+1. Sign in to GitHub and open [github.com/awslabs/agent-plugins](https://github.com/awslabs/agent-plugins).
+2. Click **Fork** (top-right), choose **your personal account** (or an organization you admin), and confirm.
+3. Wait for the fork to finish. Your copy lives at `https://github.com/<your-username>/agent-plugins`.
+4. Note the **`owner/repo` slug** — for example `jane-doe/agent-plugins`. You will use this exact string in CDK context, the PAT repository scope, and every `submit --repo …` command in Step 6.
 
-### Register the repo in CDK
+### Register your fork in CDK
 
 Every repository the agent can work on must be **onboarded** as a `Blueprint` construct in the CDK stack. The Blueprint writes a configuration record to DynamoDB; the orchestrator checks this before accepting tasks.
 
@@ -74,15 +91,70 @@ const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
 });
 ```
 
-You can point that blueprint at your fork **without editing the stack** by setting one of the following before `mise run build` or `mise //cdk:deploy` (same shell session):
+**Recommended:** add your fork to `cdk/cdk.json` so the value is checked in and you do not have to export an environment variable in every shell session. Edit `cdk/cdk.json` and add a `"context"` block (create it if missing):
+
+```json
+{
+  "app": "npx ts-node -P tsconfig.json --prefer-ts-exts src/main.ts",
+  "context": {
+    "blueprintRepo": "your-username/agent-plugins"
+  }
+}
+```
+
+Replace `your-username/agent-plugins` with the slug from your fork in the previous step.
+
+After changing `cdk.json`, **recompile the CDK app** so the updated context is picked up before deploy:
+
+```bash
+export MISE_EXPERIMENTAL=1
+mise //cdk:compile
+```
+
+You can also run a full `mise run build` (includes compile). Then deploy in Step 3 with `mise //cdk:deploy`. If you already deployed once with the wrong repo name, edit `cdk.json` and **redeploy** — the Blueprint updates the DynamoDB record on stack update.
+
+Alternatively, for a one-off deploy without editing `cdk.json`:
 
 ```bash
 export BLUEPRINT_REPO=your-username/agent-plugins
 ```
 
-Alternatively, set CDK context (for example in `cdk/cdk.json` under `"context"`, or for a single deploy: `cdk deploy -c blueprintRepo=your-username/agent-plugins`). Environment variable wins over context when both are set.
+Or pass context on the command line: `cdk deploy -c blueprintRepo=your-username/agent-plugins`. The environment variable wins over context when both are set.
 
 The resolved `repo` value must match **exactly** what you pass to the CLI later (`owner/repo` format). To onboard **additional** repositories, add more `Blueprint` constructs in `agent.ts` and redeploy (see [Onboard your own repositories](#onboard-your-own-repositories) below).
+
+### Create a GitHub personal access token
+
+The agent authenticates to GitHub using a **fine-grained personal access token (PAT)**. Go to GitHub → **Settings** → **Developer settings** → **Fine-grained tokens** → **Generate new token**.
+
+:::caution[Scope the token to your fork]
+
+Under **Repository access**, choose **Only select repositories** and pick **the fork you created above** (`your-username/agent-plugins`). Do not scope the token to `awslabs/agent-plugins` unless you own that upstream repo. The token repository must match the `blueprintRepo` value you set in `cdk/cdk.json` (or `BLUEPRINT_REPO`).
+
+:::
+
+Grant these permissions on that repository:
+
+| Permission | Access | Why |
+|---|---|---|
+| **Contents** | Read and write | Clone the repo and push branches |
+| **Pull requests** | Read and write | Create and update pull requests |
+| **Issues** | Read | Read issue context for tasks that reference an issue |
+| **Metadata** | Read (default) | Required by GitHub for all fine-grained tokens |
+
+Keep the token value — you will store it in AWS Secrets Manager in Step 4.
+
+:::note[Already configured your fork?]
+
+If you have not yet added `blueprintRepo` to `cdk/cdk.json`, go back to [Register your fork in CDK](#register-your-fork-in-cdk), set `"blueprintRepo": "your-username/agent-plugins"`, run `mise //cdk:compile`, and redeploy before submitting tasks. The PAT, Blueprint repo name, and `--repo` argument in Step 6 must all refer to the **same** fork.
+
+:::
+
+:::note[Collaborator or cross-org repos?]
+
+Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](../../agent/README.md#github-pat--minimal-permissions) for details.
+
+:::
 
 ## Step 3 - Deploy
 
@@ -121,7 +193,32 @@ If a task fails immediately with text like the model is **not available on your 
 
 ## Step 4 - Store the GitHub token
 
-The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK stack created an empty secret for you - now you need to put your token value in it.
+The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK stack created an empty secret for you - now you need to put your token value in it. Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGION` matches where you deployed - if it is empty, the AWS CLI builds a malformed endpoint URL and fails silently.
+
+<Tabs syncKey="quickstart-method">
+
+<TabItem label="ABCA CLI">
+
+```bash
+cd cli
+
+REGION=us-east-1  # your deployment region
+
+# Interactive prompt — stores in the platform GitHubTokenSecretArn output
+node lib/bin/bgagent.js github set-token --region "$REGION" --stack-name backgroundagent-dev
+```
+
+For a repository with a per-blueprint token secret (`credentials.githubTokenSecretArn` on the Blueprint), target that repo instead:
+
+```bash
+cd cli
+
+node lib/bin/bgagent.js github set-token --region "$REGION" --repo your-org/your-repo
+```
+
+</TabItem>
+
+<TabItem label="AWS CLI">
 
 ```bash
 REGION=us-east-1  # your deployment region
@@ -138,13 +235,51 @@ aws secretsmanager put-secret-value \
   --secret-string "ghp_your_token_here"
 ```
 
-Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGION` matches where you deployed - if it is empty, the AWS CLI builds a malformed endpoint URL and fails silently.
+</TabItem>
+
+</Tabs>
 
 ## Step 5 - Create a Cognito user
 
-The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so you create a user via the AWS CLI. The pool requires the username to be a valid email address, a password of at least 12 characters mixing uppercase, lowercase, digits, and symbols, and the user's email to be pre-verified.
+The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so an operator must create users (AWS credentials with `cognito-idp:AdminCreateUser` and `cognito-idp:AdminSetUserPassword` on the pool — no ABCA CLI `configure` required yet). The pool requires the username to be a valid email, a password of at least 12 characters mixing uppercase, lowercase, digits, and symbols, and the user's email to be pre-verified.
+
+<Tabs syncKey="quickstart-method">
+
+<TabItem label="ABCA CLI">
 
 ```bash
+cd cli
+
+REGION=us-east-1  # your deployment region (same as Step 4)
+
+# Creates the user, sets a permanent password, and writes credentials + configure bundle
+# to ~/.bgagent/invites/you@example.com.txt (mode 0600)
+node lib/bin/bgagent.js admin invite-user you@example.com \
+  --region "$REGION" \
+  --stack-name backgroundagent-dev
+```
+
+The command wraps `AdminCreateUser` + `AdminSetUserPassword`: email is pre-verified, the welcome email is suppressed (avoids SES errors on new accounts), and the password is permanent (no forced change on first login). When stack outputs are available, the invite file also includes a configure bundle for Step 6.
+
+To manage users later:
+
+```bash
+cd cli
+
+node lib/bin/bgagent.js admin list-users --region "$REGION" --stack-name backgroundagent-dev
+node lib/bin/bgagent.js admin reset-password you@example.com --region "$REGION"
+node lib/bin/bgagent.js admin delete-user someone@example.com --region "$REGION"
+```
+
+</TabItem>
+
+<TabItem label="AWS CLI">
+
+Requires the AWS CLI with credentials that can call `cognito-idp:Admin*` on the deployment user pool. No ABCA CLI build or `node lib/bin/bgagent.js` invocation is needed on this path.
+
+```bash
+REGION=us-east-1  # your deployment region (same as Step 4)
+
 USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
   --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
@@ -165,31 +300,34 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-The first command creates the user with a temporary password, pre-verifies the email (required or login fails with `User is not confirmed`), and suppresses Cognito's welcome email (which otherwise errors on accounts without SES configured). The second sets a permanent password so you do not have to go through a password change flow on first login.
+The first command creates the user with a temporary password, pre-verifies the email (required or login fails with `User is not confirmed`), and suppresses Cognito's welcome email (which otherwise errors on accounts without SES configured). The second sets a permanent password so you do not have to go through a password change flow on first login. Remember the password you set — you will need it in Step 6.
 
-## Step 6 - Configure the CLI and submit a task
+</TabItem>
 
-The `bgagent` CLI is the recommended way to interact with the platform. It handles Cognito authentication, token caching, and output formatting. You configure it once with the stack outputs, log in, and then submit tasks.
+</Tabs>
+
+## Step 6 - Configure and submit a task
+
+Authenticate, then submit your first task. A typical simple task takes 2-5 minutes. When it completes, you will see a PR URL — open it in your browser to review the agent's work.
+
+<Tabs syncKey="quickstart-submit">
+
+<TabItem label="ABCA CLI">
+
+The ABCA CLI handles Cognito authentication, token caching, and output formatting.
 
 ```bash
-# Get stack outputs
-API_URL=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
-  --region "$REGION" \
-  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' --output text)
-APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
-  --region "$REGION" \
-  --query 'Stacks[0].Outputs[?OutputKey==`AppClientId`].OutputValue' --output text)
-
-# Build and configure the CLI
 cd cli
-mise run build
-node lib/bin/bgagent.js configure \
-  --api-url $API_URL \
-  --region "$REGION" \
-  --user-pool-id $USER_POOL_ID \
-  --client-id $APP_CLIENT_ID
 
-# Log in
+REGION=us-east-1  # your deployment region (same as Step 4)
+
+# After Step 5 invite-user: paste the bundle from ~/.bgagent/invites/you@example.com.txt
+node lib/bin/bgagent.js configure --from-bundle "<paste bundle from invite file>"
+
+# Or read ApiUrl / UserPoolId / AppClientId from CloudFormation (same as `platform outputs`)
+node lib/bin/bgagent.js configure --region "$REGION" --stack-name backgroundagent-dev
+
+# Log in (password from ~/.bgagent/invites/you@example.com.txt)
 node lib/bin/bgagent.js login --username you@example.com
 
 # Submit your first task and wait for it to complete
@@ -199,33 +337,85 @@ node lib/bin/bgagent.js submit \
   --wait
 ```
 
-The `--wait` flag polls until the task reaches a terminal state. A typical simple task takes 2-5 minutes. When it completes, you will see a PR URL in your terminal - open it in your browser to review the agent's work.
+The `--wait` flag polls until the task reaches a terminal state. You can still pass `--api-url`, `--user-pool-id`, or `--client-id` to override individual stack outputs.
 
-Alternatively, use `watch` to stream progress events in real time:
+</TabItem>
+
+<TabItem label="AWS CLI">
+
+Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). Requires `curl` and the AWS CLI — no ABCA CLI build.
 
 ```bash
+REGION=us-east-1  # your deployment region (same as Step 4)
+
+API_URL=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
+  --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' --output text)
+APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-dev \
+  --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`AppClientId`].OutputValue' --output text)
+
+TOKEN=$(aws cognito-idp initiate-auth \
+  --region "$REGION" \
+  --client-id "$APP_CLIENT_ID" \
+  --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters USERNAME=you@example.com,PASSWORD='YourPerm@nent1Pass!' \
+  --query 'AuthenticationResult.IdToken' --output text)
+
+curl -X POST "$API_URL/tasks" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "your-username/agent-plugins",
+    "task_description": "Add a CODEOWNERS file to the repository root"
+  }'
+```
+
+Poll task status until `COMPLETED` (or a terminal failure state):
+
+```bash
+curl "$API_URL/tasks/<TASK_ID>" -H "Authorization: $TOKEN"
+```
+
+See [User guide → Using the REST API](./USER_GUIDE.md#using-the-rest-api) for list, cancel, and events endpoints.
+
+</TabItem>
+
+</Tabs>
+
+ABCA CLI-only helpers after submit — use `watch` to stream progress events in real time:
+
+```bash
+cd cli
+
 node lib/bin/bgagent.js watch <TASK_ID>
 ```
 
 While a task is running, you can steer the agent with a nudge:
 
 ```bash
+cd cli
+
 node lib/bin/bgagent.js nudge <TASK_ID> "Also add a test for the edge case"
 ```
 
 ## Step 7 - See an approval gate in action
 
-If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end.
+If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end. Run the commands below from the `cli/` directory (`cd cli` from the repo root).
 
 First, check which rules apply to your repo:
 
 ```bash
+cd cli
+
 node lib/bin/bgagent.js policies list --repo owner/repo
 ```
 
 Submit a task that will plausibly trip a soft-deny rule — for example, one of the default blueprint rules guards force-pushes:
 
 ```bash
+cd cli
+
 node lib/bin/bgagent.js submit --repo owner/repo \
   --task "Force-push the feature branch so the history is linear"
 ```
@@ -233,18 +423,24 @@ node lib/bin/bgagent.js submit --repo owner/repo \
 In a second terminal, watch the task:
 
 ```bash
+cd cli
+
 node lib/bin/bgagent.js watch <TASK_ID>
 ```
 
 When the agent hits the guarded tool call, `watch` prints an `approval_requested` event and the task status flips to `AWAITING_APPROVAL`. List the pending approval:
 
 ```bash
+cd cli
+
 node lib/bin/bgagent.js pending
 ```
 
 The output includes ready-to-run approve/deny lines. Pick one:
 
 ```bash
+cd cli
+
 # Approve just this call
 node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID>
 
@@ -258,6 +454,8 @@ The task transitions back to `RUNNING` immediately on a decision. The denial rea
 If you want a task to run without interactive gates (e.g. an unattended overnight job), pre-approve the scopes you trust up-front:
 
 ```bash
+cd cli
+
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
   --pre-approve write_path:tests/**
@@ -267,7 +465,7 @@ Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-a
 
 ## What happened behind the scenes
 
-Here is what the platform did after you ran `bgagent submit`:
+Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 
 1. **Task creation** - The CLI authenticated via Cognito and sent a `POST /v1/tasks` request. The API validated the request, checked idempotency, and stored a task record in DynamoDB with status `SUBMITTED`.
 2. **Orchestration** - The durable orchestrator picked up the task and ran admission control (concurrency limits). It then ran **pre-flight checks** - calling the GitHub API to verify your token can access the repository with push permissions. If the token were read-only, the task would have failed here with a clear error instead of failing later inside the agent.
@@ -332,6 +530,8 @@ The agent automatically loads project-level instructions from `CLAUDE.md` at the
 Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials, using HMAC-SHA256 authentication. This is useful for automating PR review on every PR, or triggering code changes from CI events. See the [User guide - Webhooks](./USER_GUIDE.md) for setup instructions.
 
 ## Next steps
+
+Run from the `cli/` directory (`cd cli` from the repo root):
 
 - **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
 - **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
