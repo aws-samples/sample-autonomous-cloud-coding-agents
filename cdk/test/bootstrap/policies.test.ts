@@ -163,6 +163,22 @@ describe('IaCRole-ABCA-Application', () => {
     expect(allActions).toContain('lambda:DeleteProvisionedConcurrencyConfig');
   });
 
+  it('LambdaEventSourceMappings grants tagging (CDK event-source constructs tag the mapping)', () => {
+    // Regression guard for #407: DynamoDBEventSource (and peers) tag the
+    // created event source mapping, so the exec role needs Tag/UntagResource
+    // on event-source-mapping:*. The TagResource granted elsewhere is scoped
+    // to function:*/layer:* and does not cover mappings, so a fresh deploy
+    // rolled back with AccessDenied on lambda:TagResource. Lock the contract.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
+    const esm = statements.find((s) => s.Sid === 'LambdaEventSourceMappings');
+    expect(esm).toBeDefined();
+
+    const actions = Array.isArray(esm!.Action) ? esm!.Action : [esm!.Action];
+    expect(actions).toContain('lambda:TagResource');
+    expect(actions).toContain('lambda:UntagResource');
+  });
+
   it('SecretsManager statement allow-lists a secret pattern for every integration that creates a secret', () => {
     // Regression guard for #402: each integration construct that creates a
     // Secrets Manager secret (GitHub token, Slack, Linear, Jira, GitHub
@@ -260,6 +276,38 @@ describe('IaCRole-ABCA-Observability', () => {
         'xray',
       ]),
     );
+  });
+
+  it('S3ApplicationBuckets grants the bucket-feature actions the stack buckets enable', () => {
+    // Regression guard for #404: the exec role must hold a CreateBucket-time
+    // action for every feature the application buckets turn on, or a fresh
+    // deploy rolls back with AccessDenied at that specific configure call.
+    // AttachmentsBucket sets `versioned: true`, so PutBucketVersioning (and
+    // GetBucketVersioning for the read/drift path) are required — they were
+    // missing, which is how this reached main. The service-prefix check above
+    // can't catch it (still `s3:`). If a bucket later enables notifications,
+    // CORS, etc., add the matching action here and to the policy together.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+    }>;
+    const s3Buckets = statements.find((s) => s.Sid === 'S3ApplicationBuckets');
+    expect(s3Buckets).toBeDefined();
+
+    const actions = Array.isArray(s3Buckets!.Action)
+      ? s3Buckets!.Action
+      : [s3Buckets!.Action];
+
+    for (const action of [
+      's3:CreateBucket',
+      's3:PutEncryptionConfiguration',
+      's3:PutLifecycleConfiguration',
+      's3:PutBucketVersioning',
+      's3:GetBucketVersioning',
+    ]) {
+      expect(actions).toContain(action);
+    }
   });
 });
 
