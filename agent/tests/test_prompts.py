@@ -45,6 +45,38 @@ class TestChannelPromptAddendum:
         assert "mcp__linear-server__save_comment" in addendum
         assert "ABC-42" in addendum
 
+    def test_new_task_keeps_headline_progress_comments(self):
+        # A new_task (no resolved_workflow → default new-task-v1) keeps the
+        # "Starting" / PR-opened comment instructions — those ARE the issue's
+        # headline signal.
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={"linear_issue_id": "issue-uuid-1"},
+            )
+        )
+        assert "🤖 Starting on this issue" in addendum
+
+    def test_comment_iteration_suppresses_progress_comments(self):
+        # iteration-UX: a pr-iteration (an @bgagent comment follow-up) is
+        # surfaced by the platform's single maturing threaded reply, so the
+        # agent must NOT post its own Starting / PR-opened / completed comments —
+        # they re-clutter the issue (ABCA-430). Context discovery still applies.
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={"linear_issue_id": "issue-uuid-1"},
+                resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
+            )
+        )
+        assert "Linear issue progress (iteration)" in addendum
+        assert "do NOT post your own" in addendum
+        # The headline "🤖 Starting" instruction is gone for iterations…
+        assert "🤖 Starting on this issue" not in addendum
+        # …but the on-demand context-discovery half is still present.
+        assert "Linear context discovery" in addendum
+        assert "mcp__linear-server__list_comments" in addendum
+
     def test_linear_integration_node_gets_no_addendum(self):
         # #247 UX.16: the synthetic orchestration integration node is a Linear
         # task but has NO real sub-issue — channel_metadata omits
