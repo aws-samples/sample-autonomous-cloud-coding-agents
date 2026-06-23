@@ -149,6 +149,20 @@ describe('IaCRole-ABCA-Application', () => {
     );
   });
 
+  it('grants Put/Delete provisioned-concurrency, not just Get (#409)', () => {
+    // The Slack-events function pins provisioned concurrency on its `live`
+    // alias, so the exec role needs Put (create/update) and Delete (removal),
+    // not only the Get verb. Get-without-Put rolled the deploy back with
+    // AccessDenied on lambda:PutProvisionedConcurrencyConfig.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    expect(allActions).toContain('lambda:PutProvisionedConcurrencyConfig');
+    expect(allActions).toContain('lambda:DeleteProvisionedConcurrencyConfig');
+  });
+
   it('LambdaEventSourceMappings grants tagging (CDK event-source constructs tag the mapping)', () => {
     // Regression guard for #407: DynamoDBEventSource (and peers) tag the
     // created event source mapping, so the exec role needs Tag/UntagResource

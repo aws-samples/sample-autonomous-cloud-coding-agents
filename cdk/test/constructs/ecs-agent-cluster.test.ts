@@ -266,15 +266,16 @@ describe('EcsAgentCluster construct', () => {
       // to the SessionRole's policy (which carries the conditioned DDB
       // statements). The task-role policy must NOT contain any unconditioned
       // task-table DDB grant — that access now lives only on the SessionRole.
-      const taskRolePolicies = Object.values(policies).filter((p) =>
-        p.Properties.PolicyDocument.Statement.some((s: { Action: string | string[] }) => {
+      const taskRolePolicies = Object.entries(policies).filter(([id, p]) =>
+        id.includes('TaskDefTaskRole')
+        && p.Properties.PolicyDocument.Statement.some((s: { Action: string | string[] }) => {
           const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
           return actions.includes('sts:AssumeRole');
         }),
       );
       expect(taskRolePolicies).toHaveLength(1);
 
-      const taskRoleStatements = taskRolePolicies[0].Properties.PolicyDocument.Statement;
+      const taskRoleStatements = taskRolePolicies[0][1].Properties.PolicyDocument.Statement;
       // No unconditioned dynamodb item grant on the task role (the only DDB the
       // task role may touch directly is UserConcurrencyTable — assert that any
       // DDB statement present is NOT a leading-key-less task-table grant by
