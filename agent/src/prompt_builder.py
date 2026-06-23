@@ -157,6 +157,31 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     issue_ref = f" (`{issue_identifier}`)" if issue_identifier else ""
     issue_id = config.channel_metadata.get("linear_issue_id") or ""
     project_id = config.channel_metadata.get("linear_project_id") or ""
+
+    # iteration-UX: a comment-iteration (pr-iteration-v1, triggered by an
+    # @bgagent comment) is surfaced by the platform's single maturing threaded
+    # reply (👀 On it → 🔄 Working → ✅/💬 + cost). The agent's own top-level
+    # "🤖 Starting" / "🔗 PR opened" comments would just re-clutter the issue
+    # with the comments we removed (ABCA-430). So for iterations, suppress the
+    # progress-comment instructions and post ONLY the context-discovery half +
+    # the state-transition guidance. (new_task keeps its headline comments — they
+    # ARE the issue's first signal.)
+    workflow_id = (config.resolved_workflow or {}).get("id", "")
+    is_comment_iteration = workflow_id == "coding/pr-iteration-v1"
+    if is_comment_iteration:
+        return (
+            "\n\n## Linear issue progress (iteration)\n\n"
+            f"This is a follow-up iteration on Linear issue{issue_ref}, triggered "
+            "by a comment. The platform posts a single threaded status reply under "
+            "that comment (it shows progress + cost), so **do NOT post your own "
+            "'Starting' / 'PR opened' / 'task completed' Linear comments** — they "
+            "duplicate the platform reply and clutter the issue. The Linear MCP is "
+            "still loaded; use it ONLY for the on-demand context discovery below "
+            "(fetching attachments / comments / documents when you need them). Do "
+            "the code work and let the platform narrate it.\n"
+            + _linear_context_discovery_section(issue_id, project_id)
+        )
+
     return (
         "\n\n## Linear issue progress updates (REQUIRED)\n\n"
         f"This task was submitted from Linear issue{issue_ref}. The Linear MCP "
@@ -208,6 +233,18 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
         "comments on the issue.\n\n"
         "Keep the start + PR-opened comments concise. Do not mirror the full "
         "agent transcript back to Linear.\n\n"
+        + _linear_context_discovery_section(issue_id, project_id)
+    )
+
+
+def _linear_context_discovery_section(issue_id: str, project_id: str) -> str:
+    """The on-demand Linear MCP context-discovery guidance.
+
+    Shared by the new-task progress addendum and the iteration addendum (where
+    the start/PR-opened comments are suppressed but context discovery still
+    applies). Pure string-builder.
+    """
+    return (
         "## Linear context discovery (on demand)\n\n"
         "The same Linear MCP exposes tools for fetching extra context on the "
         "issue when you need it. Use them sparingly — only when the task "
