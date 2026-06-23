@@ -247,6 +247,38 @@ describe('IaCRole-ABCA-Observability', () => {
       ]),
     );
   });
+
+  it('S3ApplicationBuckets grants the bucket-feature actions the stack buckets enable', () => {
+    // Regression guard for #404: the exec role must hold a CreateBucket-time
+    // action for every feature the application buckets turn on, or a fresh
+    // deploy rolls back with AccessDenied at that specific configure call.
+    // AttachmentsBucket sets `versioned: true`, so PutBucketVersioning (and
+    // GetBucketVersioning for the read/drift path) are required — they were
+    // missing, which is how this reached main. The service-prefix check above
+    // can't catch it (still `s3:`). If a bucket later enables notifications,
+    // CORS, etc., add the matching action here and to the policy together.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+    }>;
+    const s3Buckets = statements.find((s) => s.Sid === 'S3ApplicationBuckets');
+    expect(s3Buckets).toBeDefined();
+
+    const actions = Array.isArray(s3Buckets!.Action)
+      ? s3Buckets!.Action
+      : [s3Buckets!.Action];
+
+    for (const action of [
+      's3:CreateBucket',
+      's3:PutEncryptionConfiguration',
+      's3:PutLifecycleConfiguration',
+      's3:PutBucketVersioning',
+      's3:GetBucketVersioning',
+    ]) {
+      expect(actions).toContain(action);
+    }
+  });
 });
 
 describe('IaCRole-ABCA-Compute-AgentCore', () => {

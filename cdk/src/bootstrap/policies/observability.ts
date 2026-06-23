@@ -127,6 +127,8 @@ export function observabilityPolicy(): iam.PolicyDocument {
           's3:GetBucketPublicAccessBlock',
           's3:PutEncryptionConfiguration',
           's3:PutLifecycleConfiguration',
+          's3:PutBucketVersioning',
+          's3:GetBucketVersioning',
           's3:GetBucketLocation',
           's3:ListBucket',
           's3:PutBucketTagging',
