@@ -47,8 +47,8 @@ import {
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply } from './shared/failure-reply';
-import { isNoChangeIteration, renderIterationSuccessReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState } from './shared/linear-feedback';
+import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
@@ -71,6 +71,7 @@ import {
 import type { ChannelSource } from './shared/types';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
+import { TaskTable } from '../constructs/task-table';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
@@ -144,6 +145,16 @@ interface TerminalTaskEvent {
   readonly codeChanged?: boolean;
   /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
   readonly answerText?: string;
+  /**
+   * iteration-UX: the maturing "👀 On it" reply posted at trigger time. When
+   * present, the settle EDITS this reply (👀→✅/💬) instead of posting a fresh
+   * one. Absent on pre-fix tasks → falls back to a new threaded reply.
+   */
+  readonly iterationReplyId?: string;
+  /** iteration-UX: this iteration's cost (USD) — folded into the settle reply. */
+  readonly costUsd?: number;
+  /** iteration-UX: this iteration's wall-clock seconds — folded into the reply. */
+  readonly durationS?: number;
 }
 
 /**
@@ -180,6 +191,12 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
   // A6/#299: did this iteration commit anything, and (if not) what did the agent say?
   const codeChanged = img.code_changed?.BOOL;
   const answerText = img.answer_text?.S;
+  // iteration-UX: the maturing reply to edit + this run's cost/duration.
+  const iterationReplyId = img.channel_metadata?.M?.iteration_reply_comment_id?.S;
+  const costUsd = img.cost_usd?.N !== undefined ? Number(img.cost_usd.N)
+    : (img.cost_usd?.S !== undefined ? Number(img.cost_usd.S) : undefined);
+  const durationS = img.duration_s?.N !== undefined ? Number(img.duration_s.N)
+    : (img.duration_s?.S !== undefined ? Number(img.duration_s.S) : undefined);
 
   // A6 cascade marker: an iteration/restack task names the node it acted on
   // via channel_metadata. A restack task also carries
@@ -212,6 +229,9 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(triggerCommentIssueId !== undefined && { triggerCommentIssueId }),
     ...(codeChanged !== undefined && { codeChanged }),
     ...(answerText !== undefined && { answerText }),
+    ...(iterationReplyId !== undefined && { iterationReplyId }),
+    ...(costUsd !== undefined && Number.isFinite(costUsd) && { costUsd }),
+    ...(durationS !== undefined && Number.isFinite(durationS) && { durationS }),
   };
 }
 
@@ -808,8 +828,20 @@ async function replyToIterationComment(
   }
   if (!won) return;
 
+  // iteration-UX: mature the settle reply (👀→✅/💬) with cost + running total,
+  // editing the trigger-time reply when its id was captured. A failure keeps the
+  // existing UX.5 failure reply (replyable retry).
+  const prNumber = await resolvePrNumber(evt.taskId);
+  const runningTotalUsd = await sumIterationCostForIssue(changedSubIssueId, evt.taskId, evt.costUsd);
   const body = succeeded
-    ? await buildIterationAckSuccess(evt)
+    ? renderMaturingReply({
+      state: isNoChangeIteration(evt.codeChanged) ? 'answered' : 'updated',
+      prNumber,
+      ...(evt.answerText !== undefined && { answerText: evt.answerText }),
+      ...(evt.costUsd !== undefined && { costUsd: evt.costUsd }),
+      ...(evt.durationS !== undefined && { durationS: evt.durationS }),
+      ...(runningTotalUsd !== null && { runningTotalUsd }),
+    })
     : renderFailureReply({
       status: evt.status,
       buildPassed: evt.buildPassed,
@@ -822,7 +854,9 @@ async function replyToIterationComment(
   // parent issue, NOT changedSubIssueId. Fall back to the sub-issue id for
   // tasks created before UX.19 (no triggerCommentIssueId persisted).
   const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
-  await replyToComment(ctx, replyIssueId, commentId, body);
+  // iteration-UX: EDIT the maturing reply posted at trigger time; fall back to a
+  // fresh threaded reply for pre-fix tasks that captured no reply id.
+  await upsertThreadedReply(ctx, replyIssueId, commentId, body, evt.iterationReplyId);
 
   // #247 UX.21: settle the comment + sub-issue so all three views agree (panel
   // row, sub-issue state, comment reaction) — the platform owns this, not the
@@ -849,18 +883,41 @@ async function replyToIterationComment(
 }
 
 /**
- * Build the iteration ack reply. A6/#299: a real edit → "✅ Updated — PR #N";
- * a no-change iteration (a question) → "💬 <agent's answer>" instead of a false
- * "✅ Updated". ``codeChanged === undefined`` (pre-fix / non-iteration) keeps
- * the "✅ Updated" behaviour.
+ * iteration-UX: sum ``cost_usd`` across all iteration tasks on a sub-issue (the
+ * running total shown on the settle reply). Queries the LinearIssueIndex by the
+ * sub-issue's linear_issue_id; ``thisCost`` is added explicitly in case the
+ * terminal task's projection hasn't propagated yet (deduped by task_id). Best-
+ * effort: returns this task's cost on any read failure, null when nothing known.
  */
-async function buildIterationAckSuccess(evt: TerminalTaskEvent): Promise<string> {
-  const prNumber = await resolvePrNumber(evt.taskId);
-  return renderIterationSuccessReply({
-    ...(evt.codeChanged !== undefined && { codeChanged: evt.codeChanged }),
-    prNumber,
-    ...(evt.answerText !== undefined && { answerText: evt.answerText }),
-  });
+async function sumIterationCostForIssue(
+  subIssueId: string,
+  thisTaskId: string,
+  thisCost?: number,
+): Promise<number | null> {
+  const base = typeof thisCost === 'number' && Number.isFinite(thisCost) ? thisCost : 0;
+  try {
+    const res = await ddb.send(new QueryCommand({
+      TableName: TASK_TABLE,
+      IndexName: TaskTable.LINEAR_ISSUE_INDEX,
+      KeyConditionExpression: 'linear_issue_id = :iid',
+      ExpressionAttributeValues: { ':iid': subIssueId },
+    }));
+    let total = 0;
+    let sawThis = false;
+    for (const item of (res.Items ?? []) as Array<{ task_id?: string; cost_usd?: unknown }>) {
+      if (item.task_id === thisTaskId) sawThis = true;
+      const c = typeof item.cost_usd === 'number' ? item.cost_usd
+        : (typeof item.cost_usd === 'string' ? Number(item.cost_usd) : NaN);
+      if (Number.isFinite(c)) total += c;
+    }
+    if (!sawThis) total += base;
+    return total > 0 ? total : null;
+  } catch (err) {
+    logger.warn('iteration-UX: running-total cost query failed — using this task only', {
+      task_id: thisTaskId, error: err instanceof Error ? err.message : String(err),
+    });
+    return base > 0 ? base : null;
+  }
 }
 
 /**

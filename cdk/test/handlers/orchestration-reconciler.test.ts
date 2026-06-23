@@ -40,6 +40,7 @@ const swapIssueReactionMock = jest.fn();
 const swapCommentReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
 const replyToCommentMock = jest.fn();
+const upsertThreadedReplyMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
@@ -47,8 +48,10 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
   replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
+  upsertThreadedReply: (...args: unknown[]) => upsertThreadedReplyMock(...args),
   EMOJI_SUCCESS: 'white_check_mark',
   EMOJI_FAILURE: 'x',
+  EMOJI_NEEDS_INPUT: 'question',
 }));
 
 jest.mock('../../src/handlers/shared/logger', () => ({
@@ -670,6 +673,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     swapCommentReactionMock.mockReset().mockResolvedValue(true);
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue('reply-1');
+    upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
   });
 
   /** An iteration event carrying the human comment id that triggered it. */
@@ -692,9 +696,9 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     ]);
     await handler(iterEventWithComment('COMPLETED'));
 
-    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
     // Signature: replyToComment(ctx, issueId, parentCommentId, body).
-    const [, issueId, parentCommentId, body] = replyToCommentMock.mock.calls[0];
+    const [, issueId, parentCommentId, body] = upsertThreadedReplyMock.mock.calls[0];
     expect(issueId).toBe('A'); // the sub-issue the comment lives on
     expect(parentCommentId).toBe('human-cmt-1');
     expect(body).toMatch(/^✅ Updated — PR #\d+\./);
@@ -724,8 +728,8 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
       })],
     } as never);
 
-    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
-    const [, issueId, parentCommentId] = replyToCommentMock.mock.calls[0];
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+    const [, issueId, parentCommentId] = upsertThreadedReplyMock.mock.calls[0];
     expect(issueId).toBe('PARENT'); // NOT 'A' — the reply targets the parent comment's issue
     expect(parentCommentId).toBe('parent-cmt-1');
   });
@@ -736,8 +740,8 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     ]);
     await handler(iterEventWithComment('FAILED', 'human-cmt-1', undefined, 'agent_status="error_max_turns"'));
 
-    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
-    const [, , , body] = replyToCommentMock.mock.calls[0];
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+    const [, , , body] = upsertThreadedReplyMock.mock.calls[0];
     expect(body).toMatch(/^❌/);
     expect(body).toMatch(/Exceeded max turns/i); // classified
     expect(body).toMatch(/CloudWatch for task `iter-task-1`/);
@@ -757,8 +761,8 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     // COMPLETED, build_passed=false, NO error_message → build/test failure shape.
     await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
 
-    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
-    const [, , , body] = replyToCommentMock.mock.calls[0];
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+    const [, , , body] = upsertThreadedReplyMock.mock.calls[0];
     expect(body).toMatch(/build\/tests didn't pass/i);
     expect(body).toMatch(/PR's checks/i);
     expect(body).not.toMatch(/CloudWatch/i); // build-fail copy omits the log pointer
@@ -771,7 +775,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
     ]);
     await handler(iterEventWithComment('COMPLETED', 'human-cmt-1', false));
-    const [, , , body] = replyToCommentMock.mock.calls[0];
+    const [, , , body] = upsertThreadedReplyMock.mock.calls[0];
     expect(body).toMatch(/^❌/);
   });
 
@@ -800,7 +804,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     await handler(iterEventWithComment('COMPLETED')); // redelivery
 
     // Replied exactly once across both deliveries.
-    expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
   });
 
   test('a restack (no trigger_comment_id) → no ack reply', async () => {
@@ -817,6 +821,6 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
         restack_predecessor_sub_issue_id: 'Z',
       })],
     } as never);
-    expect(replyToCommentMock).not.toHaveBeenCalled();
+    expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
   });
 });

@@ -21,12 +21,14 @@ import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
+import { renderMaturingReply } from './shared/iteration-reply';
 import {
   reactToComment,
   replyToComment,
   reportIssueFailure,
   swapCommentReaction,
   upsertStatusComment,
+  upsertThreadedReply,
   EMOJI_STARTED,
   EMOJI_NEEDS_INPUT,
 } from './shared/linear-feedback';
@@ -115,6 +117,41 @@ const ACK_CLAIM_TTL_SECONDS = 86_400;
  *   bubble up and fail the Lambda — which would trigger SQS retries on a
  *   poison message.
  */
+/**
+ * Iteration-UX: post the IMMEDIATE threaded "👀 On it" reply under the trigger
+ * comment, synchronously at trigger time. This is what kills the multi-minute
+ * silence (cold start + clone + agent run) — the user sees a textual ack at once,
+ * not just the 👀 reaction. Returns the reply's comment id so the spawn can stash
+ * it in ``channel_metadata.iteration_reply_comment_id``; the fanout dispatcher
+ * then EDITS this same reply on the pr_created milestone + on terminal, instead
+ * of posting fresh top-level comments. Best-effort: null on any failure (the
+ * iteration still runs; the terminal path falls back to a fresh reply).
+ *
+ * ``issueId`` is the issue the trigger comment lives on (sub-issue for a direct
+ * comment, parent epic for a UX.18-routed one); ``replyTargetId`` is the thread
+ * root to reply under.
+ */
+async function postIterationAck(
+  workspaceId: string,
+  registryTableName: string,
+  issueId: string,
+  replyTargetId: string,
+): Promise<string | null> {
+  try {
+    return await upsertThreadedReply(
+      { linearWorkspaceId: workspaceId, registryTableName },
+      issueId,
+      replyTargetId,
+      renderMaturingReply({ state: 'on_it' }),
+    );
+  } catch (err) {
+    logger.warn('Iteration ack reply failed (non-fatal)', {
+      issue_id: issueId, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 async function safeReportIssueFailure(
   issueId: string,
   linearWorkspaceId: string | undefined,
@@ -1167,6 +1204,12 @@ async function iterateOrchestrationChild(args: {
     await reactToComment({ linearWorkspaceId: workspaceId, registryTableName }, commentId, EMOJI_STARTED);
   }
 
+  // Iteration-UX: post the immediate "👀 On it" threaded reply (kills the
+  // silence) and persist its id so the fanout dispatcher matures THIS reply
+  // (🔄→✅/💬) instead of posting new top-level comments. The reply threads under
+  // the conversation root (replyTargetId) on the issue the comment lives on.
+  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId);
+
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
   const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
@@ -1189,6 +1232,8 @@ async function iterateOrchestrationChild(args: {
     linear_workspace_slug: resolved.workspaceSlug,
     // The agent addresses the real sub-issue (reactions/comments).
     linear_issue_id: subIssueId,
+    // Iteration-UX: the maturing reply to EDIT (not re-create) on later events.
+    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
   try {
@@ -1263,6 +1308,9 @@ async function handleStandaloneCommentTrigger(args: {
   // ACK the instant we commit (same as the orchestration path).
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  // Iteration-UX: immediate "👀 On it" threaded reply + persist its id so the
+  // fanout dispatcher matures THIS reply instead of posting new comments.
+  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
 
   const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
   const channelMetadata: Record<string, string> = {
@@ -1274,6 +1322,8 @@ async function handleStandaloneCommentTrigger(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    // Iteration-UX: the maturing reply to EDIT on later events.
+    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
   try {

@@ -38,7 +38,7 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type {
   DynamoDBBatchItemFailure,
   DynamoDBBatchResponse,
@@ -49,8 +49,8 @@ import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration'
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
-import { renderIterationSuccessReply } from './shared/iteration-reply';
-import { postIssueComment, replyToComment } from './shared/linear-feedback';
+import { renderMaturingReply } from './shared/iteration-reply';
+import { postIssueComment, replyToComment, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -1004,6 +1004,32 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Iteration-UX: this task is a comment-iteration when it carries a maturing
+  // reply id (set at trigger time). For those, the progress + terminal status
+  // lives in that ONE edited reply, NOT in fresh top-level comments.
+  const iterationReplyId = task.channel_metadata?.iteration_reply_comment_id;
+  const triggerCommentId = task.channel_metadata?.trigger_comment_id;
+  const isIteration = Boolean(triggerCommentId);
+
+  // pr_created milestone on an iteration → mature the reply to "🔄 Working".
+  // (Non-iteration tasks ignore pr_created here — the agent's own headline
+  // "🤖 PR opened" comment covers the first task; the terminal comment follows.)
+  if (event.event_type === 'agent_milestone') {
+    if (isIteration && iterationReplyId && triggerCommentId) {
+      await upsertThreadedReply(
+        { linearWorkspaceId: workspaceId, registryTableName },
+        issueId,
+        triggerCommentId,
+        renderMaturingReply({
+          state: 'working',
+          ...(typeof task.pr_number === 'number' && { prNumber: task.pr_number }),
+        }),
+        iterationReplyId,
+      );
+    }
+    return; // milestones never post the top-level status comment
+  }
+
   // Idempotency across partial-batch retries: Linear has no comment
   // edit API, so a re-run of this dispatcher (e.g. a sibling channel's
   // infra rejection pushed the whole stream record into
@@ -1030,84 +1056,91 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   // title rather than nothing. See error-classifier.ts.
   const classification = classifyError(task.error_message);
 
-  const body = renderLinearFinalStatusComment({
-    eventType: event.event_type,
-    prUrl: task.pr_url ?? null,
-    // DDB returns numeric attributes as strings at the Document-client
-    // boundary; coerce so toFixed/comparisons work. Same pattern the
-    // GitHub dispatcher uses.
-    costUsd: coerceNumericOrNull(
-      task.cost_usd,
-      { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
-      logger,
-    ),
-    turns: coerceNumericOrNull(
-      task.turns_attempted,
-      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
-      logger,
-    ),
-    maxTurns: coerceNumericOrNull(
-      task.max_turns,
-      { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
-      logger,
-    ),
-    durationS: coerceNumericOrNull(
-      task.duration_s,
-      { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
-      logger,
-    ),
-    taskId: task.task_id,
-    errorTitle: classification?.title ?? null,
-  });
-
-  const postResult = await postIssueComment(
-    { linearWorkspaceId: workspaceId, registryTableName },
-    issueId,
-    body,
-  );
-
-  // Split the success / failure path so post-failure can be alarmed
-  // distinctly. The underlying linear-feedback.ts path already WARNs
-  // on the specific failure reason (auth, network, etc.); this
-  // backstop ensures a steady drip of post-failures shows up in the
-  // dispatcher's own log channel for cross-channel alarms.
-  if (postResult.ok) {
-    logger.info('[fanout/linear] comment dispatched', {
-      event: 'fanout.linear.dispatched',
-      task_id: task.task_id,
-      issue_id: issueId,
-      event_type: event.event_type,
-      posted: true,
+  // Iteration-UX: an iteration's outcome + cost goes into the matured threaded
+  // reply (below), NOT a fresh top-level "Task completed" comment — that
+  // top-level comment is the clutter we're removing. Only the FIRST task (and
+  // any non-iteration Linear task) posts the headline top-level status comment.
+  if (!isIteration) {
+    const body = renderLinearFinalStatusComment({
+      eventType: event.event_type,
+      prUrl: task.pr_url ?? null,
+      // DDB returns numeric attributes as strings at the Document-client
+      // boundary; coerce so toFixed/comparisons work. Same pattern the
+      // GitHub dispatcher uses.
+      costUsd: coerceNumericOrNull(
+        task.cost_usd,
+        { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
+        logger,
+      ),
+      turns: coerceNumericOrNull(
+        task.turns_attempted,
+        { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+        logger,
+      ),
+      maxTurns: coerceNumericOrNull(
+        task.max_turns,
+        { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
+        logger,
+      ),
+      durationS: coerceNumericOrNull(
+        task.duration_s,
+        { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
+        logger,
+      ),
+      taskId: task.task_id,
+      errorTitle: classification?.title ?? null,
     });
-    await saveLinearCommentState(task.task_id, event.event_id);
-  } else {
-    logger.warn('[fanout/linear] postIssueComment failed — Linear API path failed', {
-      event: 'fanout.linear.post_failed',
-      error_id: 'FANOUT_LINEAR_POST_FAILED',
-      task_id: task.task_id,
-      issue_id: issueId,
-      event_type: event.event_type,
-      posted: false,
-      retryable: postResult.retryable,
-    });
-    if (postResult.retryable) {
+
+    const postResult = await postIssueComment(
+      { linearWorkspaceId: workspaceId, registryTableName },
+      issueId,
+      body,
+    );
+
+    // Split the success / failure path so post-failure can be alarmed
+    // distinctly. The underlying linear-feedback.ts path already WARNs
+    // on the specific failure reason (auth, network, etc.); this
+    // backstop ensures a steady drip of post-failures shows up in the
+    // dispatcher's own log channel for cross-channel alarms.
+    if (postResult.ok) {
+      logger.info('[fanout/linear] comment dispatched', {
+        event: 'fanout.linear.dispatched',
+        task_id: task.task_id,
+        issue_id: issueId,
+        event_type: event.event_type,
+        posted: true,
+      });
+      await saveLinearCommentState(task.task_id, event.event_id);
+    } else {
+      logger.warn('[fanout/linear] postIssueComment failed — Linear API path failed', {
+        event: 'fanout.linear.post_failed',
+        error_id: 'FANOUT_LINEAR_POST_FAILED',
+        task_id: task.task_id,
+        issue_id: issueId,
+        event_type: event.event_type,
+        posted: false,
+        retryable: postResult.retryable,
+      });
+      if (postResult.retryable) {
       // Escalate to routeEvent's Promise.allSettled so the record
       // enters batchItemFailures and Lambda retries. Safe because the
       // marker above was NOT persisted — the retry posts the missing
       // comment or, if a concurrent run won, short-circuits on the
       // marker. Terminal failures stay log-only: a retry cannot fix
       // them and would burn the event-source's bounded retryAttempts.
-      throw new Error(
-        `[fanout/linear] transient Linear post failure for task ${task.task_id} — escalating for batch retry`,
-      );
+        throw new Error(
+          `[fanout/linear] transient Linear post failure for task ${task.task_id} — escalating for batch retry`,
+        );
+      }
     }
-  }
+  } // end if (!isIteration) — top-level headline status comment
 
-  // #247 UX.3: a STANDALONE comment-triggered iteration (carries
+  // #247 UX.3 + iteration-UX: a STANDALONE comment-triggered iteration (carries
   // trigger_comment_id but NOT orchestration_iteration — those get the
-  // reconciler's reply) closes the human's @bgagent conversation with a
-  // THREADED ✅/❌ reply beneath their comment, on top of the metrics comment
-  // above. Orchestration iterations are skipped here to avoid a double-reply.
+  // reconciler's reply) closes the human's @bgagent conversation by MATURING the
+  // threaded reply (👀→✅/💬 + cost + running total) it posted at trigger time.
+  // Orchestration iterations are settled by the reconciler instead (skipped here
+  // via the orchestration_iteration guard inside replyToStandaloneTrigger).
   await replyToStandaloneTrigger(event, task, registryTableName, workspaceId, issueId);
 }
 
@@ -1154,32 +1187,94 @@ async function replyToStandaloneTrigger(
   }
 
   // A clean success = completed AND the build/tests passed. A completed task
-  // whose build is red is NOT a clean ack — it gets the build/test failure
-  // reply (consistent with the reconciler's success gate).
+  // whose build is red is NOT a clean ack — it gets the failure reply
+  // (consistent with the reconciler's success gate).
   const completed = event.event_type === 'task_completed';
   const succeeded = completed && task.build_passed !== false;
   const prNumber = typeof task.pr_number === 'number'
     ? task.pr_number
     : (typeof task.pr_url === 'string' ? Number(task.pr_url.match(/\/pull\/(\d+)\b/)?.[1]) || null : null);
-  const body = succeeded
-    ? renderIterationSuccessReply({
-      // A6/#299: a no-change iteration (a question) → "💬 <answer>" not a false
-      // "✅ Updated". codeChanged undefined (pre-fix) keeps the "✅ Updated" path.
-      ...(typeof task.code_changed === 'boolean' && { codeChanged: task.code_changed }),
-      prNumber,
-      ...(typeof task.answer_text === 'string' && { answerText: task.answer_text }),
-    })
-    : renderFailureReply({
-      // Preserve COMPLETED (so a completed-but-build-failed task reads as a
-      // build/test failure, not an agent crash); a non-completed terminal
-      // (failed/cancelled/stranded/timed_out) is an agent-itself failure.
+
+  // Iteration-UX: cumulative cost across ALL iteration tasks on this PR/issue
+  // (incl. this one), so the reply shows a running total over many rounds.
+  const issueIdForCost = task.channel_metadata?.linear_issue_id ?? issueId;
+  const runningTotalUsd = await sumIterationCostForIssue(issueIdForCost, task);
+  const thisCost = coerceNumericOrNull(
+    task.cost_usd, { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id }, logger,
+  );
+  const durationS = coerceNumericOrNull(
+    task.duration_s, { field: 'duration_s', task_id: task.task_id, event_id: event.event_id }, logger,
+  );
+  const screenshotUrl = typeof task.screenshot_url === 'string' ? task.screenshot_url : null;
+
+  // Build the maturing-reply terminal state. A6/#299: code_changed===false (a
+  // question) → 💬 answered; else ✅ updated. A failure → ❌ with the sanitized
+  // reason. Cost / running total / screenshot fold into the one reply.
+  let state: 'updated' | 'answered' | 'failed';
+  if (!succeeded) state = 'failed';
+  else if (task.code_changed === false) state = 'answered';
+  else state = 'updated';
+
+  const body = state === 'failed'
+    ? renderFailureReply({
       status: completed ? TaskStatus.COMPLETED : TaskStatus.FAILED,
       buildPassed: typeof task.build_passed === 'boolean' ? task.build_passed : null,
       ...(typeof task.error_message === 'string' && { errorMessage: task.error_message }),
       taskId: task.task_id,
+    })
+    : renderMaturingReply({
+      state,
+      prNumber,
+      ...(typeof task.answer_text === 'string' && { answerText: task.answer_text }),
+      costUsd: thisCost,
+      durationS,
+      runningTotalUsd,
+      // Only fold the preview link in on a real edit (a question didn't change UI).
+      ...(state === 'updated' && screenshotUrl ? { screenshotUrl } : {}),
     });
 
-  await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, issueId, triggerCommentId, body);
+  // Iteration-UX: EDIT the maturing reply posted at trigger time (👀 On it →
+  // terminal) rather than posting a fresh comment. Falls back to a new threaded
+  // reply when the ack-reply id wasn't captured (best-effort at trigger).
+  const replyCtx = { linearWorkspaceId: workspaceId, registryTableName };
+  const existingReplyId = task.channel_metadata?.iteration_reply_comment_id;
+  await upsertThreadedReply(replyCtx, issueId, triggerCommentId, body, existingReplyId);
+}
+
+/**
+ * Iteration-UX: sum ``cost_usd`` across ALL Linear-iteration tasks on one issue
+ * (the running total shown on the reply). Queries the LinearIssueIndex GSI for
+ * every task on the issue and sums the costs; ``current`` is the terminal task
+ * whose own ``cost_usd`` may not yet be readable via the index's eventually-
+ * consistent projection, so it is added explicitly (deduped by task_id). Best-
+ * effort: on any read failure returns just this task's cost (never throws).
+ */
+async function sumIterationCostForIssue(issueId: string, current: TaskRecord): Promise<number | null> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  const currentCost = coerceNumericOrNull(current.cost_usd, { field: 'cost_usd', task_id: current.task_id }, logger) ?? 0;
+  if (!tableName || !issueId) return currentCost || null;
+  try {
+    const res = await ddb.send(new QueryCommand({
+      TableName: tableName,
+      IndexName: 'LinearIssueIndex',
+      KeyConditionExpression: 'linear_issue_id = :iid',
+      ExpressionAttributeValues: { ':iid': issueId },
+    }));
+    let total = 0;
+    let sawCurrent = false;
+    for (const item of (res.Items ?? []) as TaskRecord[]) {
+      if (item.task_id === current.task_id) sawCurrent = true;
+      const c = coerceNumericOrNull(item.cost_usd, { field: 'cost_usd', task_id: item.task_id }, logger);
+      if (typeof c === 'number') total += c;
+    }
+    if (!sawCurrent) total += currentCost; // index lag — add this task explicitly
+    return total > 0 ? total : null;
+  } catch (err) {
+    logger.warn('[fanout/linear] running-total cost query failed — using this task only', {
+      task_id: current.task_id, error: err instanceof Error ? err.message : String(err),
+    });
+    return currentCost || null;
+  }
 }
 
 /** Exposed for testing: the per-channel dispatcher callable by the
