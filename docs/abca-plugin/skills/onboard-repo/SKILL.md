@@ -12,10 +12,20 @@ description: >-
 You are helping an **operator** register a GitHub repository with their running ABCA
 deployment so tasks can target it.
 
-There are two paths. **Default to the CLI operator path** — it's a single runtime
-command against the deployed stack, no code change and no redeploy. Use the CDK
-Blueprint path only when the operator wants the repo set declaratively in
-infrastructure-as-code.
+There are two paths.
+
+**Prefer the CLI operator path (Path A)** when the repo can run on the
+**platform/default-blueprint** setup — the default GitHub token secret, a model
+already granted to the runtime, and the default egress allowlist. It's a single
+runtime command against the deployed stack: no code change, no redeploy.
+
+**Use the CDK Blueprint path (Path B)** when the repo needs its **own** config that
+the CLI can't provision at runtime — a per-repo GitHub token, a model not yet
+granted to the runtime, custom egress domains, Cedar HITL policies, or
+system-prompt overrides. These are baked into infrastructure and require a redeploy
+(with the correct permissions). When in doubt, start with Path A; if a task later
+fails on a missing token / model grant / blocked egress, promote the repo to a
+Blueprint.
 
 > **This is an operation, not a contribution.** Onboarding a repo into your own
 > deployment writes a record to the platform's RepoTable — it is **not** a change to
