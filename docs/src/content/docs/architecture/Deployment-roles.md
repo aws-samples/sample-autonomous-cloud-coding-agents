@@ -323,6 +323,8 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "lambda:GetFunctionCodeSigningConfig",
         "lambda:GetFunctionRecursionConfig",
         "lambda:GetProvisionedConcurrencyConfig",
+        "lambda:PutProvisionedConcurrencyConfig",
+        "lambda:DeleteProvisionedConcurrencyConfig",
         "lambda:GetRuntimeManagementConfig",
         "lambda:ListVersionsByFunction",
         "lambda:InvokeFunction",
