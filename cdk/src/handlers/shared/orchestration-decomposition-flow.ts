@@ -185,7 +185,20 @@ export async function runPlanVerdict(params: RunVerdictParams): Promise<Decompos
   // approve: atomically take the plan so a racing second approve can't double-seed.
   const taken = await effects.consumePendingPlan();
   if (!taken) return { kind: 'noop', reason: 'no_pending_plan' };
-  return finalizeWriteBack(parentIssueId, { shouldDecompose: true, reasoning: '', nodes: taken.nodes }, effects);
+  const result = await finalizeWriteBack(parentIssueId, { shouldDecompose: true, reasoning: '', nodes: taken.nodes }, effects);
+  // If write-back failed, RESTORE the pending plan we consumed — otherwise the
+  // "re-approving will resume" message is a lie (the plan is gone) and the user
+  // is stuck. Write-back is idempotent (reuse-by-title), so a genuine re-approve
+  // resumes from the partial state. Best-effort: a restore failure just means
+  // the user re-labels instead of re-approving.
+  if (result.kind === 'handled' && result.reason === 'writeback_error') {
+    try {
+      await effects.putPendingPlan({ nodes: taken.nodes });
+    } catch {
+      // swallow — the error comment already told the user; re-label is the fallback
+    }
+  }
+  return result;
 }
 
 /** Write the plan back to Linear and return either a seed graph or a terminal error. */
