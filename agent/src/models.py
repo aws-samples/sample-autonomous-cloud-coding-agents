@@ -322,6 +322,14 @@ class RepoSetup(BaseModel):
     # (only a workflow declaring a gating verify_lint step opts in), so this
     # affects reporting + the persisted lint_passed signal, not pass/fail gating.
     lint_gate_inert: bool = False
+    # A6/#299: the branch HEAD sha captured right after checkout, BEFORE the
+    # agent runs. On a PR-iteration the post-hooks compare the final HEAD to
+    # this to decide whether the iteration actually committed anything — a
+    # question-only comment ("where is the login page?") makes no commit, and
+    # the platform must report "answered / no change" rather than a misleading
+    # "✅ Updated — PR #N". Empty when the sha couldn't be read (treated as
+    # "unknown" → defaults to the change-made path, the safe-for-back-compat side).
+    head_sha_before: str = ""
 
 
 class TokenUsage(BaseModel):
@@ -393,3 +401,15 @@ class TaskResult(BaseModel):
     # Phase 3), or ``None`` for coding tasks / when no artifact was delivered.
     # Surfaced on TaskDetail so the user can retrieve the knowledge-task output.
     artifact_uri: str | None = None
+    # A6/#299: True when this run advanced the PR branch HEAD (a real commit
+    # landed), False when it ran but the branch is unchanged (a question-only
+    # iteration), None when not a PR-iteration / unknown (no baseline sha). The
+    # Linear/Slack settle reply reads this: False → "💬 answered, no change",
+    # True/None → the existing "✅ Updated — PR #N". None defaults to the
+    # change-made side for back-compat with pre-fix tasks.
+    code_changed: bool | None = None
+    # The agent's final answer text, surfaced verbatim on a no-change iteration
+    # reply so a question gets an actual answer (not an empty "✅ Updated").
+    # Distinct from result_text's repo-less-artifact role; populated only for
+    # the no-op-iteration reply path. Empty otherwise.
+    answer_text: str = ""

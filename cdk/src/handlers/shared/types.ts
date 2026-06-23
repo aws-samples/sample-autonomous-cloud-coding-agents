@@ -135,6 +135,14 @@ export interface TaskRecord {
   readonly cost_usd?: number;
   readonly duration_s?: number;
   readonly build_passed?: boolean;
+  /**
+   * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
+   * ran with no change (a question-only ``@bgagent`` comment). Absent for
+   * pre-fix tasks / non-iterations → the settle reply defaults to "✅ Updated".
+   */
+  readonly code_changed?: boolean;
+  /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
+  readonly answer_text?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
   /**

@@ -1118,6 +1118,29 @@ def run_task(
             # still produces a usable debug artifact.
             trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
 
+            # A6/#299: did this PR-iteration actually advance the branch HEAD?
+            # Compare the final HEAD to the sha captured at checkout. Unchanged
+            # ⇒ a question-only iteration (no commit) ⇒ the settle reply reports
+            # "answered / no change" instead of a false "✅ Updated". Only
+            # meaningful for a PR workflow with a baseline sha; otherwise None
+            # (the change-made / back-compat side). Best-effort — a rev-parse
+            # failure leaves it None, never flips the verdict.
+            code_changed: bool | None = None
+            if config.is_pr_workflow and setup.head_sha_before:
+                head_after_res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=setup.repo_dir,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if head_after_res.returncode == 0:
+                    code_changed = head_after_res.stdout.strip() != setup.head_sha_before
+            # The agent's final text — surfaced as the answer on a no-change
+            # iteration so a question gets an actual reply.
+            answer_text = (agent_result.result_text or "").strip()
+
             # Build TaskResult
             usage = agent_result.usage
             turns_attempted = agent_result.num_turns or agent_result.turns
@@ -1151,6 +1174,10 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
+                code_changed=code_changed,
+                # Only carry the answer text on a no-change iteration (where it
+                # becomes the reply); a normal edit's reply is the PR link.
+                answer_text=answer_text if code_changed is False else "",
             )
 
             result_dict = result.model_dump()

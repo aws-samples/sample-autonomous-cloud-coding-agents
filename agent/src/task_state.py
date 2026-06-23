@@ -306,6 +306,19 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("lint_passed") is not None:
                 update_parts.append("lint_passed = :lp")
                 expr_values[":lp"] = bool(result["lint_passed"])
+            # A6/#299: whether a PR-iteration advanced the branch HEAD (a real
+            # commit landed) vs. ran with no change (a question-only comment).
+            # The Linear/Slack settle reply reads this to avoid a false
+            # "✅ Updated" on a no-op iteration. None ⇒ not persisted (the
+            # consumer defaults to the change-made side, back-compat).
+            if result.get("code_changed") is not None:
+                update_parts.append("code_changed = :cc")
+                expr_values[":cc"] = bool(result["code_changed"])
+            if result.get("answer_text"):
+                update_parts.append("answer_text = :ans")
+                # Bound the persisted answer so a verbose agent can't bloat the
+                # row; the reply renderer truncates again for display.
+                expr_values[":ans"] = str(result["answer_text"])[:2000]
             # --trace artifact URI (design §10.1). Written atomically
             # with the terminal-status transition so a consumer that
             # reads TaskRecord.trace_s3_uri immediately after

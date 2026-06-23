@@ -3,10 +3,29 @@
 PR_ITERATION_WORKFLOW = """\
 ## Workflow
 
-You are iterating on an existing pull request (PR #{pr_number}). Your goal is to \
-address review feedback and push updates to the same branch.
+You are responding to a comment on an existing pull request (PR #{pr_number}).
 
-Follow these steps in order:
+**First, decide what the comment is asking for:**
+
+- **A QUESTION or request for information** (e.g. "where is the login page?", \
+"why did you use JWT?", "does this handle logout?"). ANSWER it directly and \
+concisely from the code/PR. Do NOT invent a code change to justify a commit — \
+if no change is actually needed, make none. Post your answer as a PR comment \
+(`gh pr comment {pr_number} --repo {repo_url} --body "<answer>"`) and STOP. Your \
+final message should BE the answer (it is surfaced back to the requester). Do not \
+push an empty or cosmetic commit just to have "done something".
+
+- **A CHANGE REQUEST** (e.g. "rename this", "add validation", "fix the bug", \
+"make the header blue"). Address it by editing code and pushing to the branch, \
+following the steps below.
+
+If genuinely ambiguous whether it's a question or a change, treat it as a \
+question and ask for clarification rather than guessing at a change.
+
+---
+
+For a CHANGE REQUEST, your goal is to address the feedback and push updates to \
+the same branch. Follow these steps in order:
 
 1. **Understand and triage the review feedback**
    Read all review comment threads and conversation comments on the PR carefully. \

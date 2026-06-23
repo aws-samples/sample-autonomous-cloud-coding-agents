@@ -95,6 +95,16 @@ class TestGetSystemPrompt:
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
+    def test_pr_iteration_distinguishes_question_from_change(self):
+        # A6/#299: a question-only comment ("where is the login page?") must be
+        # answered without forcing a code change, or the platform reports a
+        # false "✅ Updated". The prompt must carry the triage.
+        prompt = get_system_prompt("coding/pr-iteration-v1")
+        assert "QUESTION" in prompt
+        assert "CHANGE REQUEST" in prompt
+        # It must explicitly forbid inventing a commit to justify "doing something".
+        assert "empty or cosmetic commit" in prompt or "Do NOT invent a code change" in prompt
+
     def test_pr_review_returns_prompt_with_review_workflow(self):
         prompt = get_system_prompt("coding/pr-review-v1")
         assert "READ-ONLY" in prompt
