@@ -270,7 +270,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // skip it. The return tells us whether this is the synthetic integration
   // node — whose screenshot belongs in the panel only, never as a standalone
   // Linear comment on the parent epic (#247 UX.16).
-  const { isIntegrationNode: isIntegrationDeploy } = await persistScreenshotUrl(
+  const { isIntegrationNode: isIntegrationDeploy, isIteration: isIterationDeploy } = await persistScreenshotUrl(
     pr.headRefName,
     publicUrl,
     previewUrl,
@@ -320,7 +320,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // cluttering the maturing panel (which already embeds the combined preview
   // via the persisted screenshot_url). Skip the Linear post for the integration
   // node; the panel is the only Linear surface for the combined result.
-  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy) {
+  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy && !isIterationDeploy) {
     // Branch-name first — it deterministically encodes this PR's own
     // issue (`bgagent/{taskId}/abca-151-...`). Title/body are ambiguous
     // fallbacks: in a stacked #247 orchestration the body often names a
@@ -536,8 +536,8 @@ async function persistScreenshotUrl(
   branchName: string,
   publicUrl: string,
   previewUrl: string,
-): Promise<{ isIntegrationNode: boolean }> {
-  const result = { isIntegrationNode: false };
+): Promise<{ isIntegrationNode: boolean; isIteration: boolean }> {
+  const result = { isIntegrationNode: false, isIteration: false };
   if (!TASK_TABLE) return result;
   const taskId = extractTaskIdFromBranch(branchName);
   if (!taskId) return result;
@@ -558,10 +558,17 @@ async function persistScreenshotUrl(
     }));
     const subIssueId = upd.Attributes?.channel_metadata?.orchestration_sub_issue_id;
     result.isIntegrationNode = typeof subIssueId === 'string' && isIntegrationNode(subIssueId);
+    // iteration-UX: a comment-iteration carries trigger_comment_id. Its preview
+    // is already folded into the maturing threaded reply (the [preview](…) link),
+    // so a standalone "🖼️ Preview screenshot" Linear comment would re-clutter the
+    // issue — exactly what we removed. (The GitHub PR screenshot comment still
+    // posts; this only gates the Linear surface.)
+    result.isIteration = typeof upd.Attributes?.channel_metadata?.trigger_comment_id === 'string';
     logger.info('Persisted screenshot_url on task record', {
       task_id: taskId,
       public_url: publicUrl,
       is_integration_node: result.isIntegrationNode,
+      is_iteration: result.isIteration,
     });
   } catch (err) {
     // ConditionalCheckFailed = the task row is gone (TTL); anything else is a
