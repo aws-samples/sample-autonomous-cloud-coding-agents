@@ -10,6 +10,8 @@ allowed-tools:
 
 Check the current state of the ABCA platform and report a concise status summary.
 
+> **Running the CLI:** the `node cli/lib/bin/bgagent.js …` checks below need `node` on `PATH`; in a non-interactive or mise-managed shell, prefix with `mise exec --`.
+
 ## Checks to Run
 
 Run these in parallel where possible:
