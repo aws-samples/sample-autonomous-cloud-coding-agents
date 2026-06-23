@@ -49,6 +49,9 @@ import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
+/** #299 Mode B: default sub-issue cap shown when --max-sub-issues is omitted (matches the handler default). */
+const DEFAULT_MAX_SUB_ISSUES = 8;
+
 /** Standard RFC 4122 UUID — Linear's `projects.nodes[].id` matches this shape. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1314,6 +1317,9 @@ export function makeLinearCommand(): Command {
       .requiredOption('--repo <owner/repo>', 'GitHub repository the mapped project should route tasks to')
       .option('--label <label>', `Label that triggers a task (default: ${DEFAULT_LABEL_FILTER})`, DEFAULT_LABEL_FILTER)
       .option('--team-id <id>', 'Optional Linear team UUID for the project (stored for debug)')
+      .option('--decompose-allowed', 'Enable #299 Mode B auto-decomposition (bgagent:decompose / bgagent:auto) for this project (default: off)')
+      .option('--max-sub-issues <n>', 'Max sub-issues an auto-decomposed plan may contain (default: 8)')
+      .option('--max-parent-budget-usd <usd>', 'Max worst-case cost (Σ child budgets, USD) for an auto-decomposed plan (default: unbounded)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (projectId: string, opts) => {
@@ -1343,6 +1349,25 @@ export function makeLinearCommand(): Command {
           process.exit(1);
         }
 
+        // #299 Mode B decomposition caps (optional). Validate before writing so
+        // a typo'd flag fails loudly rather than storing a bad cap.
+        let maxSubIssues: number | undefined;
+        if (opts.maxSubIssues !== undefined) {
+          maxSubIssues = Number(opts.maxSubIssues);
+          if (!Number.isInteger(maxSubIssues) || maxSubIssues < 1) {
+            console.error(`Invalid --max-sub-issues: ${opts.maxSubIssues}. Expected a positive integer.`);
+            process.exit(1);
+          }
+        }
+        let maxParentBudgetUsd: number | undefined;
+        if (opts.maxParentBudgetUsd !== undefined) {
+          maxParentBudgetUsd = Number(opts.maxParentBudgetUsd);
+          if (!Number.isFinite(maxParentBudgetUsd) || maxParentBudgetUsd <= 0) {
+            console.error(`Invalid --max-parent-budget-usd: ${opts.maxParentBudgetUsd}. Expected a positive number.`);
+            process.exit(1);
+          }
+        }
+
         const now = new Date().toISOString();
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
         await ddb.send(new PutCommand({
@@ -1352,6 +1377,11 @@ export function makeLinearCommand(): Command {
             repo: opts.repo,
             label_filter: opts.label,
             ...(opts.teamId && { team_id: opts.teamId }),
+            // #299: decomposition is opt-in per project. Only stamp the flag
+            // when explicitly enabled; absent → reads as false (off).
+            ...(opts.decomposeAllowed && { decompose_allowed: true }),
+            ...(maxSubIssues !== undefined && { max_sub_issues: maxSubIssues }),
+            ...(maxParentBudgetUsd !== undefined && { max_parent_budget_usd: maxParentBudgetUsd }),
             status: 'active',
             onboarded_at: now,
             updated_at: now,
@@ -1362,6 +1392,12 @@ export function makeLinearCommand(): Command {
         console.log(`  Trigger label: ${opts.label}`);
         if (opts.teamId) {
           console.log(`  Team: ${opts.teamId}`);
+        }
+        if (opts.decomposeAllowed) {
+          console.log('  Auto-decomposition (#299 Mode B): ENABLED');
+          console.log(`    Max sub-issues: ${maxSubIssues ?? DEFAULT_MAX_SUB_ISSUES}`);
+          console.log(`    Max plan budget: ${maxParentBudgetUsd !== undefined ? `$${maxParentBudgetUsd}` : 'unbounded'}`);
+          console.log('    Trigger with `bgagent:decompose` (plan + approve) or `bgagent:auto` (plan + run).');
         }
       }),
   );

@@ -1,0 +1,157 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { isBotAuthoredComment } from '../../../src/handlers/shared/orchestration-comment-trigger';
+import {
+  criticalPathLength,
+  PLAN_PROPOSAL_PREFIX,
+  renderAlreadyDecomposedNote,
+  renderCapRejection,
+  renderPlanProposal,
+  renderSingleTaskNote,
+} from '../../../src/handlers/shared/orchestration-decomposition-render';
+import type { DecompositionPlan, PlannedSubIssue } from '../../../src/handlers/shared/orchestration-decomposition-types';
+
+function node(o: Partial<PlannedSubIssue> = {}): PlannedSubIssue {
+  return { title: 'T', description: 'd', size: 'M', max_budget_usd: 3, depends_on: [], ...o };
+}
+
+const FANOUT: DecompositionPlan = {
+  shouldDecompose: true,
+  reasoning: 'Three independent surfaces.',
+  nodes: [
+    node({ title: 'Pricing route', size: 'M', max_budget_usd: 3 }),
+    node({ title: 'Comparison table', size: 'S', max_budget_usd: 1 }),
+    node({ title: 'Stripe checkout', size: 'L', max_budget_usd: 6 }),
+  ],
+};
+
+const CHAIN: DecompositionPlan = {
+  shouldDecompose: true,
+  reasoning: 'Sequential.',
+  nodes: [
+    node({ title: 'Schema', size: 'S', max_budget_usd: 1, depends_on: [] }),
+    node({ title: 'API', size: 'M', max_budget_usd: 3, depends_on: [0] }),
+    node({ title: 'UI', size: 'M', max_budget_usd: 3, depends_on: [1] }),
+  ],
+};
+
+const DIAMOND: DecompositionPlan = {
+  shouldDecompose: true,
+  reasoning: 'Fan-out then integrate.',
+  nodes: [
+    node({ title: 'Base', depends_on: [] }),
+    node({ title: 'Left', depends_on: [0] }),
+    node({ title: 'Right', depends_on: [0] }),
+    node({ title: 'Merge', depends_on: [1, 2] }),
+  ],
+};
+
+describe('criticalPathLength', () => {
+  test('fan-out (all independent) → 1 layer', () => {
+    expect(criticalPathLength(FANOUT)).toBe(1);
+  });
+
+  test('chain A→B→C → 3 layers', () => {
+    expect(criticalPathLength(CHAIN)).toBe(3);
+  });
+
+  test('diamond A→{B,C}→D → 3 layers', () => {
+    expect(criticalPathLength(DIAMOND)).toBe(3);
+  });
+
+  test('empty plan → 0', () => {
+    expect(criticalPathLength({ shouldDecompose: false, reasoning: '', nodes: [] })).toBe(0);
+  });
+});
+
+describe('renderPlanProposal — content', () => {
+  test('lists every sub-issue with its size and 1-based number', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: false });
+    expect(md).toContain('1. **Pricing route** `M`');
+    expect(md).toContain('2. **Comparison table** `S`');
+    expect(md).toContain('3. **Stripe checkout** `L`');
+  });
+
+  test('shows the reasoning as a blockquote', () => {
+    expect(renderPlanProposal(FANOUT, { autoRun: false })).toContain('> Three independent surfaces.');
+  });
+
+  test('summarises count, critical path, and cost ceiling (Σ budgets, no absolute time)', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: false });
+    expect(md).toContain('3 sub-issues');
+    expect(md).toContain('critical path 1');
+    expect(md).toContain('cost ceiling **$10**'); // 3 + 1 + 6
+    expect(md).not.toMatch(/\bminutes?\b|\bhours?\b/i); // no absolute-time estimate (#299)
+  });
+
+  test('renders dependency notes for non-root nodes (1-based refs)', () => {
+    const md = renderPlanProposal(DIAMOND, { autoRun: false });
+    expect(md).toContain('2. **Left** `M` _(after #1)_');
+    expect(md).toContain('4. **Merge** `M` _(after #2, #3)_');
+    // The root has no "after" note.
+    expect(md).toContain('1. **Base** `M`');
+    expect(md.split('\n').find((l) => l.startsWith('1. **Base**'))).not.toContain('after');
+  });
+
+  test('manual mode footer prompts for @bgagent approve / reject', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: false });
+    expect(md).toContain('@bgagent approve');
+    expect(md).toContain('@bgagent reject');
+  });
+
+  test('auto mode footer says starting now (still offers reject)', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: true });
+    expect(md).toContain('Auto-run is on');
+    expect(md).toContain('@bgagent reject');
+    expect(md).not.toContain('@bgagent approve');
+  });
+});
+
+describe('renderPlanProposal — self-trigger guard (UX.20)', () => {
+  // The proposal embeds literal "@bgagent approve" text. The comment-trigger
+  // parser MUST treat our own proposal as bot-authored, or posting it would
+  // re-trigger ourselves. The prefix glyph is the guard signal.
+  test('the rendered proposal is recognised as a bot-authored comment', () => {
+    expect(renderPlanProposal(FANOUT, { autoRun: false }).startsWith(PLAN_PROPOSAL_PREFIX)).toBe(true);
+    expect(isBotAuthoredComment(renderPlanProposal(FANOUT, { autoRun: false }))).toBe(true);
+    expect(isBotAuthoredComment(renderPlanProposal(FANOUT, { autoRun: true }))).toBe(true);
+  });
+
+  test('the cap-rejection / single-task / already-decomposed notes are also bot-authored', () => {
+    expect(isBotAuthoredComment(renderCapRejection('over cap'))).toBe(true);
+    expect(isBotAuthoredComment(renderSingleTaskNote('small fix'))).toBe(true);
+    expect(isBotAuthoredComment(renderAlreadyDecomposedNote())).toBe(true);
+  });
+});
+
+describe('the note renderers', () => {
+  test('cap rejection embeds the cap message', () => {
+    expect(renderCapRejection('over the limit of 8')).toContain('over the limit of 8');
+  });
+
+  test('single-task note includes the reasoning when present', () => {
+    expect(renderSingleTaskNote('one cohesive change')).toContain('one cohesive change');
+    expect(renderSingleTaskNote('')).not.toContain('()');
+  });
+
+  test('already-decomposed note explains the no-op', () => {
+    expect(renderAlreadyDecomposedNote()).toContain('already has sub-issues');
+  });
+});

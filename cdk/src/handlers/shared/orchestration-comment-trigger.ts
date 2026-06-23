@@ -92,6 +92,7 @@ const BOT_COMMENT_PREFIXES = [
   '🤖', // agent progress ("🤖 Starting…")
   '🖼️', // preview screenshot comment
   '🔗', // "PR opened" / combined-PR
+  '🗂️', // #299 Mode B plan-proposal / decomposition notes (embed literal "@bgagent approve")
 ] as const;
 
 /** True when ``body`` is one of the bot's own rendered comments (loop guard). */
@@ -110,4 +111,32 @@ export function isBotAuthoredComment(body: string): boolean {
 export function buildIterationInstruction(trigger: CommentTrigger): string {
   if (trigger.instruction.length > 0) return trigger.instruction;
   return 'Address the latest review feedback on this pull request.';
+}
+
+/**
+ * #299 Mode B — the approve/reject verdict of an ``@bgagent`` comment on a
+ * pending decomposition plan. ``none`` means the comment is an ordinary
+ * instruction (not a plan verdict), so the caller falls through to the normal
+ * iteration paths.
+ */
+export type PlanVerdict = 'approve' | 'reject' | 'none';
+
+/**
+ * Classify an already-parsed comment instruction as a plan ``approve``/``reject``
+ * verdict. Strict: the instruction must be (essentially) JUST the keyword, so a
+ * sentence that merely contains the word "approve" inside a longer iteration
+ * request ("approve the dialog copy and …") is NOT a verdict — it's work.
+ *
+ * Accepts a leading keyword optionally followed by light punctuation/filler
+ * ("approve", "approve.", "approve this", "reject — too many"), matched
+ * case-insensitively. ``reject`` is checked first so "reject" never reads as a
+ * fuzzy "approve".
+ */
+export function parsePlanVerdict(instruction: string): PlanVerdict {
+  const text = instruction.trim().toLowerCase();
+  if (!text) return 'none';
+  const firstWord = text.split(/[\s.,!—-]+/)[0];
+  if (firstWord === 'reject' || firstWord === 'rejected') return 'reject';
+  if (firstWord === 'approve' || firstWord === 'approved') return 'approve';
+  return 'none';
 }
