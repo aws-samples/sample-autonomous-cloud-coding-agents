@@ -20,41 +20,39 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import {
-  AdminCreateUserCommand,
-  AdminSetUserPasswordCommand,
-  CognitoIdentityProviderClient,
-} from '@aws-sdk/client-cognito-identity-provider';
 import { Command } from 'commander';
-import { getConfigDir, loadConfig, SECRET_FILE_MODE } from '../config';
+import {
+  adminDeleteUser,
+  adminInviteUser,
+  adminResetPassword,
+  assertLikelyEmail,
+  listCognitoUsers,
+  resolveCognitoAdminContext,
+} from '../cognito-admin';
+import { getConfigDir, SECRET_FILE_MODE } from '../config';
 import { CliError } from '../errors';
+import { DEFAULT_STACK_NAME } from '../operator-context';
 import { CliConfig } from '../types';
 
 /**
- * Generate a strong temporary password meeting Cognito's default policy:
+ * Generate a strong password meeting Cognito's default policy:
  * min 12 chars, with at least one upper, lower, digit, and symbol.
- *
- * Uses node crypto for cryptographic randomness; the symbol set excludes
- * `'` `"` `\` `` ` `` to keep the password copy-pasteable across shells
- * without escaping pain.
  */
 export function generateTempPassword(): string {
-  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // ambiguous chars (I/O) removed
-  const lower = 'abcdefghijkmnpqrstuvwxyz'; // (l/o) removed
-  const digit = '23456789'; // (0/1) removed
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnpqrstuvwxyz';
+  const digit = '23456789';
   const symbol = '!@#$%^&*()-_=+[]{}<>?';
   const all = upper + lower + digit + symbol;
 
   const pickFrom = (set: string): string => set[crypto.randomInt(set.length)];
 
-  // One required char from each class, then 14 more random chars (>= 12 total).
   const RANDOM_FILL_CHARS = 14;
   const chars: string[] = [pickFrom(upper), pickFrom(lower), pickFrom(digit), pickFrom(symbol)];
   for (let i = 0; i < RANDOM_FILL_CHARS; i += 1) {
     chars.push(pickFrom(all));
   }
 
-  // Fisher-Yates shuffle so the required chars don't land at predictable indices
   for (let i = chars.length - 1; i > 0; i -= 1) {
     const j = crypto.randomInt(i + 1);
     [chars[i], chars[j]] = [chars[j], chars[i]];
@@ -62,11 +60,7 @@ export function generateTempPassword(): string {
   return chars.join('');
 }
 
-/**
- * Encode the four configure-fields as a single base64 bundle Alice can paste
- * into `bgagent configure --from-bundle`. Bundle is Cognito-only — Linear /
- * Slack onboarding is per-deployment, not per-user.
- */
+/** Encode configure fields as a base64 bundle for `bgagent configure --from-bundle`. */
 export function encodeBundle(config: CliConfig): string {
   const json = JSON.stringify({
     api_url: config.api_url,
@@ -77,11 +71,7 @@ export function encodeBundle(config: CliConfig): string {
   return Buffer.from(json, 'utf-8').toString('base64');
 }
 
-/**
- * Decode a base64 bundle back to a CliConfig. Throws CliError on malformed
- * input. Validates all four required fields are present and non-empty so a
- * truncated paste fails fast instead of writing a half-broken config.json.
- */
+/** Decode a base64 configure bundle. */
 export function decodeBundle(bundle: string): CliConfig {
   let json: string;
   try {
@@ -116,138 +106,178 @@ export function decodeBundle(bundle: string): CliConfig {
   };
 }
 
-/**
- * `bgagent admin invite-user <email>` — wraps Cognito admin-create-user +
- * admin-set-user-password and prints a shareable bundle. Requires the caller
- * to have AWS credentials with cognito-idp:AdminCreateUser permission on the
- * configured user pool (i.e. they're a stack admin / IAM principal, not just
- * a Cognito-authenticated end-user).
- *
- * Bundle distribution is intentionally manual — Slack/1Password/email is
- * usually fine, and adding SES introduces verified-identity gates and PII
- * handling that aren't worth the polish for a self-hosted tool.
- */
+const ADMIN_OPTS = {
+  region: '--region <region>',
+  stackName: '--stack-name <name>',
+} as const;
+
+function addAdminContextOptions(cmd: Command): Command {
+  return cmd
+    .option(ADMIN_OPTS.region, 'AWS region (defaults to configured region or AWS_REGION)')
+    .option(ADMIN_OPTS.stackName, 'CloudFormation stack name', DEFAULT_STACK_NAME);
+}
+
+const ADMIN_EMAIL_COLUMN_WIDTH = 36;
+const ADMIN_USERNAME_COLUMN_WIDTH = 36;
+const ADMIN_STATUS_COLUMN_WIDTH = 22;
+const ADMIN_ENABLED_COLUMN_WIDTH = 8;
+
+/** Cognito user-pool administration for stack admins (operator IAM credentials). */
 export function makeAdminCommand(): Command {
-  const admin = new Command('admin').description('Admin commands for managing the deployment');
+  const admin = new Command('admin')
+    .description('Cognito user-pool administration (operator AWS credentials)');
 
   admin.addCommand(
-    new Command('invite-user')
-      .description('Create a Cognito user and print a shareable config bundle')
-      .argument('<email>', 'Email address of the new user')
-      .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option(
-        '--temp-password <pwd>',
-        'Temporary password (default: auto-generated, must meet Cognito policy)',
-      )
-      .action(async (email: string, opts) => {
-        const config = loadConfig();
-        const region = opts.region ?? config.region;
+    addAdminContextOptions(
+      new Command('invite-user')
+        .description('Create a Cognito user with a permanent password and optional configure bundle')
+        .argument('<email>', 'Email address of the new user (Cognito username)')
+        .option('--password <pwd>', 'Permanent password (default: auto-generated)')
+        .option('--temp-password <pwd>', 'Alias for --password')
+        .action(async (email: string, opts) => {
+          assertLikelyEmail(email);
+          const ctx = await resolveCognitoAdminContext(opts);
+          const password = opts.password ?? opts.tempPassword ?? generateTempPassword();
+          await adminInviteUser(ctx, email, password);
 
-        if (!isLikelyEmail(email)) {
-          throw new CliError(
-            `'${email}' does not look like a valid email. The Cognito pool requires email as the username.`,
+          const bundle = ctx.configureBundle ? encodeBundle(ctx.configureBundle) : null;
+          printInviteSummary(email, password, bundle);
+        }),
+    ),
+  );
+
+  admin.addCommand(
+    addAdminContextOptions(
+      new Command('list-users')
+        .description('List Cognito users in the deployment user pool')
+        .option('--output <format>', 'Output format: text or json', 'text')
+        .action(async (opts) => {
+          const ctx = await resolveCognitoAdminContext(opts);
+          const users = await listCognitoUsers(ctx);
+
+          if (opts.output === 'json') {
+            console.log(JSON.stringify({ user_pool_id: ctx.userPoolId, users }, null, 2));
+            return;
+          }
+
+          if (users.length === 0) {
+            console.log(`No users in pool ${ctx.userPoolId}.`);
+            return;
+          }
+
+          console.log(`User pool: ${ctx.userPoolId}`);
+          console.log(
+            `${'EMAIL'.padEnd(ADMIN_EMAIL_COLUMN_WIDTH)} `
+            + `${'USERNAME'.padEnd(ADMIN_USERNAME_COLUMN_WIDTH)} `
+            + `${'STATUS'.padEnd(ADMIN_STATUS_COLUMN_WIDTH)} `
+            + `${'ENABLED'.padEnd(ADMIN_ENABLED_COLUMN_WIDTH)} CREATED`,
           );
-        }
-
-        const tempPassword = opts.tempPassword ?? generateTempPassword();
-
-        const cognito = new CognitoIdentityProviderClient({ region });
-        try {
-          await cognito.send(new AdminCreateUserCommand({
-            UserPoolId: config.user_pool_id,
-            Username: email,
-            UserAttributes: [
-              { Name: 'email', Value: email },
-              { Name: 'email_verified', Value: 'true' },
-            ],
-            TemporaryPassword: tempPassword,
-            MessageAction: 'SUPPRESS',
-          }));
-        } catch (err) {
-          if (err instanceof Error && err.name === 'UsernameExistsException') {
-            throw new CliError(
-              `User ${email} already exists. Re-run with a different email, or delete the user first via the AWS console.`,
+          for (const user of users) {
+            console.log(
+              `${(user.email ?? '-').padEnd(ADMIN_EMAIL_COLUMN_WIDTH)} `
+              + `${user.username.padEnd(ADMIN_USERNAME_COLUMN_WIDTH)} `
+              + `${user.status.padEnd(ADMIN_STATUS_COLUMN_WIDTH)} `
+              + `${String(user.enabled).padEnd(ADMIN_ENABLED_COLUMN_WIDTH)} `
+              + `${user.created_at ?? '-'}`,
             );
           }
-          throw err;
-        }
+        }),
+    ),
+  );
 
-        // The user has been created at this point. If `AdminSetUserPassword`
-        // fails (stricter password policy than the generator, partial IAM
-        // grant on the Set verb, throttling, etc.) the user is left in
-        // `FORCE_CHANGE_PASSWORD` state — they exist in the pool but
-        // can't actually log in. Surface a clear diagnostic so the
-        // admin knows to either retry the password set manually or
-        // delete the half-created user before re-running.
-        try {
-          await cognito.send(new AdminSetUserPasswordCommand({
-            UserPoolId: config.user_pool_id,
-            Username: email,
-            Password: tempPassword,
-            Permanent: true,
-          }));
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          const errorName = err instanceof Error ? err.name : 'Error';
-          throw new CliError(
-            `User ${email} was created but the password could not be set `
-            + `(${errorName}: ${message}). The user is now stuck in FORCE_CHANGE_PASSWORD `
-            + 'state and cannot log in. Either:\n'
-            + `  1. Delete the user and re-run: aws cognito-idp admin-delete-user --user-pool-id ${config.user_pool_id} --username ${email}\n`
-            + '  2. Or set the password manually via the AWS console once the underlying issue is fixed.',
-          );
-        }
+  admin.addCommand(
+    addAdminContextOptions(
+      new Command('delete-user')
+        .description('Delete a Cognito user from the user pool')
+        .argument('<email>', 'Email / username of the user to delete')
+        .action(async (email: string, opts) => {
+          assertLikelyEmail(email);
+          const ctx = await resolveCognitoAdminContext(opts);
+          await adminDeleteUser(ctx, email);
+          console.log(`✓ Deleted Cognito user ${email}`);
+        }),
+    ),
+  );
 
-        const bundle = encodeBundle(config);
-        printInviteSummary(email, tempPassword, bundle);
-      }),
+  admin.addCommand(
+    addAdminContextOptions(
+      new Command('reset-password')
+        .description('Set a new permanent password for an existing Cognito user')
+        .argument('<email>', 'Email / username of the user')
+        .option('--password <pwd>', 'New permanent password (default: auto-generated)')
+        .action(async (email: string, opts) => {
+          assertLikelyEmail(email);
+          const ctx = await resolveCognitoAdminContext(opts);
+          const password = opts.password ?? generateTempPassword();
+          await adminResetPassword(ctx, email, password);
+          const invitePath = writeCredentialsFile(email, password, null, 'password-reset');
+          console.log();
+          console.log(`✓ Reset password for ${email}`);
+          console.log(`  New password written to: ${invitePath}`);
+        }),
+    ),
   );
 
   return admin;
 }
 
-/** Permissive email-shape check — Cognito does the real validation. */
-function isLikelyEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
-function printInviteSummary(email: string, tempPassword: string, bundle: string): void {
-  // The password never touches stdout: terminal scrollback, tmux logs, and
-  // CI capture all outlive the "share once" intent. Write the share-block
-  // to a 0600 file under the config dir instead and print its path —
-  // the admin copies it to the teammate over a secure channel, then
-  // deletes it.
-  const inviteDir = path.join(getConfigDir(), 'invites');
-  fs.mkdirSync(inviteDir, { recursive: true, mode: 0o700 });
-  const invitePath = path.join(inviteDir, `${email.replace(/[^a-zA-Z0-9.@_-]/g, '_')}.txt`);
-  const shareBlock = [
-    `email:    ${email}`,
-    `password: ${tempPassword}`,
-    `bundle:   ${bundle}`,
-    '',
-    'Run:',
-    `  bgagent configure --from-bundle ${bundle}`,
-    `  bgagent login --username ${email}`,
-    '',
-  ].join('\n');
-  fs.writeFileSync(invitePath, shareBlock, { mode: SECRET_FILE_MODE });
-  // writeFileSync only honors `mode` on create — a re-invite into a
-  // pre-existing loose-permissions file would keep its old bits. chmod
-  // makes the 0600 intent durable.
-  fs.chmodSync(invitePath, SECRET_FILE_MODE);
+function printInviteSummary(email: string, password: string, bundle: string | null): void {
+  const invitePath = writeCredentialsFile(email, password, bundle, 'invite');
 
   const SUMMARY_BAR_WIDTH = 64;
   const bar = '─'.repeat(SUMMARY_BAR_WIDTH);
   console.log();
   console.log(`✓ Created Cognito user ${email}`);
   console.log('✓ Set permanent password (no first-login change required)');
+  if (bundle) {
+    console.log('✓ Included configure bundle for `bgagent configure --from-bundle`');
+  } else {
+    console.log('  (Configure bundle unavailable — run `bgagent platform outputs` then `bgagent configure`.)');
+  }
   console.log();
   console.log('Credentials written to (owner-readable only):');
   console.log(bar);
   console.log(`  ${invitePath}`);
   console.log(bar);
   console.log();
-  console.log('Share that file\'s contents with the new teammate over a secure');
-  console.log('channel (1Password, encrypted DM), then delete it:');
+  if (bundle) {
+    console.log('Next steps for this user:');
+    console.log('  bgagent configure --from-bundle <bundle from file>');
+    console.log(`  bgagent login --username ${email}`);
+    console.log();
+  }
+  console.log('Share the file over a secure channel for teammates, then delete it:');
   console.log(`  rm ${invitePath}`);
+}
+
+function credentialsFilePath(email: string): string {
+  const inviteDir = path.join(getConfigDir(), 'invites');
+  return path.join(inviteDir, `${email.replace(/[^a-zA-Z0-9.@_-]/g, '_')}.txt`);
+}
+
+function writeCredentialsFile(
+  email: string,
+  password: string,
+  bundle: string | null,
+  kind: 'invite' | 'password-reset',
+): string {
+  const inviteDir = path.join(getConfigDir(), 'invites');
+  fs.mkdirSync(inviteDir, { recursive: true, mode: 0o700 });
+  const invitePath = credentialsFilePath(email);
+  const lines = [
+    `email:    ${email}`,
+    `password: ${password}`,
+  ];
+  if (bundle) {
+    lines.push(`bundle:   ${bundle}`, '');
+    lines.push('Run:');
+    lines.push(`  bgagent configure --from-bundle ${bundle}`);
+    lines.push(`  bgagent login --username ${email}`);
+  } else if (kind === 'password-reset') {
+    lines.push('', 'Run:', `  bgagent login --username ${email}`);
+  }
+  lines.push('');
+  fs.writeFileSync(invitePath, lines.join('\n'), { mode: SECRET_FILE_MODE });
+  fs.chmodSync(invitePath, SECRET_FILE_MODE);
+  return invitePath;
 }

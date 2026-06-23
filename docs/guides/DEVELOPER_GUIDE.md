@@ -30,7 +30,7 @@ For a concise duplicate of this table, common pitfalls, and a CDK test file map,
 
 ## Repository preparation
 
-The [Quick Start](./QUICK_START.md) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
+The [Quick Start](./QUICK_START.mdx) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
 
 ### Pre-flight checks
 
@@ -116,7 +116,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 
 ## Installation
 
-Follow the [Quick Start](./QUICK_START.md) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
+Follow the [Quick Start](./QUICK_START.mdx) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
 This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
 
@@ -266,7 +266,7 @@ For the full list, see `agent/README.md`.
 
 ### Deployment
 
-Follow the [Quick Start](./QUICK_START.md) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
+Follow the [Quick Start](./QUICK_START.mdx) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
 
 ```bash
 mise run build
@@ -377,7 +377,7 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 | I want to... | Look at |
 |---|---|
-| Update a user-facing guide | `docs/guides/` (USER_GUIDE.md, DEVELOPER_GUIDE.md, QUICK_START.md, PROMPT_GUIDE.md, ROADMAP.md) |
+| Update a user-facing guide | `docs/guides/` (USER_GUIDE.md, DEVELOPER_GUIDE.md, QUICK_START.mdx, PROMPT_GUIDE.md, ROADMAP.md) |
 | Update an architecture doc | `docs/design/` |
 | Change the sidebar or site config | `docs/astro.config.mjs` |
 | Change how docs are synced | `docs/scripts/sync-starlight.mjs` |
