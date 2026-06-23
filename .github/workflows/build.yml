@@ -286,7 +286,7 @@ jobs:
           mise run build
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@3f20e214133d0983f9a10f3d63b0faf9241a3daa # v6.0.0
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
