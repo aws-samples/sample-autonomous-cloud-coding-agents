@@ -106,6 +106,12 @@ export function applicationPolicy(): iam.PolicyDocument {
           'lambda:DeleteEventSourceMapping',
           'lambda:UpdateEventSourceMapping',
           'lambda:GetEventSourceMapping',
+          // CDK event-source constructs (e.g. DynamoDBEventSource) tag the
+          // created mapping, so the exec role needs Tag/UntagResource on
+          // event-source-mapping:* (the function:*/layer:*-scoped TagResource
+          // grant elsewhere in this policy does not cover mappings).
+          'lambda:TagResource',
+          'lambda:UntagResource',
         ],
         resources: ['*'],
       }),
@@ -246,6 +252,7 @@ export function applicationPolicy(): iam.PolicyDocument {
           'arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*',
           'arn:aws:secretsmanager:*:*:secret:SlackIntegration*',
           'arn:aws:secretsmanager:*:*:secret:LinearIntegration*',
+          'arn:aws:secretsmanager:*:*:secret:JiraIntegration*',
           'arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*',
           'arn:aws:secretsmanager:*:*:secret:bgagent/*',
         ],
