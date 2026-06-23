@@ -478,7 +478,6 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
     });
-    agentSessionRole.grantAssumeToComputeRole(runtime.role);
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination

@@ -59,9 +59,18 @@ function createStack() {
     traceArtifactsBucket,
     attachmentsBucket,
   });
-  sessionRole.grantAssumeToComputeRole(computeRole);
 
   return { stack, template: Template.fromStack(stack), computeRole, sessionRole };
+}
+
+function findComputeRolePolicy(template: Template) {
+  const policies = template.findResources('AWS::IAM::Policy');
+  return Object.entries(policies).find(([id]) => id.includes('ComputeRole'))![1];
+}
+
+function findSessionRoleTrust(template: Template) {
+  const roles = template.findResources('AWS::IAM::Role');
+  return Object.entries(roles).find(([id]) => id.includes('AgentSessionRole'))![1];
 }
 
 describe('AgentSessionRole construct', () => {
@@ -75,8 +84,9 @@ describe('AgentSessionRole construct', () => {
     template.hasResourceProperties('AWS::IAM::Role', {
       AssumeRolePolicyDocument: {
         Statement: Match.arrayWith([
-          Match.objectLike({ Action: 'sts:AssumeRole' }),
-          Match.objectLike({ Action: 'sts:TagSession' }),
+          Match.objectLike({
+            Action: Match.arrayWith(['sts:AssumeRole', 'sts:TagSession']),
+          }),
         ]),
       },
       // Role chaining caps at 1h regardless; documented explicitly.
@@ -163,20 +173,27 @@ describe('AgentSessionRole construct', () => {
     );
   });
 
-  test('compute role is granted sts:AssumeRole + sts:TagSession on the SessionRole', () => {
-    const policies = template.findResources('AWS::IAM::Policy');
-    const computePolicy = Object.entries(policies).find(([id]) =>
-      id.includes('ComputeRole'),
-    )![1];
+  test('constructor admits assumingRoles with both trust and grant wired', () => {
+    const computePolicy = findComputeRolePolicy(template);
     const statements = computePolicy.Properties.PolicyDocument.Statement;
     const stsStatement = statements.find((s: { Action: string | string[] }) => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.includes('sts:AssumeRole') && actions.includes('sts:TagSession');
     });
     expect(stsStatement).toBeDefined();
+
+    const trustDoc = findSessionRoleTrust(template).Properties.AssumeRolePolicyDocument;
+    const bundledTrust = trustDoc.Statement.find(
+      (s: { Action: string | string[] }) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes('sts:AssumeRole') && actions.includes('sts:TagSession');
+      },
+    );
+    expect(bundledTrust).toBeDefined();
+    expect(JSON.stringify(trustDoc)).toContain('ComputeRole');
   });
 
-  test('addAssumingRole admits a second compute role (ECS task role) to the trust', () => {
+  test('admitComputeRole wires both trust and grant for an additional compute role', () => {
     const app = new App();
     const stack = new Stack(app, 'MultiPrincipalStack');
     const agentcoreRole = new iam.Role(stack, 'AgentCoreRole', {
@@ -194,17 +211,25 @@ describe('AgentSessionRole construct', () => {
       traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
       attachmentsBucket: new s3.Bucket(stack, 'AB'),
     });
-    sessionRole.addAssumingRole(ecsTaskRole);
+    sessionRole.admitComputeRole(ecsTaskRole);
 
-    const trustStatements = Template.fromStack(stack).findResources(
-      'AWS::IAM::Role',
-    );
-    const sr = Object.entries(trustStatements).find(([id]) => id.includes('SR'))![1];
-    // Trust policy now has statements for both AssumeRole and TagSession; the
-    // ECS task role ARN appears as an additional principal.
-    const serialized = JSON.stringify(sr.Properties.AssumeRolePolicyDocument);
-    expect(serialized).toContain('sts:TagSession');
-    expect(serialized).toContain('EcsTaskRole');
-    expect(serialized).toContain('AgentCoreRole');
+    const stackTemplate = Template.fromStack(stack);
+    const trustDoc = Object.entries(stackTemplate.findResources('AWS::IAM::Role')).find(
+      ([id]) => id.includes('SR'),
+    )![1].Properties.AssumeRolePolicyDocument;
+    const serializedTrust = JSON.stringify(trustDoc);
+    expect(serializedTrust).toContain('sts:TagSession');
+    expect(serializedTrust).toContain('EcsTaskRole');
+    expect(serializedTrust).toContain('AgentCoreRole');
+
+    const ecsPolicy = Object.entries(stackTemplate.findResources('AWS::IAM::Policy')).find(
+      ([id]) => id.includes('EcsTaskRole'),
+    )![1];
+    const ecsStatements = ecsPolicy.Properties.PolicyDocument.Statement;
+    const stsGrant = ecsStatements.find((s: { Action: string | string[] }) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes('sts:AssumeRole') && actions.includes('sts:TagSession');
+    });
+    expect(stsGrant).toBeDefined();
   });
 });
