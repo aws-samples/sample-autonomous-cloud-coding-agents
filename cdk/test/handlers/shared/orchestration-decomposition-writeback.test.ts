@@ -116,6 +116,24 @@ describe('writeBackPlan — happy path (all fresh)', () => {
     expect(r.kind).toBe('ok');
     expect(calls.filter((c) => c.op === 'relation')).toHaveLength(0);
   });
+
+  test('the relation mutation declares type as the IssueRelationType ENUM, not String (B7 live-fix)', async () => {
+    // Regression: Linear's issueRelationCreate input `type` is the
+    // IssueRelationType enum; declaring the GraphQL var `String!` makes Linear
+    // reject the whole mutation with a 400, so edges silently never get created.
+    // Assert the query text uses the enum type.
+    const seen: string[] = [];
+    const graphql: GraphqlFn = jest.fn(async (query: string, vars: Record<string, unknown>) => {
+      seen.push(query);
+      if (query.includes('query ParentState')) return { issue: { team: { id: 't' }, children: { nodes: [] } } };
+      if (query.includes('mutation CreateSubIssue')) return { issueCreate: { success: true, issue: { id: `new-${vars.title}` } } };
+      return { issueRelationCreate: { success: true } };
+    });
+    await writeBackPlan({ graphql, parentIssueId: PARENT, nodes: [node('A'), node('B', [0])] });
+    const relQuery = seen.find((q) => q.includes('CreateBlockingRelation'))!;
+    expect(relQuery).toContain('$type: IssueRelationType!');
+    expect(relQuery).not.toContain('$type: String!');
+  });
 });
 
 describe('writeBackPlan — idempotent / resumable', () => {

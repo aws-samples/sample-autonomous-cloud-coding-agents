@@ -191,6 +191,39 @@ describe('runPlanVerdict — approve', () => {
     const r = await runPlanVerdict({ parentIssueId: PARENT, verdict: 'approve', effects: e });
     expect(r).toEqual({ kind: 'handled', reason: 'writeback_error' });
   });
+
+  test('write-back failure RESTORES the consumed pending plan (so re-approve resumes)', async () => {
+    // The consume happens before write-back (race protection); if write-back
+    // fails, the plan must be put back or "re-approving will resume" is a lie.
+    const nodes = [
+      { title: 'A', description: 'a', size: 'S' as const, max_budget_usd: 1, depends_on: [] },
+      { title: 'B', description: 'b', size: 'S' as const, max_budget_usd: 1, depends_on: [0] },
+    ];
+    const e = effects({
+      consumePendingPlan: jest.fn().mockResolvedValue({ nodes }),
+      graphql: jest.fn().mockResolvedValue(null), // write-back errors
+      putPendingPlan: jest.fn().mockResolvedValue(true),
+    });
+    const r = await runPlanVerdict({ parentIssueId: PARENT, verdict: 'approve', effects: e });
+    expect(r.reason).toBe('writeback_error');
+    // The plan was put back with the same nodes.
+    expect(e.putPendingPlan).toHaveBeenCalledTimes(1);
+    expect((e.putPendingPlan as jest.Mock).mock.calls[0][0].nodes).toEqual(nodes);
+  });
+
+  test('a successful approve does NOT restore a pending plan', async () => {
+    const e = effects({
+      consumePendingPlan: jest.fn().mockResolvedValue({
+        nodes: [
+          { title: 'A', description: 'a', size: 'S' as const, max_budget_usd: 1, depends_on: [] },
+          { title: 'B', description: 'b', size: 'S' as const, max_budget_usd: 1, depends_on: [0] },
+        ],
+      }),
+    });
+    const r = await runPlanVerdict({ parentIssueId: PARENT, verdict: 'approve', effects: e });
+    expect(r.kind).toBe('seed');
+    expect(e.putPendingPlan).not.toHaveBeenCalled();
+  });
 });
 
 describe('runPlanVerdict — reject', () => {

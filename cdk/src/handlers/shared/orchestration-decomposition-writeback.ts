@@ -83,8 +83,13 @@ mutation CreateSubIssue($teamId: String!, $parentId: String!, $title: String!, $
 }
 `.trim();
 
+// NOTE: ``type`` is the ``IssueRelationType`` ENUM (values: blocks, duplicate,
+// related, similar), NOT a String — declaring it ``String!`` makes Linear
+// reject the mutation with a 400 (live-caught in B7). The enum value is passed
+// as a variable (``RELATION_TYPE_BLOCKS = 'blocks'``), which Linear coerces to
+// the enum once the param type is correct.
 const ISSUE_RELATION_CREATE_MUTATION = `
-mutation CreateBlockingRelation($issueId: String!, $relatedIssueId: String!, $type: String!) {
+mutation CreateBlockingRelation($issueId: String!, $relatedIssueId: String!, $type: IssueRelationType!) {
   issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedIssueId, type: $type }) {
     success
   }
