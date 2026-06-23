@@ -20,7 +20,66 @@
 import {
   isNoChangeIteration,
   renderIterationSuccessReply,
+  renderMaturingReply,
 } from '../../../src/handlers/shared/iteration-reply';
+
+describe('renderMaturingReply — the edit-in-place states', () => {
+  test('on_it → instant ack (no metadata)', () => {
+    expect(renderMaturingReply({ state: 'on_it' })).toBe('👀 On it — reading the PR…');
+  });
+
+  test('working → names the PR being updated', () => {
+    expect(renderMaturingReply({ state: 'working', prNumber: 293 })).toBe('🔄 Working — updating PR #293…');
+    expect(renderMaturingReply({ state: 'working' })).toBe('🔄 Working…');
+  });
+
+  test('updated → ✅ + cost · duration · running total + preview link, all folded in', () => {
+    const r = renderMaturingReply({
+      state: 'updated',
+      prNumber: 293,
+      costUsd: 0.79,
+      durationS: 309,
+      runningTotalUsd: 2.04,
+      screenshotUrl: 'https://cdn/x.png',
+    });
+    expect(r).toContain('✅ Updated — PR #293.');
+    expect(r).toContain('$0.79');
+    expect(r).toContain('5m 9s');
+    expect(r).toContain('total this PR: $2.04');
+    expect(r).toContain('[preview](https://cdn/x.png)');
+    // ALL in one reply body — no separate comments.
+    expect(r.split('\n').length).toBeLessThanOrEqual(2);
+  });
+
+  test('answered → 💬 + the answer + cost (a question, no commit)', () => {
+    const r = renderMaturingReply({ state: 'answered', answerText: 'The login page is at /login.html', costUsd: 0.24 });
+    expect(r).toContain('💬 The login page is at /login.html');
+    expect(r).toContain('$0.24');
+    expect(r).not.toContain('Updated');
+  });
+
+  test('answered with no answer → honest no-change line', () => {
+    expect(renderMaturingReply({ state: 'answered' })).toContain('No code change was needed');
+  });
+
+  test('failed → ❌ + sanitized reason', () => {
+    expect(renderMaturingReply({ state: 'failed', failureReason: 'build failed: tsc error' }))
+      .toContain('❌ build failed: tsc error');
+  });
+
+  test('terminal metadata line omits unknown parts gracefully', () => {
+    // Only cost known → no duration, no total, no empty separators.
+    const r = renderMaturingReply({ state: 'updated', prNumber: 1, costUsd: 0.5 });
+    expect(r).toContain('$0.50');
+    expect(r).not.toContain('total this PR');
+    expect(r).not.toMatch(/·\s*·/); // no doubled separators
+  });
+
+  test('on_it / working never carry a metadata line', () => {
+    expect(renderMaturingReply({ state: 'on_it', costUsd: 1 })).not.toContain('$');
+    expect(renderMaturingReply({ state: 'working', costUsd: 1, prNumber: 2 })).not.toContain('$');
+  });
+});
 
 describe('renderIterationSuccessReply — changed (a real edit)', () => {
   test('code changed + PR number → "✅ Updated — PR #N"', () => {

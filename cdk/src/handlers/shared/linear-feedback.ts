@@ -414,6 +414,40 @@ export async function replyToComment(
 }
 
 /**
+ * The MATURING THREADED REPLY for a comment-iteration (iteration-UX redesign).
+ * If ``existingReplyId`` is given, EDIT that reply in place; otherwise CREATE a
+ * new reply threaded under ``parentCommentId`` and return its id. Mirrors
+ * {@link upsertStatusComment} but as a THREADED reply (carries ``parentId``) so
+ * one iteration shows a single reply that matures 👀→🔄→✅/💬 instead of N
+ * top-level comments. Returns the reply id (existing on edit, new on create),
+ * or null on any failure. Best-effort — never throws.
+ *
+ * Linear requires ``issueId`` even for a threaded reply (parentId alone fails
+ * commentCreate validation, live-verified 2026-06-16), so the create carries both.
+ */
+export async function upsertThreadedReply(
+  ctx: LinearFeedbackContext,
+  issueId: string,
+  parentCommentId: string,
+  body: string,
+  existingReplyId?: string,
+): Promise<string | null> {
+  const token = await resolveToken(ctx);
+  if (!token) return null;
+
+  if (existingReplyId) {
+    const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingReplyId, body })).ok;
+    return ok ? existingReplyId : null;
+  }
+
+  const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
+    issueId, parentId: parentCommentId, body,
+  });
+  const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
+  return created?.success && created.comment?.id ? created.comment.id : null;
+}
+
+/**
  * Swap the PARENT epic's bgagent status marker so only ONE is shown at a
  * time (👀 → ✅/❌), mirroring the children's reaction behaviour. The
  * children capture the reaction id in-process and delete it; the parent's
