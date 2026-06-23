@@ -83,9 +83,10 @@ Output goes to `cdk/cdk.out/`. Useful for reviewing generated CloudFormation tem
 ## Post-Deployment
 
 After a successful deploy, remind the user to:
-- Store/update the GitHub PAT in Secrets Manager if this is a fresh deployment
-- Onboard repositories with `bgagent repo onboard <owner/repo>` (a runtime operation — no redeploy). A CDK `Blueprint` construct is only needed for declarative config (Cedar policies, egress allowlist, system-prompt overrides) — see the `onboard-repo` skill
-- Run a smoke test: `curl -s -H "Authorization: $TOKEN" $API_URL/tasks`
+- Store/update the GitHub PAT in Secrets Manager if this is a fresh deployment.
+- Onboard a repository. `bgagent repo onboard <owner/repo>` is a runtime operation (no redeploy) that works when the repo can use the **platform/default-blueprint** setup — the default GitHub token secret, an already-granted model, and the default egress allowlist. A repo that needs its **own** config — a per-repo GitHub token, a model not yet granted to the runtime, custom egress domains, Cedar HITL policies, or system-prompt overrides — needs a dedicated CDK `Blueprint` construct and a redeploy (with the correct permissions). See the `onboard-repo` skill for both paths.
+- **Verify readiness before submitting a task:** `bgagent platform doctor` smoke-checks the API, Cognito, GitHub token, Bedrock model access, and onboarded repos — confirm everything is green first.
+- (Lower-level alternative) raw API smoke test: `curl -s -H "Authorization: $TOKEN" $API_URL/tasks`.
 
 ## Least-Privilege Bootstrap (the default)
 
