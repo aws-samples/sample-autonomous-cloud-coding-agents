@@ -189,6 +189,30 @@ export function isNoChangeIteration(codeChanged?: boolean): boolean {
   return codeChanged === false;
 }
 
+/** Matches the `· [preview](url)` segment folded onto a matured reply. */
+const PREVIEW_SUFFIX_RE = /\s*·\s*\[preview\]\((?<url>[^)\s]+)\)/;
+
+/**
+ * iteration-UX convergence: the deploy-preview link and the terminal-settle of
+ * a maturing reply are written by two INDEPENDENT async paths (the screenshot
+ * webhook appends ` · [preview](url)`; the fanout/reconciler terminal-settle
+ * re-renders the whole reply body) with no ordering guarantee. Whichever runs
+ * last wins, so a terminal re-render would silently drop a preview the webhook
+ * already appended (live-caught on ABCA-434: appended 18:56:09, clobbered by the
+ * terminal edit 18:56:23). This makes the edit path CONVERGE rather than
+ * overwrite: if ``currentBody`` already carries a ``[preview]`` segment and the
+ * freshly-rendered ``newBody`` does not, carry the link onto the new body in the
+ * same ` · [preview](url)` shape ``renderMaturingReply`` uses. Pure; idempotent
+ * (a no-op when newBody already has its own preview or currentBody has none).
+ */
+export function preservePreviewSuffix(newBody: string, currentBody: string | null | undefined): string {
+  if (typeof currentBody !== 'string') return newBody;
+  if (newBody.includes('[preview]')) return newBody; // new render already carries one
+  const url = currentBody.match(PREVIEW_SUFFIX_RE)?.groups?.url;
+  if (!url) return newBody;
+  return `${newBody} · [preview](${url})`;
+}
+
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
