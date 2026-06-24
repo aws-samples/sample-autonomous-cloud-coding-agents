@@ -4,7 +4,7 @@ title: Deployment guide
 
 # Deployment guide
 
-This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/developer-guide/introduction). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/architecture/deployment-roles).
+This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
 
 ## Architecture overview
 
@@ -53,7 +53,7 @@ ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is presen
 
 The dominant idle cost is VPC networking: 7 interface endpoints across 2 AZs (~$102/month) plus the NAT Gateway (~$32/month).
 
-For the full cost model including per-task costs, see [COST_MODEL.md](/architecture/cost-model).
+For the full cost model including per-task costs, see [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model).
 
 ## AWS services inventory
 
@@ -146,7 +146,7 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
    - `intent: "labels"` → reads PR labels against an allowlist
    - `intent: "<type>"` → deploys the specified type (e.g., `agentcore`)
 4. **Requires approval** — The `deploy` job uses a GitHub Environment with required reviewers. Approvals are logged and the self-review rule prevents unilateral deploys.
-5. **Deploys via OIDC** — Assumes an IAM role via GitHub OIDC federation (no long-lived credentials). The role is scoped to the `cdk deploy` action with least-privilege policies per [DEPLOYMENT_ROLES.md](/architecture/deployment-roles).
+5. **Deploys via OIDC** — Assumes an IAM role via GitHub OIDC federation (no long-lived credentials). The role is scoped to the `cdk deploy` action with least-privilege policies per [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
 
 ### Security controls
 
@@ -229,8 +229,8 @@ For users without AWS CLI access.
 ## Related docs
 
 - [Quick start](./QUICK_START.mdx) -- Zero-to-first-PR in 6 steps.
-- [Developer guide](/developer-guide/introduction) -- Local development, testing, repository onboarding.
-- [User guide](/using/overview) -- API reference, CLI usage, task management.
-- [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
-- [COST_MODEL.md](/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
-- [COMPUTE.md](/architecture/compute) -- Compute backend architecture and trade-offs.
+- [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) -- Local development, testing, repository onboarding.
+- [User guide](/sample-autonomous-cloud-coding-agents/using/overview) -- API reference, CLI usage, task management.
+- [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
+- [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
+- [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend architecture and trade-offs.

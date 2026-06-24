@@ -7,8 +7,8 @@ title: Repo onboarding
 Before users can submit tasks for a repository, that repository must be onboarded to the platform. Onboarding registers the repo and produces a per-repo configuration that the orchestrator uses at task time: compute strategy, model, credentials, networking, and pipeline customizations. If a user submits a task for a non-onboarded repo, the API returns `422 REPO_NOT_ONBOARDED`.
 
 - **Use this doc for:** the Blueprint construct interface, RepoConfig schema, override precedence, compute strategy interface, and pipeline customization model.
-- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](/using/overview) for per-repo overrides.
-- **Related docs:** [ORCHESTRATOR.md](/architecture/orchestrator) for how the orchestrator consumes blueprint config, [COMPUTE.md](/architecture/compute) for compute backends, [SECURITY.md](/architecture/security) for custom step trust boundaries.
+- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
+- **Related docs:** [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the orchestrator consumes blueprint config, [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for compute backends, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for custom step trust boundaries.
 
 ## Why onboarding?
 
@@ -36,11 +36,11 @@ For operators with IAM access to the deployed stack, `bgagent repo onboard` and 
 | **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
 | **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
 | **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
-| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/architecture/adr-017-operator-cli-repo-onboarding)) |
+| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding)) |
 
 Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
 
-See also: [Using the CLI — operator commands](/using/overview#operator-commands-stack-admin) and [ADR-017](/architecture/adr-017-operator-cli-repo-onboarding).
+See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/overview#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding).
 
 ### Blueprint construct
 
@@ -147,9 +147,9 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 
 ## Pipeline customization
 
-Blueprints customize the orchestrator pipeline through three progressively powerful layers. See [ORCHESTRATOR.md](/architecture/orchestrator) for how the framework enforces invariants regardless of customization.
+Blueprints customize the orchestrator pipeline through three progressively powerful layers. See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the framework enforces invariants regardless of customization.
 
-> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — see the "Blueprint custom steps and step sequences" item in [ROADMAP.md](/roadmap/roadmap). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
+> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — see the "Blueprint custom steps and step sequences" item in [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
 
 ### Layer 1: Parameterized strategies
 
@@ -267,4 +267,4 @@ The onboarding pipeline can produce two kinds of customization artifacts that he
 
 **Dynamic artifacts** are generated by the pipeline when repo hygiene is weak: codebase summaries, dependency graphs, suggested rules from the repo layout. These compensate for missing documentation and are attached to the repo's agent configuration.
 
-For prompt writing guidelines, see the [Prompt Guide](/customizing/prompt-engineering).
+For prompt writing guidelines, see the [Prompt Guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering).

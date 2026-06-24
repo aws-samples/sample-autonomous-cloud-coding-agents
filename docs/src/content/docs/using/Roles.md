@@ -15,4 +15,4 @@ There are four lifecycle roles. They are often the same person early on, but the
 
 If you're a teammate joining an existing deployment, jump to [Joining an existing deployment](#joining-an-existing-deployment) below.
 
-If you're standing up a new deployment from scratch, see the [Developer guide](/developer-guide/introduction) first, then come back here for the [admin onboarding flow](#get-stack-outputs).
+If you're standing up a new deployment from scratch, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) first, then come back here for the [admin onboarding flow](#get-stack-outputs).

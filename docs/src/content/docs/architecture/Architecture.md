@@ -10,7 +10,7 @@ This document outlines the overall architecture of the platform. Each component 
 
 ## Design principles
 
-For long-term direction and review tenets, see [VISION.md](/architecture/vision).
+For long-term direction and review tenets, see [VISION.md](/sample-autonomous-cloud-coding-agents/architecture/vision).
 
 - **Extensibility** - Extend the system without modifying core code. Critical components are accessed through internal interfaces (ComputeStrategy, MemoryStore) so implementations can be swapped.
 - **Flexibility** - This field moves fast. Components should be replaceable as better options emerge.
@@ -39,13 +39,13 @@ flowchart LR
 
 The orchestrator and agent are deliberately separated. The orchestrator handles everything deterministic (cheap Lambda invocations); the agent handles everything that needs LLM reasoning (expensive compute + tokens). This separation provides reliability (crashed agents don't leave orphaned state), cost efficiency (bookkeeping doesn't burn tokens), security (the agent can't bypass platform invariants), and testability (deterministic steps are unit-tested without LLM calls).
 
-For the full orchestrator design, see [ORCHESTRATOR.md](/architecture/orchestrator). For the API contract, see [API_CONTRACT.md](/architecture/api-contract).
+For the full orchestrator design, see [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator). For the API contract, see [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract).
 
 ## Repository onboarding
 
 Onboarding is CDK-based. Each repository is an instance of the `Blueprint` construct in the stack. The construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time.
 
-Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](/architecture/repo-onboarding) for the full design.
+Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full design.
 
 ## Model selection
 
@@ -68,7 +68,7 @@ The dominant cost is Bedrock inference + compute, not infrastructure. Memory, La
 | Medium (small team) | 200-500 | $500-3,000 |
 | High (org-wide) | 2,000-5,000 | $5,000-30,000 |
 
-For the full breakdown, see [COST_MODEL.md](/architecture/cost-model).
+For the full breakdown, see [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model).
 
 ## Known architectural risks
 

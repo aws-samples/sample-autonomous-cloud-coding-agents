@@ -27,7 +27,7 @@ Two forces constrain the design:
 
 ## Decision
 
-Introduce **workflows**: versioned, declarative YAML files describing how the agent executes one kind of task (ordered `steps`, system prompt, `agent_config` (tools, MCP servers, skills, plugins, rules/prompt-fragments, Cedar policy — mirroring the #246 registry asset kinds), how repo-discovered config is layered/gated, hydration sources, terminal outcomes, `domain`, `requires_repo`, `read_only`). The three shipped task types become the first three first-party workflows. The full schema and worked examples live in [docs/design/WORKFLOWS.md](/architecture/workflows).
+Introduce **workflows**: versioned, declarative YAML files describing how the agent executes one kind of task (ordered `steps`, system prompt, `agent_config` (tools, MCP servers, skills, plugins, rules/prompt-fragments, Cedar policy — mirroring the #246 registry asset kinds), how repo-discovered config is layered/gated, hydration sources, terminal outcomes, `domain`, `requires_repo`, `read_only`). The three shipped task types become the first three first-party workflows. The full schema and worked examples live in [docs/design/WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows).
 
 Four sub-decisions:
 
@@ -82,7 +82,7 @@ What does **not** change: read-only is still enforced by *both* `allowed_tools` 
 
 ## Addendum (2026-06-08): repo-optional open questions resolved — schema freeze
 
-[WORKFLOWS.md](/architecture/workflows) open questions #1 (memory actorId for repo-less tasks) and #2 (artifact-delivery contract) were flagged as **blocking Phase 3 and requiring resolution before the Phase-0 schema is frozen**, because either might add or reshape a schema field. Both are now decided. The schema field reshape implied by #2 is applied in the same change as this addendum, so the schema can be treated as frozen.
+[WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) open questions #1 (memory actorId for repo-less tasks) and #2 (artifact-delivery contract) were flagged as **blocking Phase 3 and requiring resolution before the Phase-0 schema is frozen**, because either might add or reshape a schema field. Both are now decided. The schema field reshape implied by #2 is applied in the same change as this addendum, so the schema can be treated as frozen.
 
 **Decision 1 — Memory actorId for repo-less tasks: per-user (`user:{id}`).** A repo-less task uses `actorId = user:{cognito_sub}` (the platform user id already threaded as `TaskConfig.user_id`), not the `repo` used by coding tasks (`memory.py`). Rationale: it is caller-scoped (no cross-tenant knowledge bleed — the same isolation property the per-user trace prefix already relies on), and it matches the platform's existing user-scoping pattern. Cross-*workflow* knowledge pooling (e.g. "all `web_research` tasks share learnings") is explicitly **not** adopted now — it mixes tenants in one namespace and is a larger privacy decision deferrable to the registry phase.
   - **Schema impact: none.** This is a fixed platform fallback, not author-configurable, so it adds **no** `actor_namespace` selector to the workflow schema. (The earlier note that it "may introduce an `actor_namespace` selector" is resolved in the negative — keeping the schema smaller.) It is a Phase-3 `memory.py` change: when `repo` is absent, key on `user:{user_id}`; coding tasks are unchanged.
@@ -101,10 +101,10 @@ With both resolved and the one schema reshape applied, the Phase-0 schema is **f
 - Issue [#245](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/245) — attribution on resolved capability
 - Issue [#236](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/236) — E2E verification (parity coverage)
 - Issue [#99](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/99) — AKW integration (broader vision; out-of-scope items defer here)
-- [docs/design/WORKFLOWS.md](/architecture/workflows) — the workflow schema, step catalog, and step-runner design
-- [docs/design/ORCHESTRATOR.md](/architecture/orchestrator) — durable lifecycle and extension points
-- [docs/design/REPO_ONBOARDING.md](/architecture/repo-onboarding) — the Blueprint construct and `step_sequence` model
-- [docs/design/CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates) — policy engine the `agent_config` feeds
+- [docs/design/WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) — the workflow schema, step catalog, and step-runner design
+- [docs/design/ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) — durable lifecycle and extension points
+- [docs/design/REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) — the Blueprint construct and `step_sequence` model
+- [docs/design/CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — policy engine the `agent_config` feeds
 - Prior art: `origin/merge/akw-integration` (commit `9d066a8`) — AKW YAML registry and models (reconciled, scoped down)
-- [ADR-013](/architecture/adr-013-tiered-validation-pyramid) — the validation pyramid the `promotion_gate` layers onto
-- [ADR-005](/architecture/adr-005-feedback-loop) — the feedback loop that workflow trajectory-evolution would extend (future, out of scope)
+- [ADR-013](/sample-autonomous-cloud-coding-agents/architecture/adr-013-tiered-validation-pyramid) — the validation pyramid the `promotion_gate` layers onto
+- [ADR-005](/sample-autonomous-cloud-coding-agents/architecture/adr-005-feedback-loop) — the feedback loop that workflow trajectory-evolution would extend (future, out of scope)

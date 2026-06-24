@@ -7,7 +7,7 @@ title: Memory
 Agents are stateless by default: each task starts from scratch with no knowledge of what happened before. The memory system fixes this by giving agents access to repository knowledge, past task episodes, and review feedback across sessions. A well-configured `CLAUDE.md` in the repository is often more impactful than any external memory, but external memory fills gaps the repo cannot: execution history, reviewer preferences, operational quirks, and cross-task patterns.
 
 - **Use this doc for:** understanding what memory stores, how it flows through the pipeline, the security threat model, and the tiered implementation plan.
-- **Related docs:** [SECURITY.md](/architecture/security) for prompt injection and memory poisoning mitigations, [EVALUATION.md](/architecture/evaluation) for how memory quality is measured, [ORCHESTRATOR.md](/architecture/orchestrator) for context hydration.
+- **Related docs:** [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for prompt injection and memory poisoning mitigations, [EVALUATION.md](/sample-autonomous-cloud-coding-agents/architecture/evaluation) for how memory quality is measured, [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for context hydration.
 
 ## Design principles
 
@@ -72,7 +72,7 @@ After the PR is opened, the agent writes:
 
 1. **Task episode** - Structured summary: approach, files changed, PR number, difficulties, outcome
 2. **Repo learnings** - New knowledge discovered about the codebase
-3. **Self-feedback** - What context was missing that would have helped (see [EVALUATION.md](/architecture/evaluation))
+3. **Self-feedback** - What context was missing that would have helped (see [EVALUATION.md](/sample-autonomous-cloud-coding-agents/architecture/evaluation))
 
 If the agent crashes before writing memory, the orchestrator writes a minimal episode as fallback (also fail-open).
 
@@ -110,7 +110,7 @@ The most novel component and the primary feedback loop between human reviewers a
 - **Reviewer authority** - Maintainer feedback should carry more weight than contributor feedback
 - **Rule expiry** - Rules not relevant in N tasks may be stale. Consider TTL or relevance checks.
 - **Extraction quality** - The LLM prompt that extracts rules is critical. Vague extraction produces vague rules that match poorly on retrieval.
-- **Security** - PR review comments are attacker-controlled input. See [SECURITY.md](/architecture/security).
+- **Security** - PR review comments are attacker-controlled input. See [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security).
 
 ### User preference memory
 
@@ -210,4 +210,4 @@ flowchart TB
 | 5. Write-ahead validation | Open | Planned: separate model evaluates proposed memory updates before commit |
 | 6. Anomaly detection | Open | Planned: write pattern monitoring, behavioral drift detection, automatic halt |
 
-See [ROADMAP.md](/roadmap/roadmap) for the phased implementation plan and [SECURITY.md](/architecture/security) for the broader security context.
+See [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) for the phased implementation plan and [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for the broader security context.

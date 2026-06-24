@@ -791,6 +791,6 @@ These policies are conservative-but-scoped starting points. To tighten further:
 
 ## Reference
 
-- [SECURITY.md](/architecture/security) -- Runtime IAM, memory isolation, custom step trust boundaries.
-- [COMPUTE.md](/architecture/compute) -- Compute backend options (AgentCore vs ECS Fargate).
-- [COST_MODEL.md](/architecture/cost-model) -- Infrastructure baseline costs and scale-to-zero analysis.
+- [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) -- Runtime IAM, memory isolation, custom step trust boundaries.
+- [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend options (AgentCore vs ECS Fargate).
+- [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Infrastructure baseline costs and scale-to-zero analysis.

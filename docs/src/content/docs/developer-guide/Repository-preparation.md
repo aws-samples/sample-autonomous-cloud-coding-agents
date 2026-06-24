@@ -13,7 +13,7 @@ Permission requirements vary by task type:
 - `new_task` and `pr_iteration` require Contents (read/write) and Pull requests (read/write).
 - `pr_review` only needs Triage or higher since it does not push branches.
 
-Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](/architecture/readme#github-pat--minimal-permissions) for when to use which token type.
+Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for when to use which token type.
 
 ### Quick setup (single repo)
 
@@ -57,7 +57,7 @@ new Blueprint(this, 'MyServiceBlueprint', {
 });
 ```
 
-If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](/architecture/repo-onboarding) for the full model.
+If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full model.
 
 Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
@@ -69,9 +69,9 @@ The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `g
 
 A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
 
-See the [Cedar policy guide](/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
+See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
 
 ### Other options
 
 - **Stack name** - The default is `backgroundagent-dev` (set in `cdk/src/main.ts`). If you rename it, update all `--stack-name` references.
-- **Making repos agent-friendly** - Add `CLAUDE.md`, `.claude/rules/`, and clear build commands. See the [Prompt guide](/customizing/prompt-engineering#repo-level-instructions) for details.
+- **Making repos agent-friendly** - Add `CLAUDE.md`, `.claude/rules/`, and clear build commands. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for details.

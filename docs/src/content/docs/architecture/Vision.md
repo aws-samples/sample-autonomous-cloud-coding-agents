@@ -7,7 +7,7 @@ title: Vision
 This document states the long-term direction of **ABCA (Autonomous Background Coding Agents on AWS)** and the **tenets** that should guide design, implementation, and review. Use it when evaluating pull requests, RFCs, and ADRs: if a change clearly advances the vision and respects the tenets, it belongs; if it trades tenets away without an explicit, documented rationale, it needs more discussion.
 
 - **Use this doc for:** alignment checks in review — “does this fit where we are going?”
-- **Not a substitute for:** [ARCHITECTURE.md](/architecture/architecture) (system shape), [ROADMAP.md](/roadmap/roadmap) (what ships when), or [docs/decisions/](../decisions/) (specific accepted choices).
+- **Not a substitute for:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) (system shape), [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) (what ships when), or [docs/decisions/](../decisions/) (specific accepted choices).
 
 ## Vision
 
@@ -17,7 +17,7 @@ We are building toward **lights-sparse**, **graduated** autonomy (defined below)
 
 ### What "lights-sparse" means
 
-**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy in the [introduction](/architecture/index).
+**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy in the [introduction](/sample-autonomous-cloud-coding-agents/architecture/index).
 
 - **Lights-out** (the analogy’s end state): humans set goals, policy, and constraints; production runs without people on the floor.
 - **Lights-sparse** (where teams are now): the **implementation loop** — edit code, run tests, open pull requests — is increasingly **unattended**, while **governance, merge authority, and production release** stay **supervised**. Humans are not at the keyboard for every step; they are still accountable for what ships.
@@ -26,7 +26,7 @@ ABCA is built for that posture: asynchronous tasks, policy-gated escalation when
 
 ### What "graduated" means here
 
-**Graduated** autonomy is not a single on/off switch: operators tighten or loosen gates over time (Cedar policies, `--pre-approve`, per-repo posture) without forking the deployment. See tenet 2 and [CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates).
+**Graduated** autonomy is not a single on/off switch: operators tighten or loosen gates over time (Cedar policies, `--pre-approve`, per-repo posture) without forking the deployment. See tenet 2 and [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
 
 Success looks like teams that can **submit work and walk away**, trust that doomed work fails fast and cheaply, inspect every important decision in an audit trail, and see **measurable improvement** over time (fewer revision cycles, higher first-review merge rates, predictable cost).
 
@@ -39,7 +39,7 @@ Tenets are durable preferences. They can conflict; resolving conflict is a desig
 **The normal path is asynchronous and unattended** — submit a task, leave, and come back to a PR, review, or failure reason. Human involvement during a run is **by exception and policy-driven**, not the default way to “drive” the agent.
 
 - Progress and outcomes surface through **status, events, and notifications** (GitHub comment, Slack, email) — the platform reaches the human; the human does not babysit a terminal.
-- **Human-in-the-loop (HITL)** is how we escalate when autonomy must pause: Cedar **soft-deny** rules become approval gates; **hard-deny** rules still fail closed; **`--pre-approve`** scopes let trusted work proceed without repeated gates. See [CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates) and [INTERACTIVE_AGENTS.md](/architecture/interactive-agents).
+- **Human-in-the-loop (HITL)** is how we escalate when autonomy must pause: Cedar **soft-deny** rules become approval gates; **hard-deny** rules still fail closed; **`--pre-approve`** scopes let trusted work proceed without repeated gates. See [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) and [INTERACTIVE_AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents).
 - Real-time steering (**nudge**, **watch**) is for **operator intervention**, not the primary product shape.
 - **In review:** Do not conflate “background agent” with “no human ever.” Ask whether the change preserves fire-and-forget for the submitter while making escalation **reachable, attributable, and policy-gated** when risk warrants it.
 
@@ -48,7 +48,7 @@ Tenets are durable preferences. They can conflict; resolving conflict is a desig
 **The same deployment should support different autonomy postures** so teams can adopt incrementally: tight gates early, broader pre-approval and fewer interrupts later — without forking the platform.
 
 - Autonomy is expressed through **configuration and policy** (Blueprint, Cedar policies, submit-time `--pre-approve`, per-repo overrides) — not hard-coded per customer in core orchestrator logic.
-- A repo can run **fully gated** (many soft-deny rules, narrow pre-approve), **mostly autonomous** (`all_session` pre-approve with hard-deny still enforced), or anywhere between; platform maturity moves along the [ROADMAP.md](/roadmap/roadmap) scorecard, not a single global on/off switch.
+- A repo can run **fully gated** (many soft-deny rules, narrow pre-approve), **mostly autonomous** (`all_session` pre-approve with hard-deny still enforced), or anywhere between; platform maturity moves along the [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) scorecard, not a single global on/off switch.
 - **Merge and release authority** stay human regardless of autonomy level; raising autonomy means fewer *in-run* interruptions, not unsupervised production promotion.
 - **In review:** Prefer knobs that let operators tighten or loosen autonomy per repo/task; flag designs that lock everyone to one posture or that bypass policy to “make demos easier.”
 
@@ -143,12 +143,12 @@ These are out of scope for the project vision. Proposals that primarily serve th
 
 | Document | Role |
 |----------|------|
-| [ARCHITECTURE.md](/architecture/architecture) | Component design and design principles for the current system |
-| [ROADMAP.md](/roadmap/roadmap) | Sequenced delivery and maturity scorecard |
-| [SECURITY.md](/architecture/security) | Threat model and controls (tenets 4–5 in depth) |
-| [CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates) | HITL approval gates, pre-approve scopes, graduated in-run autonomy |
-| [INTERACTIVE_AGENTS.md](/architecture/interactive-agents) | Async UX, watch/nudge, notification plane, approval state machine |
+| [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) | Component design and design principles for the current system |
+| [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) | Sequenced delivery and maturity scorecard |
+| [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) | Threat model and controls (tenets 4–5 in depth) |
+| [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) | HITL approval gates, pre-approve scopes, graduated in-run autonomy |
+| [INTERACTIVE_AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) | Async UX, watch/nudge, notification plane, approval state machine |
 | [docs/decisions/](../decisions/) | Recorded choices when tenets conflict or ambiguity is resolved |
-| [docs/src/content/docs/index.md](/architecture/index) (synced intro) | Public-facing narrative including dark-factory attribute table |
+| [docs/src/content/docs/index.md](/sample-autonomous-cloud-coding-agents/architecture/index) (synced intro) | Public-facing narrative including dark-factory attribute table |
 
 When tenets and architecture principles overlap, **tenets win for review judgment**; **architecture and ADRs win for implementation detail** once a direction is chosen.

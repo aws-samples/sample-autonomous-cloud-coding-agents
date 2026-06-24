@@ -82,7 +82,7 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
 ```
 
-> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](/architecture/workflows)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
+> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](/sample-autonomous-cloud-coding-agents/architecture/workflows)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
 
 **Request body fields:**
 

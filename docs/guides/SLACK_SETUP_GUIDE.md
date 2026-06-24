@@ -6,7 +6,7 @@ This guide walks through setting up the ABCA Slack integration. Once configured,
 
 - ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
 - A Cognito user account configured (see [User guide](./USER_GUIDE.md))
-- A Slack workspace where you can install apps (use a personal free workspace if your corporate Slack restricts app installs)
+- A Slack workspace where you are authorized to install apps (if your workspace requires admin approval for app installs, request it through your Slack administrator)
 - AWS CLI configured with credentials for your ABCA account
 
 ## Quick start
