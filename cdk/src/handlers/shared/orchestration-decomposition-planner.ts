@@ -18,28 +18,38 @@
  */
 
 /**
- * #299 Mode B — the decomposition planner (B3).
+ * #299 Mode B — the decomposition planner (B3, two-stage DJ-1 redesign).
  *
- * A single Bedrock ``InvokeModel`` call that does BOTH jobs the issue asks for:
- *   1. **Complexity judge** — should this issue be decomposed at all, or is it
- *      a single cohesive change? (No → fall back to today's single task.)
- *   2. **Planner** — if yes, propose a dependency-aware sub-issue breakdown with
- *      per-child S/M/L sizing and ``blockedBy`` edges (as indices).
+ * TWO Bedrock ``InvokeModel`` calls, deliberately separated:
+ *   1. **Critical assessor** — should this issue be decomposed at all, or run as
+ *      one coherent PR? Tiny output (``{decompose, reasoning}``). Kept separate
+ *      because asking ONE call to also produce a breakdown anchors it toward
+ *      finding seams (priming → over-decomposition). A judge that only decides
+ *      yes/no isn't contaminated by having to draft a plan.
+ *   2. **Decomposer** — runs only when needed; produces a dependency-aware
+ *      sub-issue breakdown with per-child S/M/L sizing and ``blockedBy`` edges
+ *      (as indices). It does NOT re-litigate the decision — it just decomposes.
  *
- * Combining them in one call is cheaper and lets the judge's "why it's complex"
- * reasoning directly inform the breakdown.
+ * The assessment is **balanced, not biased** (the explicit design correction): a
+ * genuinely multi-part feature (auth = OAuth + session + reset + RBAC) MUST
+ * decompose; a cohesive change (same files, one internal ordering) runs as one
+ * task. The yardstick is what an AUTONOMOUS AGENT does in one coherent PR — not
+ * how a human team would slice tickets. No thumb on either side.
  *
- * Design choices:
- *  - **Budget is derived from size, not asked of the model.** The model is poor
- *    at dollar estimates and would make the cost ceiling non-deterministic.
- *    S/M/L → a fixed per-child ``max_budget_usd`` ({@link SIZE_DEFAULT_BUDGET_USD}),
- *    so Σ is a stable, explainable worst-case ceiling.
- *  - **Edges are indices, validated as a DAG.** The model returns
- *    ``depends_on: number[]`` referencing positions in its own ``sub_issues``
- *    array (no Linear ids exist yet — those are minted at write-back, B5). We
- *    map indices → synthetic ids and run the proven {@link validateDag} so a
- *    self-contradictory plan (cycle / dangling / dup) is rejected here, not at
- *    seed time.
+ * DJ-2 — surface, don't silently veto: on an EXPLICIT ``:decompose`` the
+ * decomposer runs even when the assessor leans one-shot, so the user always sees
+ * a breakdown they can approve; the assessor's "I'd one-shot this" opinion rides
+ * along as ``assessedDecompose`` for the flow to surface as a caveat. On ``:auto``
+ * (no human in the loop) the assessor's verdict stands.
+ *
+ * Design choices (unchanged):
+ *  - **Budget is derived from size, not asked of the model.** S/M/L → a fixed
+ *    per-child ``max_budget_usd`` ({@link SIZE_DEFAULT_BUDGET_USD}), so Σ is a
+ *    stable, explainable worst-case ceiling.
+ *  - **Edges are indices, validated as a DAG.** The decomposer returns
+ *    ``depends_on: number[]`` into its own ``sub_issues`` array (no Linear ids
+ *    exist yet — minted at write-back, B5). Mapped to synthetic ids and run
+ *    through {@link validateDag} so a cycle / dangling / dup is rejected here.
  *  - **The LLM boundary is injected.** {@link planDecomposition} takes an
  *    {@link InvokeModelFn}; the pure prompt-build + parse/validate core is fully
  *    unit-testable without Bedrock. {@link bedrockInvokeModel} is the prod impl.
@@ -83,6 +93,15 @@ export interface PlannerInput {
    * aims under the cap; the hard cap is still enforced by ``applyPlanCaps`` (B2).
    */
   readonly maxSubIssues: number;
+  /**
+   * DJ-2 — the human EXPLICITLY asked to decompose (``:decompose`` label). When
+   * true, the decomposer runs even if the assessor leans one-shot, so the user
+   * always sees a breakdown to approve (we don't silently override an explicit
+   * opt-in). The assessor's opinion is surfaced as a caveat instead. When false
+   * (``:auto``, no human), the assessor's verdict stands and a one-shot verdict
+   * short-circuits to ``single_task``. Defaults to false.
+   */
+  readonly forceDecompose?: boolean;
 }
 
 /**
@@ -94,59 +113,161 @@ export type InvokeModelFn = (prompt: string) => Promise<string>;
 
 /** Discriminated outcome of a decomposition attempt. */
 export type DecompositionResult =
-  // The judge said don't decompose (or it produced <2 nodes) → single task.
+  // The assessor said one-shot (and the human didn't force), or the decomposer
+  // produced <2 nodes → single task. ``reasoning`` is the assessor's rationale.
   | { readonly kind: 'single_task'; readonly reasoning: string }
   // A valid, DAG-checked plan ready to gate against caps + render.
-  | { readonly kind: 'plan'; readonly plan: DecompositionPlan }
+  // ``assessedDecompose`` is the assessor's independent verdict: false here means
+  // the human FORCED a plan the assessor would have one-shot (DJ-2 caveat).
+  // ``assessedReasoning`` is the assessor's rationale (surfaced in that caveat).
+  | {
+    readonly kind: 'plan';
+    readonly plan: DecompositionPlan;
+    readonly assessedDecompose: boolean;
+    readonly assessedReasoning: string;
+  }
   // The model failed / returned an unusable or self-contradictory plan.
   | { readonly kind: 'error'; readonly message: string };
 
+/** The critical assessor's verdict (stage 1). */
+export interface AssessmentResult {
+  /** True = this issue genuinely spans separable units / a real build order. */
+  readonly decompose: boolean;
+  /** One or two sentences explaining the verdict (surfaced to the user). */
+  readonly reasoning: string;
+}
+
 /**
- * Plan a decomposition for one issue. Never throws — model/parse/validation
- * failures are returned as ``{ kind: 'error' }`` so the caller decides the UX
- * (typically: fall back to a single task with a note).
+ * Plan a decomposition for one issue (two-stage). Never throws — model/parse/
+ * validation failures are returned as ``{ kind: 'error' }`` so the caller decides
+ * the UX (typically: fall back to a single task with a note).
+ *
+ * Stage 1 (assessor) decides decompose-vs-one-shot. Stage 2 (decomposer) runs
+ * when the assessor says decompose OR the human forced it (``forceDecompose``).
+ * On ``:auto`` (no force) a one-shot verdict short-circuits to ``single_task``
+ * WITHOUT a second model call.
  */
 export async function planDecomposition(
   input: PlannerInput,
   invoke: InvokeModelFn,
 ): Promise<DecompositionResult> {
-  const prompt = buildDecompositionPrompt(input);
+  // Stage 1 — critical assessor.
+  const assessment = await assessDecomposition(input, invoke);
+  if (assessment === null) {
+    return { kind: 'error', message: 'The decomposition planner could not be reached. Try again shortly.' };
+  }
 
+  // One-shot verdict and the human didn't force it → single task (no 2nd call).
+  if (!assessment.decompose && !input.forceDecompose) {
+    return { kind: 'single_task', reasoning: assessment.reasoning || 'Single cohesive change — running as one task.' };
+  }
+
+  // Stage 2 — decomposer. Runs when the assessor said decompose, or the human
+  // explicitly asked (DJ-2: never silently override an explicit :decompose).
   let raw: string;
   try {
-    raw = await invoke(prompt);
+    raw = await invoke(buildDecomposerPrompt(input));
   } catch (err) {
-    logger.error('Decomposition planner: model invocation failed', {
+    logger.error('Decomposition planner: decomposer invocation failed', {
       repo: input.repo,
       error: err instanceof Error ? err.message : String(err),
     });
     return { kind: 'error', message: 'The decomposition planner could not be reached. Try again shortly.' };
   }
 
-  return parsePlannerResponse(raw, input.maxSubIssues);
+  return parseDecomposerResponse(raw, input.maxSubIssues, assessment);
 }
 
 /**
- * Build the planner prompt. Pure + deterministic so the prompt is testable and
- * stable across deploys. Instructs the model to return ONLY a JSON object.
+ * Stage 1 — the critical assessor. One small model call returning only
+ * ``{decompose, reasoning}``. Returns null on a model/parse failure (the caller
+ * maps that to an error result). Balanced: see {@link buildAssessmentPrompt}.
  */
-export function buildDecompositionPrompt(input: PlannerInput): string {
+export async function assessDecomposition(
+  input: PlannerInput,
+  invoke: InvokeModelFn,
+): Promise<AssessmentResult | null> {
+  let raw: string;
+  try {
+    raw = await invoke(buildAssessmentPrompt(input));
+  } catch (err) {
+    logger.error('Decomposition planner: assessor invocation failed', {
+      repo: input.repo,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  return parseAssessment(raw);
+}
+
+/**
+ * Build the ASSESSOR prompt (stage 1). Pure + deterministic. The model decides
+ * ONLY whether to decompose — it does NOT draft a breakdown (that priming is
+ * exactly what biased the old single-call judge toward over-splitting).
+ *
+ * BALANCED framing (the explicit design correction): decompose a genuinely
+ * multi-part feature; one-shot a cohesive change. No default-to-one-task thumb.
+ */
+export function buildAssessmentPrompt(input: PlannerInput): string {
   const description = input.description.trim() || '(no description provided)';
   return [
-    'You are a senior engineering lead planning how to execute a software task with a fleet',
-    'of autonomous coding agents. Each agent works one sub-task in an isolated clone, opens a',
-    'pull request, and a build/test gate must pass before its dependents start.',
+    'You are a senior engineering lead triaging one software task for a fleet of autonomous',
+    'coding agents. Each agent works ONE sub-task in an isolated clone, opens a pull request,',
+    'and a build/test gate must pass before any dependent sub-task starts.',
     '',
-    'Decide whether the task below should be DECOMPOSED into multiple dependency-ordered',
-    'sub-issues, or run as ONE task.',
+    'Decide ONE thing: should this task be DECOMPOSED into multiple dependency-ordered',
+    'sub-issues, or executed as ONE coherent pull request?',
     '',
-    'Decompose ONLY when the work genuinely spans separable units that benefit from independent',
-    'PRs (distinct surfaces/files/layers, or a natural build order). Do NOT decompose a small or',
-    'cohesive change — over-splitting creates merge overhead and a longer critical path for no',
-    'gain. When unsure, prefer a single task.',
+    'Judge by what an autonomous agent can deliver in a single coherent PR — NOT by how a human',
+    'team would slice tickets. Weigh both directions honestly; there is no default.',
     '',
-    'If you decompose:',
-    `- Propose at most ${input.maxSubIssues} sub-issues (fewer is better).`,
+    'DECOMPOSE when the work genuinely has either:',
+    '  • two or more SEPARABLE units of work (distinct surfaces, layers, or files that each',
+    '    warrant their own reviewable PR) — e.g. "add authentication" = OAuth + session handling',
+    '    + password reset + role checks; "build checkout" = cart + payment + order + receipt; or',
+    '  • a real DEPENDENCY ORDER (parts that must land in sequence: schema → API → UI).',
+    '',
+    'ONE TASK when the change is cohesive: tightly coupled, mostly the same files, no meaningful',
+    'internal ordering, or simply small. Splitting a cohesive change adds merge overhead and a',
+    'longer critical path for no gain.',
+    '',
+    'Respond with ONLY a JSON object (no prose, no markdown fences) of this exact shape:',
+    '{ "decompose": boolean, "reasoning": "one or two sentences explaining the verdict" }',
+    '',
+    `Repository: ${input.repo}`,
+    `Task title: ${input.title}`,
+    'Task description:',
+    description,
+  ].join('\n');
+}
+
+/** Parse the assessor's tiny ``{decompose, reasoning}`` JSON. Null on garbage. */
+export function parseAssessment(raw: string): AssessmentResult | null {
+  const obj = extractJsonObject(raw);
+  if (!obj) return null;
+  return {
+    decompose: obj.decompose === true,
+    reasoning: typeof obj.reasoning === 'string' ? obj.reasoning.trim() : '',
+  };
+}
+
+/**
+ * Build the DECOMPOSER prompt (stage 2). Pure + deterministic. By the time this
+ * runs the decision to decompose is already made — the model's job is to produce
+ * the BEST breakdown, not to re-litigate whether to. Instructs JSON-only output.
+ */
+export function buildDecomposerPrompt(input: PlannerInput): string {
+  const description = input.description.trim() || '(no description provided)';
+  return [
+    'You are a senior engineering lead breaking a software task into dependency-ordered',
+    'sub-issues for a fleet of autonomous coding agents. Each agent works ONE sub-issue in an',
+    'isolated clone, opens a pull request, and a build/test gate must pass before its dependents',
+    'start. The decision to decompose has already been made — your job is the BEST breakdown,',
+    'not whether to decompose.',
+    '',
+    'Rules:',
+    `- Propose at most ${input.maxSubIssues} sub-issues (fewer is better — only as many as the`,
+    '  work honestly has). Each sub-issue must be independently implementable + reviewable.',
     '- Each sub-issue gets a short imperative title, a one-paragraph scope, and a size:',
     '  "S" (small, isolated), "M" (medium), or "L" (large/involved).',
     '- Express dependencies with "depends_on": a list of the ZERO-BASED INDICES (into your own',
@@ -157,13 +278,11 @@ export function buildDecompositionPrompt(input: PlannerInput): string {
     '',
     'Respond with ONLY a JSON object (no prose, no markdown fences) of this exact shape:',
     '{',
-    '  "should_decompose": boolean,',
-    '  "reasoning": "one or two sentences explaining the verdict",',
+    '  "reasoning": "one or two sentences describing the breakdown",',
     '  "sub_issues": [',
     '    { "title": "string", "description": "string", "size": "S"|"M"|"L", "depends_on": [int, ...] }',
     '  ]',
     '}',
-    'When "should_decompose" is false, "sub_issues" must be an empty array.',
     '',
     `Repository: ${input.repo}`,
     `Task title: ${input.title}`,
@@ -173,24 +292,33 @@ export function buildDecompositionPrompt(input: PlannerInput): string {
 }
 
 /**
- * Parse + validate the model's raw completion into a {@link DecompositionResult}.
- * Pure. Handles markdown-fenced or prose-wrapped JSON, a no-decompose verdict,
- * and rejects self-contradictory graphs (cycle / dangling / duplicate) via
- * {@link validateDag}.
+ * Parse + validate the DECOMPOSER's raw completion into a {@link DecompositionResult}.
+ * Pure. Handles markdown-fenced or prose-wrapped JSON; a <2-node breakdown
+ * collapses to single_task (nothing to orchestrate); rejects self-contradictory
+ * graphs (cycle / dangling / duplicate) via {@link validateDag}. ``assessment``
+ * carries through onto a ``plan`` result so the flow can surface a DJ-2 caveat
+ * when the human forced a plan the assessor would have one-shot.
  */
-export function parsePlannerResponse(raw: string, maxSubIssues: number): DecompositionResult {
+export function parseDecomposerResponse(
+  raw: string,
+  maxSubIssues: number,
+  assessment: AssessmentResult,
+): DecompositionResult {
   const obj = extractJsonObject(raw);
   if (!obj) {
     return { kind: 'error', message: 'The planner returned a response that could not be parsed as a plan.' };
   }
 
   const reasoning = typeof obj.reasoning === 'string' ? obj.reasoning.trim() : '';
-  const shouldDecompose = obj.should_decompose === true;
   const rawNodes = Array.isArray(obj.sub_issues) ? obj.sub_issues : [];
 
-  // Judge said no, or there's nothing worth orchestrating (<2 nodes) → single task.
-  if (!shouldDecompose || rawNodes.length < 2) {
-    return { kind: 'single_task', reasoning: reasoning || 'Single cohesive change — running as one task.' };
+  // The decomposer produced nothing worth orchestrating (<2 nodes) → single task.
+  // (No ``should_decompose`` veto — the assessor already made that call.)
+  if (rawNodes.length < 2) {
+    return {
+      kind: 'single_task',
+      reasoning: assessment.reasoning || reasoning || 'Single cohesive change — running as one task.',
+    };
   }
 
   if (rawNodes.length > maxSubIssues) {
@@ -232,6 +360,8 @@ export function parsePlannerResponse(raw: string, maxSubIssues: number): Decompo
   return {
     kind: 'plan',
     plan: { shouldDecompose: true, reasoning, nodes },
+    assessedDecompose: assessment.decompose,
+    assessedReasoning: assessment.reasoning,
   };
 }
 

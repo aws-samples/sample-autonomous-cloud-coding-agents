@@ -34,15 +34,28 @@ const PARENT = 'parent-uuid';
 const PLANNER_INPUT: PlannerInput = { title: 'T', description: 'd', repo: 'a/b', maxSubIssues: 8 };
 const CAPS: ProjectDecompositionCaps = { decompose_allowed: true, max_sub_issues: 8 };
 
-/** A planner response that decomposes into a 2-node chain. */
+/** The decomposer's 2-node chain breakdown (stage 2 shape). */
 const CHAIN_PLAN = JSON.stringify({
-  should_decompose: true,
   reasoning: 'two units',
   sub_issues: [
     { title: 'A', description: 'a', size: 'S', depends_on: [] },
     { title: 'B', description: 'b', size: 'M', depends_on: [0] },
   ],
 });
+
+/**
+ * A two-stage planner mock: returns the assessor verdict for stage-1 prompts
+ * (they ask for ``"decompose": boolean``) and the decomposer breakdown for
+ * stage-2 prompts. ``decompose`` controls the assessor's verdict.
+ */
+function twoStageInvoke(decompose: boolean, plan: string = CHAIN_PLAN): jest.Mock {
+  return jest.fn(async (prompt: string) => {
+    if (prompt.includes('"decompose": boolean')) {
+      return JSON.stringify({ decompose, reasoning: decompose ? 'multi-part' : 'cohesive' });
+    }
+    return plan; // stage 2 — the decomposer breakdown
+  });
+}
 
 /** A fake Linear that creates issues new-<title> and accepts relations. */
 function fakeGraphql() {
@@ -60,7 +73,7 @@ function fakeGraphql() {
 
 function effects(over: Partial<DecompositionEffects> = {}): DecompositionEffects {
   return {
-    invokeModel: jest.fn().mockResolvedValue(CHAIN_PLAN),
+    invokeModel: twoStageInvoke(true),
     graphql: fakeGraphql(),
     postComment: jest.fn().mockResolvedValue('comment-1'),
     putPendingPlan: jest.fn().mockResolvedValue(true),
@@ -131,11 +144,29 @@ describe('runDecompositionProposal — auto (:auto)', () => {
 });
 
 describe('runDecompositionProposal — judge + caps gates', () => {
-  test('single-task verdict → posts a note, single_task (caller makes one task, no write-back)', async () => {
-    const e = effects({ invokeModel: jest.fn().mockResolvedValue(JSON.stringify({ should_decompose: false, reasoning: 'small', sub_issues: [] })) });
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
+  test(':auto + one-shot verdict → posts a note, single_task (caller makes one task, no decomposer/write-back)', async () => {
+    // On :auto (no human) the assessor's one-shot verdict stands. Only ONE model
+    // call (the assessor) — the decomposer is never reached.
+    const invokeModel = twoStageInvoke(false);
+    const e = effects({ invokeModel });
+    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: true, effects: e });
     expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
+    expect(invokeModel).toHaveBeenCalledTimes(1); // assessor only, no decomposer
     expect(e.putPendingPlan).not.toHaveBeenCalled();
+  });
+
+  test('DJ-2: :decompose + one-shot verdict → STILL proposes a plan with a one-shot caveat (no silent veto)', async () => {
+    // The human explicitly applied :decompose (autoRun:false → forced). Even
+    // though the assessor leaned one-shot, we draft + propose a breakdown and
+    // surface the assessor's rationale as an informational caveat.
+    const e = effects({ invokeModel: twoStageInvoke(false) });
+    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
+    expect(r).toEqual({ kind: 'handled', reason: 'awaiting_approval' });
+    expect(e.putPendingPlan).toHaveBeenCalledTimes(1);
+    const proposalBody = (e.postComment as jest.Mock).mock.calls[0][1];
+    expect(proposalBody).toContain('@bgagent approve'); // still approvable
+    expect(proposalBody).toMatch(/lean toward running this as \*\*one task\*\*/i); // the caveat
+    expect(proposalBody).toContain('cohesive'); // the assessor's reasoning
   });
 
   test('planner error → note + single_task fallback', async () => {

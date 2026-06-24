@@ -105,8 +105,16 @@ export async function runDecompositionProposal(
 ): Promise<DecompositionFlowResult> {
   const { parentIssueId, plannerInput, caps, autoRun, effects } = params;
 
-  // 1. Judge + plan (B3).
-  const planned = await planDecomposition(plannerInput, effects.invokeModel);
+  // 1. Assess + (if warranted) decompose — two-stage planner (DJ-1). On an
+  // explicit ``:decompose`` (manual, not autoRun) we FORCE the decomposer so the
+  // user always sees a breakdown to approve, even if the assessor leaned one-shot
+  // (DJ-2 — surface, don't silently veto). On ``:auto`` the assessor's verdict
+  // stands (no human to ask), so a one-shot verdict short-circuits to single_task.
+  const forceDecompose = !autoRun;
+  const planned = await planDecomposition(
+    { ...plannerInput, forceDecompose },
+    effects.invokeModel,
+  );
   if (planned.kind === 'error') {
     await effects.postComment(parentIssueId, renderSingleTaskNote(
       "I couldn't plan a breakdown for this issue, so I'm running it as a single task.",
@@ -136,15 +144,24 @@ export async function runDecompositionProposal(
     return { kind: 'handled', reason: capResult.reason };
   }
 
-  // 3a. AUTO: write back immediately, return the graph to seed.
+  // 3a. AUTO: write back immediately, return the graph to seed. (On :auto the
+  // assessor's verdict stood, so a 'plan' result here means it agreed to
+  // decompose — no caveat.)
   if (autoRun) {
     await effects.postComment(parentIssueId, renderPlanProposal(planned.plan, { autoRun: true }));
     return finalizeWriteBack(parentIssueId, planned.plan, effects);
   }
 
   // 3b. MANUAL: persist the pending plan + post the proposal, then wait.
+  // DJ-2: if the assessor would have one-shot this but the user forced a plan,
+  // surface its rationale as an informational caveat (no veto, no new label).
+  const oneShotCaveat = planned.assessedDecompose ? undefined : (planned.assessedReasoning || 'this looks fairly cohesive.');
   const proposalCommentId = await effects.postComment(
-    parentIssueId, renderPlanProposal(planned.plan, { autoRun: false }),
+    parentIssueId,
+    renderPlanProposal(planned.plan, {
+      autoRun: false,
+      ...(oneShotCaveat !== undefined && { oneShotCaveat }),
+    }),
   );
   const persisted = await effects.putPendingPlan({
     nodes: planned.plan.nodes,
