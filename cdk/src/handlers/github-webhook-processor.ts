@@ -19,7 +19,7 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
@@ -27,7 +27,7 @@ import {
   type GitHubDeploymentStatusPayload,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
-import { postIssueComment } from './shared/linear-feedback';
+import { appendOnceToComment, postIssueComment } from './shared/linear-feedback';
 import {
   extractLinearIdentifier,
   extractLinearIdentifierFromBranch,
@@ -320,7 +320,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // cluttering the maturing panel (which already embeds the combined preview
   // via the persisted screenshot_url). Skip the Linear post for the integration
   // node; the panel is the only Linear surface for the combined result.
-  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy && !isIterationDeploy) {
+  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy) {
     // Branch-name first — it deterministically encodes this PR's own
     // issue (`bgagent/{taskId}/abca-151-...`). Title/body are ambiguous
     // fallbacks: in a stacked #247 orchestration the body often names a
@@ -334,26 +334,42 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     if (identifier) {
       const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
       if (linearIssue) {
-        const postResult = await postIssueComment(
-          {
-            linearWorkspaceId: linearIssue.linearWorkspaceId,
-            registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
-          },
-          linearIssue.issueId,
-          renderLinearCommentBody(publicUrl, previewUrl),
-        );
-        if (postResult.ok) {
-          logger.info('Posted screenshot comment to Linear issue', {
-            identifier,
-            linear_issue_id: linearIssue.issueId,
-            workspace_slug: linearIssue.workspaceSlug,
-          });
+        const ctx = {
+          linearWorkspaceId: linearIssue.linearWorkspaceId,
+          registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
+        };
+        if (isIterationDeploy) {
+          // iteration-UX: the preview belongs IN the iteration's maturing reply,
+          // not a standalone comment. The screenshot capture is async and usually
+          // lands AFTER the reply settled (✅ + cost), so we APPEND the preview
+          // link to that reply now (in place). Find the most-recent iteration
+          // reply id for this issue and edit it; idempotent via the [preview]
+          // marker so a webhook redelivery won't double-append.
+          const replyId = await findIterationReplyId(linearIssue.issueId);
+          if (replyId) {
+            const appended = await appendOnceToComment(
+              ctx, replyId, ` · [preview](${encodeMarkdownUrl(previewUrl || publicUrl)})`, '[preview]',
+            );
+            logger.info('Appended preview link to iteration reply', {
+              linear_issue_id: linearIssue.issueId, reply_id: replyId, appended,
+            });
+          } else {
+            logger.info('Iteration deploy but no reply id found — skipping preview append', {
+              linear_issue_id: linearIssue.issueId,
+            });
+          }
         } else {
-          logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
-            event: 'screenshot.linear_comment_post_failed',
-            identifier,
-            linear_issue_id: linearIssue.issueId,
-          });
+          // First deploy / non-iteration: post the headline 🖼️ standalone comment.
+          const postResult = await postIssueComment(ctx, linearIssue.issueId, renderLinearCommentBody(publicUrl, previewUrl));
+          if (postResult.ok) {
+            logger.info('Posted screenshot comment to Linear issue', {
+              identifier, linear_issue_id: linearIssue.issueId, workspace_slug: linearIssue.workspaceSlug,
+            });
+          } else {
+            logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
+              event: 'screenshot.linear_comment_post_failed', identifier, linear_issue_id: linearIssue.issueId,
+            });
+          }
         }
       } else {
         logger.info('Linear identifier did not resolve to an issue — skipping Linear post', {
@@ -363,6 +379,37 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         });
       }
     }
+  }
+}
+
+/**
+ * iteration-UX: find the most-recent iteration's maturing-reply comment id for a
+ * Linear issue. An @bgagent iteration persists ``iteration_reply_comment_id`` on
+ * its task's channel_metadata; the screenshot webhook (resolving the issue by PR
+ * identifier) uses this to append the preview link to that reply once the async
+ * capture lands. Queries the LinearIssueIndex (newest-first) and returns the
+ * first task that carries a reply id. Null when none (best-effort).
+ */
+async function findIterationReplyId(linearIssueId: string): Promise<string | null> {
+  if (!TASK_TABLE) return null;
+  try {
+    const res = await ddb.send(new QueryCommand({
+      TableName: TASK_TABLE,
+      IndexName: 'LinearIssueIndex',
+      KeyConditionExpression: 'linear_issue_id = :iid',
+      ExpressionAttributeValues: { ':iid': linearIssueId },
+      ScanIndexForward: false, // newest first (SK = created_at)
+    }));
+    for (const item of (res.Items ?? []) as Array<{ channel_metadata?: { iteration_reply_comment_id?: string } }>) {
+      const replyId = item.channel_metadata?.iteration_reply_comment_id;
+      if (typeof replyId === 'string' && replyId) return replyId;
+    }
+    return null;
+  } catch (err) {
+    logger.warn('findIterationReplyId query failed (non-fatal)', {
+      linear_issue_id: linearIssueId, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
   }
 }
 

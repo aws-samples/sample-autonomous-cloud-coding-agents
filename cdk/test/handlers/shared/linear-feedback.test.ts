@@ -28,6 +28,7 @@ const fetchMock = jest.fn();
 
 import {
   addIssueReaction,
+  appendOnceToComment,
   type LinearFeedbackContext,
   postIssueComment,
   reactToComment,
@@ -492,6 +493,47 @@ describe('linear-feedback', () => {
       );
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'completed');
       expect(ok).toBe(false);
+    });
+  });
+
+  describe('appendOnceToComment (iteration-UX preview link)', () => {
+    const COMMENT_ID = 'reply-cmt-1';
+
+    test('reads the body and appends the line when the marker is absent', async () => {
+      // 1st fetch = read body; 2nd = commentUpdate.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u). _$0.1_' } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](https://cdn/x.png)', '[preview]');
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // The update carries the original body + the appended line.
+      const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(updateBody.variables.body).toBe('✅ Updated — [PR #5](u). _$0.1_\n · [preview](https://cdn/x.png)');
+      expect(updateBody.variables.id).toBe(COMMENT_ID);
+    });
+
+    test('idempotent: marker already present → no update (webhook redelivery)', async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u). · [preview](https://cdn/x.png)' } } }),
+      );
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](https://cdn/y.png)', '[preview]');
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // read only, NO update
+    });
+
+    test('missing comment body → no update, returns false', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { comment: null } }));
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](u)', '[preview]');
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('no token → no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](u)', '[preview]');
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });
