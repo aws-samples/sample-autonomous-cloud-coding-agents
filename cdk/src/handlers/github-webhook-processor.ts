@@ -27,6 +27,7 @@ import {
   type GitHubDeploymentStatusPayload,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
+import { renderPreviewBlock } from './shared/iteration-reply';
 import { appendOnceToComment, postIssueComment } from './shared/linear-feedback';
 import {
   extractLinearIdentifier,
@@ -347,10 +348,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           // marker so a webhook redelivery won't double-append.
           const replyId = await findIterationReplyId(linearIssue.issueId);
           if (replyId) {
-            const appended = await appendOnceToComment(
-              ctx, replyId, ` · [preview](${encodeMarkdownUrl(previewUrl || publicUrl)})`, '[preview]',
-            );
-            logger.info('Appended preview link to iteration reply', {
+            // Embed the captured screenshot PNG (publicUrl) as a clickable
+            // thumbnail linking to the live deploy (previewUrl) — same shape the
+            // first-task 🖼️ comment uses, NOT a bare text link. previewUrl is
+            // payload-derived → markdown-escape it (publicUrl is our CloudFront key).
+            const previewBlock = renderPreviewBlock(publicUrl, encodeMarkdownUrl(previewUrl));
+            const appended = await appendOnceToComment(ctx, replyId, `\n\n${previewBlock}`, '[preview]');
+            logger.info('Appended preview thumbnail to iteration reply', {
               linear_issue_id: linearIssue.issueId, reply_id: replyId, appended,
             });
           } else {

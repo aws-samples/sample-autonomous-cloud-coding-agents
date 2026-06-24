@@ -54,6 +54,7 @@ import { postIssueComment, replyToComment, upsertThreadedReply } from './shared/
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
+import { encodeMarkdownUrl } from './shared/screenshot-url';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
 import { TaskStatus } from '../constructs/task-status';
@@ -1206,6 +1207,7 @@ async function replyToStandaloneTrigger(
     task.duration_s, { field: 'duration_s', task_id: task.task_id, event_id: event.event_id }, logger,
   );
   const screenshotUrl = typeof task.screenshot_url === 'string' ? task.screenshot_url : null;
+  const deployUrl = typeof task.screenshot_preview_url === 'string' ? task.screenshot_preview_url : null;
 
   // Build the maturing-reply terminal state. A6/#299: code_changed===false (a
   // question) → 💬 answered; else ✅ updated. A failure → ❌ with the sanitized
@@ -1230,8 +1232,10 @@ async function replyToStandaloneTrigger(
       costUsd: thisCost,
       durationS,
       runningTotalUsd,
-      // Only fold the preview link in on a real edit (a question didn't change UI).
+      // Only fold the preview thumbnail in on a real edit (a question didn't
+      // change the UI). The screenshot links to the live deploy when known.
       ...(state === 'updated' && screenshotUrl ? { screenshotUrl } : {}),
+      ...(state === 'updated' && screenshotUrl && deployUrl ? { deployUrl: encodeMarkdownUrl(deployUrl) } : {}),
     });
 
   // Iteration-UX: EDIT the maturing reply posted at trigger time (👀 On it →

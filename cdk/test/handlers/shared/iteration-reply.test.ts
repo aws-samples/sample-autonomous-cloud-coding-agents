@@ -22,6 +22,7 @@ import {
   preservePreviewSuffix,
   renderIterationSuccessReply,
   renderMaturingReply,
+  renderPreviewBlock,
 } from '../../../src/handlers/shared/iteration-reply';
 
 describe('renderMaturingReply — the edit-in-place states', () => {
@@ -41,7 +42,7 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(u).toContain('✅ Updated — [PR #293](https://gh/pull/293).');
   });
 
-  test('updated → ✅ + cost · duration · running total + preview link, all folded in', () => {
+  test('updated → ✅ + cost · duration · running total + clickable preview thumbnail', () => {
     const r = renderMaturingReply({
       state: 'updated',
       prNumber: 293,
@@ -49,14 +50,26 @@ describe('renderMaturingReply — the edit-in-place states', () => {
       durationS: 309,
       runningTotalUsd: 2.04,
       screenshotUrl: 'https://cdn/x.png',
+      deployUrl: 'https://app.vercel.app',
     });
     expect(r).toContain('✅ Updated — PR #293.');
     expect(r).toContain('$0.79');
     expect(r).toContain('5m 9s');
     expect(r).toContain('total this PR: $2.04');
-    expect(r).toContain('[preview](https://cdn/x.png)');
-    // ALL in one reply body — no separate comments.
-    expect(r.split('\n').length).toBeLessThanOrEqual(2);
+    // Clickable image thumbnail: screenshot PNG embedded, linking to the deploy.
+    expect(r).toContain('[![preview](https://cdn/x.png)](https://app.vercel.app)');
+  });
+
+  test('updated with screenshot but NO deploy url → plain embedded image (no link target)', () => {
+    const r = renderMaturingReply({ state: 'updated', prNumber: 7, screenshotUrl: 'https://cdn/y.png' });
+    expect(r).toContain('![preview](https://cdn/y.png)');
+    expect(r).not.toContain('[![preview]'); // not a link when no deploy url
+  });
+
+  test('updated with NO screenshot → no preview block at all', () => {
+    const r = renderMaturingReply({ state: 'updated', prNumber: 7, costUsd: 0.1 });
+    expect(r).not.toContain('preview');
+    expect(r).toContain('✅ Updated — PR #7.');
   });
 
   test('answered → 💬 + the answer + cost (a question, no commit)', () => {
@@ -153,19 +166,27 @@ describe('isNoChangeIteration', () => {
 });
 
 describe('preservePreviewSuffix — converge the two async writers (ABCA-434 race)', () => {
-  const URL = 'https://cdn.example/screenshots/x.png';
+  const PNG = 'https://cdn.example/screenshots/x.png';
+  const DEPLOY = 'https://app.vercel.app';
+  const BLOCK = `[![preview](${PNG})](${DEPLOY})`;
 
-  test('carries an already-landed [preview] from current onto the new body', () => {
-    // The screenshot webhook appended the preview; this terminal re-render
-    // would otherwise drop it. Convergence re-attaches it in the · [preview] shape.
-    const current = `✅ Updated — [PR #5](u). _$0.1_ · [preview](${URL})`;
+  test('carries an already-landed clickable thumbnail from current onto the new body', () => {
+    // The screenshot webhook appended the block; this terminal re-render would
+    // otherwise drop it. Convergence re-attaches the EXACT block on its own line.
+    const current = `✅ Updated — [PR #5](u). _$0.1_\n\n${BLOCK}`;
     const newBody = '✅ Updated — [PR #5](u). _$0.2 · 35s · total this PR: $0.5_';
-    expect(preservePreviewSuffix(newBody, current)).toBe(`${newBody} · [preview](${URL})`);
+    expect(preservePreviewSuffix(newBody, current)).toBe(`${newBody}\n\n${BLOCK}`);
+  });
+
+  test('preserves a plain embed too (screenshot, no deploy link)', () => {
+    const current = `✅ Updated.\n\n![preview](${PNG})`;
+    const newBody = '✅ Updated — [PR #5](u). _$0.2_';
+    expect(preservePreviewSuffix(newBody, current)).toBe(`${newBody}\n\n![preview](${PNG})`);
   });
 
   test('no-op when the new body already carries its own preview (settle-after-append)', () => {
-    const current = `✅ Updated. · [preview](${URL})`;
-    const newBody = `✅ Updated — [PR #5](u). · [preview](${URL})`;
+    const current = `✅ Updated.\n\n${BLOCK}`;
+    const newBody = `✅ Updated — [PR #5](u).\n\n${BLOCK}`;
     expect(preservePreviewSuffix(newBody, current)).toBe(newBody); // not doubled
   });
 
@@ -182,8 +203,22 @@ describe('preservePreviewSuffix — converge the two async writers (ABCA-434 rac
 
   test('idempotent across repeated settles', () => {
     const newBody = '✅ Updated — [PR #5](u). _$0.2_';
-    const once = preservePreviewSuffix(newBody, `x · [preview](${URL})`);
+    const once = preservePreviewSuffix(newBody, `x\n\n${BLOCK}`);
     const twice = preservePreviewSuffix(once, once); // current now already has it
     expect(twice).toBe(once);
+  });
+});
+
+describe('renderPreviewBlock — clickable thumbnail vs plain embed', () => {
+  test('both urls → clickable image thumbnail', () => {
+    expect(renderPreviewBlock('https://cdn/s.png', 'https://deploy')).toBe('[![preview](https://cdn/s.png)](https://deploy)');
+  });
+  test('screenshot only → plain embed', () => {
+    expect(renderPreviewBlock('https://cdn/s.png')).toBe('![preview](https://cdn/s.png)');
+    expect(renderPreviewBlock('https://cdn/s.png', null)).toBe('![preview](https://cdn/s.png)');
+  });
+  test('no screenshot → empty', () => {
+    expect(renderPreviewBlock(null, 'https://deploy')).toBe('');
+    expect(renderPreviewBlock(undefined)).toBe('');
   });
 });
