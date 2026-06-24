@@ -24,3 +24,9 @@ run = "./node_modules/.bin/astro dev"
 description = "astro check"
 depends = [":sync"]
 run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"
+
+[tasks.link-check]
+# Scope: docs/guides/, docs/design/, docs/decisions/, and root *.md files.
+# Not scanned: docs/README.md, agent/, cli/, contracts/, docs/abca-plugin/.
+description = "Check for broken links in Markdown sources"
+run = "bash scripts/link-check.sh"

@@ -95,12 +95,13 @@ description = "Generate commands stubs from .abca/commands for multiple AI assis
 run = "node scripts/sync-abca-commands.mjs"
 
 [tasks."drift-prevention"]
-description = "Run checks to prevent drift in contracts between packages"
+description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "//docs:link-check" },
 ]
 
 ##################
