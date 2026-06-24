@@ -67,10 +67,40 @@ export interface MaturingReplyInput {
   readonly durationS?: number | null;
   /** Cumulative cost across ALL iterations on this PR/issue (incl. this one). */
   readonly runningTotalUsd?: number | null;
-  /** Deploy-preview screenshot URL, folded in as a link (not a standalone comment). */
+  /**
+   * Captured deploy-preview screenshot PNG (our CloudFront URL). Embedded as a
+   * clickable image thumbnail in the reply when present, NOT a standalone comment.
+   */
   readonly screenshotUrl?: string | null;
+  /**
+   * Live deploy URL (the Vercel/preview site). When present, the embedded
+   * screenshot links to it ({@link renderPreviewBlock}). MUST be markdown-escaped
+   * by the caller (payload-derived).
+   */
+  readonly deployUrl?: string | null;
   /** Sanitized failure reason (failed state). */
   readonly failureReason?: string;
+}
+
+/**
+ * The deploy-preview block folded into a maturing reply: the captured screenshot
+ * PNG embedded as an image, made CLICKABLE to the live deploy when the deploy URL
+ * is known (the user picked the clickable-thumbnail UX over a bare text link).
+ *  - both urls → ``[![preview](screenshot.png)](deploy)`` (image links to deploy)
+ *  - screenshot only → ``![preview](screenshot.png)`` (plain embed, no link target)
+ *  - no screenshot → '' (nothing to show)
+ * ``screenshotUrl`` is our own CloudFront key (no parens) so it's safe as-is;
+ * ``deployUrl`` is payload-derived, so callers MUST pass it already
+ * markdown-escaped (see ``encodeMarkdownUrl``) to avoid a link-breakout. Pure.
+ */
+export function renderPreviewBlock(
+  screenshotUrl: string | null | undefined,
+  deployUrl?: string | null,
+): string {
+  if (!screenshotUrl) return '';
+  return deployUrl
+    ? `[![preview](${screenshotUrl})](${deployUrl})`
+    : `![preview](${screenshotUrl})`;
 }
 
 /** Format a USD cost as "$X.XX", or "" when unknown. */
@@ -95,7 +125,8 @@ function dur(s: number | null | undefined): string {
  */
 export function renderMaturingReply(input: MaturingReplyInput): string {
   const meta = terminalMetaLine(input);
-  const screenshot = input.screenshotUrl ? ` · [preview](${input.screenshotUrl})` : '';
+  // Clickable image thumbnail (screenshot PNG → live deploy), on its own block.
+  const previewBlock = renderPreviewBlock(input.screenshotUrl, input.deployUrl);
 
   const prRef = prReference(input.prNumber, input.prUrl);
   switch (input.state) {
@@ -105,11 +136,10 @@ export function renderMaturingReply(input: MaturingReplyInput): string {
       return prRef ? `🔄 Working — updating ${prRef}…` : '🔄 Working…';
     case 'updated': {
       const head = prRef ? `✅ Updated — ${prRef}.` : '✅ Updated.';
-      // Second line carries metadata + preview link (when present). The preview
-      // joins onto the meta line with " · ", or stands alone (its leading " · "
-      // trimmed) when there's no metadata.
-      const tail = meta ? `${meta}${screenshot}` : screenshot.replace(/^ · /, '');
-      return tail ? `${head}\n${tail}` : head;
+      // headline + metadata, then the embedded preview thumbnail on its own line.
+      const lines = [meta ? `${head}\n${meta}` : head];
+      if (previewBlock) lines.push(previewBlock);
+      return lines.join('\n\n');
     }
     case 'answered': {
       const answer = (input.answerText ?? '').trim();
@@ -189,28 +219,33 @@ export function isNoChangeIteration(codeChanged?: boolean): boolean {
   return codeChanged === false;
 }
 
-/** Matches the `· [preview](url)` segment folded onto a matured reply. */
-const PREVIEW_SUFFIX_RE = /\s*·\s*\[preview\]\((?<url>[^)\s]+)\)/;
+/**
+ * Matches a preview block folded onto a matured reply, in either shape
+ * {@link renderPreviewBlock} emits: a clickable thumbnail
+ * ``[![preview](png)](deploy)`` or a plain embed ``![preview](png)``. Captures
+ * the whole block so convergence re-attaches it verbatim (image + deploy link).
+ */
+const PREVIEW_BLOCK_RE = /\[?!\[preview\]\([^)\s]+\)(?:\]\([^)\s]+\))?/;
 
 /**
- * iteration-UX convergence: the deploy-preview link and the terminal-settle of
+ * iteration-UX convergence: the deploy-preview block and the terminal-settle of
  * a maturing reply are written by two INDEPENDENT async paths (the screenshot
- * webhook appends ` · [preview](url)`; the fanout/reconciler terminal-settle
+ * webhook appends the ``![preview]`` block; the fanout/reconciler terminal-settle
  * re-renders the whole reply body) with no ordering guarantee. Whichever runs
  * last wins, so a terminal re-render would silently drop a preview the webhook
  * already appended (live-caught on ABCA-434: appended 18:56:09, clobbered by the
  * terminal edit 18:56:23). This makes the edit path CONVERGE rather than
- * overwrite: if ``currentBody`` already carries a ``[preview]`` segment and the
- * freshly-rendered ``newBody`` does not, carry the link onto the new body in the
- * same ` · [preview](url)` shape ``renderMaturingReply`` uses. Pure; idempotent
- * (a no-op when newBody already has its own preview or currentBody has none).
+ * overwrite: if ``currentBody`` already carries a ``[preview]`` block and the
+ * freshly-rendered ``newBody`` does not, carry that exact block onto the new body
+ * on its own line. Pure; idempotent (a no-op when newBody already has its own
+ * preview or currentBody has none).
  */
 export function preservePreviewSuffix(newBody: string, currentBody: string | null | undefined): string {
   if (typeof currentBody !== 'string') return newBody;
   if (newBody.includes('[preview]')) return newBody; // new render already carries one
-  const url = currentBody.match(PREVIEW_SUFFIX_RE)?.groups?.url;
-  if (!url) return newBody;
-  return `${newBody} · [preview](${url})`;
+  const block = currentBody.match(PREVIEW_BLOCK_RE)?.[0];
+  if (!block) return newBody;
+  return `${newBody}\n\n${block}`;
 }
 
 function truncate(s: string, max: number): string {
