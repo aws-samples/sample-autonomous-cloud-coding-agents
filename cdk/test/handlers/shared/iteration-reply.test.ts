@@ -33,6 +33,13 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(renderMaturingReply({ state: 'working' })).toBe('🔄 Working…');
   });
 
+  test('a PR url makes the reference a clickable markdown link', () => {
+    const w = renderMaturingReply({ state: 'working', prNumber: 293, prUrl: 'https://gh/pull/293' });
+    expect(w).toBe('🔄 Working — updating [PR #293](https://gh/pull/293)…');
+    const u = renderMaturingReply({ state: 'updated', prNumber: 293, prUrl: 'https://gh/pull/293' });
+    expect(u).toContain('✅ Updated — [PR #293](https://gh/pull/293).');
+  });
+
   test('updated → ✅ + cost · duration · running total + preview link, all folded in', () => {
     const r = renderMaturingReply({
       state: 'updated',

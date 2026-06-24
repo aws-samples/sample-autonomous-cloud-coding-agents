@@ -832,11 +832,13 @@ async function replyToIterationComment(
   // editing the trigger-time reply when its id was captured. A failure keeps the
   // existing UX.5 failure reply (replyable retry).
   const prNumber = await resolvePrNumber(evt.taskId);
+  const prUrl = await resolvePrUrl(evt.taskId);
   const runningTotalUsd = await sumIterationCostForIssue(changedSubIssueId, evt.taskId, evt.costUsd);
   const body = succeeded
     ? renderMaturingReply({
       state: isNoChangeIteration(evt.codeChanged) ? 'answered' : 'updated',
       prNumber,
+      ...(prUrl !== null && { prUrl }),
       ...(evt.answerText !== undefined && { answerText: evt.answerText }),
       ...(evt.costUsd !== undefined && { costUsd: evt.costUsd }),
       ...(evt.durationS !== undefined && { durationS: evt.durationS }),
@@ -1009,6 +1011,19 @@ async function spawnRestackTask(
  * ``pr_number``; orchestration child tasks commonly persist only ``pr_url``
  * (``.../pull/N``) with ``pr_number`` null — fall back to parsing it.
  */
+/** iteration-UX: the dependent's PR URL (for a clickable reply link). Null when absent. */
+async function resolvePrUrl(taskId?: string): Promise<string | null> {
+  if (!taskId) return null;
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE, Key: { task_id: taskId }, ProjectionExpression: 'pr_url',
+    }));
+    return typeof res.Item?.pr_url === 'string' ? res.Item.pr_url : null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolvePrNumber(taskId?: string): Promise<number | null> {
   if (!taskId) return null;
   try {

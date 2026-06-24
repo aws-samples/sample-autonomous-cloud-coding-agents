@@ -701,7 +701,8 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     const [, issueId, parentCommentId, body] = upsertThreadedReplyMock.mock.calls[0];
     expect(issueId).toBe('A'); // the sub-issue the comment lives on
     expect(parentCommentId).toBe('human-cmt-1');
-    expect(body).toMatch(/^✅ Updated — PR #\d+\./);
+    // iteration-UX: the PR ref is a clickable markdown link when the URL resolves.
+    expect(body).toMatch(/^✅ Updated — \[PR #\d+\]\(https:\/\/.*\)\./);
     // #247 UX.21: the trigger comment's 👀 swaps to ✅, and the sub-issue
     // advances to In Review (platform-owned settle, not agent-flapped).
     expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'white_check_mark');

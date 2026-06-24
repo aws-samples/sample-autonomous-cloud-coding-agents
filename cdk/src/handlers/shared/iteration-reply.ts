@@ -57,6 +57,8 @@ export type IterationState = 'on_it' | 'working' | 'updated' | 'answered' | 'fai
 export interface MaturingReplyInput {
   readonly state: IterationState;
   readonly prNumber?: number | null;
+  /** Full PR URL — makes the "PR #N" reference a clickable link when present. */
+  readonly prUrl?: string | null;
   /** Agent's answer (answered state). */
   readonly answerText?: string;
   /** This iteration's cost (USD) — shown on terminal states. */
@@ -95,15 +97,14 @@ export function renderMaturingReply(input: MaturingReplyInput): string {
   const meta = terminalMetaLine(input);
   const screenshot = input.screenshotUrl ? ` · [preview](${input.screenshotUrl})` : '';
 
+  const prRef = prReference(input.prNumber, input.prUrl);
   switch (input.state) {
     case 'on_it':
       return '👀 On it — reading the PR…';
     case 'working':
-      return input.prNumber != null
-        ? `🔄 Working — updating PR #${input.prNumber}…`
-        : '🔄 Working…';
+      return prRef ? `🔄 Working — updating ${prRef}…` : '🔄 Working…';
     case 'updated': {
-      const head = input.prNumber != null ? `✅ Updated — PR #${input.prNumber}.` : '✅ Updated.';
+      const head = prRef ? `✅ Updated — ${prRef}.` : '✅ Updated.';
       // Second line carries metadata + preview link (when present). The preview
       // joins onto the meta line with " · ", or stands alone (its leading " · "
       // trimmed) when there's no metadata.
@@ -123,6 +124,12 @@ export function renderMaturingReply(input: MaturingReplyInput): string {
       return meta ? `${head}\n${meta}` : head;
     }
   }
+}
+
+/** A clickable "[PR #N](url)" when the url is known, else plain "PR #N", else "". */
+function prReference(prNumber: number | null | undefined, prUrl: string | null | undefined): string {
+  if (prNumber == null) return '';
+  return prUrl ? `[PR #${prNumber}](${prUrl})` : `PR #${prNumber}`;
 }
 
 /** "cost: $X · 2m 3s · total this PR: $Y" — only the known parts. */

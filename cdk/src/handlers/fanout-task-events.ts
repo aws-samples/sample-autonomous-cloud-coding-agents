@@ -1225,6 +1225,7 @@ async function replyToStandaloneTrigger(
     : renderMaturingReply({
       state,
       prNumber,
+      ...(typeof task.pr_url === 'string' && { prUrl: task.pr_url }),
       ...(typeof task.answer_text === 'string' && { answerText: task.answer_text }),
       costUsd: thisCost,
       durationS,
