@@ -138,6 +138,13 @@ query CommentReactions($commentId: String!) {
 }
 `.trim();
 
+/** Read a COMMENT's current body — to append to it (iteration-UX preview link). */
+const COMMENT_BODY_QUERY = `
+query CommentBody($commentId: String!) {
+  comment(id: $commentId) { body }
+}
+`.trim();
+
 /**
  * The bgagent status-marker emojis we manage on the PARENT epic. Mirrors
  * ``_BGAGENT_EMOJIS`` in ``agent/src/linear_reactions.py``. Only these are
@@ -445,6 +452,34 @@ export async function upsertThreadedReply(
   });
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
+}
+
+/**
+ * iteration-UX: append a one-line suffix to an existing comment, idempotently.
+ * Reads the comment's current body, and if it does NOT already contain
+ * ``marker``, appends ``\n``+``line`` and updates. Used by the screenshot webhook
+ * to add the ``· [preview](url)`` link to the iteration's settle reply once the
+ * (async) capture finishes — the reply has usually already rendered ✅ + cost by
+ * then, so the link arrives a few seconds later as an in-place edit rather than a
+ * new comment. ``marker`` is a stable substring (e.g. ``[preview]``) so a webhook
+ * redelivery doesn't append twice. Best-effort; returns true only if appended.
+ */
+export async function appendOnceToComment(
+  ctx: LinearFeedbackContext,
+  commentId: string,
+  line: string,
+  marker: string,
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+  const data = await graphqlData(token, COMMENT_BODY_QUERY, { commentId });
+  const current = (data?.comment as { body?: string } | undefined)?.body;
+  if (typeof current !== 'string') return false;
+  if (current.includes(marker)) return false; // already appended (idempotent)
+  const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, {
+    id: commentId, body: `${current}\n${line}`,
+  })).ok;
+  return ok;
 }
 
 /**
