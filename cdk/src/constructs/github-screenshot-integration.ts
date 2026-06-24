@@ -264,6 +264,22 @@ export class GitHubScreenshotIntegration extends Construct {
     // the UpdateItem; the handler's update is guarded by attribute_exists.
     if (props.taskTable) {
       props.taskTable.grantWriteData(this.webhookProcessorFn);
+      // iteration-UX: on an iteration re-deploy the processor resolves the
+      // issue's most-recent maturing-reply id via a Query on LinearIssueIndex
+      // (to append the `· [preview]` link to that reply). grantWriteData does
+      // NOT include dynamodb:Query nor the index ARN, so grant it narrowly —
+      // Query on just that one GSI, not blanket grantReadData on the table.
+      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'dynamodb',
+            resource: 'table',
+            resourceName: `${props.taskTable.tableName}/index/LinearIssueIndex`,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+        ],
+      }));
     }
 
     // AgentCore Browser session lifecycle + automation-stream connect.

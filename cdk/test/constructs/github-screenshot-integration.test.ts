@@ -20,6 +20,7 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { GitHubScreenshotIntegration } from '../../src/constructs/github-screenshot-integration';
 
@@ -125,6 +126,53 @@ describe('GitHubScreenshotIntegration construct', () => {
       KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }],
       TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+    });
+  });
+});
+
+describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new Stack(app, 'TaskTableStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubToken');
+    // A table carrying the LinearIssueIndex GSI the processor must Query to
+    // find the iteration's maturing reply (to append the `· [preview]` link).
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    taskTable.addGlobalSecondaryIndex({
+      indexName: 'LinearIssueIndex',
+      partitionKey: { name: 'linear_issue_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+    });
+
+    new GitHubScreenshotIntegration(stack, 'Screenshot', { api, githubTokenSecret, taskTable });
+    template = Template.fromStack(stack);
+  });
+
+  test('grants dynamodb:Query scoped to the LinearIssueIndex GSI (not a blanket read)', () => {
+    // REGRESSION: the preview-link append (findIterationReplyId) Queries
+    // LinearIssueIndex, but grantWriteData covers only UpdateItem — without an
+    // explicit Query grant the processor hit AccessDenied at runtime and
+    // silently logged "no reply id found" (unit-mocked ddb never caught it).
+    // Pin a Query statement whose resource ARN names the index.
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: 'Allow',
+            Action: 'dynamodb:Query',
+            Resource: Match.objectLike({
+              'Fn::Join': Match.arrayWith([
+                Match.arrayWith([Match.stringLikeRegexp('index/LinearIssueIndex')]),
+              ]),
+            }),
+          }),
+        ]),
+      },
     });
   });
 });
