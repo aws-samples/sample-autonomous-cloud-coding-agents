@@ -5,7 +5,7 @@ title: Cedar hitl gates
 # Cedar HITL Approval Gates
 
 > **Status:** Core implemented; this document remains the authoritative design reference.
-> **Companion:** [`INTERACTIVE_AGENTS.md`](/architecture/interactive-agents) §9.3 (pointing here), §7 (state machine).
+> **Companion:** [`INTERACTIVE_AGENTS.md`](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) §9.3 (pointing here), §7 (state machine).
 > **Visual:** [`/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio`](/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio) (12 pages; supplemented by inline Mermaid diagrams below).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).

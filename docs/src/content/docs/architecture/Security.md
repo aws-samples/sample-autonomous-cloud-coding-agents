@@ -7,7 +7,7 @@ title: Security
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 
 - **Use this doc for:** understanding the security boundaries, what can go wrong, and how the platform mitigates each threat.
-- **Related docs:** [COMPUTE.md](/architecture/compute) for runtime isolation details, [MEMORY.md](/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/architecture/input-gateway) for authentication flows, [IDENTITY_AND_AUTH.md](/architecture/identity-and-auth) for the worked identity/auth examples and the credential-plane direction.
+- **Related docs:** [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for runtime isolation details, [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/sample-autonomous-cloud-coding-agents/architecture/input-gateway) for authentication flows, [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) for the worked identity/auth examples and the credential-plane direction.
 
 ## Design principle
 
@@ -40,7 +40,7 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 **Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/roadmap/roadmap), the [ADR-016](/architecture/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/architecture/identity-and-auth) worked examples).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap), the [ADR-016](/sample-autonomous-cloud-coding-agents/architecture/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) worked examples).
 
 **Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole` or the ECS Fargate task role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
 
@@ -59,7 +59,7 @@ Input screening happens at two points in the pipeline, forming a defense-in-dept
 
 - **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 10,000 characters.
 - **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `MEDIUM` input strength screens task descriptions for prompt injection.
-- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](/architecture/attachments) for the full screening pipeline.
+- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](/sample-autonomous-cloud-coding-agents/architecture/attachments) for the full screening pipeline.
 - **Fail-closed** - If the Bedrock API is unavailable, submissions are rejected (HTTP 503). Unscreened content never reaches the agent.
 
 ### Hydration-time screening
@@ -82,11 +82,11 @@ Per-repo tool profiles are stored in onboarding config and loaded during context
 
 ## Blueprint custom steps
 
-The blueprint framework ([REPO_ONBOARDING.md](/architecture/repo-onboarding)) allows per-repo custom Lambda steps in the orchestrator pipeline. These are a trust boundary that requires specific attention.
+The blueprint framework ([REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding)) allows per-repo custom Lambda steps in the orchestrator pipeline. These are a trust boundary that requires specific attention.
 
 **Deployment control** - Custom steps are defined in the `Blueprint` CDK construct and deployed via `cdk deploy`. Only principals with CDK deployment permissions can add or modify them. There is no runtime API for custom step CRUD.
 
-The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. The Cedar-driven HITL approval gates feature (see [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, the §12 trust model in that doc must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
+The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. The Cedar-driven HITL approval gates feature (see [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, the §12 trust model in that doc must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
 
 **Input filtering** - The framework strips credential ARNs (`github_token_secret_arn`) and networking configuration (`egress_allowlist`) from the config before passing it to custom Lambda steps. If a custom step needs secrets, it must declare them explicitly and the operator must grant IAM permissions.
 
@@ -116,11 +116,11 @@ The platform is self-hosted in the customer's AWS account. No code or repo data 
 | Audit | Bedrock model invocation logging (90-day retention) | Prompt injection investigation, compliance |
 | Deployment | CDK infrastructure as code | Consistent, auditable deployments |
 
-**DNS Firewall note:** Currently in observation mode (non-allowlisted domains are logged as ALERT but not blocked). Per-repo `egressAllowlist` entries are aggregated into the platform-wide policy. DNS Firewall does not block direct IP connections, which is acceptable for the "confused agent" threat model but not for sophisticated adversaries. See [COMPUTE.md](/architecture/compute) for the enforcement rollout process.
+**DNS Firewall note:** Currently in observation mode (non-allowlisted domains are logged as ALERT but not blocked). Per-repo `egressAllowlist` entries are aggregated into the platform-wide policy. DNS Firewall does not block direct IP connections, which is acceptable for the "confused agent" threat model but not for sophisticated adversaries. See [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for the enforcement rollout process.
 
 ## Policy enforcement
 
-The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [ROADMAP.md](/roadmap/roadmap)).
+The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap)).
 
 ### Current enforcement map
 
@@ -161,7 +161,7 @@ flowchart LR
 | Finalization | Build/lint verification | `agent/src/post_hooks.py` | Task record and PR body |
 | Infrastructure | DNS Firewall, WAF | CDK constructs | CloudWatch logs |
 
-**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [ROADMAP.md](/roadmap/roadmap)).
+**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap)).
 
 ### Mid-execution enforcement
 
@@ -176,7 +176,7 @@ Once an agent session starts, two mechanisms enforce policy without requiring an
 
 ## Memory threats
 
-The platform's memory system ([MEMORY.md](/architecture/memory)) faces threats from both intentional attacks and emergent corruption. OWASP classifies memory poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications, recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: poisoned entries influence every subsequent interaction.
+The platform's memory system ([MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory)) faces threats from both intentional attacks and emergent corruption. OWASP classifies memory poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications, recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: poisoned entries influence every subsequent interaction.
 
 ### Attack vectors
 
@@ -198,7 +198,7 @@ The platform's memory system ([MEMORY.md](/architecture/memory)) faces threats f
 5. **Review feedback quorum** - Only promote feedback to persistent rules if the same pattern appears from multiple trusted reviewers across multiple PRs. Single review comments never become permanent rules.
 6. **Blast radius containment** - Even if poisoned rules get through, the agent cannot modify CI/CD pipelines, change branch protection, access secrets beyond its scoped token, or push to protected branches.
 
-**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [ROADMAP.md](/roadmap/roadmap)).
+**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap)).
 
 ## Data protection
 
