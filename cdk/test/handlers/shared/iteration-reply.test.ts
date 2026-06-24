@@ -19,6 +19,7 @@
 
 import {
   isNoChangeIteration,
+  preservePreviewSuffix,
   renderIterationSuccessReply,
   renderMaturingReply,
 } from '../../../src/handlers/shared/iteration-reply';
@@ -148,5 +149,41 @@ describe('isNoChangeIteration', () => {
     expect(isNoChangeIteration(false)).toBe(true);
     expect(isNoChangeIteration(true)).toBe(false);
     expect(isNoChangeIteration(undefined)).toBe(false);
+  });
+});
+
+describe('preservePreviewSuffix — converge the two async writers (ABCA-434 race)', () => {
+  const URL = 'https://cdn.example/screenshots/x.png';
+
+  test('carries an already-landed [preview] from current onto the new body', () => {
+    // The screenshot webhook appended the preview; this terminal re-render
+    // would otherwise drop it. Convergence re-attaches it in the · [preview] shape.
+    const current = `✅ Updated — [PR #5](u). _$0.1_ · [preview](${URL})`;
+    const newBody = '✅ Updated — [PR #5](u). _$0.2 · 35s · total this PR: $0.5_';
+    expect(preservePreviewSuffix(newBody, current)).toBe(`${newBody} · [preview](${URL})`);
+  });
+
+  test('no-op when the new body already carries its own preview (settle-after-append)', () => {
+    const current = `✅ Updated. · [preview](${URL})`;
+    const newBody = `✅ Updated — [PR #5](u). · [preview](${URL})`;
+    expect(preservePreviewSuffix(newBody, current)).toBe(newBody); // not doubled
+  });
+
+  test('no-op when current has no preview (the common no-deploy case)', () => {
+    const current = '👀 On it — reading the PR…';
+    const newBody = '✅ Updated — [PR #5](u). _$0.2_';
+    expect(preservePreviewSuffix(newBody, current)).toBe(newBody);
+  });
+
+  test('null/undefined current → returns new body unchanged', () => {
+    expect(preservePreviewSuffix('✅ Updated.', null)).toBe('✅ Updated.');
+    expect(preservePreviewSuffix('✅ Updated.', undefined)).toBe('✅ Updated.');
+  });
+
+  test('idempotent across repeated settles', () => {
+    const newBody = '✅ Updated — [PR #5](u). _$0.2_';
+    const once = preservePreviewSuffix(newBody, `x · [preview](${URL})`);
+    const twice = preservePreviewSuffix(once, once); // current now already has it
+    expect(twice).toBe(once);
   });
 });

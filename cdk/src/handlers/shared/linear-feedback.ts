@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { preservePreviewSuffix } from './iteration-reply';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
 
@@ -438,12 +439,24 @@ export async function upsertThreadedReply(
   parentCommentId: string,
   body: string,
   existingReplyId?: string,
+  options?: { preservePreview?: boolean },
 ): Promise<string | null> {
   const token = await resolveToken(ctx);
   if (!token) return null;
 
   if (existingReplyId) {
-    const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingReplyId, body })).ok;
+    let finalBody = body;
+    // iteration-UX convergence: the deploy-preview link is appended by a
+    // SEPARATE async path (the screenshot webhook). A terminal-settle re-render
+    // here would clobber a preview that already landed (live-caught ABCA-434).
+    // When asked, read the current body and carry an existing `[preview]`
+    // segment onto the new body so the two writers converge regardless of order.
+    if (options?.preservePreview) {
+      const data = await graphqlData(token, COMMENT_BODY_QUERY, { commentId: existingReplyId });
+      const current = (data?.comment as { body?: string } | undefined)?.body;
+      finalBody = preservePreviewSuffix(body, current);
+    }
+    const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingReplyId, body: finalBody })).ok;
     return ok ? existingReplyId : null;
   }
 

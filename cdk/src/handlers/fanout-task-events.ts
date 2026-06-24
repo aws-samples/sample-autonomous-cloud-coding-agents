@@ -1239,7 +1239,10 @@ async function replyToStandaloneTrigger(
   // reply when the ack-reply id wasn't captured (best-effort at trigger).
   const replyCtx = { linearWorkspaceId: workspaceId, registryTableName };
   const existingReplyId = task.channel_metadata?.iteration_reply_comment_id;
-  await upsertThreadedReply(replyCtx, issueId, triggerCommentId, body, existingReplyId);
+  // preservePreview: this terminal-settle and the screenshot webhook's preview
+  // append race on this one reply (live-caught ABCA-434). Carry an already-landed
+  // `[preview]` link onto the freshly-rendered terminal body so they converge.
+  await upsertThreadedReply(replyCtx, issueId, triggerCommentId, body, existingReplyId, { preservePreview: true });
 }
 
 /**

@@ -858,7 +858,9 @@ async function replyToIterationComment(
   const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
   // iteration-UX: EDIT the maturing reply posted at trigger time; fall back to a
   // fresh threaded reply for pre-fix tasks that captured no reply id.
-  await upsertThreadedReply(ctx, replyIssueId, commentId, body, evt.iterationReplyId);
+  // preservePreview: converge with the screenshot webhook's async `[preview]`
+  // append so this terminal re-render doesn't clobber it (ABCA-434 race).
+  await upsertThreadedReply(ctx, replyIssueId, commentId, body, evt.iterationReplyId, { preservePreview: true });
 
   // #247 UX.21: settle the comment + sub-issue so all three views agree (panel
   // row, sub-issue state, comment reaction) — the platform owns this, not the

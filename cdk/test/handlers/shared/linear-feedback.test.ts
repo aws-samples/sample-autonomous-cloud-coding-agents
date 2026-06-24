@@ -38,6 +38,7 @@ import {
   swapIssueReaction,
   transitionIssueState,
   upsertStatusComment,
+  upsertThreadedReply,
 } from '../../../src/handlers/shared/linear-feedback';
 
 const CTX: LinearFeedbackContext = {
@@ -534,6 +535,32 @@ describe('linear-feedback', () => {
       const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](u)', '[preview]');
       expect(ok).toBe(false);
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('upsertThreadedReply preservePreview (iteration-UX convergence)', () => {
+    const REPLY_ID = 'reply-cmt-9';
+    const PREVIEW = 'https://cdn/screenshots/x.png';
+
+    test('terminal edit carries an already-landed [preview] from the current body', async () => {
+      // The screenshot webhook appended ` · [preview]` first; this terminal
+      // re-render reads the current body and re-attaches it (ABCA-434 race).
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `✅ Updated. · [preview](${PREVIEW})` } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const newBody = '✅ Updated — [PR #5](u). _$0.2 · 35s_';
+      const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', newBody, REPLY_ID, { preservePreview: true });
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // read body, then update
+      const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(updateBody.variables.body).toBe(`${newBody} · [preview](${PREVIEW})`);
+    });
+
+    test('without preservePreview the edit does NOT read the body (single update)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
     });
   });
 });
