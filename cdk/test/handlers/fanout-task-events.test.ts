@@ -1695,6 +1695,27 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       expect(body).not.toMatch(/CloudWatch/i);
     });
 
+    test('renders the clickable preview thumbnail from a LATE consistent re-read (ABCA-438 race-fix)', async () => {
+      // The early task load has NO screenshot (the deploy lands later). The
+      // terminal-settle does a strongly-consistent re-read right before rendering
+      // and picks up the screenshot the webhook persisted onto THIS iteration
+      // task — so the thumbnail renders without depending on the racy comment edit.
+      const PNG = 'https://cdn.example/screenshots/iter.png';
+      const DEPLOY = 'https://app.vercel.app';
+      mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { ConsistentRead?: boolean } }) => {
+        if (cmd?._type === 'Get' && cmd.input?.ConsistentRead) {
+          // the late re-read: screenshot has landed durably by now
+          return Promise.resolve({ Item: { screenshot_url: PNG, screenshot_preview_url: DEPLOY } });
+        }
+        if (cmd?._type === 'Get') return Promise.resolve({ Item: STANDALONE }); // early load: no screenshot
+        return Promise.resolve({});
+      });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
+      // Clickable thumbnail: screenshot PNG embedded, linking to the deploy.
+      expect(body).toContain(`[![preview](${PNG})](${DEPLOY})`);
+    });
+
     test('an ORCHESTRATION iteration (orchestration_iteration=true) is NOT replied here (reconciler owns it)', async () => {
       mockGet({
         ...STANDALONE,

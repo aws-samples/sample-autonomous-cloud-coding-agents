@@ -346,16 +346,21 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           // link to that reply now (in place). Find the most-recent iteration
           // reply id for this issue and edit it; idempotent via the [preview]
           // marker so a webhook redelivery won't double-append.
-          const replyId = await findIterationReplyId(linearIssue.issueId);
-          if (replyId) {
-            // Embed the captured screenshot PNG (publicUrl) as a clickable
-            // thumbnail linking to the live deploy (previewUrl) — same shape the
-            // first-task 🖼️ comment uses, NOT a bare text link. previewUrl is
-            // payload-derived → markdown-escape it (publicUrl is our CloudFront key).
+          const iter = await findIterationReplyId(linearIssue.issueId);
+          if (iter) {
+            // (1) Durably persist the screenshot onto the ITERATION task so the
+            // terminal-settle renders the thumbnail from a strongly-consistent
+            // DDB read — race-free against this comment edit (ABCA-438 clobber).
+            await persistScreenshotOnIterationTask(iter.taskId, publicUrl, previewUrl);
+            // (2) Also append to the reply now, for the case where the deploy is
+            // slow and the settle already ran (the append then wins). Embed the
+            // captured PNG as a clickable thumbnail linking to the live deploy —
+            // same shape as the first-task 🖼️ comment, NOT a bare text link.
+            // previewUrl is payload-derived → markdown-escape (publicUrl is ours).
             const previewBlock = renderPreviewBlock(publicUrl, encodeMarkdownUrl(previewUrl));
-            const appended = await appendOnceToComment(ctx, replyId, `\n\n${previewBlock}`, '[preview]');
+            const appended = await appendOnceToComment(ctx, iter.replyId, `\n\n${previewBlock}`, '[preview]');
             logger.info('Appended preview thumbnail to iteration reply', {
-              linear_issue_id: linearIssue.issueId, reply_id: replyId, appended,
+              linear_issue_id: linearIssue.issueId, reply_id: iter.replyId, task_id: iter.taskId, appended,
             });
           } else {
             logger.info('Iteration deploy but no reply id found — skipping preview append', {
@@ -387,14 +392,17 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 }
 
 /**
- * iteration-UX: find the most-recent iteration's maturing-reply comment id for a
- * Linear issue. An @bgagent iteration persists ``iteration_reply_comment_id`` on
- * its task's channel_metadata; the screenshot webhook (resolving the issue by PR
- * identifier) uses this to append the preview link to that reply once the async
- * capture lands. Queries the LinearIssueIndex (newest-first) and returns the
- * first task that carries a reply id. Null when none (best-effort).
+ * iteration-UX: find the most-recent iteration's maturing-reply comment id AND
+ * its task id for a Linear issue. An @bgagent iteration persists
+ * ``iteration_reply_comment_id`` on its task's channel_metadata. The screenshot
+ * webhook (resolving the issue by PR identifier) uses the reply id to append the
+ * preview to that reply, and the task id to persist the screenshot DURABLY onto
+ * the iteration task — so the terminal-settle renders the preview from a
+ * strongly-consistent DDB read rather than racing the (eventually-consistent)
+ * Linear comment edit (the ABCA-437/438 clobber). Queries LinearIssueIndex
+ * newest-first; returns the first task carrying a reply id. Null when none.
  */
-async function findIterationReplyId(linearIssueId: string): Promise<string | null> {
+async function findIterationReplyId(linearIssueId: string): Promise<{ replyId: string; taskId: string } | null> {
   if (!TASK_TABLE) return null;
   try {
     const res = await ddb.send(new QueryCommand({
@@ -404,9 +412,11 @@ async function findIterationReplyId(linearIssueId: string): Promise<string | nul
       ExpressionAttributeValues: { ':iid': linearIssueId },
       ScanIndexForward: false, // newest first (SK = created_at)
     }));
-    for (const item of (res.Items ?? []) as Array<{ channel_metadata?: { iteration_reply_comment_id?: string } }>) {
+    for (const item of (res.Items ?? []) as Array<{ task_id?: string; channel_metadata?: { iteration_reply_comment_id?: string } }>) {
       const replyId = item.channel_metadata?.iteration_reply_comment_id;
-      if (typeof replyId === 'string' && replyId) return replyId;
+      if (typeof replyId === 'string' && replyId && typeof item.task_id === 'string') {
+        return { replyId, taskId: item.task_id };
+      }
     }
     return null;
   } catch (err) {
@@ -414,6 +424,35 @@ async function findIterationReplyId(linearIssueId: string): Promise<string | nul
       linear_issue_id: linearIssueId, error: err instanceof Error ? err.message : String(err),
     });
     return null;
+  }
+}
+
+/**
+ * iteration-UX: durably persist the captured screenshot URLs onto the ITERATION
+ * task record (the one carrying the reply id), so the terminal-settle can render
+ * the preview thumbnail from a strongly-consistent DDB read. This is the
+ * race-free half of the fix: an @bgagent iteration's deploy pushes the SAME PR
+ * branch, so ``persistScreenshotUrl`` (keyed by branch → original task) never
+ * touches the iteration task — the settle then had no screenshot and the only
+ * preview writer was the comment append, which the settle clobbered (ABCA-438).
+ * Best-effort; guarded by attribute_exists so a TTL eviction can't zombie-create.
+ */
+async function persistScreenshotOnIterationTask(taskId: string, publicUrl: string, previewUrl: string): Promise<void> {
+  if (!TASK_TABLE) return;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET screenshot_url = :u, screenshot_preview_url = :p',
+      ConditionExpression: 'attribute_exists(task_id)',
+      ExpressionAttributeValues: { ':u': publicUrl, ':p': previewUrl },
+    }));
+  } catch (err) {
+    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
+      logger.warn('persistScreenshotOnIterationTask failed (non-fatal)', {
+        task_id: taskId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 

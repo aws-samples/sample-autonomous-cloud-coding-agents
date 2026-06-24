@@ -443,6 +443,37 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
 }
 
 /**
+ * iteration-UX: strongly-consistent re-read of just the two screenshot fields,
+ * taken late (right before the terminal-settle renders) so it reflects the
+ * screenshot the deploy webhook persisted AFTER the early task load. ConsistentRead
+ * beats the read-after-write lag that let the comment-edit race clobber the
+ * preview (ABCA-438). Best-effort: returns nulls on any failure (caller falls
+ * back to the loaded task's values).
+ */
+async function reloadScreenshotFields(taskId: string): Promise<{ screenshotUrl: string | null; deployUrl: string | null }> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return { screenshotUrl: null, deployUrl: null };
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: tableName,
+      Key: { task_id: taskId },
+      ProjectionExpression: 'screenshot_url, screenshot_preview_url',
+      ConsistentRead: true,
+    }));
+    const item = res.Item as { screenshot_url?: string; screenshot_preview_url?: string } | undefined;
+    return {
+      screenshotUrl: typeof item?.screenshot_url === 'string' ? item.screenshot_url : null,
+      deployUrl: typeof item?.screenshot_preview_url === 'string' ? item.screenshot_preview_url : null,
+    };
+  } catch (err) {
+    logger.warn('[fanout/linear] screenshot re-read failed (non-fatal)', {
+      task_id: taskId, error: err instanceof Error ? err.message : String(err),
+    });
+    return { screenshotUrl: null, deployUrl: null };
+  }
+}
+
+/**
  * Persist the ``github_comment_id`` on the TaskRecord after a
  * successful POST (either the first-ever dispatch or a 404 re-POST
  * fallback). Subsequent PATCHes are no-ops on the TaskRecord because
@@ -1206,8 +1237,16 @@ async function replyToStandaloneTrigger(
   const durationS = coerceNumericOrNull(
     task.duration_s, { field: 'duration_s', task_id: task.task_id, event_id: event.event_id }, logger,
   );
-  const screenshotUrl = typeof task.screenshot_url === 'string' ? task.screenshot_url : null;
-  const deployUrl = typeof task.screenshot_preview_url === 'string' ? task.screenshot_preview_url : null;
+  // iteration-UX: the screenshot webhook persists screenshot_url onto THIS task
+  // (the iteration task) durably, but it lands AFTER the deploy — well after the
+  // early loadTaskForComment() that produced ``task``. Re-read those two fields
+  // strongly-consistent right before rendering, so we render the preview from the
+  // freshest durable state instead of racing the (eventually-consistent) comment
+  // edit the webhook also makes (the ABCA-438 clobber). Falls back to the loaded
+  // task's values on read failure.
+  const shot = await reloadScreenshotFields(task.task_id);
+  const screenshotUrl = shot.screenshotUrl ?? (typeof task.screenshot_url === 'string' ? task.screenshot_url : null);
+  const deployUrl = shot.deployUrl ?? (typeof task.screenshot_preview_url === 'string' ? task.screenshot_preview_url : null);
 
   // Build the maturing-reply terminal state. A6/#299: code_changed===false (a
   // question) → 💬 answered; else ✅ updated. A failure → ❌ with the sanitized
