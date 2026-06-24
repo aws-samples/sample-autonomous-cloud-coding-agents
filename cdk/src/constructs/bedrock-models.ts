@@ -42,13 +42,20 @@ export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
 
 /**
  * Resolves the invocable foundation-model IDs: CDK context `bedrockModels`
- * (an array of foundation-model IDs) when provided, else
+ * (an array of **bare foundation-model IDs**) when provided, else
  * {@link DEFAULT_BEDROCK_MODEL_IDS}. Set via `cdk.json` `context` or
  * `-c bedrockModels='["anthropic.claude-opus-4-8", …]'`, then redeploy, to add
  * a model the runtime may invoke — no construct edits needed.
  *
- * Throws on a malformed override (non-array, or non-string / empty entries) so
- * a typo fails synth loudly instead of silently granting nothing.
+ * **Use the bare foundation-model ID (`anthropic.claude-…`), NOT the
+ * `us.`-prefixed inference-profile ID.** Both grant sites derive the US
+ * inference-profile ARN by prefixing `us.`, so passing `us.anthropic.…` here
+ * would produce an invalid `us.us.anthropic.…` ARN. The resolver rejects a
+ * `us.`/`eu.`/`apac.`-prefixed entry to catch that early.
+ *
+ * Throws on a malformed override (non-array, non-string / empty entries, or a
+ * region-prefixed ID) so a typo fails synth loudly instead of silently
+ * granting nothing or an invalid ARN.
  */
 export function resolveBedrockModelIds(node: Node): readonly string[] {
   const override = node.tryGetContext(BEDROCK_MODELS_CONTEXT_KEY);
@@ -65,6 +72,13 @@ export function resolveBedrockModelIds(node: Node): readonly string[] {
     if (typeof id !== 'string' || id.trim().length === 0) {
       throw new Error(
         `Context '${BEDROCK_MODELS_CONTEXT_KEY}' entries must be non-empty strings; got ${JSON.stringify(id)}.`,
+      );
+    }
+    if (/^(us|eu|apac)\./.test(id)) {
+      throw new Error(
+        `Context '${BEDROCK_MODELS_CONTEXT_KEY}' expects bare foundation-model IDs, not region-prefixed `
+        + `inference-profile IDs — got '${id}'. Use '${id.replace(/^(us|eu|apac)\./, '')}'; `
+        + 'the US inference-profile ARN is derived automatically.',
       );
     }
   }

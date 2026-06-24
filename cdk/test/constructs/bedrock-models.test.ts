@@ -58,4 +58,15 @@ describe('resolveBedrockModelIds', () => {
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['anthropic.claude-sonnet-4-6', ''] })),
     ).toThrow(/non-empty strings/);
   });
+
+  it('throws on a region-prefixed (us./eu./apac.) inference-profile ID', () => {
+    // Guards the us.us.… double-prefix footgun: both grant sites derive the
+    // inference-profile ARN by prefixing `us.`, so the context wants the bare id.
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['us.anthropic.claude-opus-4-8'] })),
+    ).toThrow(/bare foundation-model IDs/);
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['eu.anthropic.claude-sonnet-4-6'] })),
+    ).toThrow(/bare foundation-model IDs/);
+  });
 });
