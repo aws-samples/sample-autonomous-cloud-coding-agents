@@ -1668,7 +1668,8 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       const [, issueId, parentCommentId, body] = mockUpsertThreadedReply.mock.calls[0];
       expect(issueId).toBe('issue-uuid-42'); // the issue the comment lives on
       expect(parentCommentId).toBe('human-cmt-7');
-      expect(body).toMatch(/^✅ Updated — PR #13\./);
+      // iteration-UX: PR ref is a clickable markdown link (pr_url present in STANDALONE).
+      expect(body).toMatch(/^✅ Updated — \[PR #13\]\(https:\/\/github\.com\/owner\/repo\/pull\/13\)\./);
       // iteration-UX: the separate top-level "Task completed" metrics comment is
       // SUPPRESSED for iterations (its cost folds into the reply) — that's the
       // clutter we removed.

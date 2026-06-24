@@ -548,22 +548,30 @@ async function persistScreenshotUrl(
     // is a synthetic integration node WITHOUT a second Get (#247 UX.16): the
     // integration node's screenshot belongs in the PANEL only — it must NOT
     // also post a standalone Linear comment on the parent epic.
+    // ALL_OLD so we can see the PRE-update state: whether a screenshot was
+    // already posted for this task (→ this is a RE-DEPLOY, i.e. an iteration push
+    // on the same branch), and the channel_metadata (unchanged by this write).
     const upd = await ddb.send(new UpdateCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
       UpdateExpression: 'SET screenshot_url = :u, screenshot_preview_url = :p',
       ConditionExpression: 'attribute_exists(task_id)',
       ExpressionAttributeValues: { ':u': publicUrl, ':p': previewUrl },
-      ReturnValues: 'ALL_NEW',
+      ReturnValues: 'ALL_OLD',
     }));
     const subIssueId = upd.Attributes?.channel_metadata?.orchestration_sub_issue_id;
     result.isIntegrationNode = typeof subIssueId === 'string' && isIntegrationNode(subIssueId);
-    // iteration-UX: a comment-iteration carries trigger_comment_id. Its preview
-    // is already folded into the maturing threaded reply (the [preview](…) link),
-    // so a standalone "🖼️ Preview screenshot" Linear comment would re-clutter the
-    // issue — exactly what we removed. (The GitHub PR screenshot comment still
-    // posts; this only gates the Linear surface.)
-    result.isIteration = typeof upd.Attributes?.channel_metadata?.trigger_comment_id === 'string';
+    // iteration-UX: suppress the standalone "🖼️ Preview screenshot" Linear comment
+    // on a RE-DEPLOY. An @bgagent iteration pushes to the SAME PR branch, so the
+    // task resolved by branch is the original (no trigger_comment_id) — the
+    // reliable signal is that a screenshot_url was ALREADY set on this task before
+    // this write. First deploy: no prior screenshot → post the headline 🖼️. Any
+    // later push (iteration): prior screenshot present → suppress (the maturing
+    // reply already carries the [preview](…) link). Also suppress when the task is
+    // itself an iteration task (carries trigger_comment_id).
+    const hadPriorScreenshot = typeof upd.Attributes?.screenshot_url === 'string';
+    const isIterationTask = typeof upd.Attributes?.channel_metadata?.trigger_comment_id === 'string';
+    result.isIteration = hadPriorScreenshot || isIterationTask;
     logger.info('Persisted screenshot_url on task record', {
       task_id: taskId,
       public_url: publicUrl,
