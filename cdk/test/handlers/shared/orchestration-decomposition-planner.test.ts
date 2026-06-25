@@ -65,7 +65,7 @@ const ASSESS_NO: AssessmentResult = { decompose: false, reasoning: 'one cohesive
 // Stage 1 — buildAssessmentPrompt / parseAssessment
 // ---------------------------------------------------------------------------
 
-describe('buildAssessmentPrompt — balanced, decide-only, carries inputs', () => {
+describe('buildAssessmentPrompt — shippable-value test, decide-only, carries inputs', () => {
   test('includes title, description, repo and asks ONLY for the decision', () => {
     const p = buildAssessmentPrompt(INPUT);
     expect(p).toContain('acme/web');
@@ -77,13 +77,22 @@ describe('buildAssessmentPrompt — balanced, decide-only, carries inputs', () =
     expect(p).not.toContain('"sub_issues"');
   });
 
-  test('is BALANCED — frames both decompose and one-task, no default-to-one thumb', () => {
+  test('discriminator is independently SHIPPABLE/REVIEWABLE value, not "has parts"', () => {
     const p = buildAssessmentPrompt(INPUT);
-    expect(p).toMatch(/DECOMPOSE when/i);
-    expect(p).toMatch(/ONE TASK when/i);
-    expect(p).toMatch(/there is no default/i);
-    // the old biased "when unsure, prefer a single task" must be gone
-    expect(p).not.toMatch(/when unsure, prefer a single task/i);
+    expect(p).toMatch(/independently SHIPPABLE and independently REVIEWABLE/i);
+    expect(p).toMatch(/Most tasks are ONE PR/i);
+  });
+
+  test('explicitly rejects splitting on internal parts / build-order (the ABCA-442 lesson)', () => {
+    const p = buildAssessmentPrompt(INPUT);
+    // does NOT decompose merely for multiple parts or an internal sequence
+    expect(p).toMatch(/Do NOT decompose merely because a single feature has multiple PARTS/i);
+    // the dark-mode-style layering counter-example is present (styling layer + component + hook)
+    expect(p).toMatch(/persistence hook are\s+NOT separate deliverables/i);
+    // schema→API→UI for ONE feature is called out as one PR, not a decompose trigger
+    expect(p).toMatch(/likewise ONE PR/i);
+    // tie-breaker leans to one task
+    expect(p).toMatch(/prefer ONE task/i);
   });
 
   test('is a pure function (same input → same prompt)', () => {
