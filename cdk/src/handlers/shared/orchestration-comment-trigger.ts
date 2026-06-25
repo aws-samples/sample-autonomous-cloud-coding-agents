@@ -93,6 +93,8 @@ const BOT_COMMENT_PREFIXES = [
   '🖼️', // preview screenshot comment
   '🔗', // "PR opened" / combined-PR
   '🗂️', // #299 Mode B plan-proposal / decomposition notes (embed literal "@bgagent approve")
+  '💬', // maturing-reply "answered" state (a no-change/question iteration)
+  '👀', // instant "on it" ack reply (posted at trigger time)
 ] as const;
 
 /** True when ``body`` is one of the bot's own rendered comments (loop guard). */

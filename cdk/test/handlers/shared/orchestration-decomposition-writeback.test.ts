@@ -155,6 +155,60 @@ describe('writeBackPlan — idempotent / resumable', () => {
     expect(calls.filter((c) => c.op === 'create')).toHaveLength(1); // only API
   });
 
+  test('follows children pagination so reuse-by-title sees a child beyond the first page', async () => {
+    // Parent already has 100+ children spread over 2 pages; the planned "Schema"
+    // lives on PAGE 2. Without pagination it would be re-created (duplicate); with
+    // it, the dedup map finds it and reuses. First page = filler + hasNextPage;
+    // second page (after cursor) = the real match, no further page.
+    const calls: { op: string; vars: Record<string, unknown> }[] = [];
+    const graphql: GraphqlFn = jest.fn(async (query: string, vars: Record<string, unknown>) => {
+      if (query.includes('query ParentState')) {
+        calls.push({ op: 'state', vars });
+        return {
+          issue: {
+            team: { id: 'team-1' },
+            children: {
+              pageInfo: { hasNextPage: true, endCursor: 'cur-1' },
+              nodes: [{ id: 'filler-1', title: 'Some unrelated child', inverseRelations: { nodes: [] } }],
+            },
+          },
+        };
+      }
+      if (query.includes('query ParentChildrenPage')) {
+        calls.push({ op: 'page', vars });
+        return {
+          issue: {
+            children: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ id: 'old-Schema', identifier: 'ENG-7', title: 'Schema', inverseRelations: { nodes: [] } }],
+            },
+          },
+        };
+      }
+      if (query.includes('mutation CreateSubIssue')) {
+        calls.push({ op: 'create', vars });
+        return { issueCreate: { success: true, issue: { id: `new-${vars.title}`, identifier: 'ENG-9' } } };
+      }
+      if (query.includes('mutation CreateBlockingRelation')) {
+        calls.push({ op: 'relation', vars });
+        return { issueRelationCreate: { success: true } };
+      }
+      throw new Error(`unexpected query: ${query.slice(0, 40)}`);
+    });
+
+    const r = await writeBackPlan({ graphql, parentIssueId: PARENT, nodes: [node('Schema'), node('API', [0])] });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.reused).toBe(1); // Schema found on page 2 → reused, not recreated
+      expect(r.created).toBe(1); // only API
+      expect(r.children[0].id).toBe('old-Schema');
+    }
+    expect(calls.filter((c) => c.op === 'page')).toHaveLength(1); // followed the cursor
+    expect(calls.filter((c) => c.op === 'create')).toHaveLength(1); // Schema NOT duplicated
+    // 2nd page query carried the first page's endCursor.
+    expect(calls.find((c) => c.op === 'page')?.vars.after).toBe('cur-1');
+  });
+
   test('skips an edge that already exists (no duplicate relations)', async () => {
     // Both issues + the Schema→API edge already exist; a re-run is a pure no-op
     // on writes.

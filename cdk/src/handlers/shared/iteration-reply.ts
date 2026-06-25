@@ -38,8 +38,13 @@
  * orchestration reconciler) render identically and it is unit-testable.
  */
 
-/** Max chars of the agent's answer surfaced inline before truncation. */
-const MAX_ANSWER_CHARS = 1500;
+/**
+ * Max chars of the agent's answer surfaced inline before truncation. Matches the
+ * agent's own persist cap (``task_state.py`` stores ``answer_text[:2000]``) so the
+ * renderer never silently drops chars the agent already bounded — the agent is the
+ * single truncator. (``failureReason`` shares this cap for a long sanitized error.)
+ */
+const MAX_ANSWER_CHARS = 2000;
 
 /**
  * The maturing iteration reply (iteration-UX redesign). One threaded reply per

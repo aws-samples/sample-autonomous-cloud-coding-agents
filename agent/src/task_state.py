@@ -314,6 +314,12 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("code_changed") is not None:
                 update_parts.append("code_changed = :cc")
                 expr_values[":cc"] = bool(result["code_changed"])
+            # The pushed HEAD sha — lets the screenshot webhook match a deploy's
+            # commit to the iteration task that pushed it (correct preview-reply
+            # attribution when two iterations overlap on one PR). Skip empties.
+            if result.get("head_sha"):
+                update_parts.append("head_sha = :hsha")
+                expr_values[":hsha"] = str(result["head_sha"])
             if result.get("answer_text"):
                 update_parts.append("answer_text = :ans")
                 # Bound the persisted answer so a verbose agent can't bloat the
