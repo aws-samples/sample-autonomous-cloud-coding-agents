@@ -45,8 +45,28 @@ description = "cdk synth (quiet)"
 depends = [":compile"]
 run = ["mkdir -p $TMPDIR", "yarn synth:quiet"]
 
+# Reclaim regenerable build artifacts that otherwise grow unbounded and fill the
+# disk (live-caught 2026-06-25: a deploy died with ENOSPC — uv cache was 51G,
+# Docker.raw 112G). All four targets fully regenerate on the next build, so this
+# is safe to run any time; each step is best-effort (|| true) so one failing
+# tool never blocks a deploy. Run standalone with `mise //cdk:clean:disk`; it
+# also runs automatically before every `mise //cdk:deploy` (see deploy.depends).
+[tasks."clean:disk"]
+description = "Reclaim disk: stale cdk.out/cdk-tmp + uv cache + docker dangling/build-cache"
+run = [
+  "rm -rf cdk.out || true",
+  "rm -rf \"$TMPDIR\"/* || true",
+  "uv cache prune || true",
+  "docker image prune -f || true",
+  "docker builder prune -f || true",
+  "df -h / | tail -1",
+]
+
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
+# Reclaim disk first — the agent-image Docker build + CDK asset bundling need
+# several GB of working space, and uv/Docker caches accumulate across runs.
+depends = [":clean:disk"]
 run = "npx cdk deploy"
 
 [tasks.bootstrap]
