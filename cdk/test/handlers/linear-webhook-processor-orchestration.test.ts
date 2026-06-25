@@ -40,6 +40,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  DeleteCommand: jest.fn((input: unknown) => ({ _type: 'Delete', input })),
   BatchWriteCommand: jest.fn((input: unknown) => ({ _type: 'BatchWrite', input })),
 }));
 
@@ -571,7 +572,12 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
         if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
         if (cmd._type === 'Query') return { Items: [meta, footer, news] }; // loadOrchestration (parent's own)
         if (cmd._type === 'Get') {
-          const tid = (cmd.input.Key as { task_id: string }).task_id;
+          const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string };
+          // Mode B getPendingPlan Get is keyed on the #pending-plan SK — no plan
+          // on this epic, so return no item (matches prod; a verdict-shaped
+          // comment like "ship it" then falls through to the A6 no-match path).
+          if (key.sub_issue_id === '#pending-plan') return {};
+          const tid = key.task_id;
           const pr = tid === 'task-footer' ? 193 : tid === 'task-news' ? 192 : null;
           return { Item: pr ? { pr_number: pr } : {} };
         }

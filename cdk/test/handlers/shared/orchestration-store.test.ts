@@ -337,6 +337,37 @@ describe('loadOrchestration — marker rows are not children (#247 UX.20)', () =
     const ids = snap!.children.map((c) => c.sub_issue_id).sort();
     expect(ids).toEqual(['orch_1__integration', 'uuid-A']); // ack# row excluded; integration kept
   });
+
+  test('paginates a multi-page Query so a large epic is NOT truncated to one 1MB page', async () => {
+    // A single Query returns at most 1MB; a large epic (many children + ack#
+    // markers) would otherwise silently drop children → mis-settle/strand. Two
+    // pages: the first returns the meta + child A with a LastEvaluatedKey, the
+    // second returns child B and no key. Both children must appear.
+    const ddb = {
+      send: jest.fn()
+        .mockResolvedValueOnce({
+          Items: [
+            { orchestration_id: 'orch_1', sub_issue_id: '#meta', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1', child_count: 2 },
+            { orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', depends_on: [], child_status: 'succeeded' },
+          ],
+          LastEvaluatedKey: { orchestration_id: 'orch_1', sub_issue_id: 'uuid-A' },
+        })
+        .mockResolvedValueOnce({
+          Items: [
+            { orchestration_id: 'orch_1', sub_issue_id: 'uuid-B', depends_on: ['uuid-A'], child_status: 'blocked' },
+          ],
+        }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(ddb.send).toHaveBeenCalledTimes(2); // followed LastEvaluatedKey
+    expect(snap).not.toBeNull();
+    expect(snap!.children.map((c) => c.sub_issue_id).sort()).toEqual(['uuid-A', 'uuid-B']);
+    // 2nd Query carried ExclusiveStartKey from the 1st page's LastEvaluatedKey.
+    const secondCall = ddb.send.mock.calls[1][0] as QueryCommand;
+    expect((secondCall.input as { ExclusiveStartKey?: unknown }).ExclusiveStartKey).toEqual({
+      orchestration_id: 'orch_1', sub_issue_id: 'uuid-A',
+    });
+  });
 });
 
 describe('findOrchestrationChildByBranch (#305 A6)', () => {

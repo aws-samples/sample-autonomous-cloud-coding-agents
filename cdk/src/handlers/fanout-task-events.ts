@@ -50,7 +50,7 @@ import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { renderMaturingReply } from './shared/iteration-reply';
-import { postIssueComment, replyToComment, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -1286,6 +1286,14 @@ async function replyToStandaloneTrigger(
   // append race on this one reply (live-caught ABCA-434). Carry an already-landed
   // `[preview]` link onto the freshly-rendered terminal body so they converge.
   await upsertThreadedReply(replyCtx, issueId, triggerCommentId, body, existingReplyId, { preservePreview: true });
+
+  // Swap the TRIGGER comment's 👀 → ✅ / 💬 / ❌ so the human's comment reads
+  // "done" at a glance, not just the threaded reply. The orchestration path does
+  // this in the reconciler (UX.21); the standalone path was missing it, leaving a
+  // stale 👀 on every plain-issue iteration forever. Best-effort + idempotent
+  // (the ack_replied_at claim above gates this to once; the swap re-converges).
+  const reaction = state === 'failed' ? EMOJI_FAILURE : (state === 'answered' ? EMOJI_NEEDS_INPUT : EMOJI_SUCCESS);
+  await swapCommentReaction(replyCtx, triggerCommentId, reaction);
 }
 
 /**

@@ -252,32 +252,63 @@ function edgeKey(blockerId: string, blockedId: string): string {
  * ``linear-feedback.ts``'s ``graphqlData`` — write-back failures are surfaced as
  * a resumable error by the caller, never thrown).
  */
+/** Max retry attempts on a throttle/transient (429 / 5xx) before giving up. */
+const MAX_RETRIES = 3;
+/** Base backoff (ms) when no Retry-After header is given; doubles per attempt. */
+const RETRY_BASE_MS = 500;
+/** Cap any single backoff (ms) so a hostile Retry-After can't stall the Lambda. */
+const RETRY_MAX_MS = 5000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export function linearGraphqlFn(accessToken: string): GraphqlFn {
   return async (query, variables) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const resp = await fetch(LINEAR_GRAPHQL_URL, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, variables }),
-        signal: controller.signal,
-      });
-      if (!resp.ok) {
-        logger.warn('Mode B write-back GraphQL non-2xx', { status: resp.status });
+    // Bounded retry on 429 / 5xx. A single transient throttle previously aborted
+    // the WHOLE write-back (N creates + edges) and dumped the user to manual
+    // re-approve; honoring Retry-After (capped) and backing off keeps a burst
+    // from breaking a multi-sub-issue plan. Non-retryable failures (4xx other
+    // than 429, GraphQL errors, parse/timeout) still return null immediately.
+    for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const resp = await fetch(LINEAR_GRAPHQL_URL, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, variables }),
+          signal: controller.signal,
+        });
+        if (!resp.ok) {
+          const retryable = resp.status === 429 || resp.status >= 500;
+          if (retryable && attempt < MAX_RETRIES) {
+            const retryAfter = Number(resp.headers.get('retry-after'));
+            const backoff = Number.isFinite(retryAfter) && retryAfter > 0
+              ? Math.min(retryAfter * 1000, RETRY_MAX_MS)
+              : Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
+            logger.warn('Mode B write-back throttled/transient — backing off', {
+              status: resp.status, attempt: attempt + 1, backoff_ms: backoff,
+            });
+            clearTimeout(timer);
+            await sleep(backoff);
+            continue;
+          }
+          logger.warn('Mode B write-back GraphQL non-2xx', { status: resp.status, attempt: attempt + 1 });
+          return null;
+        }
+        const body = (await resp.json()) as { data?: Record<string, unknown>; errors?: unknown };
+        if (body.errors) {
+          logger.warn('Mode B write-back GraphQL errors', { errors: body.errors });
+          return null;
+        }
+        return body.data ?? null;
+      } catch (err) {
+        logger.warn('Mode B write-back request failed', {
+          error: err instanceof Error ? err.message : String(err), attempt: attempt + 1,
+        });
         return null;
+      } finally {
+        clearTimeout(timer);
       }
-      const body = (await resp.json()) as { data?: Record<string, unknown>; errors?: unknown };
-      if (body.errors) {
-        logger.warn('Mode B write-back GraphQL errors', { errors: body.errors });
-        return null;
-      }
-      return body.data ?? null;
-    } catch (err) {
-      logger.warn('Mode B write-back request failed', { error: err instanceof Error ? err.message : String(err) });
-      return null;
-    } finally {
-      clearTimeout(timer);
     }
   };
 }
