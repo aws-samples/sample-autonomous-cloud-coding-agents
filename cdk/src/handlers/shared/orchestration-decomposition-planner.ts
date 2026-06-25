@@ -205,40 +205,58 @@ export async function assessDecomposition(
  * ONLY whether to decompose — it does NOT draft a breakdown (that priming is
  * exactly what biased the old single-call judge toward over-splitting).
  *
- * The prompt teaches ONE general discriminator — does each piece stand alone as
- * an independently shippable AND reviewable deliverable? — and lets the model
- * apply it. It deliberately does NOT enumerate specific feature shapes (that
- * over-fits to whatever case last failed and has to be re-patched per incident);
- * the principle alone separates "separate deliverables sharing a parent"
- * (decompose) from "one feature's internal parts / build-order" (one PR).
+ * Framed around the OBJECTIVE, not the artifact: accomplish the original task
+ * reliably (fewest errors), at reasonable cost, splitting only where splitting
+ * serves that goal. Right-sizing cuts both ways and the prompt says so —
+ *  - too big: one agent run loses coherence over a large multi-part task and is
+ *    likelier to fail (Anthropic "context rot"; METR task-length cliff);
+ *  - too small: extra units add coordination + integration overhead and errors
+ *    compound across steps (Cognition "Don't Build Multi-Agents"; p^n reliability).
+ * The structural rule that operationalizes it is the agile vertical-slice test
+ * (INVEST Independent + Valuable): split into units that each stand alone as a
+ * coherent piece of work; don't split one feature across technical layers (the
+ * horizontal-slice anti-pattern). A dependency ORDER between genuine units is
+ * normal (the executor runs them in order) and is NOT a reason to merge. Stated
+ * as principle — NO enumerated feature shapes (those over-fit to the last failure
+ * and need re-patching per incident).
  */
 export function buildAssessmentPrompt(input: PlannerInput): string {
   const description = input.description.trim() || '(no description provided)';
   return [
-    'You are a senior engineering lead triaging one software task for a fleet of autonomous',
-    'coding agents. Each agent works ONE sub-issue in an isolated clone and opens its OWN pull',
-    'request; a build/test gate must pass before any dependent sub-issue starts. So every extra',
-    'sub-issue is another full agent run, another PR to review, and a longer serial critical path.',
+    'You are a senior engineering lead planning how a fleet of autonomous coding agents should',
+    'tackle one software task. Each sub-issue you create is handled by ONE agent working in its',
+    'own clone; the executor runs sub-issues in dependency order, so a sub-issue that depends on',
+    'an earlier one is normal and fully supported.',
     '',
-    'Decide ONE thing: should this task be DECOMPOSED into multiple sub-issues (each its own PR),',
-    'or executed as ONE coherent pull request?',
+    'Your GOAL is to get the original task done as RELIABLY as possible — fewest errors — at',
+    'reasonable cost. Decompose ONLY when splitting the work serves that goal; never split for its',
+    'own sake.',
     '',
-    'Apply ONE test to each candidate piece: on its own, would it be an independently SHIPPABLE',
-    'AND independently REVIEWABLE change — something a reviewer could merge and a user could',
-    'benefit from without the other pieces also landing? Decompose ONLY into pieces that each pass',
-    'that test. If a piece would be a half-feature that cannot be reviewed or shipped on its own,',
-    'it is NOT a separate sub-issue.',
+    'Splitting helps or hurts depending on size, so right-size the work:',
+    '  • A task too large for one agent to hold coherently — many distinct parts in one run —',
+    '    tends to drift and fail; breaking it into focused units each an agent can do well makes',
+    '    the whole more reliable.',
+    '  • But every extra unit is another full agent run and another review, and a chain of units',
+    '    accumulates error and coordination overhead at each hand-off. Splitting work that was',
+    '    fine as one unit makes the result LESS reliable and more expensive, not more.',
     '',
-    'Distinguish two situations that look similar but are not:',
-    '  • SEPARATE deliverables that happen to share a parent goal — each independently useful and',
-    '    reviewable. These decompose.',
-    "  • ONE feature's internal parts or build-order — pieces that only make sense together (one",
-    '    needs another to function, or none is shippable until all land). However many files,',
-    '    layers, or sequential steps it spans, this is ONE pull request. Splitting it yields',
-    '    half-features no one can review or ship in isolation, multiplies cost, and lengthens the',
-    '    critical path for no gain.',
+    'Decide: decompose this task into multiple dependency-ordered sub-issues, or do it as ONE unit?',
     '',
-    'Most tasks are ONE PR. When you are unsure whether the pieces truly stand alone, prefer ONE task.',
+    'Decompose when the task genuinely contains two or more separable units of work that each',
+    'stand on their own — a coherent change an agent could implement and a reviewer could judge',
+    'in isolation, delivering its own identifiable piece of the goal. A broad request bundling',
+    'several such capabilities under one heading should be split, roughly one unit per capability.',
+    '',
+    'Keep it as ONE unit when the parts only make sense together — none coherent or useful on its',
+    'own. In particular, do NOT split a single feature across technical layers (its interface, its',
+    'logic, its stored state, its tests): a lone layer has no standalone value and forces error-',
+    'prone hand-offs, so one feature is one unit however many files or layers it touches.',
+    '',
+    'A dependency or build-order between parts is NOT by itself a reason to merge them — ordering',
+    'is handled for you, and tightly-sequenced capabilities can still be separate units. Merge',
+    'only when the parts lack standalone coherence, share mutable state, or must change in lockstep.',
+    '',
+    'If splitting would not clearly make the task more reliable to complete, do it as ONE unit.',
     '',
     'Respond with ONLY a JSON object (no prose, no markdown fences) of this exact shape:',
     '{ "decompose": boolean, "reasoning": "one or two sentences explaining the verdict" }',
@@ -276,7 +294,11 @@ export function buildDecomposerPrompt(input: PlannerInput): string {
     '',
     'Rules:',
     `- Propose at most ${input.maxSubIssues} sub-issues (fewer is better — only as many as the`,
-    '  work honestly has). Each sub-issue must be independently implementable + reviewable.',
+    '  work honestly has). Each sub-issue must be a VERTICAL SLICE: a self-contained unit of work',
+    '  an agent can implement on its own, delivering its own identifiable piece of the goal. Do NOT',
+    '  split along technical layers (interface / logic / stored state / tests) — a single layer in',
+    '  isolation has no standalone value and forces error-prone hand-offs; keep each feature whole',
+    '  and slice by capability instead.',
     '- Each sub-issue gets a short imperative title, a one-paragraph scope, and a size:',
     '  "S" (small, isolated), "M" (medium), or "L" (large/involved).',
     '- Express dependencies with "depends_on": a list of the ZERO-BASED INDICES (into your own',

@@ -65,7 +65,7 @@ const ASSESS_NO: AssessmentResult = { decompose: false, reasoning: 'one cohesive
 // Stage 1 — buildAssessmentPrompt / parseAssessment
 // ---------------------------------------------------------------------------
 
-describe('buildAssessmentPrompt — shippable-value test, decide-only, carries inputs', () => {
+describe('buildAssessmentPrompt — vertical-slice criterion, decide-only, carries inputs', () => {
   test('includes title, description, repo and asks ONLY for the decision', () => {
     const p = buildAssessmentPrompt(INPUT);
     expect(p).toContain('acme/web');
@@ -77,25 +77,39 @@ describe('buildAssessmentPrompt — shippable-value test, decide-only, carries i
     expect(p).not.toContain('"sub_issues"');
   });
 
-  test('discriminator is independently SHIPPABLE/REVIEWABLE value, stated as a general test', () => {
+  test('framed around the reliability/cost OBJECTIVE, not the artifact (no PR-counting)', () => {
     const p = buildAssessmentPrompt(INPUT);
-    expect(p).toMatch(/independently SHIPPABLE/i);
-    expect(p).toMatch(/independently REVIEWABLE/i);
-    expect(p).toMatch(/Most tasks are ONE PR/i);
+    // the goal is reliable completion at reasonable cost — the criterion, not "few PRs"
+    expect(p).toMatch(/as RELIABLY as possible/i);
+    expect(p).toMatch(/never split for its\s+own sake/i); // phrase wraps across prompt lines
+    // right-sizing is named in BOTH directions (too big drifts; too small adds overhead)
+    expect(p).toMatch(/too large for one agent to hold coherently/i);
+    expect(p).toMatch(/accumulates error and coordination overhead/i);
+    // the decision is about UNITS of work, not pull requests
+    expect(p).not.toMatch(/pull request/i);
+  });
+
+  test('operationalized by the vertical-slice rule (separable standalone units)', () => {
+    const p = buildAssessmentPrompt(INPUT);
+    expect(p).toMatch(/separable units of work that each\s+stand on their own/i);
+    expect(p).toMatch(/do NOT split a single feature across technical layers/i);
+  });
+
+  test('a dependency / build-order is NOT a reason to merge (the auth over-correction lesson)', () => {
+    const p = buildAssessmentPrompt(INPUT);
+    expect(p).toMatch(/dependency or build-order between parts is NOT by itself a reason to merge/i);
+    // merge only on the real triggers
+    expect(p).toMatch(/lack standalone coherence, share mutable state, or must change in lockstep/i);
   });
 
   test('teaches the principle, not enumerated feature shapes (no hard-coded examples)', () => {
     const p = buildAssessmentPrompt(INPUT);
-    // separates "separate deliverables sharing a parent" from "one feature's parts/build-order"
-    expect(p).toMatch(/internal parts or build-order/i);
-    expect(p).toMatch(/half-features no one can review or ship in isolation/i);
-    expect(p).toMatch(/prefer ONE task/i);
     // it must NOT bake in the specific cases that happened to fail — those over-fit
     // and have to be re-patched per incident (the no-hardcoded-checks lesson).
     expect(p).not.toMatch(/dark mode/i);
-    expect(p).not.toMatch(/ABCA-442/);
-    expect(p).not.toMatch(/schema/i);
-    expect(p).not.toMatch(/styling layer/i);
+    expect(p).not.toMatch(/ABCA-44/);
+    expect(p).not.toMatch(/OAuth/i);
+    expect(p).not.toMatch(/password.?reset/i);
   });
 
   test('is a pure function (same input → same prompt)', () => {
@@ -147,6 +161,12 @@ describe('buildDecomposerPrompt — produces the breakdown, does not re-litigate
     expect(p).toContain('"sub_issues"');
     expect(p).not.toContain('"decompose"'); // decision already made
     expect(p).toMatch(/already been made/i);
+  });
+
+  test('requires vertical slices and forbids splitting by technical layer', () => {
+    const p = buildDecomposerPrompt(INPUT);
+    expect(p).toMatch(/VERTICAL SLICE/i);
+    expect(p).toMatch(/do NOT\s+split along technical layers/i);
   });
 
   test('is a pure function', () => {
