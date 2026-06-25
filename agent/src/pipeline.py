@@ -1126,6 +1126,7 @@ def run_task(
             # (the change-made / back-compat side). Best-effort — a rev-parse
             # failure leaves it None, never flips the verdict.
             code_changed: bool | None = None
+            head_sha_after = ""
             if config.is_pr_workflow and setup.head_sha_before:
                 head_after_res = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
@@ -1136,7 +1137,8 @@ def run_task(
                     timeout=60,
                 )
                 if head_after_res.returncode == 0:
-                    code_changed = head_after_res.stdout.strip() != setup.head_sha_before
+                    head_sha_after = head_after_res.stdout.strip()
+                    code_changed = head_sha_after != setup.head_sha_before
             # The agent's final text — surfaced as the answer on a no-change
             # iteration so a question gets an actual reply.
             answer_text = (agent_result.result_text or "").strip()
@@ -1178,6 +1180,7 @@ def run_task(
                 # Only carry the answer text on a no-change iteration (where it
                 # becomes the reply); a normal edit's reply is the PR link.
                 answer_text=answer_text if code_changed is False else "",
+                head_sha=head_sha_after,
             )
 
             result_dict = result.model_dump()

@@ -346,7 +346,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           // link to that reply now (in place). Find the most-recent iteration
           // reply id for this issue and edit it; idempotent via the [preview]
           // marker so a webhook redelivery won't double-append.
-          const iter = await findIterationReplyId(linearIssue.issueId);
+          const iter = await findIterationReplyId(linearIssue.issueId, sha);
           if (iter) {
             // (1) Durably persist the screenshot onto the ITERATION task so the
             // terminal-settle renders the thumbnail from a strongly-consistent
@@ -399,10 +399,21 @@ export async function handler(event: ProcessorEvent): Promise<void> {
  * preview to that reply, and the task id to persist the screenshot DURABLY onto
  * the iteration task — so the terminal-settle renders the preview from a
  * strongly-consistent DDB read rather than racing the (eventually-consistent)
- * Linear comment edit (the ABCA-437/438 clobber). Queries LinearIssueIndex
- * newest-first; returns the first task carrying a reply id. Null when none.
+ * Linear comment edit (the ABCA-437/438 clobber).
+ *
+ * Attribution: this deploy's commit ``sha`` is matched to the iteration task that
+ * PUSHED it (``head_sha``), so when two iterations overlap on one PR the preview
+ * lands on the RIGHT reply — not just the newest. ``head_sha`` is a top-level
+ * field (NOT in the LinearIssueIndex INCLUDE projection, which can't be changed
+ * in place), so we GetItem ``head_sha`` per reply-bearing candidate (bounded by
+ * iterations-per-issue, newest-first so the common single-iteration case is one
+ * read). Falls back to the newest reply-bearing task when no head_sha matches
+ * (pre-fix tasks that never stored it, or a non-PR deploy). Null when none.
  */
-async function findIterationReplyId(linearIssueId: string): Promise<{ replyId: string; taskId: string } | null> {
+async function findIterationReplyId(
+  linearIssueId: string,
+  deploySha?: string,
+): Promise<{ replyId: string; taskId: string } | null> {
   if (!TASK_TABLE) return null;
   try {
     const res = await ddb.send(new QueryCommand({
@@ -412,13 +423,25 @@ async function findIterationReplyId(linearIssueId: string): Promise<{ replyId: s
       ExpressionAttributeValues: { ':iid': linearIssueId },
       ScanIndexForward: false, // newest first (SK = created_at)
     }));
-    for (const item of (res.Items ?? []) as Array<{ task_id?: string; channel_metadata?: { iteration_reply_comment_id?: string } }>) {
-      const replyId = item.channel_metadata?.iteration_reply_comment_id;
-      if (typeof replyId === 'string' && replyId && typeof item.task_id === 'string') {
-        return { replyId, taskId: item.task_id };
+    const candidates = ((res.Items ?? []) as Array<{ task_id?: string; channel_metadata?: { iteration_reply_comment_id?: string } }>)
+      .map((item) => ({ taskId: item.task_id, replyId: item.channel_metadata?.iteration_reply_comment_id }))
+      .filter((c): c is { taskId: string; replyId: string } =>
+        typeof c.taskId === 'string' && typeof c.replyId === 'string' && c.replyId.length > 0);
+    if (candidates.length === 0) return null;
+
+    // Prefer the task whose pushed head_sha matches this deploy's commit (correct
+    // attribution under overlapping iterations). Walk newest-first; GetItem the
+    // head_sha per candidate. Stop at the first match.
+    if (deploySha) {
+      for (const c of candidates) {
+        const got = await ddb.send(new GetCommand({
+          TableName: TASK_TABLE, Key: { task_id: c.taskId }, ProjectionExpression: 'head_sha',
+        }));
+        if (got.Item?.head_sha === deploySha) return { replyId: c.replyId, taskId: c.taskId };
       }
     }
-    return null;
+    // No SHA match (pre-fix task / non-PR deploy) → newest reply-bearing task.
+    return { replyId: candidates[0].replyId, taskId: candidates[0].taskId };
   } catch (err) {
     logger.warn('findIterationReplyId query failed (non-fatal)', {
       linear_issue_id: linearIssueId, error: err instanceof Error ? err.message : String(err),

@@ -143,6 +143,13 @@ export interface TaskRecord {
   readonly code_changed?: boolean;
   /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
   readonly answer_text?: string;
+  /**
+   * The branch HEAD sha this iteration pushed. The screenshot webhook matches a
+   * deploy's commit sha → the iteration task that pushed it, so the preview
+   * thumbnail lands on the right reply when iterations overlap on one PR. Absent
+   * on pre-fix / non-PR tasks → the webhook falls back to the newest reply.
+   */
+  readonly head_sha?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
   /**

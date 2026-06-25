@@ -413,3 +413,9 @@ class TaskResult(BaseModel):
     # Distinct from result_text's repo-less-artifact role; populated only for
     # the no-op-iteration reply path. Empty otherwise.
     answer_text: str = ""
+    # The branch HEAD sha AFTER this run pushed (PR workflows). The screenshot
+    # webhook matches a deploy's commit sha → the iteration task that pushed it,
+    # so the preview thumbnail lands on the RIGHT iteration's reply when two
+    # iterations on one PR overlap (else "newest task" mis-attributes it). Empty
+    # when unknown (rev-parse failed / non-PR run) → webhook falls back to newest.
+    head_sha: str = ""

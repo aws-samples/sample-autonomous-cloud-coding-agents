@@ -686,13 +686,21 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
       : `to include ${changedLabel}'s change`;
     const updating: Record<string, string> = {};
     for (const id of updatingIds) updating[id] = reason;
-    const prUrls = await resolveChildPrUrls(snapshot.children);
-    const integration = snapshot.children.find((c) => isIntegrationNode(c.sub_issue_id));
+    // Render from a FRESH read, not the pre-spawn snapshot: spawnRestackTask just
+    // flipped the restacked rows to `released` and stamped branches, so the
+    // snapshot is stale. The forward-gating path already re-loads after writes;
+    // mirror that here so the panel reflects current child state (else a stale
+    // row status shows for one event window). Fall back to the snapshot on a
+    // read miss. (The `updating` overlay is driven by updatingIds, not statuses.)
+    const cascadeFresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+    const panelChildren = cascadeFresh?.children ?? snapshot.children;
+    const prUrls = await resolveChildPrUrls(panelChildren);
+    const integration = panelChildren.find((c) => isIntegrationNode(c.sub_issue_id));
     await upsertEpicPanel({
       ctx: feedbackCtx,
       parentLinearIssueId: meta.parent_linear_issue_id,
       ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
-      children: snapshot.children,
+      children: panelChildren,
       prUrls,
       updating,
       ...(integration && prUrls[integration.sub_issue_id] !== undefined

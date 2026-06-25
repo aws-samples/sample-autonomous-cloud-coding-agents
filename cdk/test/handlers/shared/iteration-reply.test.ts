@@ -147,7 +147,10 @@ describe('renderIterationSuccessReply — no change (a question)', () => {
   test('a long answer is truncated with an ellipsis', () => {
     const long = 'x'.repeat(5000);
     const r = renderIterationSuccessReply({ codeChanged: false, answerText: long });
-    expect(r.length).toBeLessThan(1700);
+    // Cap is MAX_ANSWER_CHARS=2000 (aligned with the agent's persist cap so the
+    // renderer never drops chars the agent already bounded); '💬 ' prefix + ellipsis.
+    expect(r.length).toBeLessThanOrEqual(2003);
+    expect(r.length).toBeGreaterThan(1700);
     expect(r.endsWith('…')).toBe(true);
   });
 

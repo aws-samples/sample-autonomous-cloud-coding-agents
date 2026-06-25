@@ -54,13 +54,14 @@ const REQUEST_TIMEOUT_MS = 8000;
 const RELATION_TYPE_BLOCKS = 'blocks';
 const CONNECTION_PAGE_SIZE = 100;
 
-/** Fetch the parent's team id (issueCreate needs a team) + existing children. */
+/** Fetch the parent's team id (issueCreate needs a team) + first page of children. */
 const PARENT_STATE_QUERY = `
 query ParentState($issueId: String!, $first: Int!) {
   issue(id: $issueId) {
     id
     team { id }
     children(first: $first) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         id
         identifier
@@ -73,6 +74,57 @@ query ParentState($issueId: String!, $first: Int!) {
   }
 }
 `.trim();
+
+/** Subsequent pages of the parent's children (cursor-paginated). */
+const PARENT_CHILDREN_PAGE_QUERY = `
+query ParentChildrenPage($issueId: String!, $first: Int!, $after: String!) {
+  issue(id: $issueId) {
+    children(first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        identifier
+        title
+        inverseRelations(first: $first) {
+          nodes { type issue { id } }
+        }
+      }
+    }
+  }
+}
+`.trim();
+
+interface ChildrenConnection {
+  readonly pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+  readonly nodes?: RawChild[];
+}
+
+/**
+ * Fetch ALL of the parent's existing children, following ``pageInfo`` cursors.
+ * The reuse-by-title dedup (and edge-already-exists check) must see every child,
+ * not just the first 100 — otherwise a resumed write-back on a parent with 100+
+ * children re-creates duplicates. ``firstConnection`` is the page already fetched
+ * by PARENT_STATE_QUERY (so we don't re-query it). Stops on any page failure
+ * (returns what it has — best-effort, mirrors the module's never-throw contract).
+ */
+async function fetchAllChildren(
+  graphql: GraphqlFn,
+  parentIssueId: string,
+  firstConnection: ChildrenConnection | undefined,
+): Promise<RawChild[]> {
+  const all: RawChild[] = [...(firstConnection?.nodes ?? [])];
+  let cursor = firstConnection?.pageInfo?.hasNextPage ? firstConnection.pageInfo.endCursor : undefined;
+  while (cursor) {
+    const data = await graphql(PARENT_CHILDREN_PAGE_QUERY, {
+      issueId: parentIssueId, first: CONNECTION_PAGE_SIZE, after: cursor,
+    });
+    const conn = (data?.issue as { children?: ChildrenConnection } | undefined)?.children;
+    if (!conn) break; // page failure → stop with what we have (never throw)
+    all.push(...(conn.nodes ?? []));
+    cursor = conn.pageInfo?.hasNextPage ? conn.pageInfo.endCursor ?? undefined : undefined;
+  }
+  return all;
+}
 
 const ISSUE_CREATE_MUTATION = `
 mutation CreateSubIssue($teamId: String!, $parentId: String!, $title: String!, $description: String!) {
@@ -137,14 +189,15 @@ export async function writeBackPlan(params: {
   // ── 1. Read parent team + existing children (for idempotent reuse) ──
   const stateData = await graphql(PARENT_STATE_QUERY, { issueId: parentIssueId, first: CONNECTION_PAGE_SIZE });
   const issue = stateData?.issue as
-    | { team?: { id?: string }; children?: { nodes?: RawChild[] } }
+    | { team?: { id?: string }; children?: ChildrenConnection }
     | undefined
     | null;
   const teamId = issue?.team?.id;
   if (!teamId) {
     return { kind: 'error', message: 'Could not resolve the parent issue\'s team for sub-issue creation.' };
   }
-  const existingChildren = issue?.children?.nodes ?? [];
+  // Follow pagination so reuse-by-title sees ALL children (not just first 100).
+  const existingChildren = await fetchAllChildren(graphql, parentIssueId, issue?.children);
   // Title → existing child (for create-skip). Exact match; planner titles are
   // distinct within a plan. First occurrence wins if Linear has dup titles.
   const byTitle = new Map<string, RawChild>();
