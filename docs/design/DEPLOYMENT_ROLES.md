@@ -117,6 +117,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
         "iam:DeleteRole",
         "iam:GetRole",
         "iam:UpdateRole",
+        "iam:UpdateAssumeRolePolicy",
         "iam:TagRole",
         "iam:UntagRole",
         "iam:ListRoleTags",
