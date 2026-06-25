@@ -144,9 +144,8 @@ describe('runDecompositionProposal — auto (:auto)', () => {
 });
 
 describe('runDecompositionProposal — judge + caps gates', () => {
-  test(':auto + one-shot verdict → posts a note, single_task (caller makes one task, no decomposer/write-back)', async () => {
-    // On :auto (no human) the assessor's one-shot verdict stands. Only ONE model
-    // call (the assessor) — the decomposer is never reached.
+  test(':auto + one-cohesive-unit verdict → single_task, one model call, no write-back', async () => {
+    // The assessor's verdict stands; the decomposer is never reached.
     const invokeModel = twoStageInvoke(false);
     const e = effects({ invokeModel });
     const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: true, effects: e });
@@ -155,18 +154,21 @@ describe('runDecompositionProposal — judge + caps gates', () => {
     expect(e.putPendingPlan).not.toHaveBeenCalled();
   });
 
-  test('DJ-2: :decompose + one-shot verdict → STILL proposes a plan with a one-shot caveat (no silent veto)', async () => {
-    // The human explicitly applied :decompose (autoRun:false → forced). Even
-    // though the assessor leaned one-shot, we draft + propose a breakdown and
-    // surface the assessor's rationale as an informational caveat.
-    const e = effects({ invokeModel: twoStageInvoke(false) });
+  test(':decompose + one-cohesive-unit verdict → single_task with reasoning (NO forced plan)', async () => {
+    // The agent's assessment drives for BOTH labels. On an explicit :decompose the
+    // verdict still stands — we post the reasoning and run one task; we do NOT
+    // manufacture a breakdown the assessor judged incoherent (that could only be
+    // the layer-split anti-pattern). The label affects only the approval gate.
+    const invokeModel = twoStageInvoke(false);
+    const e = effects({ invokeModel });
     const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'handled', reason: 'awaiting_approval' });
-    expect(e.putPendingPlan).toHaveBeenCalledTimes(1);
-    const proposalBody = (e.postComment as jest.Mock).mock.calls[0][1];
-    expect(proposalBody).toContain('@bgagent approve'); // still approvable
-    expect(proposalBody).toMatch(/lean toward running this as \*\*one task\*\*/i); // the caveat
-    expect(proposalBody).toContain('cohesive'); // the assessor's reasoning
+    expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
+    expect(invokeModel).toHaveBeenCalledTimes(1); // assessor only — decomposer never forced
+    expect(e.putPendingPlan).not.toHaveBeenCalled();
+    // posts the single-task note explaining WHY it wasn't split (the reasoning)
+    const note = (e.postComment as jest.Mock).mock.calls[0][1];
+    expect(note).toMatch(/single cohesive change/i);
+    expect(note).toContain('cohesive'); // the assessor's rationale
   });
 
   test('planner error → note + single_task fallback', async () => {
