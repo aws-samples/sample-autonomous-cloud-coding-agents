@@ -77,22 +77,25 @@ describe('buildAssessmentPrompt — shippable-value test, decide-only, carries i
     expect(p).not.toContain('"sub_issues"');
   });
 
-  test('discriminator is independently SHIPPABLE/REVIEWABLE value, not "has parts"', () => {
+  test('discriminator is independently SHIPPABLE/REVIEWABLE value, stated as a general test', () => {
     const p = buildAssessmentPrompt(INPUT);
-    expect(p).toMatch(/independently SHIPPABLE and independently REVIEWABLE/i);
+    expect(p).toMatch(/independently SHIPPABLE/i);
+    expect(p).toMatch(/independently REVIEWABLE/i);
     expect(p).toMatch(/Most tasks are ONE PR/i);
   });
 
-  test('explicitly rejects splitting on internal parts / build-order (the ABCA-442 lesson)', () => {
+  test('teaches the principle, not enumerated feature shapes (no hard-coded examples)', () => {
     const p = buildAssessmentPrompt(INPUT);
-    // does NOT decompose merely for multiple parts or an internal sequence
-    expect(p).toMatch(/Do NOT decompose merely because a single feature has multiple PARTS/i);
-    // the dark-mode-style layering counter-example is present (styling layer + component + hook)
-    expect(p).toMatch(/persistence hook are\s+NOT separate deliverables/i);
-    // schema→API→UI for ONE feature is called out as one PR, not a decompose trigger
-    expect(p).toMatch(/likewise ONE PR/i);
-    // tie-breaker leans to one task
+    // separates "separate deliverables sharing a parent" from "one feature's parts/build-order"
+    expect(p).toMatch(/internal parts or build-order/i);
+    expect(p).toMatch(/half-features no one can review or ship in isolation/i);
     expect(p).toMatch(/prefer ONE task/i);
+    // it must NOT bake in the specific cases that happened to fail — those over-fit
+    // and have to be re-patched per incident (the no-hardcoded-checks lesson).
+    expect(p).not.toMatch(/dark mode/i);
+    expect(p).not.toMatch(/ABCA-442/);
+    expect(p).not.toMatch(/schema/i);
+    expect(p).not.toMatch(/styling layer/i);
   });
 
   test('is a pure function (same input → same prompt)', () => {
