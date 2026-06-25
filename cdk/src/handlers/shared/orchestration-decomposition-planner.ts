@@ -205,12 +205,12 @@ export async function assessDecomposition(
  * ONLY whether to decompose — it does NOT draft a breakdown (that priming is
  * exactly what biased the old single-call judge toward over-splitting).
  *
- * THE DISCRIMINATOR is independently-shippable value, NOT "has multiple parts"
- * (almost every feature does) and NOT internal build-order (live-caught on
- * ABCA-442: "dark mode toggle" was wrongly split into CSS-layer → component →
- * persistence-hook, three useless-apart PRs for one cohesive feature). Decompose
- * only when each piece is its own independently shippable + reviewable unit;
- * otherwise it's one PR even if it touches several files/layers in sequence.
+ * The prompt teaches ONE general discriminator — does each piece stand alone as
+ * an independently shippable AND reviewable deliverable? — and lets the model
+ * apply it. It deliberately does NOT enumerate specific feature shapes (that
+ * over-fits to whatever case last failed and has to be re-patched per incident);
+ * the principle alone separates "separate deliverables sharing a parent"
+ * (decompose) from "one feature's internal parts / build-order" (one PR).
  */
 export function buildAssessmentPrompt(input: PlannerInput): string {
   const description = input.description.trim() || '(no description provided)';
@@ -223,23 +223,22 @@ export function buildAssessmentPrompt(input: PlannerInput): string {
     'Decide ONE thing: should this task be DECOMPOSED into multiple sub-issues (each its own PR),',
     'or executed as ONE coherent pull request?',
     '',
-    'THE TEST — would each piece be an independently SHIPPABLE and independently REVIEWABLE change',
-    'on its own? Decompose ONLY when the answer is genuinely yes. Most tasks are ONE PR.',
+    'Apply ONE test to each candidate piece: on its own, would it be an independently SHIPPABLE',
+    'AND independently REVIEWABLE change — something a reviewer could merge and a user could',
+    'benefit from without the other pieces also landing? Decompose ONLY into pieces that each pass',
+    'that test. If a piece would be a half-feature that cannot be reviewed or shipped on its own,',
+    'it is NOT a separate sub-issue.',
     '',
-    'Decompose when the task bundles SEPARATE deliverables that each stand alone — e.g.',
-    '"add authentication" = OAuth login, password reset, and role-based access control (each ships',
-    'and is reviewed on its own); "build checkout" = cart, payment, order history, receipts. These',
-    'are distinct features that happen to share a parent, not one feature.',
+    'Distinguish two situations that look similar but are not:',
+    '  • SEPARATE deliverables that happen to share a parent goal — each independently useful and',
+    '    reviewable. These decompose.',
+    "  • ONE feature's internal parts or build-order — pieces that only make sense together (one",
+    '    needs another to function, or none is shippable until all land). However many files,',
+    '    layers, or sequential steps it spans, this is ONE pull request. Splitting it yields',
+    '    half-features no one can review or ship in isolation, multiplies cost, and lengthens the',
+    '    critical path for no gain.',
     '',
-    'Do NOT decompose merely because a single feature has multiple PARTS or an internal build',
-    'order. One cohesive feature is ONE task even when it spans several files or layers that must',
-    'be built in sequence. A styling layer + the component that uses it + a persistence hook are',
-    'NOT separate deliverables — none ships or reviews meaningfully without the others, so that is',
-    'ONE pull request. "schema → API that uses it → UI that calls the API" for a single feature is',
-    'likewise ONE PR. Splitting these produces half-features no one can review or ship in isolation,',
-    'triples the cost, and lengthens the critical path for no gain.',
-    '',
-    'When you are unsure whether the parts truly stand alone, prefer ONE task.',
+    'Most tasks are ONE PR. When you are unsure whether the pieces truly stand alone, prefer ONE task.',
     '',
     'Respond with ONLY a JSON object (no prose, no markdown fences) of this exact shape:',
     '{ "decompose": boolean, "reasoning": "one or two sentences explaining the verdict" }',
