@@ -176,30 +176,24 @@ async function handleAppMention(
   // For natural language mentions like "@Shoof fix the bug in org/repo#42",
   // extract the repo pattern and reorder so submit gets "org/repo#42 fix the bug".
   // The submit handler expects: submit <repo> <description...>
+  //
+  // When no repo is present we still forward the mention (rather than erroring
+  // here): the processor falls back to the channel's onboarded default repo
+  // (`bgagent slack onboard-channel`), and only replies with guidance if no
+  // default exists. Keeping that decision in one place (the processor) avoids
+  // duplicating the channel-mapping lookup in the events handler.
   const repoPattern = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/;
   const repoMatch = text.match(repoPattern);
-  if (!repoMatch) {
-    // No repo found — reply with a helpful error instead of a broken submit.
-    const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
-    if (botToken) {
-      const mentionTs = threadTs ?? messageTs;
-      // Swap :eyes: to :x: on the mention
-      if (mentionTs) {
-        await slackFetch(botToken, 'reactions.remove', { channel: channelId, timestamp: mentionTs, name: 'eyes' });
-        await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: mentionTs, name: 'x' });
-      }
-      await slackFetch(botToken, 'chat.postMessage', {
-        channel: channelId,
-        thread_ts: mentionTs,
-        text: ':x: Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`',
-      });
-    }
-    return;
+  let commandText: string;
+  if (repoMatch) {
+    const repo = repoMatch[0];
+    const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
+    commandText = `submit ${repo} ${description}`.trim();
+  } else {
+    // No repo token — forward the whole text; the processor treats it as the
+    // task description against the channel default repo (or replies with help).
+    commandText = `submit ${text}`;
   }
-
-  const repo = repoMatch[0];
-  const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
-  const commandText = `submit ${repo} ${description}`;
 
   // Extract file references from the Slack event (if any attached)
   const rawFiles = Array.isArray(event.files) ? event.files as Array<Record<string, unknown>> : [];
