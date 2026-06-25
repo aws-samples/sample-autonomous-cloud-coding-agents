@@ -240,4 +240,61 @@ describe('linearGraphqlFn — production transport', () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('aborted')) as never;
     expect(await linearGraphqlFn('t')('q', {})).toBeNull();
   });
+
+  test('429 → retries with backoff, then succeeds (a throttle no longer aborts the write-back)', async () => {
+    jest.useFakeTimers();
+    try {
+      const headers = { get: (h: string) => (h.toLowerCase() === 'retry-after' ? null : null) };
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce({ ok: false, status: 429, headers })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { ok: 1 } }) });
+      global.fetch = fetchMock as never;
+      const p = linearGraphqlFn('t')('q', {});
+      await jest.runAllTimersAsync();
+      expect(await p).toEqual({ ok: 1 });
+      expect(fetchMock).toHaveBeenCalledTimes(2); // retried once
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('persistent 429 → null after MAX_RETRIES (bounded, does not loop forever)', async () => {
+    jest.useFakeTimers();
+    try {
+      const headers = { get: () => null };
+      const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 429, headers });
+      global.fetch = fetchMock as never;
+      const p = linearGraphqlFn('t')('q', {});
+      await jest.runAllTimersAsync();
+      expect(await p).toBeNull();
+      // initial attempt + 3 retries = 4 total
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('honors Retry-After header (capped)', async () => {
+    jest.useFakeTimers();
+    try {
+      const headers = { get: (h: string) => (h.toLowerCase() === 'retry-after' ? '2' : null) };
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce({ ok: false, status: 503, headers })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { ok: 1 } }) });
+      global.fetch = fetchMock as never;
+      const p = linearGraphqlFn('t')('q', {});
+      await jest.runAllTimersAsync();
+      expect(await p).toEqual({ ok: 1 });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a non-retryable 4xx (403) does NOT retry', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 403, headers: { get: () => null } });
+    global.fetch = fetchMock as never;
+    expect(await linearGraphqlFn('t')('q', {})).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no retry
+  });
 });

@@ -555,22 +555,33 @@ export interface OrchestrationSnapshot {
 }
 
 /**
- * Load every row for an orchestration (meta + children) in one Query.
- * Returns null when the orchestration id has no rows (e.g. TTL-reaped).
- * The reconciler calls this after resolving a terminal child's
- * orchestration via the ChildTaskIndex GSI.
+ * Load every row for an orchestration (meta + children). Returns null when the
+ * orchestration id has no rows (e.g. TTL-reaped). The reconciler calls this after
+ * resolving a terminal child's orchestration via the ChildTaskIndex GSI.
+ *
+ * Paginates: a DynamoDB Query returns at most one 1MB page, so a large epic
+ * (many children + accumulated ``ack#`` marker rows) would otherwise silently
+ * truncate — dropping children from the completion check / panel and stranding
+ * the epic. Follows ``LastEvaluatedKey`` to read all rows (mirrors
+ * ``findOrchestrationIds``'s Scan pagination).
  */
 export async function loadOrchestration(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   orchestrationId: string,
 ): Promise<OrchestrationSnapshot | null> {
-  const res = await ddb.send(new QueryCommand({
-    TableName: tableName,
-    KeyConditionExpression: 'orchestration_id = :oid',
-    ExpressionAttributeValues: { ':oid': orchestrationId },
-  }));
-  const items = (res.Items ?? []) as Array<Record<string, unknown>>;
+  const items: Array<Record<string, unknown>> = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const res: import('@aws-sdk/lib-dynamodb').QueryCommandOutput = await ddb.send(new QueryCommand({
+      TableName: tableName,
+      KeyConditionExpression: 'orchestration_id = :oid',
+      ExpressionAttributeValues: { ':oid': orchestrationId },
+      ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+    }));
+    items.push(...((res.Items ?? []) as Array<Record<string, unknown>>));
+    exclusiveStartKey = res.LastEvaluatedKey;
+  } while (exclusiveStartKey);
   if (items.length === 0) return null;
 
   const metaItem = items.find((i) => i.sub_issue_id === PARENT_META_SK);

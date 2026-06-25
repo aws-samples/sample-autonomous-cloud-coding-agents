@@ -122,21 +122,69 @@ export function buildIterationInstruction(trigger: CommentTrigger): string {
 export type PlanVerdict = 'approve' | 'reject' | 'none';
 
 /**
+ * Natural ways a reviewer signals "go ahead" / "don't" on a pending plan. Real
+ * people don't type the exact keyword — a strict ``approve``-only parser silently
+ * swallowed "lgtm", "yes go ahead", "👍", "looks good" (live-confirmed). These
+ * cover the common affirmations/negations; ``reject`` is checked first so a
+ * negation that also contains an affirmative word ("don't approve") reads as
+ * reject. Multi-word phrases are matched as phrases; single tokens as whole words.
+ */
+const APPROVE_PHRASES = [
+  'approve', 'approved', 'approves', 'lgtm', 'sgtm', 'yes', 'yep', 'yeah', 'yup',
+  'ok', 'okay', 'sure', 'proceed', 'accept', 'accepted', 'confirm', 'confirmed',
+  'ship it', 'shipit', 'do it', 'go ahead', 'go for it', 'sounds good',
+  'looks good', 'looks great', 'send it', '+1',
+] as const;
+const REJECT_PHRASES = [
+  'reject', 'rejected', 'rejects', 'no', 'nope', 'nah', 'cancel', 'cancelled',
+  'canceled', 'stop', 'discard', 'abort', "don't", 'do not', 'dont', '-1',
+] as const;
+/** Emoji affirmations/negations — matched by inclusion (no word boundaries). */
+const APPROVE_EMOJI = ['👍', '✅', '🚀'];
+const REJECT_EMOJI = ['👎', '🛑', '❌'];
+
+/**
+ * A comment with at most this many words is read as a verdict if it contains ANY
+ * approve/reject phrase; a longer comment only counts when its FIRST word is a
+ * verdict word — so a genuine edit request ("also approve the dialog copy and …")
+ * isn't hijacked as approval.
+ */
+const MAX_VERDICT_WORDS = 6;
+
+/** Word/phrase boundary match: the phrase appears as whole words in ``text``. */
+function hasPhrase(text: string, phrase: string): boolean {
+  // Escape regex metachars (e.g. "+1", "don't"); match on non-word boundaries so
+  // "approve" doesn't fire on "approval" and "no" doesn't fire on "notify".
+  const esc = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${esc}([^a-z0-9]|$)`, 'i').test(text);
+}
+
+/**
  * Classify an already-parsed comment instruction as a plan ``approve``/``reject``
- * verdict. Strict: the instruction must be (essentially) JUST the keyword, so a
- * sentence that merely contains the word "approve" inside a longer iteration
- * request ("approve the dialog copy and …") is NOT a verdict — it's work.
- *
- * Accepts a leading keyword optionally followed by light punctuation/filler
- * ("approve", "approve.", "approve this", "reject — too many"), matched
- * case-insensitively. ``reject`` is checked first so "reject" never reads as a
- * fuzzy "approve".
+ * verdict. Only consulted when a pending plan exists on the issue, so we can read
+ * natural affirmations/negations liberally — BUT we must not hijack a genuine
+ * edit request. Rule: a SHORT comment (≤6 words) is classified by any
+ * approve/reject phrase it contains; a LONGER comment only counts if its FIRST
+ * word is a verdict word (so "also approve the dialog copy and …" stays work).
+ * ``reject`` always wins over ``approve`` when both appear.
  */
 export function parsePlanVerdict(instruction: string): PlanVerdict {
-  const text = instruction.trim().toLowerCase();
+  // Normalize: drop markdown emphasis/backticks, lowercase, collapse whitespace.
+  const text = instruction.replace(/[*_`>]/g, ' ').trim().toLowerCase().replace(/\s+/g, ' ');
   if (!text) return 'none';
-  const firstWord = text.split(/[\s.,!—-]+/)[0];
-  if (firstWord === 'reject' || firstWord === 'rejected') return 'reject';
-  if (firstWord === 'approve' || firstWord === 'approved') return 'approve';
+
+  const wordCount = text.split(' ').length;
+  const firstWord = text.split(/[\s.,!?—–-]+/)[0];
+  const short = wordCount <= MAX_VERDICT_WORDS;
+
+  // reject precedence
+  if (REJECT_EMOJI.some((e) => instruction.includes(e))) return 'reject';
+  if (REJECT_PHRASES.includes(firstWord as (typeof REJECT_PHRASES)[number])) return 'reject';
+  if (short && REJECT_PHRASES.some((p) => hasPhrase(text, p))) return 'reject';
+
+  if (APPROVE_EMOJI.some((e) => instruction.includes(e))) return 'approve';
+  if (APPROVE_PHRASES.includes(firstWord as (typeof APPROVE_PHRASES)[number])) return 'approve';
+  if (short && APPROVE_PHRASES.some((p) => hasPhrase(text, p))) return 'approve';
+
   return 'none';
 }

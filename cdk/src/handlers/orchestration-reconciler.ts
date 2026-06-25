@@ -68,6 +68,7 @@ import {
   setStatusCommentId,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
+import { encodeMarkdownUrl } from './shared/screenshot-url';
 import type { ChannelSource } from './shared/types';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
@@ -325,6 +326,39 @@ async function resolveCombinedScreenshotUrl(
   }
 }
 
+/**
+ * iteration-UX: strongly-consistent re-read of the iteration task's screenshot +
+ * deploy URL, taken right before the settle renders. Mirrors the fanout
+ * (standalone) path's ``reloadScreenshotFields``: the screenshot webhook persists
+ * ``screenshot_url`` onto this task durably but AFTER the deploy, so a non-
+ * consistent read (or relying only on the comment-append convergence) can miss
+ * it and the terminal-settle re-render then clobbers the preview (ABCA-438 class,
+ * left unfixed on the orchestration path). ConsistentRead beats the lag. Returns
+ * nulls on any failure (best-effort). Caller renders the thumbnail when present.
+ */
+async function reloadIterationScreenshot(taskId?: string): Promise<{ screenshotUrl: string | null; deployUrl: string | null }> {
+  if (!taskId) return { screenshotUrl: null, deployUrl: null };
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      ProjectionExpression: 'screenshot_url, screenshot_preview_url',
+      ConsistentRead: true,
+    }));
+    const s = res.Item?.screenshot_url;
+    const d = res.Item?.screenshot_preview_url;
+    return {
+      screenshotUrl: typeof s === 'string' && s.length > 0 ? s : null,
+      deployUrl: typeof d === 'string' && d.length > 0 ? d : null,
+    };
+  } catch (err) {
+    logger.warn('Iteration screenshot re-read failed (non-fatal)', {
+      task_id: taskId, error: err instanceof Error ? err.message : String(err),
+    });
+    return { screenshotUrl: null, deployUrl: null };
+  }
+}
+
 /** Apply one terminal child's reconcile plan. */
 async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
@@ -403,7 +437,16 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     freshChildren.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
   );
   const releasableRows = freshChildren
-    .filter((c) => c.child_status === 'blocked' && c.depends_on.every((d) => succeeded.has(d)))
+    .filter((c) =>
+      // newly-unblocked: all predecessors now succeeded
+      (c.child_status === 'blocked' && c.depends_on.every((d) => succeeded.has(d)))
+      // OR throttle-deferred: a prior pass (#331) left this child `ready` but
+      // un-started (no child_task_id) because the concurrency budget was full.
+      // Re-pick it here so ANY sibling completion drains the backlog as slots
+      // free, instead of it waiting up to ~10min for the #303 sweep. Roots have
+      // no predecessors so depends_on.every(...) is vacuously true. Safe against
+      // double-release: releaseReadyChildren's flip is conditional (ready→released).
+      || (c.child_status === 'ready' && !c.child_task_id && c.depends_on.every((d) => succeeded.has(d))))
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
   if (releasableRows.length > 0) {
@@ -834,6 +877,12 @@ async function replyToIterationComment(
   const prNumber = await resolvePrNumber(evt.taskId);
   const prUrl = await resolvePrUrl(evt.taskId);
   const runningTotalUsd = await sumIterationCostForIssue(changedSubIssueId, evt.taskId, evt.costUsd);
+  // iteration-UX: strongly-consistent re-read of this iteration's screenshot so
+  // the settle renders the preview thumbnail itself (race-free against the
+  // screenshot webhook's append), matching the fanout/standalone path. Only an
+  // 'updated' (real edit) state folds the thumbnail in — a question didn't change UI.
+  const isUpdated = !isNoChangeIteration(evt.codeChanged);
+  const shot = isUpdated ? await reloadIterationScreenshot(evt.taskId) : { screenshotUrl: null, deployUrl: null };
   const body = succeeded
     ? renderMaturingReply({
       state: isNoChangeIteration(evt.codeChanged) ? 'answered' : 'updated',
@@ -843,6 +892,8 @@ async function replyToIterationComment(
       ...(evt.costUsd !== undefined && { costUsd: evt.costUsd }),
       ...(evt.durationS !== undefined && { durationS: evt.durationS }),
       ...(runningTotalUsd !== null && { runningTotalUsd }),
+      ...(shot.screenshotUrl ? { screenshotUrl: shot.screenshotUrl } : {}),
+      ...(shot.screenshotUrl && shot.deployUrl ? { deployUrl: encodeMarkdownUrl(shot.deployUrl) } : {}),
     })
     : renderFailureReply({
       status: evt.status,

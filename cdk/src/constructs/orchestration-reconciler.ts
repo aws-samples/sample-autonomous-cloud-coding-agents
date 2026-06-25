@@ -20,12 +20,13 @@
 import * as path from 'path';
 import { Duration } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import { Architecture, Runtime, StartingPosition } from 'aws-cdk-lib/aws-lambda';
+import { Architecture, FilterCriteria, FilterRule, Runtime, StartingPosition } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { TERMINAL_STATUSES } from './task-status';
 
 /**
  * Properties for OrchestrationReconciler construct.
@@ -118,12 +119,24 @@ export class OrchestrationReconciler extends Construct {
     // Subscribe to the TaskTable stream. LATEST: we only care about
     // tasks transitioning to terminal from here on. bisectBatchOnError +
     // DLQ so one poison record can't wedge the shard.
+    //
+    // FilterCriteria: the handler ignores every non-terminal status
+    // (parseTerminalTaskRecord returns null unless status ∈ TERMINAL), so the
+    // stream itself filters to terminal statuses. This keeps RUNNING/HYDRATING/
+    // heartbeat/progress writes — the bulk of TaskTable churn platform-wide —
+    // from ever invoking this 512MB reconciler. Behavior-preserving: the records
+    // dropped here are exactly the ones the handler already discarded. One filter
+    // pattern per terminal status (FilterCriteria ORs the array).
+    const terminalFilters = TERMINAL_STATUSES.map((s) => FilterCriteria.filter({
+      dynamodb: { NewImage: { status: { S: FilterRule.isEqual(s) } } },
+    }));
     this.fn.addEventSource(new DynamoEventSource(props.taskTable, {
       startingPosition: StartingPosition.LATEST,
       batchSize: 10,
       retryAttempts: 3,
       bisectBatchOnError: true,
       onFailure: new SqsDlq(this.dlq),
+      filters: terminalFilters,
     }));
 
     NagSuppressions.addResourceSuppressions(this.fn, [

@@ -65,6 +65,24 @@ describe('OrchestrationReconciler', () => {
     });
   });
 
+  test('filters the stream to TERMINAL statuses only (skips RUNNING/heartbeat churn)', () => {
+    // The handler ignores non-terminal records; the stream FilterCriteria makes
+    // that explicit so every non-terminal TaskTable write platform-wide doesn't
+    // invoke the reconciler. One filter pattern per terminal status (OR-ed).
+    template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      FilterCriteria: {
+        Filters: Match.arrayWith([
+          Match.objectLike({
+            Pattern: Match.stringLikeRegexp('"status":\\{"S":\\["COMPLETED"\\]\\}'),
+          }),
+          Match.objectLike({
+            Pattern: Match.stringLikeRegexp('"status":\\{"S":\\["FAILED"\\]\\}'),
+          }),
+        ]),
+      },
+    });
+  });
+
   test('provisions a DLQ for poison stream records', () => {
     // At least one SQS queue (the reconciler DLQ).
     const queues = template.findResources('AWS::SQS::Queue');

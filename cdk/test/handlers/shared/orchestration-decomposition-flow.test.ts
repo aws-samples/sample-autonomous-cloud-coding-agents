@@ -96,14 +96,47 @@ describe('parsePlanVerdict', () => {
     expect(parsePlanVerdict('reject.')).toBe('reject');
   });
 
-  test('a word merely CONTAINING approve in a work request is not a verdict', () => {
+  test('NATURAL approvals a real reviewer types (live-confirmed gap)', () => {
+    for (const s of ['lgtm', 'LGTM', 'yes', 'yes go ahead', 'sounds good', 'looks good',
+      'ok', 'sure', 'proceed', 'ship it', 'do it', '+1', 'go for it', 'send it']) {
+      expect(parsePlanVerdict(s)).toBe('approve');
+    }
+  });
+
+  test('NATURAL rejections', () => {
+    for (const s of ['no', 'nope', 'cancel', 'stop', 'discard', 'abort', "don't", '-1']) {
+      expect(parsePlanVerdict(s)).toBe('reject');
+    }
+  });
+
+  test('emoji verdicts', () => {
+    expect(parsePlanVerdict('👍')).toBe('approve');
+    expect(parsePlanVerdict('✅ go')).toBe('approve');
+    expect(parsePlanVerdict('👎')).toBe('reject');
+    expect(parsePlanVerdict('🛑 not yet')).toBe('reject');
+  });
+
+  test('reject wins when both signals appear', () => {
+    expect(parsePlanVerdict("don't approve this")).toBe('reject');
+    expect(parsePlanVerdict('no, looks wrong')).toBe('reject');
+  });
+
+  test('a LONG work request that merely contains a verdict word is NOT a verdict', () => {
+    // >6 words and not verdict-first → treated as an edit instruction, not approval.
     expect(parsePlanVerdict('also approve the dialog copy and rename the button')).toBe('none');
-    expect(parsePlanVerdict('change the approval banner color')).toBe('none');
+    expect(parsePlanVerdict('change the approval banner color to green please')).toBe('none');
+    expect(parsePlanVerdict('the yes button should be larger and more prominent now')).toBe('none');
+  });
+
+  test('a verdict-first short comment still wins even with trailing words', () => {
+    expect(parsePlanVerdict('approve but watch the schema migration')).toBe('approve');
+    expect(parsePlanVerdict('yes, this is the right breakdown')).toBe('approve');
   });
 
   test('empty / unrelated → none', () => {
     expect(parsePlanVerdict('')).toBe('none');
     expect(parsePlanVerdict('make the header blue')).toBe('none');
+    expect(parsePlanVerdict('what does the third sub-issue cover?')).toBe('none');
   });
 });
 
