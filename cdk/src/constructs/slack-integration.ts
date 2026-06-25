@@ -28,6 +28,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { SlackChannelMappingTable } from './slack-channel-mapping-table';
 import { SlackInstallationTable } from './slack-installation-table';
 import { SlackUserMappingTable } from './slack-user-mapping-table';
 
@@ -103,6 +104,9 @@ export class SlackIntegration extends Construct {
   /** The Slack user mapping table. */
   public readonly userMappingTable: dynamodb.Table;
 
+  /** The Slack channel → default-repo mapping table. */
+  public readonly channelMappingTable: dynamodb.Table;
+
   /** The Slack signing secret (placeholder — user populates after creating the Slack App). */
   public readonly signingSecret: secretsmanager.Secret;
 
@@ -120,8 +124,10 @@ export class SlackIntegration extends Construct {
     // --- DynamoDB Tables ---
     const installationTable = new SlackInstallationTable(this, 'InstallationTable', { removalPolicy });
     const userMappingTable = new SlackUserMappingTable(this, 'UserMappingTable', { removalPolicy });
+    const channelMappingTable = new SlackChannelMappingTable(this, 'ChannelMappingTable', { removalPolicy });
     this.installationTable = installationTable.table;
     this.userMappingTable = userMappingTable.table;
+    this.channelMappingTable = channelMappingTable.table;
 
     // --- Slack App Secrets (CDK-created placeholders) ---
     // Users populate these after creating the Slack App via the SlackAppCreateUrl output.
@@ -268,11 +274,13 @@ export class SlackIntegration extends Construct {
         ...createTaskEnv,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
+        SLACK_CHANNEL_MAPPING_TABLE_NAME: this.channelMappingTable.tableName,
       },
       bundling: commonBundling,
     });
     this.userMappingTable.grantReadWriteData(commandProcessorFn);
     this.installationTable.grantReadData(commandProcessorFn);
+    this.channelMappingTable.grantReadData(commandProcessorFn);
     commandProcessorFn.addToRolePolicy(readSlackSecretsPolicy);
     props.taskTable.grantReadWriteData(commandProcessorFn);
     props.taskEventsTable.grantReadWriteData(commandProcessorFn);

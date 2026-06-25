@@ -80,6 +80,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;
+const CHANNEL_MAPPING_TABLE = process.env.SLACK_CHANNEL_MAPPING_TABLE_NAME;
 
 /** Link code TTL. */
 const LINK_CODE_TTL_S = 10 * 60; // 10 minutes
@@ -194,11 +195,27 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     return;
   }
 
-  // Parse repo and optional issue number from first arg: "org/repo#42" or "org/repo".
+  // Resolve the target repo. Two ways:
+  //   1. The user typed it: "org/repo#42 <description>" — first arg is the repo,
+  //      the rest is the description.
+  //   2. The user omitted it and the channel has an onboarded default repo
+  //      (`bgagent slack onboard-channel`) — the WHOLE message is the description.
   const repoArg = args[0];
-  const { repo, issueNumber } = parseRepoArg(repoArg);
+  let { repo, issueNumber } = parseRepoArg(repoArg);
+  let description: string | undefined;
+  if (repo) {
+    description = args.slice(1).join(' ') || undefined;
+  } else {
+    const defaultRepo = await lookupChannelDefaultRepo(event.team_id, event.channel_id);
+    if (defaultRepo) {
+      repo = defaultRepo;
+      issueNumber = undefined;
+      // No repo token was consumed, so the entire message is the description.
+      description = args.join(' ') || undefined;
+    }
+  }
   if (!repo) {
-    await reply(`Invalid repo format: \`${repoArg}\`. Expected \`org/repo\` or \`org/repo#42\`.`);
+    await reply('Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.');
     if (event.mention_thread_ts) {
       await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
     }
@@ -211,9 +228,6 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     await reply(channelCheck.error!);
     return;
   }
-
-  // Remaining args are the task description.
-  const description = args.slice(1).join(' ') || undefined;
 
   // handleSubmit is only invoked for the mention path, so there's no response_url.
   // Notifications thread under the user's @mention message using mention_thread_ts.
@@ -520,6 +534,31 @@ async function lookupPlatformUser(teamId: string, userId: string): Promise<strin
   }
   logger.info('Found platform user', { slack_identity: key, platform_user_id: result.Item.platform_user_id });
   return (result.Item.platform_user_id as string) ?? null;
+}
+
+/**
+ * Resolve a channel's default repo from the onboarding table
+ * (`bgagent slack onboard-channel`). Returns the mapped `owner/repo` when an
+ * active mapping exists, else null. Fails open (returns null) on any error so a
+ * lookup blip degrades to the "please include a repo" path rather than a 500.
+ */
+async function lookupChannelDefaultRepo(teamId: string, channelId: string): Promise<string | null> {
+  if (!CHANNEL_MAPPING_TABLE) return null;
+  const key = `${teamId}#${channelId}`;
+  try {
+    const result = await ddb.send(new GetCommand({
+      TableName: CHANNEL_MAPPING_TABLE,
+      Key: { channel_id: key },
+    }));
+    if (!result.Item || result.Item.status !== 'active') return null;
+    return (result.Item.repo as string) ?? null;
+  } catch (err) {
+    logger.warn('Channel default repo lookup failed, falling back to explicit-repo path', {
+      channel_id: key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null; // nosemgrep: ts-silent-success-masking -- fail-open is intentional; absent default → explicit-repo error path
+  }
 }
 
 async function postToSlack(responseUrl: string, text: string): Promise<void> {

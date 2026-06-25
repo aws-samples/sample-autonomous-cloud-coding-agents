@@ -787,6 +787,11 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Slack user mapping table',
     });
 
+    new CfnOutput(this, 'SlackChannelMappingTableName', {
+      value: slackIntegration.channelMappingTable.tableName,
+      description: 'Name of the DynamoDB Slack channel → default-repo mapping table',
+    });
+
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
     const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
       api: taskApi.api,

@@ -41,6 +41,7 @@ const fetchMock = jest.fn();
 
 process.env.SLACK_USER_MAPPING_TABLE_NAME = 'SlackMap';
 process.env.SLACK_INSTALLATION_TABLE_NAME = 'SlackInstall';
+process.env.SLACK_CHANNEL_MAPPING_TABLE_NAME = 'SlackChannelMap';
 
 import { handler, type MentionEvent, type SlashCommandEvent } from '../../src/handlers/slack-command-processor';
 
@@ -140,13 +141,52 @@ describe('slack-command-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('mention submit rejects malformed repo', async () => {
+  test('mention submit with no repo and no channel default replies with guidance', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
-    // swapReaction → getBotToken → installation lookup (for :x: swap)
+    // channel-default lookup returns a row without a repo → no default; then
+    // swapReaction → getBotToken installation lookup.
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     await handler(mention({ text: 'submit not-a-repo fix' }));
     const reply = fetchMock.mock.calls.find(
-      ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Invalid repo format'),
+      ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Please include a repo'),
+    );
+    expect(reply).toBeTruthy();
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('mention submit with no repo falls back to channel default and uses full text as description', async () => {
+    // 1. user mapping → linked
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    // 2. channel-default lookup → active mapping to org/defaultrepo
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', repo: 'org/defaultrepo' } });
+    // 3. checkChannelAccess installation lookup (+ bot token secret)
+    ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
+    });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'T1', repo: 'org/defaultrepo', status: 'SUBMITTED' } }),
+    });
+    await handler(mention({ text: 'submit fix the spacing on the header' }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.repo).toBe('org/defaultrepo');
+    expect(reqBody.issue_number).toBeUndefined();
+    // The whole message is the description — the first token is NOT dropped.
+    expect(reqBody.task_description).toBe('fix the spacing on the header');
+  });
+
+  test('mention submit with no repo fails open when the channel lookup throws', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    // channel-default lookup throws → fail open → no default → guidance reply
+    ddbSend.mockRejectedValueOnce(new Error('ddb blip'));
+    ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+    await handler(mention({ text: 'submit fix the bug' }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    const reply = fetchMock.mock.calls.find(
+      ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Please include a repo'),
     );
     expect(reply).toBeTruthy();
   });

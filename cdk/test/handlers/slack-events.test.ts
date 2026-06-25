@@ -231,7 +231,11 @@ describe('slack-events handler', () => {
     expect(reactionCall).toBeTruthy();
   });
 
-  test('app_mention without repo replies with :x: and helpful error', async () => {
+  test('app_mention without repo is forwarded to the processor (channel-default fallback)', async () => {
+    // The events handler no longer answers no-repo mentions inline — it forwards
+    // them so the processor can apply the channel's onboarded default repo (and,
+    // only if there is none, reply with guidance). The whole text is forwarded
+    // as the submit description.
     fetchMock.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ ok: true }),
@@ -250,11 +254,16 @@ describe('slack-events handler', () => {
     });
     const result = await handler(signedEvent(body));
     expect(result.statusCode).toBe(200);
-    expect(lambdaSend).not.toHaveBeenCalled();
+    // Forwarded to the processor rather than answered inline.
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    const invokePayload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+    expect(invokePayload.text).toBe('submit just a question');
+    // No inline "Please include a repo" reply from the events handler.
     const postedReply = fetchMock.mock.calls.find(
       ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Please include a repo'),
     );
-    expect(postedReply).toBeTruthy();
+    expect(postedReply).toBeFalsy();
   });
 
   test('app_mention with Lambda invoke failure swaps :eyes: to :x:', async () => {

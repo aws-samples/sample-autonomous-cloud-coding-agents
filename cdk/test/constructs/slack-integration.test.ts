@@ -52,9 +52,19 @@ describe('SlackIntegration construct', () => {
     template = Template.fromStack(stack);
   });
 
-  test('creates two DynamoDB tables (installation + user mapping)', () => {
-    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping = 4
-    template.resourceCountIs('AWS::DynamoDB::Table', 4);
+  test('creates three Slack DynamoDB tables (installation + user mapping + channel mapping)', () => {
+    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping + SlackChannelMapping = 5
+    template.resourceCountIs('AWS::DynamoDB::Table', 5);
+  });
+
+  test('command processor receives the channel-mapping table env var', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          SLACK_CHANNEL_MAPPING_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
   });
 
   test('creates 6 Lambda functions', () => {

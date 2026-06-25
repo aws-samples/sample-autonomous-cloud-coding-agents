@@ -22,7 +22,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
@@ -151,7 +153,107 @@ export function makeSlackCommand(): Command {
       }),
   );
 
+  slack.addCommand(
+    new Command('onboard-channel')
+      .description('Set a default GitHub repo for a Slack channel, so members can @mention without typing the repo (admin IAM required)')
+      .argument('<channel-id>', 'Slack channel ID (e.g. C0123ABCD — right-click the channel → "Copy link" → the last path segment)')
+      .requiredOption('--repo <owner/repo>', 'GitHub repository this channel should default to')
+      .option('--team-id <id>', 'Slack workspace/team ID (auto-resolved if exactly one workspace is installed)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (channelId: string, opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+
+        const tableName = await getStackOutput(region, opts.stackName, 'SlackChannelMappingTableName');
+        if (!tableName) {
+          console.error('Could not find SlackChannelMappingTableName in stack outputs. Deploy the stack first.');
+          process.exit(1);
+        }
+
+        if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(opts.repo)) {
+          console.error(`Invalid --repo value: ${opts.repo}. Expected owner/repo.`);
+          process.exit(1);
+        }
+
+        // Slack channel IDs start with C (public), G (private/group), or D (DM).
+        if (!/^[CGD][A-Z0-9]+$/.test(channelId)) {
+          console.error(`Invalid channel ID: ${channelId}. Expected a Slack channel ID like C0123ABCD.`);
+          console.error('Right-click the channel in Slack → "Copy link" → the last path segment is the channel ID.');
+          process.exit(1);
+        }
+
+        // The mapping key is composite ({team_id}#{channel_id}) so it stays unique
+        // across workspaces. Resolve the team_id from the installation table when
+        // the operator didn't pass one — the common single-workspace case needs
+        // no flag; multi-workspace deployments must disambiguate with --team-id.
+        const installationTable = await getStackOutput(region, opts.stackName, 'SlackInstallationTableName');
+        const teamId = await resolveSlackTeamId(region, installationTable, opts.teamId);
+
+        const now = new Date().toISOString();
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        await ddb.send(new PutCommand({
+          TableName: tableName,
+          Item: {
+            channel_id: `${teamId}#${channelId}`,
+            repo: opts.repo,
+            status: 'active',
+            onboarded_at: now,
+            updated_at: now,
+          },
+        }));
+
+        console.log(`✓ Mapped Slack channel ${channelId} → ${opts.repo}`);
+        console.log(`  Workspace: ${teamId}`);
+        console.log('');
+        console.log('Members of this channel can now @mention the bot without naming the repo:');
+        console.log(`  @Shoof fix the login bug   →   runs against ${opts.repo}`);
+      }),
+  );
+
   return slack;
+}
+
+/**
+ * Resolve the Slack team (workspace) ID for an admin command.
+ *
+ * Prefers an explicit `--team-id`. Otherwise scans the installation table for
+ * active installations: if exactly one exists, uses it; if several exist, the
+ * deployment is multi-workspace and the operator must pass `--team-id`.
+ */
+export async function resolveSlackTeamId(
+  region: string,
+  installationTable: string | null,
+  explicitTeamId: string | undefined,
+): Promise<string> {
+  if (explicitTeamId) return explicitTeamId;
+
+  if (!installationTable) {
+    console.error('Could not auto-resolve the Slack workspace (SlackInstallationTableName not found). Pass --team-id.');
+    process.exit(1);
+  }
+
+  const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+  const result = await ddb.send(new ScanCommand({
+    TableName: installationTable,
+    FilterExpression: '#s = :active',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':active': 'active' },
+  }));
+  const teamIds = (result.Items ?? []).map((item) => item.team_id as string).filter(Boolean);
+
+  if (teamIds.length === 0) {
+    console.error('No active Slack workspace installations found. Install the app first (bgagent slack setup), or pass --team-id.');
+    process.exit(1);
+  }
+  if (teamIds.length > 1) {
+    console.error('Multiple Slack workspaces are installed. Re-run with --team-id <id> to pick one:');
+    for (const id of teamIds) {
+      console.error(`  ${id}`);
+    }
+    process.exit(1);
+  }
+  return teamIds[0];
 }
 
 // ─── Shared credential logic ─────────────────────────────────────────────────
