@@ -26,7 +26,6 @@ import {
   parseDecomposerResponse,
   planDecomposition,
   SIZE_DEFAULT_BUDGET_USD,
-  type AssessmentResult,
   type PlannerInput,
 } from '../../../src/handlers/shared/orchestration-decomposition-planner';
 
@@ -57,9 +56,10 @@ const INPUT: PlannerInput = {
 const DECOMPOSER_JSON = (subs: unknown[], reasoning = 'breakdown') =>
   JSON.stringify({ reasoning, sub_issues: subs });
 
-/** The assessor's tiny verdict (stage 1 shape). */
-const ASSESS_YES: AssessmentResult = { decompose: true, reasoning: 'spans multiple surfaces' };
-const ASSESS_NO: AssessmentResult = { decompose: false, reasoning: 'one cohesive change' };
+// The assessor's rationale string is threaded into parseDecomposerResponse so a
+// <2-node breakdown can fall back to it. (parseAssessment still returns the full
+// AssessmentResult — exercised in its own describe block.)
+const ASSESS_REASON = 'spans multiple surfaces';
 
 // ---------------------------------------------------------------------------
 // Stage 1 — buildAssessmentPrompt / parseAssessment
@@ -175,13 +175,13 @@ describe('buildDecomposerPrompt — produces the breakdown, does not re-litigate
 });
 
 describe('parseDecomposerResponse — golden plans', () => {
-  test('a fan-out plan (3 independent leaves) parses + sizes budgets + carries the assessor verdict', () => {
+  test('a fan-out plan (3 independent leaves) parses + sizes budgets', () => {
     const raw = DECOMPOSER_JSON([
       { title: 'Pricing route', description: 'Add /pricing', size: 'M', depends_on: [] },
       { title: 'Comparison table', description: 'Table component', size: 'S', depends_on: [] },
       { title: 'Stripe checkout', description: 'Checkout flow', size: 'L', depends_on: [] },
     ], 'Three independent surfaces.');
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('plan');
     if (r.kind === 'plan') {
       expect(r.plan.nodes).toHaveLength(3);
@@ -189,8 +189,6 @@ describe('parseDecomposerResponse — golden plans', () => {
       expect(r.plan.nodes[1].max_budget_usd).toBe(SIZE_DEFAULT_BUDGET_USD.S);
       expect(r.plan.nodes[2].max_budget_usd).toBe(SIZE_DEFAULT_BUDGET_USD.L);
       expect(r.plan.nodes.every((n) => n.depends_on.length === 0)).toBe(true);
-      expect(r.assessedDecompose).toBe(true);
-      expect(r.assessedReasoning).toBe('spans multiple surfaces');
     }
   });
 
@@ -200,7 +198,7 @@ describe('parseDecomposerResponse — golden plans', () => {
       { title: 'API', description: 'Endpoints', size: 'M', depends_on: [0] },
       { title: 'UI', description: 'Frontend', size: 'M', depends_on: [1] },
     ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('plan');
     if (r.kind === 'plan') {
       expect(r.plan.nodes[1].depends_on).toEqual([0]);
@@ -215,22 +213,9 @@ describe('parseDecomposerResponse — golden plans', () => {
       { title: 'Right', description: 'right', size: 'M', depends_on: [0] },
       { title: 'Merge', description: 'merge', size: 'M', depends_on: [1, 2] },
     ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('plan');
     if (r.kind === 'plan') expect(r.plan.nodes[3].depends_on).toEqual([1, 2]);
-  });
-
-  test('carries assessedDecompose=false through when the human forced a plan (DJ-2)', () => {
-    const raw = DECOMPOSER_JSON([
-      { title: 'A', description: 'a', size: 'S', depends_on: [] },
-      { title: 'B', description: 'b', size: 'S', depends_on: [0] },
-    ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_NO);
-    expect(r.kind).toBe('plan');
-    if (r.kind === 'plan') {
-      expect(r.assessedDecompose).toBe(false);
-      expect(r.assessedReasoning).toBe('one cohesive change');
-    }
   });
 
   test('tolerates markdown fences and leading prose around the JSON', () => {
@@ -240,31 +225,31 @@ describe('parseDecomposerResponse — golden plans', () => {
         { title: 'Two', description: 'b', size: 'S', depends_on: [0] },
       ])
       + '\n```\nLet me know if you want changes.';
-    expect(parseDecomposerResponse(raw, 8, ASSESS_YES).kind).toBe('plan');
+    expect(parseDecomposerResponse(raw, 8, ASSESS_REASON).kind).toBe('plan');
   });
 });
 
 describe('parseDecomposerResponse — <2 nodes collapses to single_task', () => {
   test('a single proposed node collapses to single_task (nothing to orchestrate)', () => {
     const raw = DECOMPOSER_JSON([{ title: 'Just do it', description: 'x', size: 'M', depends_on: [] }]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('single_task');
-    // prefers the assessor's reasoning for the note
+    // falls back to the assessor's reasoning for the note
     if (r.kind === 'single_task') expect(r.reasoning).toBe('spans multiple surfaces');
   });
 
   test('zero nodes → single_task', () => {
-    expect(parseDecomposerResponse(DECOMPOSER_JSON([]), 8, ASSESS_NO).kind).toBe('single_task');
+    expect(parseDecomposerResponse(DECOMPOSER_JSON([]), 8, 'cohesive').kind).toBe('single_task');
   });
 });
 
 describe('parseDecomposerResponse — malformed + adversarial', () => {
   test('non-JSON garbage → error', () => {
-    expect(parseDecomposerResponse('I cannot help with that.', 8, ASSESS_YES).kind).toBe('error');
+    expect(parseDecomposerResponse('I cannot help with that.', 8, ASSESS_REASON).kind).toBe('error');
   });
 
   test('an unbalanced/truncated brace (no closing }) → error, not a throw', () => {
-    expect(parseDecomposerResponse('Here you go: { "sub_issues": [', 8, ASSESS_YES).kind).toBe('error');
+    expect(parseDecomposerResponse('Here you go: { "sub_issues": [', 8, ASSESS_REASON).kind).toBe('error');
   });
 
   test('a node missing a title → error (not silently dropped)', () => {
@@ -272,7 +257,7 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
       { title: 'Good', description: 'a', size: 'S', depends_on: [] },
       { description: 'no title', size: 'M', depends_on: [0] },
     ]);
-    expect(parseDecomposerResponse(raw, 8, ASSESS_YES).kind).toBe('error');
+    expect(parseDecomposerResponse(raw, 8, ASSESS_REASON).kind).toBe('error');
   });
 
   test('a self-contradictory plan (cycle) is rejected by validateDag', () => {
@@ -280,7 +265,7 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
       { title: 'A', description: 'a', size: 'S', depends_on: [1] },
       { title: 'B', description: 'b', size: 'S', depends_on: [0] },
     ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('error');
     if (r.kind === 'error') expect(r.message).toContain('cycle');
   });
@@ -290,7 +275,7 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
       { title: 'A', description: 'a', size: 'S', depends_on: [0, 99, 'x'] }, // self + OOR + junk
       { title: 'B', description: 'b', size: 'M', depends_on: [0] },
     ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('plan');
     if (r.kind === 'plan') {
       expect(r.plan.nodes[0].depends_on).toEqual([]);
@@ -303,7 +288,7 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
       { title: 'A', description: 'a', size: 'XL', depends_on: [] },
       { title: 'B', description: 'b', depends_on: [] },
     ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     expect(r.kind).toBe('plan');
     if (r.kind === 'plan') {
       expect(r.plan.nodes[0].size).toBe('M');
@@ -313,7 +298,7 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
 
   test('over-cap node count still parses into a plan (caps reject downstream, not here)', () => {
     const subs = Array.from({ length: 10 }, (_, i) => ({ title: `T${i}`, description: 'x', size: 'S', depends_on: [] }));
-    const r = parseDecomposerResponse(DECOMPOSER_JSON(subs), 8, ASSESS_YES);
+    const r = parseDecomposerResponse(DECOMPOSER_JSON(subs), 8, ASSESS_REASON);
     expect(r.kind).toBe('plan');
     if (r.kind === 'plan') expect(r.plan.nodes).toHaveLength(10);
   });
@@ -323,7 +308,7 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
       { title: 'Only a title', size: 'S', depends_on: [] },
       { title: 'Second', size: 'S', depends_on: [0] },
     ]);
-    const r = parseDecomposerResponse(raw, 8, ASSESS_YES);
+    const r = parseDecomposerResponse(raw, 8, ASSESS_REASON);
     if (r.kind === 'plan') expect(r.plan.nodes[0].description).toBe('Only a title');
   });
 });
@@ -346,31 +331,14 @@ describe('planDecomposition — two-stage orchestration', () => {
     // stage 1 prompt = assessment (decide-only); stage 2 = decomposer (sub_issues)
     expect(invoke.mock.calls[0][0]).toContain('"decompose": boolean');
     expect(invoke.mock.calls[1][0]).toContain('"sub_issues"');
-    if (r.kind === 'plan') expect(r.assessedDecompose).toBe(true);
   });
 
-  test('assessor says one-shot + NOT forced (:auto) → single_task WITHOUT a second call', async () => {
+  test('assessor says one cohesive unit → single_task WITHOUT a second call (verdict stands for either label)', async () => {
     const invoke = jest.fn().mockResolvedValueOnce(JSON.stringify({ decompose: false, reasoning: 'cohesive' }));
-    const r = await planDecomposition({ ...INPUT, forceDecompose: false }, invoke);
+    const r = await planDecomposition(INPUT, invoke);
     expect(r.kind).toBe('single_task');
-    expect(invoke).toHaveBeenCalledTimes(1); // no decomposer call
+    expect(invoke).toHaveBeenCalledTimes(1); // no decomposer call — never forced
     if (r.kind === 'single_task') expect(r.reasoning).toBe('cohesive');
-  });
-
-  test('assessor says one-shot but FORCED (:decompose) → decomposer still runs → plan w/ assessedDecompose=false', async () => {
-    const invoke = jest.fn()
-      .mockResolvedValueOnce(JSON.stringify({ decompose: false, reasoning: 'looks cohesive' }))
-      .mockResolvedValueOnce(DECOMPOSER_JSON([
-        { title: 'A', description: 'a', size: 'S', depends_on: [] },
-        { title: 'B', description: 'b', size: 'M', depends_on: [0] },
-      ]));
-    const r = await planDecomposition({ ...INPUT, forceDecompose: true }, invoke);
-    expect(r.kind).toBe('plan');
-    expect(invoke).toHaveBeenCalledTimes(2);
-    if (r.kind === 'plan') {
-      expect(r.assessedDecompose).toBe(false);
-      expect(r.assessedReasoning).toBe('looks cohesive');
-    }
   });
 
   test('a stage-1 model throw → error (never throws), no stage-2 call', async () => {

@@ -84,14 +84,6 @@ export interface RenderPlanProposalOptions {
    * prompting for ``@bgagent approve``.
    */
   readonly autoRun: boolean;
-  /**
-   * DJ-2 — the critical assessor judged this issue better as ONE task, but the
-   * user explicitly applied ``:decompose`` so we drafted a breakdown anyway. When
-   * set, this is the assessor's rationale, surfaced as an informational caveat
-   * above the action footer so the user can decide with eyes open (approve the
-   * plan, or relabel ``abca`` to one-shot it). Absent = the assessor agreed.
-   */
-  readonly oneShotCaveat?: string;
 }
 
 /**
@@ -128,17 +120,6 @@ export function renderPlanProposal(
     + '(worst-case, Σ of per-task caps — actual spend is typically lower)',
   );
   lines.push('');
-
-  // DJ-2: the assessor leaned one-shot but the user explicitly asked to
-  // decompose — surface that as info (not a veto) so they decide with eyes open.
-  if (opts.oneShotCaveat) {
-    lines.push(
-      `ℹ️ Heads up — I'd lean toward running this as **one task**: ${opts.oneShotCaveat} `
-      + 'You asked to decompose, so here\'s the breakdown anyway. Approve to proceed, '
-      + 'or relabel `abca` to run it as a single task.',
-    );
-    lines.push('');
-  }
 
   if (opts.autoRun) {
     lines.push('▶️ Auto-run is on — creating these sub-issues and starting now. Reply `@bgagent reject` to stop.');

@@ -93,15 +93,6 @@ export interface PlannerInput {
    * aims under the cap; the hard cap is still enforced by ``applyPlanCaps`` (B2).
    */
   readonly maxSubIssues: number;
-  /**
-   * DJ-2 — the human EXPLICITLY asked to decompose (``:decompose`` label). When
-   * true, the decomposer runs even if the assessor leans one-shot, so the user
-   * always sees a breakdown to approve (we don't silently override an explicit
-   * opt-in). The assessor's opinion is surfaced as a caveat instead. When false
-   * (``:auto``, no human), the assessor's verdict stands and a one-shot verdict
-   * short-circuits to ``single_task``. Defaults to false.
-   */
-  readonly forceDecompose?: boolean;
 }
 
 /**
@@ -113,19 +104,12 @@ export type InvokeModelFn = (prompt: string) => Promise<string>;
 
 /** Discriminated outcome of a decomposition attempt. */
 export type DecompositionResult =
-  // The assessor said one-shot (and the human didn't force), or the decomposer
-  // produced <2 nodes → single task. ``reasoning`` is the assessor's rationale.
+  // The assessor judged the task one cohesive unit, or the decomposer produced
+  // <2 nodes → single task. ``reasoning`` is the assessor's rationale (surfaced
+  // so the user sees WHY it wasn't split, even when they asked).
   | { readonly kind: 'single_task'; readonly reasoning: string }
   // A valid, DAG-checked plan ready to gate against caps + render.
-  // ``assessedDecompose`` is the assessor's independent verdict: false here means
-  // the human FORCED a plan the assessor would have one-shot (DJ-2 caveat).
-  // ``assessedReasoning`` is the assessor's rationale (surfaced in that caveat).
-  | {
-    readonly kind: 'plan';
-    readonly plan: DecompositionPlan;
-    readonly assessedDecompose: boolean;
-    readonly assessedReasoning: string;
-  }
+  | { readonly kind: 'plan'; readonly plan: DecompositionPlan }
   // The model failed / returned an unusable or self-contradictory plan.
   | { readonly kind: 'error'; readonly message: string };
 
@@ -142,28 +126,31 @@ export interface AssessmentResult {
  * validation failures are returned as ``{ kind: 'error' }`` so the caller decides
  * the UX (typically: fall back to a single task with a note).
  *
- * Stage 1 (assessor) decides decompose-vs-one-shot. Stage 2 (decomposer) runs
- * when the assessor says decompose OR the human forced it (``forceDecompose``).
- * On ``:auto`` (no force) a one-shot verdict short-circuits to ``single_task``
- * WITHOUT a second model call.
+ * The AGENT'S ASSESSMENT decides whether to split — for BOTH labels. Stage 1
+ * (assessor) judges decompose-vs-one-cohesive-unit; on a one-unit verdict we
+ * return ``single_task`` with the rationale (no second call, no forced plan). We
+ * do NOT manufacture a breakdown the assessor judged incoherent just because the
+ * user asked — that can only produce the layer-split anti-pattern the prompt
+ * forbids. The label (``:decompose`` vs ``:auto``) only controls the downstream
+ * approval gate, not whether to split. Stage 2 (decomposer) runs only on a
+ * decompose verdict.
  */
 export async function planDecomposition(
   input: PlannerInput,
   invoke: InvokeModelFn,
 ): Promise<DecompositionResult> {
-  // Stage 1 — critical assessor.
+  // Stage 1 — critical assessor decides; its verdict stands for both labels.
   const assessment = await assessDecomposition(input, invoke);
   if (assessment === null) {
     return { kind: 'error', message: 'The decomposition planner could not be reached. Try again shortly.' };
   }
 
-  // One-shot verdict and the human didn't force it → single task (no 2nd call).
-  if (!assessment.decompose && !input.forceDecompose) {
+  // One cohesive unit → single task with the assessor's reasoning (no 2nd call).
+  if (!assessment.decompose) {
     return { kind: 'single_task', reasoning: assessment.reasoning || 'Single cohesive change — running as one task.' };
   }
 
-  // Stage 2 — decomposer. Runs when the assessor said decompose, or the human
-  // explicitly asked (DJ-2: never silently override an explicit :decompose).
+  // Stage 2 — decomposer (only on a decompose verdict).
   let raw: string;
   try {
     raw = await invoke(buildDecomposerPrompt(input));
@@ -175,7 +162,7 @@ export async function planDecomposition(
     return { kind: 'error', message: 'The decomposition planner could not be reached. Try again shortly.' };
   }
 
-  return parseDecomposerResponse(raw, input.maxSubIssues, assessment);
+  return parseDecomposerResponse(raw, input.maxSubIssues, assessment.reasoning);
 }
 
 /**
@@ -326,14 +313,13 @@ export function buildDecomposerPrompt(input: PlannerInput): string {
  * Parse + validate the DECOMPOSER's raw completion into a {@link DecompositionResult}.
  * Pure. Handles markdown-fenced or prose-wrapped JSON; a <2-node breakdown
  * collapses to single_task (nothing to orchestrate); rejects self-contradictory
- * graphs (cycle / dangling / duplicate) via {@link validateDag}. ``assessment``
- * carries through onto a ``plan`` result so the flow can surface a DJ-2 caveat
- * when the human forced a plan the assessor would have one-shot.
+ * graphs (cycle / dangling / duplicate) via {@link validateDag}. ``assessReasoning``
+ * is the assessor's rationale, used as the note if the breakdown collapses to one.
  */
 export function parseDecomposerResponse(
   raw: string,
   maxSubIssues: number,
-  assessment: AssessmentResult,
+  assessReasoning: string,
 ): DecompositionResult {
   const obj = extractJsonObject(raw);
   if (!obj) {
@@ -344,11 +330,10 @@ export function parseDecomposerResponse(
   const rawNodes = Array.isArray(obj.sub_issues) ? obj.sub_issues : [];
 
   // The decomposer produced nothing worth orchestrating (<2 nodes) → single task.
-  // (No ``should_decompose`` veto — the assessor already made that call.)
   if (rawNodes.length < 2) {
     return {
       kind: 'single_task',
-      reasoning: assessment.reasoning || reasoning || 'Single cohesive change — running as one task.',
+      reasoning: assessReasoning || reasoning || 'Single cohesive change — running as one task.',
     };
   }
 
@@ -391,8 +376,6 @@ export function parseDecomposerResponse(
   return {
     kind: 'plan',
     plan: { shouldDecompose: true, reasoning, nodes },
-    assessedDecompose: assessment.decompose,
-    assessedReasoning: assessment.reasoning,
   };
 }
 
