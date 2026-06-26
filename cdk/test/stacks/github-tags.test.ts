@@ -140,13 +140,13 @@ describe('github:* resource tags', () => {
   });
 
   test('compute_type tag reflects context value when provided', () => {
-    const template = synthWithTags({ compute_type: 'ecs' });
+    const template = synthWithTags({ compute_type: 'custom-compute' });
     const resources = template.findResources('AWS::DynamoDB::Table');
     const firstResource = Object.values(resources)[0];
     const tags: Array<{ Key: string; Value: string }> = firstResource?.Properties?.Tags ?? [];
 
     const tag = tags.find(t => t.Key === 'compute_type');
     expect(tag).toBeDefined();
-    expect(tag!.Value).toBe('ecs');
+    expect(tag!.Value).toBe('custom-compute');
   });
 });

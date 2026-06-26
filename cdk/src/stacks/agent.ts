@@ -22,8 +22,7 @@ import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-// ecr_assets import is only needed when the ECS block below is uncommented
-// import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -39,7 +38,7 @@ import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
-// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { JiraIntegration } from '../constructs/jira-integration';
@@ -583,31 +582,27 @@ export class AgentStack extends Stack {
       description: 'Name of the S3 bucket storing --trace trajectory artifacts (design §10.1)',
     });
 
-    // --- ECS Fargate compute backend (optional) ---
-    // To enable ECS as an alternative compute backend, uncomment the block below
-    // and the EcsAgentCluster import at the top of this file. Repos can then use
-    // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
-    //
-    // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
-    //   directory: repoRoot,
-    //   file: 'agent/Dockerfile',
-    //   platform: ecr_assets.Platform.LINUX_ARM64,
-    // });
-    //
-    // const ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
-    //   vpc: agentVpc.vpc,
-    //   agentImageAsset,
-    //   taskTable: taskTable.table,
-    //   taskEventsTable: taskEventsTable.table,
-    //   userConcurrencyTable: userConcurrencyTable.table,
-    //   githubTokenSecret,
-    //   memoryId: agentMemory.memory.memoryId,
-    //   // Per-session IAM scoping (#209): the ECS task role assumes the same
-    //   // SessionRole as the AgentCore runtime for tenant-data access. The
-    //   // construct admits the task role to the trust and injects
-    //   // AGENT_SESSION_ROLE_ARN into the container.
-    //   agentSessionRole,
-    // });
+    // --- ECS Fargate compute backend (enabled when compute_type=ecs) ---
+    const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
+    let ecsCluster: EcsAgentCluster | undefined;
+    if (computeType === 'ecs') {
+      const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
+        directory: repoRoot,
+        file: 'agent/Dockerfile',
+        platform: ecr_assets.Platform.LINUX_ARM64,
+      });
+
+      ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
+        vpc: agentVpc.vpc,
+        agentImageAsset,
+        taskTable: taskTable.table,
+        taskEventsTable: taskEventsTable.table,
+        userConcurrencyTable: userConcurrencyTable.table,
+        githubTokenSecret,
+        memoryId: agentMemory.memory.memoryId,
+        agentSessionRole,
+      });
+    }
 
     // --- Task Orchestrator (durable Lambda function) ---
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
@@ -621,16 +616,17 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
-      // To wire ECS, uncomment the ecsCluster block above and add:
-      // ecsConfig: {
-      //   clusterArn: ecsCluster.cluster.clusterArn,
-      //   taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
-      //   subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
-      //   securityGroup: ecsCluster.securityGroup.securityGroupId,
-      //   containerName: ecsCluster.containerName,
-      //   taskRoleArn: ecsCluster.taskRoleArn,
-      //   executionRoleArn: ecsCluster.executionRoleArn,
-      // },
+      ...(ecsCluster && {
+        ecsConfig: {
+          clusterArn: ecsCluster.cluster.clusterArn,
+          taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+          subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
+          securityGroup: ecsCluster.securityGroup.securityGroupId,
+          containerName: ecsCluster.containerName,
+          taskRoleArn: ecsCluster.taskRoleArn,
+          executionRoleArn: ecsCluster.executionRoleArn,
+        },
+      }),
     });
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.

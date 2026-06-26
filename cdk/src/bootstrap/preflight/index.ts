@@ -17,6 +17,9 @@
  *  SOFTWARE.
  */
 
-export { infrastructurePolicy, applicationPolicy, observabilityPolicy, allPolicies } from './policies';
-export { BOOTSTRAP_VERSION, computeBootstrapHash } from './version';
-export { getRequiredBootstrapPolicies } from './required-policies';
+export {
+  RESOURCE_ACTION_MAP,
+  getActionsForResource,
+  getAllMappedActions,
+} from './resource-action-map';
+export type { ResourceActions } from './resource-action-map';
