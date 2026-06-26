@@ -45,6 +45,7 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
+import { checkRepoOnboarding, notOnboardedGuidance } from '../repo-onboarding';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -1314,6 +1315,7 @@ export function makeLinearCommand(): Command {
       .option('--team-id <id>', 'Optional Linear team UUID for the project (stored for debug)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--skip-onboarding-check', 'Persist the mapping even if the repo has no active Blueprint (the mapping cannot trigger until one is deployed)')
       .action(async (projectId: string, opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
@@ -1339,6 +1341,23 @@ export function makeLinearCommand(): Command {
           console.error('');
           console.error('to see the full UUID for each project in your workspace.');
           process.exit(1);
+        }
+
+        // Onboarding gate: refuse to persist a mapping for a repo that has
+        // no active Blueprint, since every label trigger would fail at
+        // task-creation with 422 REPO_NOT_ONBOARDED (Linear shares the same
+        // create-task-core gate as Jira). An inconclusive check warns and
+        // proceeds rather than blocks.
+        if (!opts.skipOnboardingCheck) {
+          const onboarding = await checkRepoOnboarding({ region, stackName: opts.stackName, repo: opts.repo });
+          if (onboarding.kind === 'not-onboarded') {
+            for (const line of notOnboardedGuidance(opts.repo, onboarding)) {
+              console.error(line);
+            }
+            process.exit(1);
+          } else if (onboarding.kind === 'unverifiable') {
+            console.error(`⚠ Could not verify repo onboarding (${onboarding.detail}); proceeding without the check.`);
+          }
         }
 
         const now = new Date().toISOString();

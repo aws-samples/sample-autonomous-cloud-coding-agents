@@ -17,13 +17,14 @@
  *  SOFTWARE.
  */
 
-import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
   findReusableOauthAppCredentials,
   generateInviteCode,
   INVITE_CODE_ALPHABET,
   isWebhookSecretConfigured,
+  makeLinearCommand,
   queryLinearTeamKeys,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
@@ -36,6 +37,16 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
     DynamoDBDocumentClient: {
       from: jest.fn(() => ({ send: ddbSend })),
     },
+  };
+});
+
+// CloudFormation — `getStackOutput` reads table names from here.
+const cfnSend = jest.fn();
+jest.mock('@aws-sdk/client-cloudformation', () => {
+  const actual = jest.requireActual('@aws-sdk/client-cloudformation');
+  return {
+    ...actual,
+    CloudFormationClient: jest.fn(() => ({ send: cfnSend })),
   };
 });
 
@@ -458,5 +469,85 @@ describe('queryLinearTeamKeys', () => {
     }) as unknown as typeof fetch;
 
     expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+  });
+});
+
+describe('linear onboard-project onboarding guard', () => {
+  let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+  let consoleLogSpy: jest.SpiedFunction<typeof console.log>;
+  let consoleErrorSpy: jest.SpiedFunction<typeof console.error>;
+  let exitSpy: jest.SpiedFunction<typeof process.exit>;
+
+  // A valid full Linear project UUID (truncated URL UUIDs are rejected earlier).
+  const PROJECT_UUID = 'a680cae8-704c-4e64-92ac-0c80346d1aad';
+
+  beforeEach(() => {
+    ddbSend.mockReset().mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) {
+        return Promise.resolve({ Item: { repo: 'owner/repo', status: 'active' } });
+      }
+      return Promise.resolve({});
+    });
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'LinearProjectMappingTableName', OutputValue: 'LinearProjMapTable' },
+          { OutputKey: 'RepoTableName', OutputValue: 'RepoTable' },
+        ],
+      }],
+    });
+    loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
+    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+  });
+
+  afterEach(() => {
+    loadConfigSpy.mockRestore();
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  async function runOnboard(args: string[]): Promise<void> {
+    const program = makeLinearCommand();
+    await program.parseAsync(['node', 'bgagent', 'onboard-project', ...args]);
+  }
+
+  function putMappingInput(): { TableName: string; Item: Record<string, unknown> } {
+    const call = ddbSend.mock.calls.find((c) => !(c[0] instanceof GetCommand));
+    if (!call) throw new Error('no PutCommand was issued');
+    return call[0].input;
+  }
+
+  test('writes an active mapping on the happy path (onboarded repo)', async () => {
+    await runOnboard([PROJECT_UUID, '--repo', 'owner/repo']);
+    expect(putMappingInput().Item).toMatchObject({
+      linear_project_id: PROJECT_UUID,
+      repo: 'owner/repo',
+      status: 'active',
+    });
+  });
+
+  test('rejects a repo with no active Blueprint before writing', async () => {
+    ddbSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) return Promise.resolve({}); // no Item
+      return Promise.resolve({});
+    });
+    await expect(runOnboard([PROJECT_UUID, '--repo', 'owner/repo'])).rejects.toThrow('process.exit:1');
+    expect(ddbSend.mock.calls.some((c) => c[0] instanceof PutCommand)).toBe(false);
+    expect(consoleErrorSpy.mock.calls.flat().join('\n')).toContain('REPO_NOT_ONBOARDED');
+  });
+
+  test('--skip-onboarding-check bypasses the RepoTable read', async () => {
+    ddbSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetCommand) throw new Error('onboarding check should be skipped');
+      return Promise.resolve({});
+    });
+    await runOnboard([PROJECT_UUID, '--repo', 'owner/repo', '--skip-onboarding-check']);
+    expect(ddbSend.mock.calls.some((c) => c[0] instanceof GetCommand)).toBe(false);
+    expect(putMappingInput().Item).toMatchObject({ repo: 'owner/repo', status: 'active' });
   });
 });
