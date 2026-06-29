@@ -58,7 +58,7 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 
 - **Backend-agnostic.** One `resolve_<integration>_token()` contract serves both the AgentCore Runtime backend (token arrives via the `WorkloadAccessToken` header) and the parked ECS backend (in-process boto3). The backend decides how the token arrives; the seam does not care.
 - **Incremental.** The rollout is phased and flag-gated, and the shared PAT fallback stays until the vault path is green. No big-bang cutover.
-- **Consistent with ADR-014.** This is the credential-plane analog of [ADR-014](/architecture/adr-014-workflow-driven-tasks)'s provider-neutral `VcsProvider` seam: that one named GitHub-specific control-plane operations as instances of generic concepts; this one names the per-integration credential resolvers as instances of one outbound contract.
+- **Consistent with ADR-014.** This is the credential-plane analog of [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks)'s provider-neutral `VcsProvider` seam: that one named GitHub-specific control-plane operations as instances of generic concepts; this one names the per-integration credential resolvers as instances of one outbound contract.
 
 ## Consequences
 
@@ -66,7 +66,7 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 - (+) **Per-user, per-repo scoping replaces the shared PAT.** Tokens bind to `(workload_identity, user_id)`, so the single GitHub PAT covering every repo and user gives way to scoped, short-lived credentials.
 - (+) **Cryptographic attribution, not asserted attribution.** OBO delegation carries an `act` claim (RFC 8693 delegation mode, `user ← agent`), which is joinable to #245's `trace_id` and #237's `correlation` block. The *who acted* is verifiable, not inferred from a webhook payload.
 - (+) **Operators can bring their own IdP.** The inbound descriptor lets a deployment run on Okta, Entra, or Keycloak without forking handler code.
-- (+) **Backend-agnostic.** The same seam serves the AgentCore Runtime and ECS backends, matching the design posture already documented for the SessionRole in [SECURITY.md](/architecture/security).
+- (+) **Backend-agnostic.** The same seam serves the AgentCore Runtime and ECS backends, matching the design posture already documented for the SessionRole in [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security).
 - (−) **A new abstraction plus an adapter registry to maintain.** Two seams and their adapter sets are added platform surface; mitigated by keeping the inbound descriptor a parameterization of a single verification path (see the risk below) and the outbound contract a thin selector over the existing flows.
 - (−) **AgentCore Identity adds a managed dependency and token-vault cost.** Vault fetches (`GetResourceOauth2Token` / `GetResourceApiKey`) bill at `$0.010/1,000`. The ECS in-process resolver path remains available where that dependency is unwanted.
 - (!) **The inbound seam must not become a second auth code path.** A descriptor that grew its own verification logic would drift from the shipped Cognito/HMAC path and create two implementations to keep in sync. That is the exact cedar-parity drift hazard ADR-014 calls out. Mitigation: exactly **one** inbound verification implementation; the descriptor only parameterizes it (discovery URL, audience, client list, claim gates), never reimplements it.
@@ -93,8 +93,8 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 - Issue [#215](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/215) — Bedrock billing attribution
 - Issue [#237](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/237) — governance planes / `abca.audit.v1` correlation block
 - Issue [#288](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/288) / PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) — Jira integration (second provider through the resolver seam)
-- [ADR-014](/architecture/adr-014-workflow-driven-tasks) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
-- [IDENTITY_AND_AUTH.md](/architecture/identity-and-auth) — the worked use-cases, seams table, decision tree, and Linear before/after
-- [SECURITY.md](/architecture/security) — current auth posture, the shared-PAT limitation this ADR resolves
-- [ROADMAP.md](/roadmap/roadmap) — "Per-repo GitHub credentials", "Layered credential derivation", "Delegation chain propagation"
+- [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
+- [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) — the worked use-cases, seams table, decision tree, and Linear before/after
+- [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) — current auth posture, the shared-PAT limitation this ADR resolves
+- [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) — "Per-repo GitHub credentials", "Layered credential derivation", "Delegation chain propagation"
 - AgentCore Identity, Runtime, and Gateway — the [AWS Bedrock AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html) are the public sources for the flows, the `credentialProviderVendor` enum, and pricing

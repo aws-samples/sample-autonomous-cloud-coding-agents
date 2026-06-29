@@ -116,12 +116,12 @@ export class AgentSessionRole extends Construct {
       );
     }
 
-    const principals = props.assumingRoles.map(
-      (r) => new iam.ArnPrincipal(r.roleArn),
-    );
+    const [firstAssumingRole] = props.assumingRoles;
 
+    // CDK requires assumedBy; additional principals are admitted via
+    // admitComputeRole so trust + grant always wire together.
     this.role = new iam.Role(this, 'Role', {
-      assumedBy: new iam.CompositePrincipal(...principals),
+      assumedBy: new iam.ArnPrincipal(firstAssumingRole.roleArn),
       description:
         'Per-task scoped credentials for ABCA agent tenant-data access '
         + '(DynamoDB task rows + S3 trace/attachment objects), constrained by '
@@ -131,16 +131,6 @@ export class AgentSessionRole extends Construct {
       // intent is documented and synth-visible.
       maxSessionDuration: Duration.hours(1),
     });
-
-    // The agent passes session tags on AssumeRole, which requires the trust
-    // policy to also allow sts:TagSession (CDK's assumedBy only adds
-    // sts:AssumeRole). Same principals.
-    this.role.assumeRolePolicy?.addStatements(
-      new iam.PolicyStatement({
-        actions: ['sts:TagSession'],
-        principals,
-      }),
-    );
 
     // --- DynamoDB: item access gated by task_id leading-key ---
     // One statement per table keeps the resource ARNs explicit. The condition
@@ -220,19 +210,28 @@ export class AgentSessionRole extends Construct {
       ],
       true,
     );
+
+    for (const computeRole of props.assumingRoles) {
+      this.admitComputeRole(computeRole);
+    }
   }
 
   /**
-   * Admit an additional compute role to the trust policy (e.g. the ECS Fargate
-   * task role when that backend is enabled). Adds `sts:AssumeRole` +
-   * `sts:TagSession` for the role to this SessionRole's trust policy.
+   * Admit a compute role to assume this SessionRole with session tags. Wires
+   * both halves AssumeRole requires: trust on this SessionRole and
+   * `sts:AssumeRole`/`sts:TagSession` on the compute role's identity policy.
    */
-  public addAssumingRole(computeRole: iam.IRole): void {
-    const principal = new iam.ArnPrincipal(computeRole.roleArn);
+  public admitComputeRole(computeRole: iam.IRole): void {
+    this.addTrustForComputeRole(computeRole);
+    this.grantAssumeToComputeRole(computeRole);
+  }
+
+  /** Add bundled AssumeRole + TagSession trust for one compute principal. */
+  private addTrustForComputeRole(computeRole: iam.IRole): void {
     this.role.assumeRolePolicy?.addStatements(
       new iam.PolicyStatement({
         actions: ['sts:AssumeRole', 'sts:TagSession'],
-        principals: [principal],
+        principals: [new iam.ArnPrincipal(computeRole.roleArn)],
       }),
     );
   }
@@ -243,7 +242,7 @@ export class AgentSessionRole extends Construct {
    * policy (a separate IAM::Policy resource, so no dependency cycle with this
    * role's trust policy).
    */
-  public grantAssumeToComputeRole(computeRole: iam.IRole): void {
+  private grantAssumeToComputeRole(computeRole: iam.IRole): void {
     computeRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['sts:AssumeRole', 'sts:TagSession'],

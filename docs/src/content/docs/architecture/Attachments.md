@@ -7,7 +7,7 @@ title: Attachments
 End-to-end support for attaching files, images, and URLs to agent tasks. Attachments let users provide non-text context — screenshots of bugs, design mockups, CSV data, log files, code snippets — that the agent can reference during execution. Every channel (CLI, webhook, Slack, Linear) feeds the same schema; every attachment passes through security screening before reaching the agent.
 
 - **Use this doc for:** understanding the attachment data model, upload flow, security screening pipeline, storage layout, agent consumption, and per-channel behaviour.
-- **Related docs:** [API_CONTRACT.md](/architecture/api-contract) for the `attachments` request schema (must be updated in tandem — see [API contract sync](#api-contract-sync)), [ORCHESTRATOR.md](/architecture/orchestrator) for the task lifecycle this extends, [SECURITY.md](/architecture/security) for guardrail and Cedar context, [ARCHITECTURE.md](/architecture/architecture) for the platform overview.
+- **Related docs:** [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract) for the `attachments` request schema (must be updated in tandem — see [API contract sync](#api-contract-sync)), [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for the task lifecycle this extends, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for guardrail and Cedar context, [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) for the platform overview.
 
 ## Motivation
 
@@ -197,7 +197,7 @@ The `<attachment_id>` segment ensures uniqueness even if multiple attachments sh
 | Max inline data per attachment | 500 KB decoded | The Lambda synchronous invocation payload limit is **6 MB**. At 500 KB decoded (~667 KB base64) per attachment, even 5 inline attachments plus request JSON stays under 6 MB. The presigned path handles anything larger. |
 | Max total inline data per request | 3 MB decoded | Hard cap on total base64-decoded bytes in a single request. Even with base64 overhead (~4 MB encoded) plus JSON fields, this stays under the 6 MB Lambda payload limit. |
 | Max total size per task | 50 MB | Prevents abuse; bounds total screening and transfer time |
-| Max task_description length | 10,000 chars | Increased from 2,000. **This is a standalone API change that affects all tasks** (not just attachment tasks). Rationale: (a) attachments need rich explanatory context ("implement this design per the attached mockup, paying attention to the header layout"), (b) multiple users have reported the 2K limit as a friction point for complex task descriptions even without attachments, (c) the guardrail screening cost increase is minimal (text screening is cheap), (d) DynamoDB item size impact is negligible (~8 KB vs ~2 KB for the description field). **Requires updating [API_CONTRACT.md](/architecture/api-contract) line 82 in tandem.** |
+| Max task_description length | 10,000 chars | Increased from 2,000. **This is a standalone API change that affects all tasks** (not just attachment tasks). Rationale: (a) attachments need rich explanatory context ("implement this design per the attached mockup, paying attention to the header layout"), (b) multiple users have reported the 2K limit as a friction point for complex task descriptions even without attachments, (c) the guardrail screening cost increase is minimal (text screening is cheap), (d) DynamoDB item size impact is negligible (~8 KB vs ~2 KB for the description field). **Requires updating [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract) line 82 in tandem.** |
 | Allowed image MIME types | `image/png`, `image/jpeg` | Bedrock-supported formats; GIF/WebP removed to eliminate native image processing dependency |
 | Allowed file MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | Useful for code/data context; no executables |
 | Max URL fetch size | 10 MB | Same per-attachment limit for fetched content |
@@ -1437,7 +1437,7 @@ The `upload_url` and `upload_expires_at` fields are only present in the initial 
 
 ## API contract sync
 
-This design introduces changes that conflict with the current [API_CONTRACT.md](/architecture/api-contract). The following updates must be made to API_CONTRACT.md in tandem with implementation:
+This design introduces changes that conflict with the current [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract). The following updates must be made to API_CONTRACT.md in tandem with implementation:
 
 | Section | Current value | New value |
 |---|---|---|

@@ -8,8 +8,8 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/developer-guide/introduction))
-- A Cognito user account configured (see [User guide](/using/overview))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Jira Cloud site where you have **admin** access (to create the OAuth app and the webhook)
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
 
@@ -51,7 +51,7 @@ swallowed (with an auth circuit-breaker), never gating the pipeline.
 > with dynamic client registration and won't accept the stored REST OAuth
 > token as a Bearer header, so it can't connect from a headless agent. The
 > REST v3 API accepts the same token (it carries `write:jira-work`). See
-> [ADR-015](/architecture/adr-015-jira-integration). A `jira-server` MCP
+> [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration). A `jira-server` MCP
 > entry is still written to `.mcp.json` as a forward-looking placeholder, but
 > it is expected to fail to connect today and the outbound path does not
 > depend on it.
