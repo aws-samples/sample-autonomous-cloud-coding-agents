@@ -40,6 +40,7 @@ import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { JiraIntegration } from '../constructs/jira-integration';
@@ -578,13 +579,28 @@ export class AgentStack extends Stack {
     // --- ECS Fargate compute backend (CONTEXT-GATED) ---
     // K12 (2026-06-29): AgentCore's fixed microVM envelope OOM-kills heavy
     // CI-parity builds (ABCA's own ~2800-test `mise run build`). ECS Fargate
-    // gives a tunable 32 GB / 8 vCPU task (see EcsAgentCluster) for repos that
+    // gives a tunable 64 GB / 16 vCPU task (see EcsAgentCluster) for repos that
     // set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
     // (default 'agentcore') — ECS resources only synthesize when you deploy with
     // ``--context compute_type=ecs``, so the default synth (and the
     // bootstrap-coverage test that synths with default context) stays
     // agentcore-only. Mirrors upstream #164 (gate ECS construct on context).
     const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
+    // #502: ephemeral bucket for ECS task payloads — the orchestrator writes the
+    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
+    // passes only an S3 URI pointer; the container fetches it on boot, the
+    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
+    const ecsPayloadBucket = computeType === 'ecs'
+      ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
+      : undefined;
+    if (ecsPayloadBucket) {
+      NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
+        {
+          id: 'AwsSolutions-S1',
+          reason: 'Ephemeral per-task payloads (#502) with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+        },
+      ]);
+    }
     const ecsCluster = computeType === 'ecs'
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
         vpc: agentVpc.vpc,
@@ -598,6 +614,8 @@ export class AgentStack extends Stack {
         userConcurrencyTable: userConcurrencyTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
+        // #502: read-only grant so the container can fetch its payload from S3.
+        payloadBucket: ecsPayloadBucket!.bucket,
         // Per-session IAM scoping (#209): the ECS task role assumes the same
         // SessionRole as the AgentCore runtime for tenant-data access. The
         // construct admits the task role to the trust and injects
@@ -631,6 +649,9 @@ export class AgentStack extends Stack {
           executionRoleArn: ecsCluster.executionRoleArn,
         },
       }),
+      // #502: pass the payload bucket so the orchestrator writes/deletes the
+      // out-of-band payload and the ECS strategy builds the S3 URI pointer.
+      ...(ecsPayloadBucket && { ecsPayloadBucket: ecsPayloadBucket.bucket }),
     });
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
