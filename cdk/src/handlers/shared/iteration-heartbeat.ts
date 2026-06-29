@@ -62,7 +62,14 @@ export interface HeartbeatTaskView {
   readonly triggerCommentId?: string;
   /** The issue the trigger comment lives on (parent epic or sub-issue). */
   readonly triggerCommentIssueId?: string;
-  /** True when this task is a comment-triggered iteration (has the maturing reply). */
+  /**
+   * Whether this task carries the orchestration-iteration marker. NOT used for
+   * eligibility — both orchestration AND standalone @bgagent iterations have a
+   * maturing reply, and a STANDALONE iteration deliberately omits this marker
+   * (linear-webhook-processor.ts ~1317). Eligibility keys on the reply fields
+   * below so standalone iterations (the ABCA-483 case) are covered too. Kept on
+   * the view for logging/diagnostics only.
+   */
   readonly isIteration?: boolean;
   /** PR number, when known (makes the working line name the PR). */
   readonly prNumber?: number | null;
@@ -97,11 +104,14 @@ function parseIso(ts: string | undefined): number | null {
  */
 export function planHeartbeat(task: HeartbeatTaskView, nowMs: number): HeartbeatPlan | null {
   if (task.status !== 'RUNNING') return null;
-  if (!task.isIteration) return null;
   if ((task.channelSource ?? 'linear') !== 'linear') return null;
 
-  // Every field the reply edit needs must be present — a partial task can't be
-  // routed (mirrors the reconciler's reply path requirements).
+  // Eligibility = "this task has a maturing Linear reply to keep alive". That's
+  // exactly the set of comment-triggered iterations — BOTH orchestration and
+  // STANDALONE @bgagent iterations (the latter omits the orchestration marker
+  // but still has the reply; the ABCA-483 black-box case was standalone). So we
+  // key on the reply-routing fields, NOT ``isIteration``. A first-run / non-PR
+  // task has no ``iteration_reply_comment_id`` and is correctly skipped.
   const { linearWorkspaceId, iterationReplyCommentId, triggerCommentId, triggerCommentIssueId } = task;
   if (!linearWorkspaceId || !iterationReplyCommentId || !triggerCommentId || !triggerCommentIssueId) {
     return null;
