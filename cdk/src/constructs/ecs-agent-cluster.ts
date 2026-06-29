@@ -97,15 +97,22 @@ export class EcsAgentCluster extends Construct {
     // grant additional permissions to the task role.
 
     // Fargate task definition. Sized for heavy CI-parity builds (e.g. ABCA's
-    // own ~2800-test `mise run build` + cdk synth). The previous 4 GB / 2 vCPU
-    // OOM-killed even the AgentCore microVM on that build (live-caught
-    // 2026-06-29 dogfooding ABCA-on-ABCA); 32 GB / 8 vCPU is a valid Fargate
-    // ARM64 combination and gives the jest worker fleet + tsc the headroom
-    // AgentCore's fixed envelope can't. (Fargate ARM64 allows up to 16 vCPU /
-    // 120 GB if a future build needs more.)
+    // own ~2800-test `mise run build` + cdk synth). Sizing history (all
+    // live-caught dogfooding ABCA-on-ABCA, 2026-06-29):
+    //   - 4 GB / 2 vCPU  → OOM-killed even the AgentCore microVM.
+    //   - 32 GB / 8 vCPU → ran ~50 min then OOM-killed (exit 137) at the cap;
+    //     peak working set ~31.6 GB when the root build fans out 4 heavy jobs
+    //     in PARALLEL (agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build),
+    //     each spawning its own worker fleet (jest maxWorkers, pytest, esbuild
+    //     Lambda bundling). 32 GB had no headroom for that concurrent peak.
+    //   - 64 GB / 16 vCPU (current) → 2× the memory headroom for the parallel
+    //     storm, and 16 vCPU shortens wall-clock (paired with
+    //     BUILD_VERIFY_TIMEOUT_S=3600 below so the ~longer-than-30-min build
+    //     isn't mis-reported as a timeout). Valid Fargate ARM64 combo (16 vCPU
+    //     admits 32–120 GB in 8 GB steps).
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDef', {
-      cpu: 8192,
-      memoryLimitMiB: 32768,
+      cpu: 16384,
+      memoryLimitMiB: 65536,
       runtimePlatform: {
         cpuArchitecture: ecs.CpuArchitecture.ARM64,
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
@@ -126,6 +133,12 @@ export class EcsAgentCluster extends Construct {
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         LOG_GROUP_NAME: logGroup.logGroupName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
+        // Heavy CI-parity builds on this big-box substrate legitimately run
+        // longer than the 1800s default (ABCA's own `mise run build` is
+        // ~50 min cold). Raise the post-agent build-verify cap so a slow-but-
+        // healthy build isn't mis-reported as a timeout (see post_hooks.py
+        // BUILD_VERIFY_TIMEOUT_S). ECS-only: AgentCore repos keep the default.
+        BUILD_VERIFY_TIMEOUT_S: '3600',
         ...(props.memoryId && { MEMORY_ID: props.memoryId }),
         // Per-session IAM scoping (#209): when a SessionRole is wired, the
         // agent assumes it for tenant-data access (see aws_session.py).
