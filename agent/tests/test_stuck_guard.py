@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from stuck_guard import (
-    BAIL_THRESHOLD,
     STEER_THRESHOLD,
     StuckGuard,
     _looks_failed,
@@ -75,17 +74,23 @@ class TestStuckGuardLifecycle:
         for _ in range(STEER_THRESHOLD):
             g.record_tool_result("Bash", CMD, OOM)
         assert g.evaluate().kind == "steer"
-        # same signature fails again but below bail → no second steer
-        g.record_tool_result("Bash", CMD, OOM)
+        # same signature keeps failing identically → still only ONE steer, never
+        # escalates to a kill (advisory-only by design — no bail).
+        for _ in range(10):
+            g.record_tool_result("Bash", CMD, OOM)
         assert g.evaluate().kind == "none"
 
-    def test_bails_after_persistent_failure(self):
+    def test_never_bails_advisory_only(self):
+        # Even on a persistent identical-failure spin, the guard NEVER returns
+        # 'bail' — it only ever steers (once). The max_turns cap is the real
+        # runaway backstop; a false positive here must cost at most one nudge.
         g = StuckGuard()
-        for _ in range(BAIL_THRESHOLD):
+        for _ in range(20):
             g.record_tool_result("Bash", CMD, OOM)
-        action = g.evaluate()
-        assert action.kind == "bail"
-        assert "Stuck" in action.message
+        # The only non-'none' action this guard can ever produce is 'steer'.
+        assert g.evaluate().kind in ("none", "steer")
+        # And specifically it is not 'bail'.
+        assert g.evaluate().kind != "bail"
 
     def test_success_resets_the_streak(self):
         g = StuckGuard()
@@ -111,6 +116,29 @@ class TestStuckGuardLifecycle:
         for i in range(50):
             g.record_tool_result("Bash", {"command": f"step-{i}"}, OK)
         assert g.evaluate().kind == "none"
+
+    def test_iterating_agent_same_command_DIFFERENT_failures_never_steers(self):
+        # K10 false-positive guard: the agent re-runs the SAME test command as
+        # it fixes failures one by one — each run fails on a DIFFERENT test.
+        # That's progress, not a loop. The streak resets on each new output, so
+        # it never even reaches the (advisory) steer threshold.
+        g = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for i in range(STEER_THRESHOLD + 6):
+            # A different failing test each run → different output → distinct streak.
+            resp = f"FAIL test/file_{i}.test.ts:{i * 7} — expected {i} got {i + 1}\nexit code 1"
+            g.record_tool_result("Bash", cmd, resp)
+        action = g.evaluate()
+        assert action.kind == "none", f"iterating agent should get no action, got {action.kind}"
+
+    def test_same_command_IDENTICAL_failure_steers(self):
+        # The genuine spin: same command, byte-identical failure output every
+        # time → reaches the steer threshold and emits the one advisory nudge.
+        g = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            g.record_tool_result("Bash", cmd, OOM)  # identical output each run
+        assert g.evaluate().kind == "steer"
 
     def test_interleaved_success_on_OTHER_sig_does_not_clear_the_loop(self):
         # The real loop (cmd A) keeps failing; occasional unrelated success (cmd B)
