@@ -109,10 +109,16 @@ export class EcsAgentCluster extends Construct {
     // CDK creates this automatically via taskDefinition, but we need to
     // grant additional permissions to the task role.
 
-    // Fargate task definition
+    // Fargate task definition. Sized for heavy CI-parity builds (e.g. ABCA's
+    // own ~2800-test `mise run build` + cdk synth). The previous 4 GB / 2 vCPU
+    // OOM-killed even the AgentCore microVM on that build (live-caught
+    // 2026-06-29 dogfooding ABCA-on-ABCA); 32 GB / 8 vCPU is a valid Fargate
+    // ARM64 combination and gives the jest worker fleet + tsc the headroom
+    // AgentCore's fixed envelope can't. (Fargate ARM64 allows up to 16 vCPU /
+    // 120 GB if a future build needs more.)
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDef', {
-      cpu: 2048,
-      memoryLimitMiB: 4096,
+      cpu: 8192,
+      memoryLimitMiB: 32768,
       runtimePlatform: {
         cpuArchitecture: ecs.CpuArchitecture.ARM64,
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
