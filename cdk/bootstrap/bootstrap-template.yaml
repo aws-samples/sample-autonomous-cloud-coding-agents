@@ -821,6 +821,7 @@ Resources:
               - iam:DeleteRole
               - iam:GetRole
               - iam:UpdateRole
+              - iam:UpdateAssumeRolePolicy
               - iam:TagRole
               - iam:UntagRole
               - iam:ListRoleTags
@@ -1002,6 +1003,8 @@ Resources:
               - lambda:GetFunctionCodeSigningConfig
               - lambda:GetFunctionRecursionConfig
               - lambda:GetProvisionedConcurrencyConfig
+              - lambda:PutProvisionedConcurrencyConfig
+              - lambda:DeleteProvisionedConcurrencyConfig
               - lambda:GetRuntimeManagementConfig
               - lambda:ListVersionsByFunction
               - lambda:InvokeFunction

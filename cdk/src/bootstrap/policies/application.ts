@@ -84,6 +84,8 @@ export function applicationPolicy(): iam.PolicyDocument {
           'lambda:GetFunctionCodeSigningConfig',
           'lambda:GetFunctionRecursionConfig',
           'lambda:GetProvisionedConcurrencyConfig',
+          'lambda:PutProvisionedConcurrencyConfig',
+          'lambda:DeleteProvisionedConcurrencyConfig',
           'lambda:GetRuntimeManagementConfig',
           'lambda:ListVersionsByFunction',
           'lambda:InvokeFunction',

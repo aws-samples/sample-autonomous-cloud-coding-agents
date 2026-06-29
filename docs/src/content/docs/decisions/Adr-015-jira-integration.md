@@ -66,6 +66,6 @@ Atlassian **rotates the `refresh_token` on every use**. Only trusted Lambda code
 ## References
 
 - Issue: [#288 — Jira Cloud integration (parity with Linear)](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/288)
-- [JIRA_SETUP_GUIDE.md](/using/jira-setup-guide) — operational walkthrough
-- [LINEAR_SETUP_GUIDE.md](/using/linear-setup-guide) — the analog integration this mirrors
+- [JIRA_SETUP_GUIDE.md](/sample-autonomous-cloud-coding-agents/using/jira-setup-guide) — operational walkthrough
+- [LINEAR_SETUP_GUIDE.md](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide) — the analog integration this mirrors
 - Reference implementation: `cdk/src/constructs/jira-integration.ts`, `cdk/src/handlers/jira-*.ts`, `cdk/src/handlers/shared/jira-{verify,oauth-resolver,feedback}.ts`, `agent/src/jira_reactions.py`, `agent/src/channel_mcp.py`

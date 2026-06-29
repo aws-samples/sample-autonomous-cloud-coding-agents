@@ -90,7 +90,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
     const bootCommand = [
       'python', '-c',
       'import json, os, sys; '
-      + 'sys.path.insert(0, "/app"); '
+      + 'sys.path.insert(0, "/app/src"); '
       + 'from entrypoint import run_task; '
       + 'p = json.loads(os.environ["AGENT_PAYLOAD"]); '
       + 'r = run_task('

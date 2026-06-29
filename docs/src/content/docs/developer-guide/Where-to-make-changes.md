@@ -12,4 +12,4 @@ Before editing, decide which part of the monorepo owns the behavior. This keeps 
 | Agent runtime | `agent/` | Bundled into the image CDK deploys; run `mise run quality` in `agent/` or root build. |
 | Docs (source) | `docs/guides/`, `docs/design/` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
 
-For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](/architecture/agents)** at the repo root (oriented toward automation-assisted contributors).
+For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/agents)** at the repo root (oriented toward automation-assisted contributors).

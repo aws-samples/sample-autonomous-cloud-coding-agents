@@ -66,6 +66,7 @@ export function infrastructurePolicy(): iam.PolicyDocument {
           'iam:DeleteRole',
           'iam:GetRole',
           'iam:UpdateRole',
+          'iam:UpdateAssumeRolePolicy',
           'iam:TagRole',
           'iam:UntagRole',
           'iam:ListRoleTags',

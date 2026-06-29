@@ -100,7 +100,19 @@ function ensureFrontmatter(content, title) {
     .replaceAll('../diagrams/', `${docsBase}/diagrams/`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
       const rewritten = rewriteDocsLinkTarget(target);
-      return rewritten ? `[${label}](${rewritten})` : match;
+      if (!rewritten) {
+        return match;
+      }
+      // The site is served under `base` (docsBase), so root-relative routes
+      // must carry that prefix — otherwise they resolve to the domain root
+      // and 404. Starlight prefixes its own nav links automatically, but our
+      // rewritten body links are raw markdown and need it added explicitly
+      // (same reason the image rewrites above include docsBase). Every
+      // non-undefined return from rewriteDocsLinkTarget is a `/…` route (bare
+      // `#…` anchors and external links return undefined and keep their
+      // original text above), so the prefix always applies.
+      // (Fixes the broken in-body design-doc links.)
+      return `[${label}](${docsBase}${rewritten})`;
     });
 
   const trimmed = normalized.trimStart();
@@ -155,6 +167,25 @@ function mirrorDirectory(sourceDir, targetDirRelative) {
     const out = ensureFrontmatter(raw, fallbackTitle);
     const normalizedName = `${normalizeFileStem(file)}.md`;
     writeFile(path.join(docsRoot, targetDirRelative, normalizedName), out);
+  }
+}
+
+// Recursively copy a source asset directory into the site's public/ tree so
+// every committed image/diagram is served at its rewritten absolute URL.
+// Filenames are preserved verbatim (markdown references them as-is).
+function copyAssetDir(sourceDir, targetDir) {
+  if (!fs.existsSync(sourceDir)) {
+    return;
+  }
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const from = path.join(sourceDir, entry.name);
+    const to = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyAssetDir(from, to);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(from, to);
+    }
   }
 }
 
@@ -286,6 +317,13 @@ mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs
 
 // --- Decision records (ADRs): mirror to decisions/ ---
 mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
+
+// --- Static assets: copy source image dir into the site's public/ ---
+// Guides reference images as `../imgs/foo.png`; ensureFrontmatter() turns
+// those into absolute `/<base>/imgs/foo.png` URLs, which Astro serves from
+// public/. Copy the source dir here so every committed image is published —
+// otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
+copyAssetDir(path.join(docsRoot, 'imgs'), path.join(docsRoot, 'public', 'imgs'));
 
 // Guardrail: ensure target tree exists when running in a clean checkout.
 fs.mkdirSync(targetRoot, { recursive: true });

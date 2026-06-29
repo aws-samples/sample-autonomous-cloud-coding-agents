@@ -13,6 +13,8 @@ argument-hint: <repo> [description]
 
 You are helping the user submit a well-crafted coding task to the ABCA platform. Good prompts are critical — the agent works autonomously without asking clarifying questions.
 
+> **Running the CLI:** examples below call `node cli/lib/bin/bgagent.js …` from the repo root. In a **non-interactive or mise-managed shell** `node` may not be on `PATH` (`command not found`) — prefix with `mise exec --` (e.g. `mise exec -- node cli/lib/bin/bgagent.js submit …`), or use a global `bgagent` if installed. If `cli/lib/bin/bgagent.js` is missing, run `mise run build` first.
+
 **Quick mode:** If the user provided a repo and description inline (e.g. "submit task to owner/repo: fix the login bug"), auto-detect the task type from the description and skip to Step 5. Infer the type:
 - PR number or "review PR" → `--review-pr`
 - "iterate on PR" or "fix PR feedback" → `--pr`

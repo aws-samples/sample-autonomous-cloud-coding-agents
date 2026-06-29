@@ -9,8 +9,8 @@ The platform is a shared resource - compute, model tokens, and GitHub API calls 
 The agent is only as good as the context it receives. A well-prepared repository leads to faster, higher-quality results.
 
 - **Onboard first** - Repositories must be registered via a Blueprint construct before tasks can target them. If you get a `REPO_NOT_ONBOARDED` error, contact your platform administrator.
-- **Add a CLAUDE.md** - This is the single most impactful thing you can do. The agent loads project configuration from `CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, and `.mcp.json` in your repository. Use these to document build commands, coding conventions, architecture decisions, and constraints. A good `CLAUDE.md` prevents the agent from guessing and reduces wasted turns. See the [Prompt guide](/customizing/prompt-engineering#repo-level-customization) for examples.
-- **Keep your PAT aligned** - If tasks fail with `preflight_failed`, the GitHub PAT likely lacks the permissions the task type needs. Check the event's `reason` field and update the secret in Secrets Manager. See [Repository preparation](/developer-guide/repository-preparation) for the full permissions table.
+- **Add a CLAUDE.md** - This is the single most impactful thing you can do. The agent loads project configuration from `CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, and `.mcp.json` in your repository. Use these to document build commands, coding conventions, architecture decisions, and constraints. A good `CLAUDE.md` prevents the agent from guessing and reduces wasted turns. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-customization) for examples.
+- **Keep your PAT aligned** - If tasks fail with `preflight_failed`, the GitHub PAT likely lacks the permissions the task type needs. Check the event's `reason` field and update the secret in Secrets Manager. See [Repository preparation](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation) for the full permissions table.
 
 ### Write effective task descriptions
 
