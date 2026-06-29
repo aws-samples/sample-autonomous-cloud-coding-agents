@@ -68,7 +68,7 @@ Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.
 - **`cdk/`** — CDK app package (`@abca/cdk`): `cdk/src/`, `cdk/test/`, `cdk/cdk.json`, `cdk/tsconfig.json`, `cdk/tsconfig.dev.json`, and `cdk/eslint.config.mjs` (ESLint flat config; `cli/` uses `cli/eslint.config.mjs`).
 - **`cli/`** — `@backgroundagent/cli` — CLI tool for interacting with the deployed REST API (see below).
 - **`agent/`** — Python code that runs inside the agent compute environment (entrypoint, server, system prompt, Dockerfile, requirements). The system prompt is refactored into `agent/prompts/` with a shared base template and per-task-type workflow variants (`new_task`, `pr_iteration`, `pr_review`).
-- **`docs/`** — Authoritative Markdown in `guides/` (developer, user, roadmap, prompt) and `design/`; assets in `diagrams/`, `imgs/`. The Starlight docs site lives here (`astro.config.mjs`, `package.json`); `src/content/docs/` is refreshed via `docs/scripts/sync-starlight.mjs`.
+- **`docs/`** — Authoritative Markdown in `guides/` (developer, user, prompt) and `design/`; assets in `imgs/`. The Starlight docs site lives here (`astro.config.mjs`, `package.json`); `src/content/docs/` is refreshed via `docs/scripts/sync-starlight.mjs`.
 - **`CONTRIBUTING.md`** — Contribution guidelines at the repository root.
 - **`package.json`** (root), **`yarn.lock`** — Yarn workspace root (minimal manifest); dependencies live in **`cdk/`**, **`cli/`**, and **`docs/`** package manifests.
 

@@ -367,7 +367,7 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 | I want to... | Look at |
 |---|---|
-| Update a user-facing guide | `docs/guides/` (USER_GUIDE.md, DEVELOPER_GUIDE.md, QUICK_START.mdx, PROMPT_GUIDE.md, ROADMAP.md) |
+| Update a user-facing guide | `docs/guides/` (USER_GUIDE.md, DEVELOPER_GUIDE.md, QUICK_START.mdx, PROMPT_GUIDE.md) |
 | Update an architecture doc | `docs/design/` |
 | Change the sidebar or site config | `docs/astro.config.mjs` |
 | Change how docs are synced | `docs/scripts/sync-starlight.mjs` |

@@ -210,4 +210,4 @@ flowchart TB
 | 5. Write-ahead validation | Open | Planned: separate model evaluates proposed memory updates before commit |
 | 6. Anomaly detection | Open | Planned: write pattern monitoring, behavioral drift detection, automatic halt |
 
-See [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) for the phased implementation plan and [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for the broader security context.
+See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for the phased implementation plan and [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for the broader security context.

@@ -108,10 +108,6 @@ export default defineConfig({
           collapsed: true,
           autogenerate: { directory: 'decisions' },
         },
-        {
-          label: 'Roadmap',
-          autogenerate: { directory: 'roadmap' },
-        },
       ],
     }),
   ],

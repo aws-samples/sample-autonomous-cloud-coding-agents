@@ -39,7 +39,6 @@ function rewriteDocsLinkTarget(target) {
   const explicitGuideRoutes = {
     PROMPT_GUIDE: '/customizing/prompt-engineering',
     QUICK_START: '/getting-started/quick-start',
-    ROADMAP: '/roadmap/roadmap',
     DEVELOPER_GUIDE: '/developer-guide/introduction',
     USER_GUIDE: '/using/overview',
     CONTRIBUTING: '/developer-guide/contributing',
@@ -97,7 +96,6 @@ function rewriteDocsLinkTarget(target) {
 function ensureFrontmatter(content, title) {
   const normalized = content
     .replaceAll('../imgs/', `${docsBase}/imgs/`)
-    .replaceAll('../diagrams/', `${docsBase}/diagrams/`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
       const rewritten = rewriteDocsLinkTarget(target);
       if (!rewritten) {
@@ -295,12 +293,6 @@ mirrorMarkdownFile(
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'CEDAR_POLICY_GUIDE.md'),
   path.join('src', 'content', 'docs', 'customizing', 'Cedar-policies.md'),
-);
-
-// --- Roadmap: mirror to roadmap/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'ROADMAP.md'),
-  path.join('src', 'content', 'docs', 'roadmap', 'Roadmap.md'),
 );
 
 // --- Contributing: mirror to developer-guide/ ---
