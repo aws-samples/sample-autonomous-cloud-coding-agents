@@ -36,6 +36,13 @@ jest.mock('@aws-sdk/client-ecs', () => ({
   StopTaskCommand: jest.fn((input: unknown) => ({ _type: 'StopTask', input })),
 }));
 
+const mockS3Send = jest.fn();
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({ send: mockS3Send })),
+  PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
+  DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
+}));
+
 import { EcsComputeStrategy } from '../../../../src/handlers/shared/strategies/ecs-strategy';
 
 beforeEach(() => {
@@ -88,12 +95,15 @@ describe('EcsComputeStrategy', () => {
         { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
       ]));
 
-      // AGENT_PAYLOAD contains the full orchestrator payload for direct run_task() invocation
+      // No ECS_PAYLOAD_BUCKET in this module's env → inline fallback (#502): the
+      // full payload rides in AGENT_PAYLOAD and nothing is written to S3.
       const agentPayload = envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD');
       expect(agentPayload).toBeDefined();
       const parsed = JSON.parse(agentPayload.value);
       expect(parsed.repo_url).toBe('org/repo');
       expect(parsed.prompt).toBe('Fix the bug');
+      expect(envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD_S3_URI')).toBeUndefined();
+      expect(mockS3Send).not.toHaveBeenCalled();
 
       // Container command override — runs Python directly instead of uvicorn
       expect(override.command).toBeDefined();
@@ -334,5 +344,112 @@ describe('EcsComputeStrategy', () => {
         }),
       ).resolves.toBeUndefined();
     });
+  });
+});
+
+// #502: the S3-pointer path requires ECS_PAYLOAD_BUCKET to be set BEFORE the
+// module is imported (it's a module-level constant). Re-import under
+// jest.isolateModules with the env var set so these tests don't perturb the
+// inline-fallback tests above.
+describe('EcsComputeStrategy with ECS_PAYLOAD_BUCKET (S3-pointer path, #502)', () => {
+  const PAYLOAD_BUCKET = 'test-ecs-payload-bucket';
+
+  function loadStrategyWithBucket(): {
+    EcsComputeStrategy: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').EcsComputeStrategy;
+    deleteEcsPayload: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').deleteEcsPayload;
+    ecsPayloadKey: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').ecsPayloadKey;
+  } {
+    let mod!: ReturnType<typeof loadStrategyWithBucket>;
+    jest.isolateModules(() => {
+      process.env.ECS_PAYLOAD_BUCKET = PAYLOAD_BUCKET;
+      process.env.ECS_CLUSTER_ARN = CLUSTER_ARN;
+      process.env.ECS_TASK_DEFINITION_ARN = TASK_DEF_ARN;
+      process.env.ECS_SUBNETS = 'subnet-aaa,subnet-bbb';
+      process.env.ECS_SECURITY_GROUP = 'sg-12345';
+      process.env.ECS_CONTAINER_NAME = 'AgentContainer';
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      mod = require('../../../../src/handlers/shared/strategies/ecs-strategy');
+    });
+    return mod;
+  }
+
+  afterEach(() => {
+    delete process.env.ECS_PAYLOAD_BUCKET;
+  });
+
+  test('writes payload to S3 and passes AGENT_PAYLOAD_S3_URI, not the inline blob', async () => {
+    mockS3Send.mockResolvedValueOnce({});
+    mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+
+    const { EcsComputeStrategy: Strategy } = loadStrategyWithBucket();
+    const strategy = new Strategy();
+    await strategy.startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo', prompt: 'Fix the bug', hydrated_context: { big: 'x'.repeat(10000) } },
+      blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
+    });
+
+    // PutObject to the payload bucket at <task_id>/payload.json
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    const put = mockS3Send.mock.calls[0][0];
+    expect(put._type).toBe('PutObject');
+    expect(put.input.Bucket).toBe(PAYLOAD_BUCKET);
+    expect(put.input.Key).toBe('TASK001/payload.json');
+    expect(JSON.parse(put.input.Body).repo_url).toBe('org/repo');
+
+    // Override carries the URI pointer, NOT the inline payload
+    const envVars = mockSend.mock.calls[0][0].input.overrides.containerOverrides[0].environment;
+    const uri = envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD_S3_URI');
+    expect(uri.value).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
+    expect(envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD')).toBeUndefined();
+  });
+
+  test('boot command loads payload from S3 when the URI is set, else inline', async () => {
+    mockS3Send.mockResolvedValueOnce({});
+    mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+
+    const { EcsComputeStrategy: Strategy } = loadStrategyWithBucket();
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo' },
+      blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
+    });
+
+    const cmd = mockSend.mock.calls[0][0].input.overrides.containerOverrides[0].command;
+    const src = cmd[2];
+    // Reads the URI, fetches via boto3 S3 when set, falls back to inline env.
+    expect(src).toContain('AGENT_PAYLOAD_S3_URI');
+    expect(src).toContain('get_object');
+    expect(src).toContain('AGENT_PAYLOAD');
+  });
+
+  test('deleteEcsPayload deletes the task payload object', async () => {
+    mockS3Send.mockResolvedValueOnce({});
+    const { deleteEcsPayload, ecsPayloadKey } = loadStrategyWithBucket();
+    await deleteEcsPayload('TASK001');
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    const del = mockS3Send.mock.calls[0][0];
+    expect(del._type).toBe('DeleteObject');
+    expect(del.input.Bucket).toBe(PAYLOAD_BUCKET);
+    expect(del.input.Key).toBe(ecsPayloadKey('TASK001'));
+    expect(ecsPayloadKey('TASK001')).toBe('TASK001/payload.json');
+  });
+
+  test('deleteEcsPayload swallows S3 errors (best-effort — lifecycle is the backstop)', async () => {
+    mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
+    const { deleteEcsPayload } = loadStrategyWithBucket();
+    await expect(deleteEcsPayload('TASK001')).resolves.toBeUndefined();
+  });
+});
+
+describe('deleteEcsPayload without ECS_PAYLOAD_BUCKET', () => {
+  test('no-ops when no payload bucket is configured', async () => {
+    // The top-of-file import has no ECS_PAYLOAD_BUCKET set.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { deleteEcsPayload } = require('../../../../src/handlers/shared/strategies/ecs-strategy');
+    await expect(deleteEcsPayload('TASK001')).resolves.toBeUndefined();
+    expect(mockS3Send).not.toHaveBeenCalled();
   });
 });

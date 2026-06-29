@@ -160,6 +160,16 @@ export interface TaskOrchestratorProps {
   };
 
   /**
+   * S3 bucket for per-task ECS payloads (#502). When provided (alongside
+   * ``ecsConfig``), the orchestrator writes the payload here and passes only an
+   * ``AGENT_PAYLOAD_S3_URI`` pointer in the RunTask override (the full payload
+   * exceeds the 8 KB containerOverrides limit), then deletes the object in the
+   * finalize step. The orchestrator gets write + delete; the ECS task role gets
+   * read-only (granted on the bucket by ``EcsAgentCluster``).
+   */
+  readonly ecsPayloadBucket?: s3.IBucket;
+
+  /**
    * S3 bucket for task attachments. When provided, the orchestrator gets
    * ReadWrite grants for URL fetch/screen/upload during hydration.
    */
@@ -220,6 +230,7 @@ export class TaskOrchestrator extends Construct {
         '@aws-sdk/client-ecs',
         '@aws-sdk/client-lambda',
         '@aws-sdk/client-bedrock-runtime',
+        '@aws-sdk/client-s3',
         '@aws-sdk/client-secrets-manager',
         '@aws-sdk/lib-dynamodb',
         '@aws-sdk/util-dynamodb',
@@ -262,6 +273,9 @@ export class TaskOrchestrator extends Construct {
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
         }),
+        // #502: bucket the orchestrator writes the ECS payload to (and deletes
+        // from at finalize); the ECS strategy reads this to build the S3 URI.
+        ...(props.ecsPayloadBucket && { ECS_PAYLOAD_BUCKET: props.ecsPayloadBucket.bucketName }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
       },
       bundling: orchestratorBundling,
@@ -278,6 +292,15 @@ export class TaskOrchestrator extends Construct {
     // Attachments bucket grants (URL fetch/screen/upload during hydration)
     if (props.attachmentsBucket) {
       props.attachmentsBucket.grantReadWrite(this.fn);
+    }
+
+    // #502: ECS payload bucket — the orchestrator writes the payload before
+    // RunTask and deletes it at finalize. Write + delete only (it never reads
+    // its own payload back; the ECS container is the reader, with its own
+    // read-only grant from EcsAgentCluster).
+    if (props.ecsPayloadBucket) {
+      props.ecsPayloadBucket.grantPut(this.fn);
+      props.ecsPayloadBucket.grantDelete(this.fn);
     }
 
     // Durable execution managed policy
