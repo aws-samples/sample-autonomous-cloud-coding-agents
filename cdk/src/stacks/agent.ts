@@ -42,6 +42,7 @@ import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
+import { IterationHeartbeat } from '../constructs/iteration-heartbeat';
 import { JiraIntegration } from '../constructs/jira-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
@@ -980,6 +981,32 @@ export class AgentStack extends Stack {
     );
     orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+
+    // K6: mid-run liveness heartbeat. A scheduled sweep edits the maturing
+    // Linear reply of RUNNING comment-triggered iterations to show elapsed time
+    // ("🔄 Working … _8m elapsed_") so a long run isn't a silent black box
+    // (live-caught ABCA-483). Needs the workspace registry + per-workspace
+    // linear-oauth secret read to resolve the outbound token (same as the
+    // reconciler's reply path). Read-only on the TaskTable.
+    const iterationHeartbeat = new IterationHeartbeat(this, 'IterationHeartbeat', {
+      taskTable: taskTable.table,
+    });
+    linearIntegration.workspaceRegistryTable.grantReadData(iterationHeartbeat.fn);
+    iterationHeartbeat.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
+    );
+    iterationHeartbeat.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
       resources: [
         Stack.of(this).formatArn({
           service: 'secretsmanager',

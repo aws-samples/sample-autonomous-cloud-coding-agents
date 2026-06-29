@@ -47,6 +47,38 @@
 const MAX_ANSWER_CHARS = 2000;
 
 /**
+ * K6: below this elapsed floor the ``working`` reply shows no "(N elapsed)"
+ * clause — a freshly-acked task reads as a clean "🔄 Working…" and only grows
+ * the liveness suffix once a run is genuinely long enough to look silent.
+ */
+const HEARTBEAT_ELAPSED_FLOOR_S = 90;
+
+/** K6: max chars of the agent's latest-progress hint shown on the working line. */
+const PROGRESS_NOTE_MAX = 80;
+
+/**
+ * K6 liveness suffix for the ``working`` state: a short italic line carrying
+ * elapsed time (+ an optional sanitized progress note) so a long-running task
+ * isn't a silent black box (live-caught ABCA-483: 22-min silence between 👀 and
+ * ❌). Returns '' for a just-started task (< {@link HEARTBEAT_ELAPSED_FLOOR_S})
+ * so the first ack stays clean. Pure.
+ */
+function workingLivenessSuffix(
+  elapsedS: number | null | undefined,
+  progressNote: string | undefined,
+): string {
+  const e = dur(elapsedS);
+  // Only show the clause once the run is long enough to read as "is it alive?".
+  const showElapsed =
+    typeof elapsedS === 'number' && Number.isFinite(elapsedS) && elapsedS >= HEARTBEAT_ELAPSED_FLOOR_S;
+  const note = (progressNote ?? '').replace(/\s+/g, ' ').trim();
+  const parts: string[] = [];
+  if (showElapsed && e) parts.push(`${e} elapsed`);
+  if (note) parts.push(truncate(note, PROGRESS_NOTE_MAX));
+  return parts.length ? `_${parts.join(' · ')}_` : '';
+}
+
+/**
  * The maturing iteration reply (iteration-UX redesign). One threaded reply per
  * ``@bgagent`` comment that EDITS IN PLACE through these states instead of
  * posting ~5 separate top-level comments per round. Mirrors the #247 epic panel.
@@ -85,6 +117,19 @@ export interface MaturingReplyInput {
   readonly deployUrl?: string | null;
   /** Sanitized failure reason (failed state). */
   readonly failureReason?: string;
+  /**
+   * K6 liveness heartbeat: seconds elapsed since the task started, shown on the
+   * ``working`` state so a long run isn't a silent black box ("🔄 Working — 8m
+   * elapsed…"). Only rendered when > a small floor (a just-started task shows
+   * the plain "Working…" line). Distinct from ``durationS`` (a TERMINAL total).
+   */
+  readonly elapsedS?: number | null;
+  /**
+   * K6: short, sanitized latest-progress hint from the agent's most recent
+   * milestone (e.g. "running build verification"). Optional; appended to the
+   * working line when present. Caller MUST pre-sanitize (it's agent-derived).
+   */
+  readonly progressNote?: string;
 }
 
 /**
@@ -137,8 +182,15 @@ export function renderMaturingReply(input: MaturingReplyInput): string {
   switch (input.state) {
     case 'on_it':
       return '👀 On it — reading the PR…';
-    case 'working':
-      return prRef ? `🔄 Working — updating ${prRef}…` : '🔄 Working…';
+    case 'working': {
+      // K6 liveness: base "Working" line + an optional "(Nm elapsed[ · note])"
+      // suffix so a long run shows it's alive, not stuck. The elapsed clause is
+      // omitted for a freshly-started task (< HEARTBEAT_ELAPSED_FLOOR_S) so the
+      // first ack reads clean.
+      const base = prRef ? `🔄 Working — updating ${prRef}…` : '🔄 Working…';
+      const live = workingLivenessSuffix(input.elapsedS, input.progressNote);
+      return live ? `${base}\n${live}` : base;
+    }
     case 'updated': {
       const head = prRef ? `✅ Updated — ${prRef}.` : '✅ Updated.';
       // headline + metadata, then the embedded preview thumbnail on its own line.
