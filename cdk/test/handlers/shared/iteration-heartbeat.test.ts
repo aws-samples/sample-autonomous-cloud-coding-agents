@@ -59,9 +59,14 @@ describe('planHeartbeat — eligibility', () => {
     // The ABCA-483 black-box case was a standalone @bgagent iteration, which
     // omits orchestration_iteration but still has a maturing reply. It must
     // get a heartbeat. Eligibility is the reply-routing fields, not isIteration.
+    // (Live-caught: the first deploy returned eligible:0 for exactly this case
+    // because the standalone path stamps linear_issue_id, not
+    // trigger_comment_issue_id — the sweep's toView now falls back to it, so by
+    // the time we reach planHeartbeat the issue id is populated either way.)
     const plan = planHeartbeat(task({ isIteration: false }), NOW);
     expect(plan).not.toBeNull();
     expect(plan!.replyId).toBe('reply-1');
+    expect(plan!.issueId).toBe('issue-1');
   });
 
   test('a task with NO maturing reply (first run / non-PR) → no plan', () => {

@@ -62,7 +62,14 @@ function toView(img: DdbMap): HeartbeatTaskView {
     ...(cm.linear_workspace_id?.S !== undefined && { linearWorkspaceId: cm.linear_workspace_id.S }),
     ...(cm.iteration_reply_comment_id?.S !== undefined && { iterationReplyCommentId: cm.iteration_reply_comment_id.S }),
     ...(cm.trigger_comment_id?.S !== undefined && { triggerCommentId: cm.trigger_comment_id.S }),
-    ...(cm.trigger_comment_issue_id?.S !== undefined && { triggerCommentIssueId: cm.trigger_comment_issue_id.S }),
+    // The issue the reply lives on. The orchestration path stamps
+    // ``trigger_comment_issue_id`` (parent epic for a UX.18 routed comment);
+    // the STANDALONE path stamps only ``linear_issue_id`` (the reply is on that
+    // same issue). Fall back to it so standalone iterations get a heartbeat —
+    // the reconciler's reply path uses the same precedence.
+    ...((cm.trigger_comment_issue_id?.S ?? cm.linear_issue_id?.S) !== undefined && {
+      triggerCommentIssueId: cm.trigger_comment_issue_id?.S ?? cm.linear_issue_id?.S,
+    }),
     isIteration: cm.orchestration_iteration?.S === 'true',
     ...(prNumberRaw !== undefined && { prNumber: Number(prNumberRaw) }),
     ...(img.pr_url?.S !== undefined && { prUrl: img.pr_url.S }),
