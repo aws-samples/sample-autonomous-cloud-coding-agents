@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from shell import log, run_cmd
@@ -18,6 +20,33 @@ if TYPE_CHECKING:
 # lint_command) so gating runs the repo's real command.
 DEFAULT_BUILD_COMMAND = "mise run build"
 DEFAULT_LINT_COMMAND = "mise run lint"
+
+# Wall-clock ceiling for a single build/lint verification subprocess. The old
+# hardcoded 600s (run_cmd's default) was too low for a real CI-parity build
+# (install + compile + full test suite + synth) — a heavy repo's legitimate
+# build exceeded it and was reported as a build FAILURE, which is the wrong
+# diagnosis (the build didn't fail, it didn't finish in time). Raised to 30min
+# and made env-overridable; well under the orchestrator's 9h durable ceiling.
+# When the ceiling IS hit we now surface a distinct "timed out" reason (see
+# VerifyOutcome.timed_out → pipeline error_message → platform failure copy)
+# rather than a generic "build failed".
+BUILD_VERIFY_TIMEOUT_S = int(os.environ.get("BUILD_VERIFY_TIMEOUT_S") or 1800)
+
+
+@dataclass
+class VerifyOutcome:
+    """Result of a build/lint verification run.
+
+    ``passed`` drives gating exactly as the old bare-bool return did. ``timed_out``
+    distinguishes "the command exceeded BUILD_VERIFY_TIMEOUT_S and was killed"
+    from "the command ran and exited non-zero" — a different diagnosis that the
+    pipeline surfaces as a distinct reason ("timed out" vs "build/tests failed").
+    A timeout still counts as not-passed (a build that never finished is not green).
+    """
+
+    passed: bool
+    timed_out: bool = False
+
 
 # POSIX shell exit code for "command not found" — an inert build signal (the
 # configured verify command isn't installed), not a genuine build failure.
@@ -73,46 +102,50 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     return shlex.split(cmd)
 
 
-def verify_build(repo_dir: str, command: str = "") -> bool:
-    """Run the configured build command (default ``mise run build``) to verify the build."""
-    argv = resolve_verify_argv(command, DEFAULT_BUILD_COMMAND)
-    log("POST", f"Running post-agent build verification ({' '.join(argv)})...")
+def _run_verify(repo_dir: str, command: str, default: str, label: str) -> VerifyOutcome:
+    """Run a configured verify command and classify the outcome.
+
+    Returns a :class:`VerifyOutcome` so callers can distinguish a TIMEOUT (the
+    command exceeded ``BUILD_VERIFY_TIMEOUT_S`` and was killed — the build did
+    not *fail*, it did not *finish*) from a genuine non-zero exit. Both are
+    not-passed for gating, but the pipeline surfaces them as different reasons.
+    """
+    argv = resolve_verify_argv(command, default)
+    log("POST", f"Running post-agent {label} ({' '.join(argv)})...")
     try:
         result = run_cmd(
             argv,
-            label="verify-build-post",
+            label=label,
             cwd=repo_dir,
             check=False,
+            timeout=BUILD_VERIFY_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        log("WARN", "Post-agent build timed out — treating as failed")
-        return False
+        log(
+            "WARN",
+            f"Post-agent {label} TIMED OUT after {BUILD_VERIFY_TIMEOUT_S}s "
+            "— reporting as timed out (not a build failure)",
+        )
+        return VerifyOutcome(passed=False, timed_out=True)
     if result.returncode != 0:
-        log("POST", "Post-agent build FAILED")
-        return False
-    log("POST", "Post-agent build: OK")
-    return True
+        log("POST", f"Post-agent {label} FAILED (exit {result.returncode})")
+        return VerifyOutcome(passed=False)
+    log("POST", f"Post-agent {label}: OK")
+    return VerifyOutcome(passed=True)
 
 
-def verify_lint(repo_dir: str, command: str = "") -> bool:
+def verify_build(repo_dir: str, command: str = "") -> VerifyOutcome:
+    """Run the configured build command (default ``mise run build``) to verify the build.
+
+    Returns a :class:`VerifyOutcome` (``.passed`` for gating, ``.timed_out`` to
+    distinguish "exceeded the time limit" from "ran and failed").
+    """
+    return _run_verify(repo_dir, command, DEFAULT_BUILD_COMMAND, "verify-build-post")
+
+
+def verify_lint(repo_dir: str, command: str = "") -> VerifyOutcome:
     """Run the configured lint command (default ``mise run lint``) to verify lint passes."""
-    argv = resolve_verify_argv(command, DEFAULT_LINT_COMMAND)
-    log("POST", f"Running post-agent lint verification ({' '.join(argv)})...")
-    try:
-        result = run_cmd(
-            argv,
-            label="verify-lint-post",
-            cwd=repo_dir,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        log("WARN", "Post-agent lint timed out — treating as failed")
-        return False
-    if result.returncode != 0:
-        log("POST", "Post-agent lint FAILED")
-        return False
-    log("POST", "Post-agent lint: OK")
-    return True
+    return _run_verify(repo_dir, command, DEFAULT_LINT_COMMAND, "verify-lint-post")
 
 
 def ensure_committed(repo_dir: str) -> bool:

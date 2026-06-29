@@ -67,6 +67,33 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
     });
   });
 
+  describe('build TIMEOUT — distinct from a red build (user 2026-06-29)', () => {
+    // The agent finished cleanly but the build verify exceeded its wall-clock
+    // limit and was killed → error_message carries build_ok=timeout. This is a
+    // different diagnosis (slow build / cap too low), NOT "your code is broken".
+    const body = renderFailureReply({
+      status: TaskStatus.FAILED,
+      errorMessage: "Task did not succeed (agent_status='success', build_ok=timeout)",
+      taskId: 't-to',
+    });
+
+    test('reads as "timed out / didn\'t finish in time", not "didn\'t pass"', () => {
+      expect(body).toMatch(/^❌/);
+      expect(body).toMatch(/didn't finish in time|timed out/i);
+      expect(body).not.toMatch(/didn't pass/i);
+      expect(body).toMatch(/build log in CloudWatch for task `t-to`/);
+    });
+
+    test('still invites a reply (retry seam)', () => {
+      expect(body).toMatch(/reply with guidance/i);
+    });
+
+    test('a timeout is NOT misread as an agent crash (no classified-title path)', () => {
+      // It must take the build branch, not the classifyError/CloudWatch-crash branch.
+      expect(body).not.toMatch(/Unexpected error|didn't complete/i);
+    });
+  });
+
   describe('agent-itself failure (crash / cap / timeout before a clean terminal)', () => {
     test('max-turns crash → classified title + CloudWatch task id + retry invite', () => {
       const body = renderFailureReply({
@@ -150,5 +177,25 @@ describe('renderPanelFailureReason (K1 — failed-node sub-line on the epic pane
 
   test('null when there is no task id to point at (nothing actionable to render)', () => {
     expect(renderPanelFailureReason({ buildPassed: false })).toBeNull();
+  });
+
+  test('a build TIMEOUT on the integration node reads "timed out", not "failed"', () => {
+    const reason = renderPanelFailureReason({
+      errorMessage: "Task did not succeed (agent_status='success', build_ok=timeout)",
+      taskId: 't-int-to',
+      isIntegration: true,
+    });
+    expect(reason).toMatch(/Combined build timed out after merging the sub-issue branches/i);
+    expect(reason).not.toMatch(/failed/i);
+    expect(reason).toMatch(/CloudWatch for task `t-int-to`/);
+  });
+
+  test('a build TIMEOUT on a regular leaf reads "Build/tests timed out"', () => {
+    const reason = renderPanelFailureReason({
+      errorMessage: "Task did not succeed (agent_status='end_turn', build_ok=timeout)",
+      taskId: 't-leaf-to',
+    });
+    expect(reason).toMatch(/^Build\/tests timed out/);
+    expect(reason).not.toMatch(/failed/i);
   });
 });

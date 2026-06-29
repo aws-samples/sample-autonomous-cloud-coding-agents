@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from models import AgentResult, RepoSetup, TaskConfig
 from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
+from post_hooks import VerifyOutcome
 
 
 class TestCedarPoliciesInjection:
@@ -52,8 +53,8 @@ class TestCedarPoliciesInjection:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -120,8 +121,8 @@ class TestCedarPoliciesInjection:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -407,8 +408,8 @@ class TestRepoLessPipeline:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value="https://github.com/org/repo/pull/1"),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -479,6 +480,28 @@ class TestResolveOverallTaskStatus:
         assert err is not None
         assert "agent_status='success'" in err
         assert "build_ok=False" in err
+
+    def test_success_with_build_TIMED_OUT_marks_timeout_distinctly(self):
+        # User 2026-06-29: a build that exceeded the time limit must read as a
+        # TIMEOUT, not a generic build failure. The error_message carries
+        # ``build_ok=timeout`` so the platform's failure copy says "timed out".
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(
+            ar, build_ok=False, pr_url="https://pr", build_timed_out=True
+        )
+        assert status == "error"
+        assert err is not None
+        assert "build_ok=timeout" in err
+        assert "build_ok=False" not in err  # not the generic-failure marker
+
+    def test_build_failed_but_not_timeout_keeps_false_marker(self):
+        ar = AgentResult(status="success")
+        _, err = _resolve_overall_task_status(
+            ar, build_ok=False, pr_url="https://pr", build_timed_out=False
+        )
+        assert err is not None
+        assert "build_ok=False" in err
+        assert "timeout" not in err
 
     def test_unknown_always_error_even_with_pr_and_build(self):
         """agent_status=unknown must always fail — never infer success from PR/build."""
@@ -635,8 +658,8 @@ class TestCancelSkipsPostHooks:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", mock_ensure_pr),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -712,8 +735,8 @@ class TestCancelSkipsPostHooks:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", mock_ensure_pr),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -796,8 +819,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -864,8 +887,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -931,8 +954,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -999,8 +1022,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -1072,8 +1095,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1142,8 +1165,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1213,8 +1236,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1278,8 +1301,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1605,7 +1628,7 @@ class TestTraceCrashPath:
         with (
             patch("pipeline.ensure_committed", return_value=False),
             patch("pipeline.verify_build", side_effect=RuntimeError("build verify boom")),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1683,7 +1706,7 @@ class TestTraceCrashPath:
         with (
             patch("pipeline.ensure_committed", return_value=False),
             patch("pipeline.verify_build", side_effect=ValueError("original pipeline error")),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),

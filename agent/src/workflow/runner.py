@@ -519,7 +519,8 @@ def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
     from post_hooks import verify_build
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
-    passed = verify_build(repo_dir, ctx.config.build_command)
+    outcome = verify_build(repo_dir, ctx.config.build_command)
+    passed = outcome.passed
     # was_passing_before defaults True (assume green-before, so a post-agent
     # failure IS a regression) — the same conservative default pipeline.py uses.
     was_passing_before = ctx.setup.build_before if ctx.setup else True
@@ -529,11 +530,17 @@ def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
         read_only=ctx.workflow.read_only,
         was_passing_before=was_passing_before,
     )
+    # Distinguish a timeout from a genuine red build in the step error too.
+    fail_reason = (
+        "post-agent build timed out"
+        if outcome.timed_out
+        else "post-agent build failed (regression)"
+    )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status=status,
-        error=None if status == "succeeded" else "post-agent build failed (regression)",
+        error=None if status == "succeeded" else fail_reason,
         data={"build_passed": passed},
     )
 
@@ -543,7 +550,8 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
     from post_hooks import verify_lint
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
-    passed = verify_lint(repo_dir, ctx.config.lint_command)
+    outcome = verify_lint(repo_dir, ctx.config.lint_command)
+    passed = outcome.passed
     was_passing_before = ctx.setup.lint_before if ctx.setup else True
     status = gate_status(
         passed=passed,
@@ -551,11 +559,14 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
         read_only=ctx.workflow.read_only,
         was_passing_before=was_passing_before,
     )
+    fail_reason = (
+        "post-agent lint timed out" if outcome.timed_out else "post-agent lint failed (regression)"
+    )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status=status,
-        error=None if status == "succeeded" else "post-agent lint failed (regression)",
+        error=None if status == "succeeded" else fail_reason,
         data={"lint_passed": passed},
     )
 

@@ -70,14 +70,27 @@ export interface FailureReplyInput {
  * ``agent/src/pipeline.py`` ``_resolve_overall_task_status`` /
  * ``_apply_post_hook_gates``.
  */
-const BUILD_GATE_FAILED_RE = /agent_status=['"]?(success|end_turn)['"]?.*build_ok\s*=\s*False/i;
+const BUILD_GATE_FAILED_RE = /agent_status=['"]?(success|end_turn)['"]?.*build_ok\s*=\s*(False|timeout)/i;
+
+/**
+ * The agent finished cleanly but the build gate failed because the build
+ * VERIFICATION TIMED OUT (exceeded ``BUILD_VERIFY_TIMEOUT_S`` and was killed) —
+ * a different diagnosis from a genuine red build. ``agent/src/pipeline.py``
+ * ``_resolve_overall_task_status`` emits ``build_ok=timeout`` for this case so
+ * we render "build timed out" rather than the misleading "build/tests failed"
+ * (the build didn't fail — it didn't finish in time; the fix is a faster build
+ * or a higher cap, not a code change).
+ */
+const BUILD_GATE_TIMEOUT_RE = /agent_status=['"]?(success|end_turn)['"]?.*build_ok\s*=\s*timeout/i;
 
 /**
  * True when the failure is a BUILD/TEST failure (the agent completed and a PR
  * exists, but the verification gate is red) vs an agent-itself failure
  * (crash / cap / timeout). Two shapes are accepted:
  *  - the live gating shape: ``error_message`` says ``agent_status='success' …
- *    build_ok=False`` (the agent succeeded; only the build gate failed); OR
+ *    build_ok=False`` (the agent succeeded; only the build gate failed), OR
+ *    ``build_ok=timeout`` (the build gate timed out — also a build-side, not
+ *    agent-crash, failure); OR
  *  - the explicit field shape: a terminal task with ``build_passed === false``
  *    and no crash error_message (defensive — e.g. an informational-gate path
  *    that surfaces build_passed directly).
@@ -87,6 +100,11 @@ function isBuildFailure(input: Pick<FailureReplyInput, 'buildPassed' | 'errorMes
     return true;
   }
   return input.buildPassed === false && !input.errorMessage;
+}
+
+/** True when the build gate failed specifically because it TIMED OUT (a subset of build failures). */
+function isBuildTimeout(input: Pick<FailureReplyInput, 'errorMessage'>): boolean {
+  return !!input.errorMessage && BUILD_GATE_TIMEOUT_RE.test(input.errorMessage);
 }
 
 /** Collapse whitespace + clip to EXCERPT_MAX chars with an ellipsis. */
@@ -99,6 +117,17 @@ function excerpt(raw: string): string {
  * Render the ❌ failure reply body. Best-effort, never throws.
  */
 export function renderFailureReply(input: FailureReplyInput): string {
+  if (isBuildTimeout(input)) {
+    // Build verification TIMED OUT — a distinct diagnosis from a red build:
+    // the build didn't fail, it didn't finish within the time limit. Say so,
+    // so the user fixes the right thing (a slow build / a higher cap), not
+    // their code. Still answerable — a reply re-runs it.
+    return (
+      '❌ I made the change, but the build/tests didn\'t finish in time (timed '
+      + `out) — see the build log in CloudWatch for task \`${input.taskId}\`. `
+      + "Reply with guidance and I'll try again."
+    );
+  }
   if (isBuildFailure(input)) {
     // Build/test failure — one line. Point at the agent's CloudWatch build log
     // (by task id), NOT the PR's GitHub checks: the agent ran the configured
@@ -145,6 +174,13 @@ export function renderPanelFailureReason(input: {
   readonly isIntegration?: boolean;
 }): string | null {
   if (!input.taskId) return null;
+  if (isBuildTimeout(input)) {
+    // Distinct from a red build: the build didn't finish within the time limit.
+    const what = input.isIntegration
+      ? 'Combined build timed out after merging the sub-issue branches'
+      : 'Build/tests timed out';
+    return `${what} — see the build log in CloudWatch for task \`${input.taskId}\`.`;
+  }
   if (isBuildFailure(input)) {
     const what = input.isIntegration
       ? 'Combined build failed after merging the sub-issue branches'

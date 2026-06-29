@@ -62,6 +62,7 @@ class TestVerifyBuildHonorsCommand:
 
         def fake_run_cmd(argv, **kw):
             seen["argv"] = argv
+            seen["kw"] = kw
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(post_hooks, "run_cmd", fake_run_cmd)
@@ -69,29 +70,45 @@ class TestVerifyBuildHonorsCommand:
 
     def test_build_defaults_to_mise(self, monkeypatch):
         seen = self._capture_argv(monkeypatch)
-        assert verify_build("/repo") is True
+        outcome = verify_build("/repo")
+        assert outcome.passed is True
+        assert outcome.timed_out is False
         assert seen["argv"] == ["mise", "run", "build"]
 
     def test_build_uses_configured_command(self, monkeypatch):
         seen = self._capture_argv(monkeypatch)
-        assert verify_build("/repo", "npm run build") is True
+        assert verify_build("/repo", "npm run build").passed is True
         assert seen["argv"] == ["npm", "run", "build"]
+
+    def test_verify_passes_the_build_timeout(self, monkeypatch):
+        # The verify subprocess must run under BUILD_VERIFY_TIMEOUT_S (not
+        # run_cmd's 600s default) so a real CI-parity build can finish.
+        seen = self._capture_argv(monkeypatch)
+        verify_build("/repo", "mise run build")
+        assert seen["kw"].get("timeout") == post_hooks.BUILD_VERIFY_TIMEOUT_S
 
     def test_lint_uses_configured_command(self, monkeypatch):
         seen = self._capture_argv(monkeypatch)
-        assert verify_lint("/repo", "ruff check .") is True
+        assert verify_lint("/repo", "ruff check .").passed is True
         assert seen["argv"] == ["ruff", "check", "."]
 
-    def test_nonzero_returncode_is_failure(self, monkeypatch):
+    def test_nonzero_returncode_is_failure_not_timeout(self, monkeypatch):
         monkeypatch.setattr(post_hooks, "run_cmd", lambda argv, **kw: SimpleNamespace(returncode=1))
-        assert verify_build("/repo", "npm run build") is False
+        outcome = verify_build("/repo", "npm run build")
+        assert outcome.passed is False
+        assert outcome.timed_out is False  # ran-and-failed, not a timeout
 
-    def test_timeout_is_failure(self, monkeypatch):
+    def test_timeout_is_not_passed_AND_flagged_timed_out(self, monkeypatch):
+        # The key distinction (user 2026-06-29): a timeout must read as "timed
+        # out", not a generic build failure. passed=False (a build that never
+        # finished isn't green) but timed_out=True so the reason differs.
         def boom(argv, **kw):
             raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
 
         monkeypatch.setattr(post_hooks, "run_cmd", boom)
-        assert verify_build("/repo", "npm run build") is False
+        outcome = verify_build("/repo", "npm run build")
+        assert outcome.passed is False
+        assert outcome.timed_out is True
 
 
 class TestIsVerifyCommandInert:
