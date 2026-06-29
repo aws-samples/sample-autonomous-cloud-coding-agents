@@ -27,6 +27,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
 import { formatJson } from '../format';
+import { promptSecret } from '../prompt-secret';
 
 export function makeSlackCommand(): Command {
   const slack = new Command('slack')
@@ -233,65 +234,6 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
-
-function promptSecret(label: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-      terminal: false,
-    });
-
-    process.stderr.write(label);
-
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-
-      let value = '';
-
-      const onData = (chunk: Buffer) => {
-        const str = chunk.toString();
-        for (const char of str) {
-          if (char === '\n' || char === '\r') {
-            cleanup();
-            process.stderr.write('\n');
-            resolve(value.trim());
-            return;
-          } else if (char === '\u0003') {
-            cleanup();
-            process.stderr.write('\n');
-            reject(new Error('Cancelled.'));
-            return;
-          } else if (char === '\u007f' || char === '\b') {
-            if (value.length > 0) {
-              value = value.slice(0, -1);
-              process.stderr.write('\b \b');
-            }
-          } else {
-            value += char;
-            process.stderr.write('*');
-          }
-        }
-      };
-
-      const cleanup = () => {
-        process.stdin.removeListener('data', onData);
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        rl.close();
-      };
-
-      process.stdin.on('data', onData);
-    } else {
-      rl.once('line', (line) => {
-        rl.close();
-        resolve(line.trim());
-      });
-      rl.once('close', () => reject(new Error('No input provided.')));
-    }
-  });
-}
 
 function promptConfirm(label: string): Promise<boolean> {
   return new Promise((resolve) => {
