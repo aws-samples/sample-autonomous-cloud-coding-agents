@@ -55,8 +55,17 @@ describe('planHeartbeat — eligibility', () => {
     expect(planHeartbeat(task({ status: 'HYDRATING' }), NOW)).toBeNull();
   });
 
-  test('not an iteration (no maturing reply) → no plan', () => {
-    expect(planHeartbeat(task({ isIteration: false }), NOW)).toBeNull();
+  test('a STANDALONE iteration (no orchestration marker) is STILL eligible — keys on the reply, not isIteration', () => {
+    // The ABCA-483 black-box case was a standalone @bgagent iteration, which
+    // omits orchestration_iteration but still has a maturing reply. It must
+    // get a heartbeat. Eligibility is the reply-routing fields, not isIteration.
+    const plan = planHeartbeat(task({ isIteration: false }), NOW);
+    expect(plan).not.toBeNull();
+    expect(plan!.replyId).toBe('reply-1');
+  });
+
+  test('a task with NO maturing reply (first run / non-PR) → no plan', () => {
+    expect(planHeartbeat(task({ iterationReplyCommentId: undefined }), NOW)).toBeNull();
   });
 
   test('non-linear channel → no plan (reply edit only wired for linear)', () => {
