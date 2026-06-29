@@ -69,7 +69,11 @@ So commits that touch `orchestration-rollup.ts` / `orchestration-reconciler.ts`
 Then the orchestration-layer slices of K1 go to the `linear-vercel` PR, not main.
 
 ## NOT for cherry-pick (stay on linear-vercel)
-- K6 heartbeat (task #103, **not built**) — edits the Linear maturing reply.
+- **K6 heartbeat** (`c7f4509`, **BUILT**) — edits the Linear maturing reply via a
+  scheduled sweep. Linear-specific (`IterationHeartbeat` construct + sweep
+  handler + the `working`-state elapsed suffix in `iteration-reply.ts`). The
+  `iteration-reply.ts` `working` suffix is arguably agnostic, but the sweep +
+  construct are Linear-only, so the whole commit stays on linear-vercel.
 - Any `orchestration-*.ts` change.
 
 ## Live-verification state (dev)
