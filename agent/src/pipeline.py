@@ -461,8 +461,17 @@ def _resolve_overall_task_status(
     *,
     build_ok: bool,
     pr_url: str | None,
+    build_timed_out: bool = False,
 ) -> tuple[str, str | None]:
-    """Map agent outcome + build gate to (overall_status, error_for_task_result)."""
+    """Map agent outcome + build gate to (overall_status, error_for_task_result).
+
+    ``build_timed_out`` distinguishes a build-gate failure that was actually a
+    TIMEOUT (the verify command exceeded its wall-clock ceiling and was killed)
+    from a genuine red build. When the agent itself finished cleanly but the
+    build gate failed ONLY because it timed out, the error_message carries a
+    ``build_ok=timeout`` marker so the platform surfaces "build timed out"
+    rather than the misleading "build/tests failed".
+    """
     agent_status = agent_result.status
     err = agent_result.error
 
@@ -484,7 +493,11 @@ def _resolve_overall_task_status(
         return "error", merged
 
     if not err:
-        err = f"Task did not succeed (agent_status={agent_status!r}, build_ok={build_ok})"
+        # The agent finished cleanly but the build gate failed. If that failure
+        # was a TIMEOUT, mark it distinctly (``build_ok=timeout``) so the
+        # platform's failure copy reads "timed out", not "build/tests failed".
+        build_marker = "timeout" if build_timed_out else build_ok
+        err = f"Task did not succeed (agent_status={agent_status!r}, build_ok={build_marker})"
     return "error", err
 
 
@@ -1020,7 +1033,14 @@ def run_task(
                 safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
-                build_passed = verify_build(setup.repo_dir, config.build_command)
+                build_outcome = verify_build(setup.repo_dir, config.build_command)
+                build_passed = build_outcome.passed
+                # Distinct diagnosis: a build that exceeded BUILD_VERIFY_TIMEOUT_S
+                # was KILLED, not failed — surface "timed out" rather than the
+                # misleading "build/tests failed" (a build that never finished is
+                # a different problem than a broken build). Threaded into the task
+                # error_message below so the platform's failure copy reflects it.
+                build_timed_out = build_outcome.timed_out
                 # #72: when lint is INERT for this repo (no runnable lint task and
                 # no configured lint_command — see repo.py setup), running the
                 # default `mise run lint` would just fail "no such task" and
@@ -1036,7 +1056,7 @@ def run_task(
                     )
                     lint_passed = True
                 else:
-                    lint_passed = verify_lint(setup.repo_dir, config.lint_command)
+                    lint_passed = verify_lint(setup.repo_dir, config.lint_command).passed
                 pr_url = ensure_pr(
                     config,
                     setup,
@@ -1088,6 +1108,7 @@ def run_task(
                 agent_result,
                 build_ok=build_ok,
                 pr_url=pr_url,
+                build_timed_out=build_timed_out,
             )
 
             # ✅/❌ on the Linear issue (removes the 👀 first so the final
