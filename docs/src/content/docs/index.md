@@ -53,7 +53,7 @@ Planned work to move each row from Partial or Planned to Strong is tracked as [G
 
 ## The use case
 
-Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository and works on it. Depending on the task type, the agent creates a new branch and opens a pull request (`new_task`), iterates on an existing PR to address review feedback (`pr_iteration`), or performs a read-only review and posts structured comments on an existing PR (`pr_review`).
+Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository and works on it. Depending on the resolved workflow, the agent creates a new branch and opens a pull request (`coding/new-task-v1`), iterates on an existing PR to address review feedback (`coding/pr-iteration-v1`, CLI `--pr`), or performs a read-only review and posts structured comments on an existing PR (`coding/pr-review-v1`, CLI `--review-pr`).
 
 Key characteristics:
 

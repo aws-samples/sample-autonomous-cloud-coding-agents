@@ -1,33 +1,33 @@
 # Workflows (workflow-driven tasks)
 
-A **workflow** is a versioned, declarative document that describes how the agent should execute one *kind* of task: the ordered steps to run inside the container, the system prompt, the agent configuration (tools, MCP servers, skills, plugins, rules, Cedar policy), what context to hydrate, the post-execution gates, and what "done" means. Workflows replace the hardcoded `task_type` branches scattered across the Python agent runtime (`pipeline.py`, `post_hooks.py`, `repo.py`, `prompts/`) with a single **step runner** that interprets the workflow file.
+A **workflow** is a versioned, declarative document that describes how the agent should execute one *kind* of task: the ordered steps to run inside the container, the system prompt, the agent configuration (tools, MCP servers, skills, plugins, rules, Cedar policy), what context to hydrate, the post-execution gates, and what "done" means. Workflows replaced the hardcoded `task_type` branches that used to be scattered across the Python agent runtime (`pipeline.py`, `post_hooks.py`, `repo.py`, `prompts/`) with a single **step runner** that interprets the workflow file.
 
-The three shipped task types — `new_task`, `pr_iteration`, `pr_review` — become the first three first-party workflows, and **the `task_type` enum is removed**: this work replaces it, it does not coexist with it. New domains (research, document drafting, data analysis) are new workflow files, not new orchestrator branches. Crucially, a workflow can declare `requires_repo: false`, unlocking **repo-optional tasks**: knowledge work with no GitHub clone and no PR scaffolding.
+The three former task types — `new_task`, `pr_iteration`, `pr_review` — are now first-party workflows (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`). The `task_type` enum is **removed**; `workflow_ref` is the only task-selection field on the API. New domains (research, document drafting, data analysis) are new workflow files, not new orchestrator branches. A workflow can declare `requires_repo: false`, enabling **repo-optional tasks**: knowledge work with no GitHub clone and no PR scaffolding.
 
-- **Use this doc for:** the workflow file schema, step-kind catalog, the agent-side step runner model, how a workflow reference flows from API to agent, and the plan for replacing the `task_type` enum with workflows (it is removed, not aliased).
+- **Use this doc for:** the workflow file schema, step-kind catalog, the agent-side step runner model, and how a `workflow_ref` flows from API to agent.
 - **Related docs:** [ARCHITECTURE.md](./ARCHITECTURE.md) for the deterministic-steps-wrapping-one-agentic-step model, [ORCHESTRATOR.md](./ORCHESTRATOR.md) for the durable lifecycle the workflow runs inside, [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the per-repo **Blueprint** (a distinct concept — see [Naming](#naming-workflow-vs-blueprint)), [CEDAR_HITL_GATES.md](./CEDAR_HITL_GATES.md) for the policy engine a workflow's `agent_config` feeds, [SECURITY.md](./SECURITY.md) for tool tiers, and [API_CONTRACT.md](./API_CONTRACT.md) for the `workflow_ref` wire field.
 - **Decision record:** [ADR-014](../decisions/ADR-014-workflow-driven-tasks.md).
 - **Tracking issue:** [#248](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/248). Pairs with the agent asset registry ([#246](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/246)) and attribution ([#245](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/245)). Scoped-down, current-architecture track of the broader AKW vision ([#99](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/99)).
 
-## The problem
+## Background: what workflows replaced
 
-Today the platform supports exactly three task types, fixed at the type level (`TaskType = 'new_task' | 'pr_iteration' | 'pr_review'`) and enforced by an exhaustiveness assert in `validation.ts`. Behavior for each type is not centralized — it is spread across eight Python files in the agent runtime plus a Cedar policy, each branching on the literal string:
+Before #248, the platform supported exactly three task types, fixed at the type level (`TaskType = 'new_task' | 'pr_iteration' | 'pr_review'`) and enforced by an exhaustiveness assert in `validation.ts`. Behavior for each type was not centralized — it was spread across eight Python files in the agent runtime plus a Cedar policy, each branching on the literal string:
 
-| Where | What branches on `task_type` |
+| Where | What used to branch on `task_type` |
 |---|---|
 | `agent/src/models.py` | `TaskType` enum + `is_pr_task` / `is_read_only` properties |
 | `agent/src/config.py` | `PR_TASK_TYPES` frozenset; required-input rules (PR ⇒ `pr_number`; else `issue`/`description`) |
 | `agent/src/server.py` | duplicate required-input validation on the `/invocations` payload |
 | `agent/src/prompts/__init__.py` | `_PROMPTS` lookup table → workflow-fragment injection |
-| `agent/src/runner.py` | `PolicyEngine(task_type=...)` — task_type becomes the Cedar principal |
+| `agent/src/runner.py` | `PolicyEngine(task_type=...)` — task_type became the Cedar principal |
 | `agent/src/repo.py` | branch selection: resume existing branch (PR tasks) vs create new |
 | `agent/src/post_hooks.py` | PR finalization: create / push+resolve / resolve-only |
 | `agent/src/pipeline.py` | skip safety-net commit and treat build as informational for `pr_review` |
 | `agent/policies/hard_deny.cedar` | read-only enforced by literal `Agent::TaskAgent::"pr_review"` |
 
-Adding a fourth task type means touching all of these. Adding a *non-coding* task type is currently impossible: every task unconditionally clones a repo (`setup_repo` runs for all three types), and the create-task API hard-requires an onboarded `repo` (`422 REPO_NOT_ONBOARDED`). "Requires a repo" is an implicit, universal assumption, not a declared property.
+Adding a fourth task type meant touching all of these. Adding a *non-coding* task type was impossible: every task unconditionally cloned a repo, and the create-task API hard-required an onboarded `repo` (`422 REPO_NOT_ONBOARDED`). "Requires a repo" was an implicit, universal assumption, not a declared property.
 
-The goal of this design is to **invert** that: make per-task-type behavior *data* (a workflow file) interpreted by one generic runner, so new task types — coding or not — are authored, not coded.
+Workflows **invert** that model: per-task-type behavior is *data* (a workflow file) interpreted by one generic runner, so new task types — coding or not — are authored, not coded.
 
 ## Naming: Workflow vs Blueprint
 
