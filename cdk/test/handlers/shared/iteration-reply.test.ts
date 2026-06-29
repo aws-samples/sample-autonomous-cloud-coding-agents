@@ -35,6 +35,49 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(renderMaturingReply({ state: 'working' })).toBe('🔄 Working…');
   });
 
+  describe('K6 liveness heartbeat on the working state', () => {
+    test('a fresh task (< 90s) shows the clean working line, no elapsed clause', () => {
+      expect(renderMaturingReply({ state: 'working', prNumber: 7, elapsedS: 30 }))
+        .toBe('🔄 Working — updating PR #7…');
+    });
+
+    test('a long-running task shows "Nm elapsed" so it is not a silent black box', () => {
+      const r = renderMaturingReply({ state: 'working', prNumber: 7, elapsedS: 8 * 60 });
+      expect(r).toContain('🔄 Working — updating PR #7…');
+      expect(r).toContain('_8m elapsed_');
+    });
+
+    test('a sanitized progress note is appended after elapsed', () => {
+      const r = renderMaturingReply({
+        state: 'working', prNumber: 7, elapsedS: 5 * 60, progressNote: 'running build verification',
+      });
+      expect(r).toContain('_5m elapsed · running build verification_');
+    });
+
+    test('a progress note alone (no elapsed yet) still surfaces', () => {
+      const r = renderMaturingReply({ state: 'working', elapsedS: 10, progressNote: 'cloning repo' });
+      // elapsed below floor → omitted; note still shown
+      expect(r).toContain('_cloning repo_');
+      expect(r).not.toContain('elapsed');
+    });
+
+    test('progress note whitespace is collapsed + over-long notes truncated', () => {
+      const r = renderMaturingReply({
+        state: 'working', elapsedS: 200, progressNote: 'a'.repeat(200),
+      });
+      // suffix line stays bounded (note capped at 80 + ellipsis)
+      const suffix = r.split('\n').pop()!;
+      expect(suffix.length).toBeLessThan(120);
+      expect(suffix.endsWith('…_')).toBe(true);
+    });
+
+    test('elapsed/note never appear on terminal states (working-only)', () => {
+      const updated = renderMaturingReply({ state: 'updated', prNumber: 7, elapsedS: 600, progressNote: 'x' });
+      expect(updated).not.toContain('elapsed');
+      expect(updated).not.toContain('\nx');
+    });
+  });
+
   test('a PR url makes the reference a clickable markdown link', () => {
     const w = renderMaturingReply({ state: 'working', prNumber: 293, prUrl: 'https://gh/pull/293' });
     expect(w).toBe('🔄 Working — updating [PR #293](https://gh/pull/293)…');
