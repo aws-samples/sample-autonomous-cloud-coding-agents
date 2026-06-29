@@ -1041,6 +1041,20 @@ def run_task(
                 # a different problem than a broken build). Threaded into the task
                 # error_message below so the platform's failure copy reflects it.
                 build_timed_out = build_outcome.timed_out
+                # K8: an INERT build gate (exit 127 / no-such-task — the command
+                # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
+                # the lint-inert path: do NOT gate on it (it's a config problem,
+                # not the agent's code), and treat build as passing for the gate
+                # so we don't emit a false "build failed". The honest signal is
+                # carried in error_message (build_ok=inert) for the platform copy.
+                build_inert = build_outcome.inert
+                if build_inert:
+                    log(
+                        "POST",
+                        "Post-agent build gate is INERT (command couldn't run) "
+                        "— not gating on it; surfacing as inert, not a failure",
+                    )
+                    build_passed = True
                 # #72: when lint is INERT for this repo (no runnable lint task and
                 # no configured lint_command — see repo.py setup), running the
                 # default `mise run lint` would just fail "no such task" and

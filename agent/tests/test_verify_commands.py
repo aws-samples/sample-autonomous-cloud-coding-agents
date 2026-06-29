@@ -110,6 +110,41 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.passed is False
         assert outcome.timed_out is True
 
+    def test_exit_127_is_INERT_not_a_build_failure(self, monkeypatch):
+        # K8: command-not-found (e.g. yarn missing) means the gate couldn't run —
+        # a CONFIG problem, not the agent's code. Must flag inert, not a failure,
+        # so the platform doesn't emit a false "build failed".
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=127, stderr="yarn: command not found"),
+        )
+        outcome = verify_build("/repo", "yarn install && yarn build")
+        assert outcome.passed is False
+        assert outcome.inert is True
+        assert outcome.timed_out is False
+
+    def test_no_such_mise_task_is_INERT(self, monkeypatch):
+        no_task = "mise ERROR no task named 'build'"
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=1, stderr=no_task),
+        )
+        assert verify_build("/repo", "mise run build").inert is True
+
+    def test_genuine_nonzero_is_a_failure_NOT_inert(self, monkeypatch):
+        # A real compiler/test failure (exit 1/2 with real output) must NOT be
+        # mislabeled inert — that would hide a genuine red build.
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=2, stderr="tsc: 3 type errors"),
+        )
+        outcome = verify_build("/repo", "mise //cdk:compile")
+        assert outcome.passed is False
+        assert outcome.inert is False
+
 
 class TestIsVerifyCommandInert:
     def test_mise_no_tasks_defined_is_inert(self):

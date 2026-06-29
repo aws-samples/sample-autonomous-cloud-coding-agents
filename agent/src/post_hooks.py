@@ -37,15 +37,28 @@ BUILD_VERIFY_TIMEOUT_S = int(os.environ.get("BUILD_VERIFY_TIMEOUT_S") or 1800)
 class VerifyOutcome:
     """Result of a build/lint verification run.
 
-    ``passed`` drives gating exactly as the old bare-bool return did. ``timed_out``
-    distinguishes "the command exceeded BUILD_VERIFY_TIMEOUT_S and was killed"
-    from "the command ran and exited non-zero" — a different diagnosis that the
-    pipeline surfaces as a distinct reason ("timed out" vs "build/tests failed").
-    A timeout still counts as not-passed (a build that never finished is not green).
+    ``passed`` drives gating exactly as the old bare-bool return did. The two
+    other flags distinguish WHY a not-passed result happened, so the platform
+    can report an honest, actionable reason instead of a blanket "build failed":
+
+    - ``timed_out`` — the command exceeded ``BUILD_VERIFY_TIMEOUT_S`` and was
+      killed (a build that never finished, not a build that failed).
+    - ``inert`` — the command could not RUN at all: exit 127 (command not
+      found, e.g. ``yarn`` missing) or mise "no such task". This is a CONFIG
+      problem (the gate isn't actually verifying anything), NOT the agent's
+      code being broken. Live-caught 2026-06-29: an inert exit-127 gate was
+      silently reported as ``build_passed=False`` — a false "your code is
+      broken" for a repo we never managed to build. ``is_verify_command_inert``
+      already existed but was only consulted at repo SETUP; now the post-agent
+      gate consults it too.
+
+    A timeout / inert result still counts as not-passed for gating, but the
+    pipeline surfaces each as its own reason.
     """
 
     passed: bool
     timed_out: bool = False
+    inert: bool = False
 
 
 # POSIX shell exit code for "command not found" — an inert build signal (the
@@ -128,6 +141,17 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
         )
         return VerifyOutcome(passed=False, timed_out=True)
     if result.returncode != 0:
+        # Distinguish "couldn't RUN" (exit 127 / no-such-task → the gate is
+        # inert, a config problem) from "ran and failed" (real red build). An
+        # inert gate verified nothing, so reporting it as a build FAILURE is a
+        # false "your code is broken" — surface it as inert instead. K8.
+        if is_verify_command_inert(result.returncode, getattr(result, "stderr", "") or ""):
+            log(
+                "WARN",
+                f"Post-agent {label} could not RUN (exit {result.returncode}) "
+                "— gate is INERT (command not found / no such task), not a build failure",
+            )
+            return VerifyOutcome(passed=False, inert=True)
         log("POST", f"Post-agent {label} FAILED (exit {result.returncode})")
         return VerifyOutcome(passed=False)
     log("POST", f"Post-agent {label}: OK")
