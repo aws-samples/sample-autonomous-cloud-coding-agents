@@ -23,10 +23,14 @@
  * iteration does not land cleanly. Two distinct shapes, per the user's design:
  *
  *  - BUILD/TEST failure (the agent ran and opened/updated a PR, but the build
- *    or tests are red): a sanitized ONE-LINE reason pointing at the PR's
- *    checks. We deliberately do NOT dump the raw build output — it's untrusted
- *    repo code and the per-test detail isn't persisted platform-side; the PR's
- *    checks tab is the authoritative, safe place to read it.
+ *    or tests are red): a sanitized ONE-LINE reason pointing at the agent's
+ *    CloudWatch build log. We deliberately do NOT dump the raw build output —
+ *    it's untrusted repo code. The pointer is CloudWatch (by task id), NOT the
+ *    PR's GitHub checks: the agent runs the configured build (``mise run
+ *    build``) INSIDE the microVM, so that output lives in CloudWatch, and the
+ *    target repo may have no GitHub CI at all. ("subissues
+ *    pass, parent build fails" + "saw nothing in the PR" — the old "see the
+ *    PR's checks" copy pointed at the wrong, often-empty surface.)
  *
  *  - AGENT-ITSELF failure (the agent crashed / timed out / hit a cap before a
  *    clean terminal): the classified one-line title + a TRUNCATED excerpt of
@@ -78,7 +82,7 @@ const BUILD_GATE_FAILED_RE = /agent_status=['"]?(success|end_turn)['"]?.*build_o
  *    and no crash error_message (defensive — e.g. an informational-gate path
  *    that surfaces build_passed directly).
  */
-function isBuildFailure(input: FailureReplyInput): boolean {
+function isBuildFailure(input: Pick<FailureReplyInput, 'buildPassed' | 'errorMessage'>): boolean {
   if (input.errorMessage && BUILD_GATE_FAILED_RE.test(input.errorMessage)) {
     return true;
   }
@@ -96,11 +100,14 @@ function excerpt(raw: string): string {
  */
 export function renderFailureReply(input: FailureReplyInput): string {
   if (isBuildFailure(input)) {
-    // Build/test failure — one line, point at the PR's checks (the safe,
-    // authoritative detail surface). No raw output dump.
+    // Build/test failure — one line. Point at the agent's CloudWatch build log
+    // (by task id), NOT the PR's GitHub checks: the agent ran the configured
+    // build inside the microVM, so that's where the failing output is, and the
+    // repo may have no GitHub CI. No raw output dump (untrusted repo code).
     return (
-      "❌ I made the change, but the build/tests didn't pass — see the PR's "
-      + 'checks for details. Reply with guidance and I\'ll try again.'
+      "❌ I made the change, but the build/tests didn't pass — see the build "
+      + `log in CloudWatch for task \`${input.taskId}\`. Reply with guidance `
+      + "and I'll try again."
     );
   }
 
@@ -112,4 +119,39 @@ export function renderFailureReply(input: FailureReplyInput): string {
     `❌ ${title} —${detail} see CloudWatch for task \`${input.taskId}\`. `
     + 'Reply with guidance and I\'ll try again.'
   );
+}
+
+/**
+ * Compose the SHORT one-line failure reason shown as a sub-line under a ❌ row
+ * on the parent epic panel (K1). The panel path
+ * (``reconcileTerminalChild → refreshPanelAndSettle``) is where a failed node —
+ * crucially the SYNTHETIC integration node, which has no Linear sub-issue and
+ * therefore no comment-iteration reply — would otherwise surface as a bare
+ * "❌ … — failed" with no reason and no pointer. This gives the user the one
+ * thing they need to debug: WHAT failed (build vs agent-crash) and WHERE to
+ * read it (CloudWatch by task id).
+ *
+ * Same security stance as {@link renderFailureReply}: classified reason + task
+ * id only, never the raw (untrusted) build output. Returns null when there's no
+ * task id to point at (nothing actionable to render). ``isIntegration`` tailors
+ * the build-failure wording to name the merge — the integration node's failure
+ * is specifically "the combined build after merging the sub-issue branches",
+ * which is the exact failure mode reported and the panel must make legible.
+ */
+export function renderPanelFailureReason(input: {
+  readonly buildPassed?: boolean | null;
+  readonly errorMessage?: string | null;
+  readonly taskId?: string;
+  readonly isIntegration?: boolean;
+}): string | null {
+  if (!input.taskId) return null;
+  if (isBuildFailure(input)) {
+    const what = input.isIntegration
+      ? 'Combined build failed after merging the sub-issue branches'
+      : 'Build/tests failed';
+    return `${what} — see the build log in CloudWatch for task \`${input.taskId}\`.`;
+  }
+  const classification = classifyError(input.errorMessage);
+  const title = classification?.title ?? "the task didn't complete";
+  return `${title} — see CloudWatch for task \`${input.taskId}\`.`;
 }

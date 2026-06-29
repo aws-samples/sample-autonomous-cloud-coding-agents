@@ -37,6 +37,7 @@ import {
   renderRollupComment,
   renderStatusBlock,
   renderEpicPanel,
+  buildPanelRows,
   truncateQuote,
   cascadeNodeLabel,
   rollupKindFromChildren,
@@ -493,6 +494,36 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     expect(body).toContain('🔗 **Combined PR (all sub-issues merged):**');
   });
 
+  test('K1: a failed row renders an indented diagnostic sub-line (what failed + where to read it)', () => {
+    const reason = 'Combined build failed after merging the sub-issue branches — see the build log in CloudWatch for task `t-int`.';
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [
+        row('a', 'succeeded', { linear_identifier: 'ENG-1' }),
+        row('orch_x__integration', 'failed', { failureReason: reason }),
+      ],
+    });
+    // The integration row + its sub-line on the very next line (indented ↳).
+    expect(body).toContain(`- ❌ Integration — combined result — failed\n    ↳ ${reason}`);
+  });
+
+  test('K1: the sub-line is ONLY rendered for failed rows (not succeeded/skipped/running)', () => {
+    const reason = 'should not appear';
+    const succeeded = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded', { failureReason: reason })] });
+    expect(succeeded).not.toContain('↳');
+    expect(succeeded).not.toContain(reason);
+    // A skipped row (predecessor failed) gets no sub-line either — only the
+    // node that actually failed carries the diagnostic.
+    const skipped = renderEpicPanel({ inProgress: false, rows: [row('a', 'skipped', { failureReason: reason })] });
+    expect(skipped).not.toContain('↳');
+  });
+
+  test('K1: a failed row with NO reason resolved still renders cleanly (no dangling ↳)', () => {
+    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'failed', { linear_identifier: 'ENG-1' })] });
+    expect(body).toContain('❌ ENG-1 — failed');
+    expect(body).not.toContain('↳');
+  });
+
   test('embeds the combined preview screenshot when present', () => {
     const body = renderEpicPanel({
       inProgress: false,
@@ -549,5 +580,36 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
       ],
     });
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
+  });
+});
+
+describe('buildPanelRows (K1 — failureReasons map → row.failureReason)', () => {
+  const child = (sub: string, status: string): OrchestrationChildRow => ({
+    orchestration_id: 'orch_1',
+    sub_issue_id: sub,
+    parent_linear_issue_id: 'parent',
+    linear_workspace_id: 'ws',
+    repo: 'o/r',
+    depends_on: [],
+    child_status: status as OrchestrationChildRow['child_status'],
+    created_at: 'now',
+    updated_at: 'now',
+  });
+
+  test('attaches the reason to the matching failed row, and only that row', () => {
+    const rows = buildPanelRows(
+      [child('a', 'succeeded'), child('orch_1__integration', 'failed')],
+      {},
+      {},
+      { orch_1__integration: 'Combined build failed — see CloudWatch for task `t-int`.' },
+    );
+    expect(rows.find((r) => r.sub_issue_id === 'a')?.failureReason).toBeUndefined();
+    expect(rows.find((r) => r.sub_issue_id === 'orch_1__integration')?.failureReason)
+      .toMatch(/Combined build failed/);
+  });
+
+  test('omits failureReason when no map is supplied (back-compat)', () => {
+    const rows = buildPanelRows([child('a', 'failed')]);
+    expect(rows[0].failureReason).toBeUndefined();
   });
 });
