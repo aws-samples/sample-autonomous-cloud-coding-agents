@@ -86,10 +86,10 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
-  test('creates a Fargate task definition with 8 vCPU and 32 GB (K12: sized for heavy CI-parity builds)', () => {
+  test('creates a Fargate task definition with 16 vCPU and 64 GB (K14: full parallel mise build OOM\'d at 32 GB)', () => {
     baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
-      Cpu: '8192',
-      Memory: '32768',
+      Cpu: '16384',
+      Memory: '65536',
       RequiresCompatibilities: ['FARGATE'],
       RuntimePlatform: {
         CpuArchitecture: 'ARM64',
@@ -185,6 +185,9 @@ describe('EcsAgentCluster construct', () => {
             Match.objectLike({ Name: 'TASK_EVENTS_TABLE_NAME', Value: Match.anyValue() }),
             Match.objectLike({ Name: 'USER_CONCURRENCY_TABLE_NAME', Value: Match.anyValue() }),
             Match.objectLike({ Name: 'LOG_GROUP_NAME', Value: Match.anyValue() }),
+            // K14: ECS big-box substrate raises the build-verify cap so a
+            // slow-but-healthy CI-parity build isn't mis-flagged as a timeout.
+            Match.objectLike({ Name: 'BUILD_VERIFY_TIMEOUT_S', Value: '3600' }),
           ]),
         }),
       ]),
