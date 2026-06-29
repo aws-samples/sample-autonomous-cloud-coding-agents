@@ -46,7 +46,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
-import { renderFailureReply } from './shared/failure-reply';
+import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -293,6 +293,56 @@ async function resolveChildPrUrls(
 }
 
 /**
+ * K1: batch-read each FAILED child's failure detail from the
+ * TaskTable so the panel can render WHY it failed + WHERE to read it. Mirrors
+ * {@link resolveChildPrUrls}: ``error_message`` / ``build_passed`` land on the
+ * TaskRecord (not the orchestration row), and by the time the epic settles
+ * they've been written. Only failed children with a task id are read. Composes
+ * the one-line reason via {@link renderPanelFailureReason}, tagging the
+ * synthetic integration node so its copy names the combined merge build — the
+ * exact failure that was previously surfaced as a bare "❌ … failed".
+ * Best-effort: a read miss just yields no sub-line (never throws out of the
+ * reconcile). Returns ``sub_issue_id → reason``.
+ */
+async function resolveChildFailureReasons(
+  children: readonly OrchestrationChildRow[],
+): Promise<Record<string, string>> {
+  const failed = children.filter((c) => c.child_status === 'failed' && c.child_task_id);
+  if (failed.length === 0) return {};
+  const taskToSub = new Map(failed.map((c) => [c.child_task_id!, c.sub_issue_id]));
+  const isIntegration = new Map(failed.map((c) => [c.sub_issue_id, isIntegrationNode(c.sub_issue_id)]));
+  const keys = [...taskToSub.keys()].map((task_id) => ({ task_id }));
+  const out: Record<string, string> = {};
+  try {
+    for (let i = 0; i < keys.length; i += 100) {
+      const chunk = keys.slice(i, i + 100);
+      const res = await ddb.send(new BatchGetCommand({
+        RequestItems: {
+          [TASK_TABLE]: { Keys: chunk, ProjectionExpression: 'task_id, error_message, build_passed' },
+        },
+      }));
+      for (const rec of res.Responses?.[TASK_TABLE] ?? []) {
+        const taskId = rec.task_id as string | undefined;
+        const sub = taskId ? taskToSub.get(taskId) : undefined;
+        if (!sub || !taskId) continue;
+        const reason = renderPanelFailureReason({
+          ...(typeof rec.build_passed === 'boolean' && { buildPassed: rec.build_passed as boolean }),
+          ...(typeof rec.error_message === 'string' && { errorMessage: rec.error_message as string }),
+          taskId,
+          isIntegration: isIntegration.get(sub) ?? false,
+        });
+        if (reason) out[sub] = reason;
+      }
+    }
+  } catch (err) {
+    logger.warn('Panel failure-reason batch-read failed (non-fatal) — panel posts without sub-lines', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return out;
+}
+
+/**
  * #247: read the integration node's deploy-preview screenshot URL from its
  * TaskRecord (persisted by the screenshot pipeline) so the parent panel can
  * embed the combined preview. Best-effort — null when the node has no task,
@@ -515,6 +565,12 @@ async function refreshPanelAndSettle(
   );
 
   const prUrls = await resolveChildPrUrls(children);
+  // K1: when any node failed, resolve its one-line reason + CloudWatch pointer
+  // so the panel row carries a diagnostic sub-line (the integration node's
+  // combined-build failure has no other surface). Only read on a failure —
+  // healthy epics skip the extra BatchGet.
+  const anyFailed = children.some((c) => c.child_status === 'failed');
+  const failureReasons = anyFailed ? await resolveChildFailureReasons(children) : {};
   const integration = children.find((c) => isIntegrationNode(c.sub_issue_id));
   const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
   // #247 (task #57): embed the integration node's combined deploy preview in
@@ -547,6 +603,7 @@ async function refreshPanelAndSettle(
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
     children,
     prUrls,
+    ...(Object.keys(failureReasons).length > 0 && { failureReasons }),
     ...(combinedPrUrl !== undefined && { combinedPrUrl }),
     ...(combinedScreenshot !== null && { combinedScreenshotUrl: combinedScreenshot.url }),
     ...(combinedScreenshot?.previewUrl !== undefined && { combinedPreviewUrl: combinedScreenshot.previewUrl }),

@@ -1686,13 +1686,15 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       expect(body).toMatch(/reply with guidance/i);
     });
 
-    test('task_completed but build_passed=false → ❌ build/test reply pointing at PR checks (UX.5)', async () => {
+    test('task_completed but build_passed=false → ❌ build/test reply pointing at the CloudWatch build log (UX.5/K2)', async () => {
       mockGet({ ...STANDALONE, build_passed: false, error_message: undefined });
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
       const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
       expect(body).toMatch(/build\/tests didn't pass/i);
-      expect(body).toMatch(/PR's checks/i);
-      expect(body).not.toMatch(/CloudWatch/i);
+      // K2: the agent ran the build in the microVM → its log is in CloudWatch,
+      // not the PR's GitHub checks (the repo may have no CI).
+      expect(body).toMatch(/build log in CloudWatch for task `t-lin`/);
+      expect(body).not.toMatch(/PR's checks/i);
     });
 
     test('renders the clickable preview thumbnail from a LATE consistent re-read (ABCA-438 race-fix)', async () => {

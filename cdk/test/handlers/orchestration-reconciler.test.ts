@@ -334,6 +334,90 @@ describe('orchestration-reconciler handler', () => {
     expect(body).toContain('[![combined preview](https://cdn.example/combined.png)](https://combined.vercel.app)');
     expect(body).toContain('[Open the combined preview](https://combined.vercel.app)');
   });
+
+  test('K1: a FAILED integration node surfaces its build-failure reason + CloudWatch pointer on the panel', async () => {
+    // the synthetic integration node has no Linear sub-issue,
+    // so a failed combined build previously surfaced as a bare "❌ … failed" with
+    // NO reason and NO log pointer. The reconciler must now resolve the reason
+    // from the failed task's record and render it as a panel sub-line.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    const meta = {
+      sub_issue_id: '#meta',
+      orchestration_id: 'orch_1',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: 2,
+      platform_user_id: 'u1',
+      status_comment_id: 'panel-1',
+    };
+    // A succeeded leaf + a FAILED integration node → all-terminal (with failures).
+    const rows = [
+      {
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'A',
+        depends_on: [],
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        repo: 'o/r',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ENG-1',
+      },
+      {
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'orch_1__integration',
+        depends_on: ['A'],
+        child_status: 'failed',
+        child_task_id: 'task-int',
+        repo: 'o/r',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+      },
+    ];
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'ChildTaskIndex') {
+        return { Items: [{ ...rows[1] }] }; // the integration node just went terminal (failed)
+      }
+      if (cmd._type === 'Query') return { Items: [meta, ...rows] };
+      if (cmd._type === 'BatchGet') {
+        const keys = cmd.input.RequestItems as Record<string, { Keys: Array<{ task_id: string }>; ProjectionExpression?: string }>;
+        const tbl = Object.keys(keys)[0];
+        const proj = keys[tbl].ProjectionExpression ?? '';
+        // resolveChildFailureReasons projects error_message/build_passed; the
+        // failed integration task carries the live build-gate error shape.
+        if (proj.includes('error_message')) {
+          return {
+            Responses: {
+              [tbl]: keys[tbl].Keys.map((k) => (
+                k.task_id === 'task-int'
+                  ? { task_id: k.task_id, error_message: "Task did not succeed (agent_status='success', build_ok=False)" }
+                  : { task_id: k.task_id }
+              )),
+            },
+          };
+        }
+        // resolveChildPrUrls projects task_id/pr_url.
+        return { Responses: { [tbl]: keys[tbl].Keys.map((k) => ({ task_id: k.task_id, pr_url: `https://github.com/o/r/pull/${k.task_id.length}` })) } };
+      }
+      return {};
+    });
+
+    await handler({
+      Records: [taskRecord({ task_id: 'task-int', status: 'FAILED', orchestration_id: 'orch_1' })],
+    } as never);
+
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toContain('⚠️ **ABCA orchestration finished with failures**');
+    // The diagnostic sub-line: names the combined merge build + points at CloudWatch by task id.
+    expect(body).toMatch(/↳ Combined build failed after merging the sub-issue branches/);
+    expect(body).toContain('CloudWatch for task `task-int`');
+    // Never leaks raw build output (untrusted repo content).
+    expect(body).not.toContain('build_ok');
+  });
 });
 
 /** Detect a cascade marker in parseTerminalTaskRecord. */
@@ -765,8 +849,10 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
     const [, , , body] = upsertThreadedReplyMock.mock.calls[0];
     expect(body).toMatch(/build\/tests didn't pass/i);
-    expect(body).toMatch(/PR's checks/i);
-    expect(body).not.toMatch(/CloudWatch/i); // build-fail copy omits the log pointer
+    // K2: build-gate failures now point at the agent's CloudWatch build log
+    // (the build ran in the microVM), not the PR's GitHub checks.
+    expect(body).toMatch(/build log in CloudWatch/i);
+    expect(body).not.toMatch(/PR's checks/i);
     // build_passed=false ⇒ not a success ⇒ no cascade onto dependents.
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });

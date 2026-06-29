@@ -18,7 +18,7 @@
  */
 
 import { TaskStatus } from '../../../src/constructs/task-status';
-import { renderFailureReply } from '../../../src/handlers/shared/failure-reply';
+import { renderFailureReply, renderPanelFailureReason } from '../../../src/handlers/shared/failure-reply';
 
 describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
   describe('build/test failure — the REAL live-verified gating shape', () => {
@@ -35,18 +35,19 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
       taskId: 't1',
     });
 
-    test('points at the PR checks, not a raw dump', () => {
+    // K2: the agent runs the configured build INSIDE the
+    // microVM, so the failing output is in CloudWatch — NOT the PR's GitHub
+    // checks (the repo may have no CI). The old "see the PR's checks" copy
+    // pointed the user at an empty surface. Point at the build log by task id.
+    test('points at the CloudWatch build log by task id, not the PR checks', () => {
       expect(body).toMatch(/^❌/);
       expect(body).toMatch(/build\/tests didn't pass/i);
-      expect(body).toMatch(/PR's checks/i);
+      expect(body).toMatch(/build log in CloudWatch for task `t1`/);
+      expect(body).not.toMatch(/PR's checks/i);
     });
 
     test('invites a reply (the retry seam)', () => {
       expect(body).toMatch(/reply with guidance/i);
-    });
-
-    test('does NOT surface a CloudWatch task pointer (that is for agent failures)', () => {
-      expect(body).not.toMatch(/CloudWatch/i);
     });
 
     test('also matches the end_turn variant of the gating message', () => {
@@ -56,12 +57,13 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
         taskId: 't1b',
       });
       expect(b).toMatch(/build\/tests didn't pass/i);
-      expect(b).not.toMatch(/CloudWatch/i);
+      expect(b).toMatch(/build log in CloudWatch for task `t1b`/);
     });
 
     test('defensive: explicit build_passed=false with no error_message still reads as build failure', () => {
       const b = renderFailureReply({ status: TaskStatus.FAILED, buildPassed: false, taskId: 't1c' });
       expect(b).toMatch(/build\/tests didn't pass/i);
+      expect(b).toMatch(/build log in CloudWatch for task `t1c`/);
     });
   });
 
@@ -111,5 +113,42 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
       expect(body).toMatch(/CloudWatch for task `t5`/);
       expect(body).not.toMatch(/PR's checks/i);
     });
+  });
+});
+
+describe('renderPanelFailureReason (K1 — failed-node sub-line on the epic panel)', () => {
+  test('integration-node build failure names the combined merge + points at CloudWatch', () => {
+    const reason = renderPanelFailureReason({
+      errorMessage: "Task did not succeed (agent_status='success', build_ok=False)",
+      taskId: 't-int',
+      isIntegration: true,
+    });
+    expect(reason).toMatch(/combined build failed after merging the sub-issue branches/i);
+    expect(reason).toMatch(/build log in CloudWatch for task `t-int`/);
+    // No raw build output leaks into the panel.
+    expect(reason).not.toMatch(/build_ok/i);
+  });
+
+  test('a regular sub-issue build failure reads generically (no merge wording)', () => {
+    const reason = renderPanelFailureReason({ buildPassed: false, taskId: 't-leaf' });
+    expect(reason).toMatch(/^Build\/tests failed/);
+    expect(reason).not.toMatch(/merging/i);
+    expect(reason).toMatch(/CloudWatch for task `t-leaf`/);
+  });
+
+  test('an agent crash surfaces the classified title + CloudWatch pointer', () => {
+    const reason = renderPanelFailureReason({
+      errorMessage: 'Task did not succeed: agent_status="error_max_turns"',
+      taskId: 't-crash',
+      isIntegration: true,
+    });
+    expect(reason).toMatch(/Exceeded max turns/i);
+    expect(reason).toMatch(/CloudWatch for task `t-crash`/);
+    // An agent crash is NOT a build failure — no combined-build wording.
+    expect(reason).not.toMatch(/combined build/i);
+  });
+
+  test('null when there is no task id to point at (nothing actionable to render)', () => {
+    expect(renderPanelFailureReason({ buildPassed: false })).toBeNull();
   });
 });

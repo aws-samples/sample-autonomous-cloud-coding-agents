@@ -185,6 +185,15 @@ export interface EpicPanelRow {
    * `to include ABCA-289's change`. Present → the row renders as 🔄 updating.
    */
   readonly updatingReason?: string;
+  /**
+   * SHORT one-line reason for a ❌ failed row, rendered as an indented sub-line
+   * (K1): WHAT failed + WHERE to read it (CloudWatch by task
+   * id). Critical for the synthetic integration node, which has no Linear
+   * sub-issue / comment-iteration reply and would otherwise surface as a bare
+   * "❌ … — failed" with no diagnostic. Composed by
+   * {@link renderPanelFailureReason}; absent for non-failed rows.
+   */
+  readonly failureReason?: string;
 }
 
 export interface EpicPanelParams {
@@ -285,7 +294,16 @@ export function renderEpicPanel(params: EpicPanelParams): string {
         r.child_status === 'released' || r.child_status === 'ready' ? 'running'
           : r.child_status === 'blocked' ? 'blocked'
             : r.child_status;
-      return `- ${icon} ${label} — ${word}${pr}`;
+      const line = `- ${icon} ${label} — ${word}${pr}`;
+      // K1: a failed row carries a diagnostic sub-line (what failed + the
+      // CloudWatch task to read). Indented continuation so it reads as a
+      // detail of the row, not a sibling bullet. Only when a reason was
+      // resolved (the integration node is the prime beneficiary — no sub-issue
+      // comment carries this anywhere else).
+      if (r.child_status === 'failed' && r.failureReason) {
+        return `${line}\n    ↳ ${r.failureReason}`;
+      }
+      return line;
     });
 
   const callout = combinedPrUrl
@@ -339,6 +357,7 @@ export function buildPanelRows(
   children: readonly OrchestrationChildRow[],
   prUrls: Readonly<Record<string, string>> = {},
   updating: Readonly<Record<string, string>> = {},
+  failureReasons: Readonly<Record<string, string>> = {},
 ): EpicPanelRow[] {
   return children.map((c) => ({
     sub_issue_id: c.sub_issue_id,
@@ -347,6 +366,7 @@ export function buildPanelRows(
     child_status: c.child_status,
     ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
     ...(updating[c.sub_issue_id] !== undefined && { updatingReason: updating[c.sub_issue_id] }),
+    ...(failureReasons[c.sub_issue_id] !== undefined && { failureReason: failureReasons[c.sub_issue_id] }),
   }));
 }
 
@@ -359,6 +379,13 @@ export interface UpsertEpicPanelParams {
   readonly prUrls?: Readonly<Record<string, string>>;
   /** sub_issue_id → human reason, for rows a cascade is currently rebuilding. */
   readonly updating?: Readonly<Record<string, string>>;
+  /**
+   * sub_issue_id → one-line failure reason for a ❌ row (K1). Resolved by the
+   * reconciler from the failed child task's record (build-gate vs agent-crash +
+   * CloudWatch task id). The integration node's entry is the one that matters
+   * most — it's the only place its combined-build failure can be surfaced.
+   */
+  readonly failureReasons?: Readonly<Record<string, string>>;
   readonly combinedPrUrl?: string;
   readonly combinedScreenshotUrl?: string;
   /** Live preview-deploy URL the combined screenshot was captured from (#247 UX.17). */
@@ -404,7 +431,7 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
     });
     return null;
   }
-  const rows = buildPanelRows(params.children, params.prUrls ?? {}, params.updating ?? {});
+  const rows = buildPanelRows(params.children, params.prUrls ?? {}, params.updating ?? {}, params.failureReasons ?? {});
   const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
   const inProgress = params.inProgress
     ?? rows.some((r) => !terminal(r.child_status) || r.updatingReason !== undefined);
