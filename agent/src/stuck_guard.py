@@ -11,30 +11,34 @@ This module gives the agent a cheap, precise loop-breaker:
 
   1. ``record_tool_result`` is called from the PostToolUse hook for every tool
      call. It computes a coarse SIGNATURE — ``(tool_name, normalized command)``
-     — and tracks how many times that exact signature has just FAILED in a row.
-     A success (or a different signature) resets the streak for that signature.
+     — and tracks how many times that exact signature has just FAILED in a row
+     WITH THE SAME OUTPUT. A success, a different signature, or a different
+     failure output resets the streak.
 
-  2. ``evaluate`` is called from a between-turns (Stop) hook. When any signature
-     has failed ``STEER_THRESHOLD`` times in a row it returns a STEER action
-     (inject a one-time message telling the agent to stop retrying and either
-     work around the failure or finish with what it has). If the SAME signature
-     keeps failing up to ``BAIL_THRESHOLD`` after steering, it returns a BAIL
-     action (end the turn loop with a clear reason) so the task fails fast with
-     an honest message instead of grinding to the turn cap.
+  2. ``evaluate`` is called from a between-turns (Stop) hook. When a signature
+     has failed ``STEER_THRESHOLD`` times in a row with identical output it
+     returns a STEER action: inject a ONE-TIME advisory message telling the
+     agent to stop retrying and either work around the failure or finish with
+     what it has.
 
-Design choices (deliberately conservative — over-steering is cheap, a
-false-positive bail is not):
+ADVISORY ONLY — by design this guard NEVER kills a task. An earlier version
+could BAIL (end the turn loop), but distinguishing a true spin from a
+legitimately-iterating agent (re-running the same test command as it fixes
+failures one by one) from raw output is genuinely fragile, and a false-positive
+KILL of a working agent is far worse than a false-positive nudge. So we dropped
+the bail: the real runaway backstop is the platform's ``max_turns`` cap (which
+now reports an honest "Exceeded max turns" reason via the error classifier). A
+false-positive here costs exactly one extra advisory comment — nothing more.
 
-  - We key on a REPEATING FAILURE, not a raw turn count. A genuinely large task
-    that makes steady progress (each turn a different, succeeding tool call)
-    never trips this — only a true spin loop does.
-  - "Failure" is detected from the tool RESPONSE text via small, well-known
-    signals (non-zero exit, "command not found", OOM/heap markers, common error
-    prefixes). We err toward NOT flagging — an unrecognized response counts as
-    success so we never punish a healthy turn.
-  - Steering is injected at most ONCE per signature (a process-lifetime dedup
-    set), mirroring the nudge hook's ``_INJECTED_NUDGES`` guard, so we don't
-    re-steer every turn.
+Design choices (deliberately conservative):
+  - Key on a REPEATING IDENTICAL FAILURE, not a raw turn count. A task making
+    steady progress (different tool calls, or the same command failing
+    DIFFERENTLY each time) never trips this — only a true spin does.
+  - "Failure" is detected from the tool RESPONSE via small, well-known signals
+    (non-zero exit, command-not-found, OOM markers). Unknown output counts as
+    success — we never punish a healthy turn.
+  - Steer at most ONCE per signature (process-lifetime dedup), mirroring the
+    nudge hook's ``_INJECTED_NUDGES`` guard.
 
 Pure + dependency-free (no boto3 / SDK imports) so it unit-tests trivially; the
 hook wiring in ``hooks.py`` owns all I/O.
@@ -45,17 +49,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-# Consecutive identical failures before we INJECT a steering message. Three is
-# enough to distinguish a real loop ("I keep running the same broken command")
-# from a normal retry-after-fix ("ran it, fixed a thing, ran it again").
+# Consecutive failures of the same command WITH IDENTICAL OUTPUT before we
+# inject the one-time advisory steer. Three distinguishes a real spin ("I keep
+# running the same broken command and getting the same error") from a normal
+# retry-after-fix ("ran it, changed something, ran it again — different result").
 STEER_THRESHOLD = 3
 
-# Consecutive identical failures (total) before we BAIL the task. Past this the
-# agent has ignored the steer and is still spinning — fail fast with a reason
-# rather than burn the rest of the turn budget.
-BAIL_THRESHOLD = 6
-
-# Max chars of the offending command surfaced in the steer/bail message. Short:
+# Max chars of the offending command surfaced in the steer message. Short:
 # this is a hint, not a log dump (and the command is untrusted repo content).
 _CMD_PREVIEW_LEN = 80
 
@@ -127,19 +127,41 @@ def _looks_failed(tool_response: str) -> bool:
     return False
 
 
+def _failure_fingerprint(tool_response: str) -> str:
+    """Whitespace-collapsed prefix of the failure output, used to tell a true
+    spin (same command, SAME error, over and over) from healthy iteration (same
+    command, but a DIFFERENT error each run — fixed one thing, hit the next).
+
+    We do NOT blur digits/paths/line-numbers: an earlier version normalized
+    ``\\d+ → #`` to ignore volatile GC timings, but that ALSO collapsed
+    ``test file_0`` and ``test file_1`` to the same fingerprint — i.e. it
+    couldn't tell a volatile number from the meaningful "which test failed"
+    progress signal, and would have nudged a legitimately-iterating agent. Since
+    the guard is now advisory-only (a false nudge is cheap), we use the SIMPLE,
+    honest comparison: two failures are "the same" only if their (collapsed)
+    output prefix is identical. A working agent's output changes run-to-run, so
+    it reads as progress and never reaches the steer threshold.
+    """
+    return re.sub(r"\s+", " ", (tool_response or "").strip())[:300]
+
+
 @dataclass
 class _SigState:
     """Per-signature streak tracking."""
 
     fail_streak: int = 0
     last_preview: str = ""
+    # Output fingerprint of the LAST failure on this signature. The streak only
+    # grows when a new failure matches it (same command failing the SAME way); a
+    # different failure resets to 1 (the agent made progress).
+    last_fingerprint: str = ""
 
 
 @dataclass
 class StuckAction:
     """What the between-turns hook should do this turn."""
 
-    kind: str  # 'none' | 'steer' | 'bail'
+    kind: str  # 'none' | 'steer'  (advisory only — never kills the task)
     signature: str = ""
     message: str = ""
 
@@ -162,7 +184,18 @@ class StuckGuard:
         sig = _signature(tool_name, tool_input)
         state = self._sigs.setdefault(sig, _SigState())
         if _looks_failed(tool_response):
-            state.fail_streak += 1
+            # Only grow the streak when the SAME command fails the SAME way. A
+            # different failure fingerprint means the agent made progress (fixed
+            # one error, hit the next) — that's healthy iteration, so reset to a
+            # fresh streak of 1 rather than march toward a bail. This is the
+            # guard against false-positives on a legitimately-iterating agent
+            # (e.g. re-running the test suite as it fixes failures one by one).
+            fp = _failure_fingerprint(tool_response)
+            if fp == state.last_fingerprint:
+                state.fail_streak += 1
+            else:
+                state.fail_streak = 1
+            state.last_fingerprint = fp
             state.last_preview = _command_preview(tool_input)
             self._last_failing_sig = sig
         else:
@@ -170,13 +203,15 @@ class StuckGuard:
             # other signatures — an A/B/A/B flip-flop between two failing
             # commands still accrues on each independently.
             state.fail_streak = 0
+            state.last_fingerprint = ""
             if self._last_failing_sig == sig:
                 self._last_failing_sig = None
 
     def evaluate(self) -> StuckAction:
-        """Called from a between-turns hook. Decide steer / bail / none.
+        """Called from a between-turns hook. Decide steer / none (advisory only).
 
-        BAIL takes precedence over STEER. STEER fires at most once per signature.
+        STEER fires at most once per signature. There is no bail — the guard
+        never kills a task (see module docstring).
         """
         sig = self._last_failing_sig
         if not sig:
@@ -184,16 +219,6 @@ class StuckGuard:
         state = self._sigs.get(sig)
         if state is None:
             return StuckAction(kind="none")
-
-        if state.fail_streak >= BAIL_THRESHOLD:
-            return StuckAction(
-                kind="bail",
-                signature=sig,
-                message=(
-                    f"Stuck: `{state.last_preview}` failed {state.fail_streak} times in a row "
-                    "and the agent kept retrying it instead of making progress on the task."
-                ),
-            )
 
         if state.fail_streak >= STEER_THRESHOLD and sig not in self._steered:
             self._steered.add(sig)
