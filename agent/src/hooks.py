@@ -1248,17 +1248,19 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 
 
 def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
-    """K7: break a repeating-failing-command spin loop (live-caught ABCA-483).
+    """K7: nudge the agent when it repeats the SAME failing command (ABCA-483).
 
     Reads the per-task :class:`StuckGuard` stamped on ``ctx`` (by
-    :func:`stop_hook`). When the same command has failed enough times in a row,
-    the guard returns:
-      - ``steer`` → inject a one-time message telling the agent to stop
-        retrying and either work around it or finish (returned as text, so the
-        SDK continues the turn with the steer as the next user message); OR
-      - ``bail`` → set ``ctx["_stuck_bail"]`` + a reason so :func:`stop_hook`
-        ends the turn loop (``continue_=False``) with an honest failure instead
-        of grinding to ``max_turns``.
+    :func:`stop_hook`). When the same command has failed with identical output
+    enough times in a row, the guard returns a ``steer`` action — a ONE-TIME
+    advisory message telling the agent to stop retrying and either work around
+    the failure or finish with what it has. Returned as injected text, so the
+    SDK continues the turn with the steer as the next user message.
+
+    ADVISORY ONLY: the guard never kills the task (the bail path was removed —
+    distinguishing a true spin from a legitimately-iterating agent is too
+    fragile to justify an auto-kill; the ``max_turns`` cap is the real
+    backstop). A false positive here costs exactly one extra advisory comment.
 
     Runs AFTER cancel (cancel wins — never steer a dying agent) but its own
     no-op-when-cancelled guard makes ordering robust. Fail-open: any error is
@@ -1275,12 +1277,6 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
         log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
         return []
 
-    if action.kind == "bail":
-        ctx["_stuck_bail"] = True
-        ctx["_stuck_bail_reason"] = action.message
-        _emit_nudge_milestone(ctx, "stuck_bail", action.message[:_NUDGE_PREVIEW_LEN])
-        log("WARN", f"stuck-guard BAIL: {action.message}")
-        return []
     if action.kind == "steer":
         _emit_nudge_milestone(ctx, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN])
         log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
@@ -1299,9 +1295,9 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
 # nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
-    # K7 stuck-guard runs early (right after cancel): if it decides to BAIL,
-    # the stop_hook loop should halt before the nudge/denial hooks mutate any
-    # DDB state for an agent we're about to stop (same rationale as cancel).
+    # K7 stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
+    # the same command keeps failing identically. Runs after cancel (never steer
+    # a dying agent); order vs nudge/denial is cosmetic since it never bails.
     _stuck_guard_between_turns_hook,
     _nudge_between_turns_hook,
     # Chunk 3 (finding #2): denial injection runs LAST so both cancel and
@@ -1372,11 +1368,11 @@ async def stop_hook(
             continue
         if produced:
             chunks.extend(produced)
-        if ctx.get("_cancel_requested") or ctx.get("_stuck_bail"):
+        if ctx.get("_cancel_requested"):
             # Any text produced by earlier hooks in this same loop iteration
-            # is discarded below — the cancel / stuck-bail branches return
-            # ``continue_=False`` and never read ``chunks``.  This is
-            # intentional: a halt wins, and we would rather drop a
+            # is discarded below — the ``_cancel_requested`` branch returns
+            # ``continue_=False`` and never reads ``chunks``.  This is
+            # intentional: cancel wins, and we would rather drop a
             # simultaneous nudge than inject into a dying agent.
             break
 
@@ -1387,23 +1383,6 @@ async def stop_hook(
         return {
             "continue_": False,
             "stopReason": "Task cancelled by user",
-        }
-
-    # K7: the stuck-guard decided the agent is in a hopeless retry loop. End the
-    # turn loop NOW (``continue_=False``) instead of grinding to ``max_turns`` —
-    # the primary win is stopping ~16 turns in rather than 100 (the ABCA-483
-    # grind was 22 min / $1.53). Unlike cancel, no external writer has stamped a
-    # terminal status, so the FINAL status is whatever the post-hooks + SDK
-    # resolve (typically a build-gate failure, surfaced honestly by the
-    # platform's failure-reply). The ``stopReason`` is logged for the trace; the
-    # one-time steer injected earlier already told the agent to finish with a
-    # summary of what failed. We deliberately do NOT force-write a terminal
-    # status here — racing the pipeline's own ``write_terminal`` is riskier than
-    # the marginal benefit, and the early stop is the real value.
-    if ctx.get("_stuck_bail"):
-        return {
-            "continue_": False,
-            "stopReason": ctx.get("_stuck_bail_reason") or "Stuck: repeated failing command",
         }
 
     if not chunks:
