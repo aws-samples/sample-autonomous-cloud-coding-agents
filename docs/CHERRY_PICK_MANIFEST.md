@@ -15,7 +15,12 @@ the parent orchestration fails (npm build errors), and we can't debug it."
 | `40bfecb` | **K1+K2** failed-node panel reason + CloudWatch-not-PR copy | **MIXED** | `failure-reply.ts` (agnostic) **+** `orchestration-rollup.ts`, `orchestration-reconciler.ts` (Linear/orch) |
 | `46a407f` | **K4** build-verify timeout ≠ build failure + cap 600→1800s | **MOSTLY main** | `agent/` (agnostic) **+** `failure-reply.ts` (agnostic) |
 | `def2d01` | **K5** classifier matches `subtype=` wrapper | **YES, clean** | `error-classifier.ts` + test only |
-| `9a88dd8` | **K7** stuck/runaway guard | **YES, clean** | `agent/src/stuck_guard.py`, `hooks.py` + tests |
+| `9a88dd8`+`41c08b0` | **K7+K10** stuck-guard — ADVISORY ONLY (steer, no bail) | **YES, clean** | `agent/src/stuck_guard.py`, `hooks.py` + tests |
+| `6e281cc` | **K8** post-agent gate reports INERT (exit-127), not failure | **YES, clean** | `agent/src/post_hooks.py`, `pipeline.py` + test |
+| `1f02799` | **K9** corepack/yarn in agent Dockerfile (exit-127 root cause) | **YES, clean** | `agent/Dockerfile` |
+| `c7f4509`+`939fc60`+`e1734c1` | **K6** mid-run liveness heartbeat | **NO — linear-vercel only** | `IterationHeartbeat` construct + sweep + `iteration-reply.ts` working-state |
+
+**K8/K9/K10 are clean main-bound** (pure `agent/`), alongside K5. K6 stays on linear-vercel. K1's orchestration slices stay; its `failure-reply.ts` slice is main-bound.
 
 `main` today is platform-agnostic; the Linear orchestration layer
 (`orchestration-*.ts`, the maturing panel) lives on `linear-vercel`, NOT main.
