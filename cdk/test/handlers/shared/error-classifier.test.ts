@@ -256,6 +256,23 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    test('classifies the runner.py "Agent session error (subtype=...)" wrapper, not just agent_status= (K5, live-caught ABCA-483)', () => {
+      // runner.py:515 emits ``Agent session error (subtype='error_max_turns')``
+      // — a DIFFERENT wrapper from pipeline.py's ``agent_status=``. Pre-K5 this
+      // fell through to UNKNOWN → "Unexpected error" even though the task hit the
+      // 100-turn cap (live: a 1-line README task burned 101 turns, reply said
+      // "Unexpected error"). The pattern must match the subtype= wrapper too.
+      const turns = classifyError("Agent session error (subtype='error_max_turns')");
+      expect(turns!.title).toBe('Exceeded max turns');
+      expect(turns!.category).toBe(ErrorCategory.TIMEOUT);
+
+      const budget = classifyError("Agent session error (subtype='error_max_budget_usd')");
+      expect(budget!.title).toBe('Exceeded max budget');
+
+      const exec = classifyError("Agent session error (subtype='error_during_execution')");
+      expect(exec!.title).toBe('Agent errored during execution');
+    });
+
     test('matches agent_status with or without quotes around the literal', () => {
       // Defensive: the agent writer currently emits single-quoted
       // repr values (``agent_status='error_max_turns'``) but a future

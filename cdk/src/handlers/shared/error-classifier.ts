@@ -205,11 +205,17 @@ const PATTERNS: readonly ErrorPattern[] = [
   // ``Task did not succeed.*agent_status=`` catch-all so the concrete
   // cap / runtime-error signals surface to users rather than the
   // opaque "Agent task did not succeed" title. Each matches the
-  // ``agent_status`` literals emitted by ``agent/src/pipeline.py``
-  // (see ``_resolve_overall_task_status``) and
-  // ``agent/src/runner.py``.
+  // status literal under BOTH wrappers the agent emits:
+  //   - ``agent_status=error_max_turns`` — ``agent/src/pipeline.py``
+  //     (``_resolve_overall_task_status``); and
+  //   - ``Agent session error (subtype='error_max_turns')`` —
+  //     ``agent/src/runner.py:515`` (the terminal-error path).
+  // Keying on only ``agent_status=`` missed the ``subtype=`` wrapper, so a
+  // real max-turns failure fell through to UNKNOWN → "Unexpected error"
+  // (live-caught on ABCA-483: a task hit the 100-turn cap but the reply
+  // said "Unexpected error"). Match either ``agent_status=``/``subtype=``.
   {
-    pattern: /agent_status=['"]?error_max_turns['"]?/i,
+    pattern: /(?:agent_status|subtype)=['"]?error_max_turns['"]?/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
       title: 'Exceeded max turns',
@@ -219,7 +225,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    pattern: /agent_status=['"]?error_max_budget_usd['"]?/i,
+    pattern: /(?:agent_status|subtype)=['"]?error_max_budget_usd['"]?/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
       title: 'Exceeded max budget',
@@ -229,7 +235,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    pattern: /agent_status=['"]?error_during_execution['"]?/i,
+    pattern: /(?:agent_status|subtype)=['"]?error_during_execution['"]?/i,
     classification: {
       category: ErrorCategory.AGENT,
       title: 'Agent errored during execution',
