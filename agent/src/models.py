@@ -365,3 +365,7 @@ class TaskResult(BaseModel):
     # Phase 3), or ``None`` for coding tasks / when no artifact was delivered.
     # Surfaced on TaskDetail so the user can retrieve the knowledge-task output.
     artifact_uri: str | None = None
+    # OTEL trace id (32-char hex) of the task's root span, captured at terminal
+    # write so the replay bundle (#515) can correlate the task to its
+    # CloudWatch/X-Ray trace. ``None`` when tracing is unavailable (local/dev).
+    otel_trace_id: str | None = None

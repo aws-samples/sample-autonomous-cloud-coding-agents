@@ -26,7 +26,7 @@ from context import assemble_prompt, fetch_github_issue
 from jira_reactions import comment_task_finished, comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
-from observability import task_span
+from observability import current_otel_trace_id, task_span
 from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
@@ -363,6 +363,7 @@ def _run_repoless_task(
         cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
         cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
         trace_s3_uri=trace_s3_uri,
+        otel_trace_id=current_otel_trace_id(),
     )
     result_dict = result.model_dump()
 
@@ -1127,6 +1128,7 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
+                otel_trace_id=current_otel_trace_id(),
             )
 
             result_dict = result.model_dump()

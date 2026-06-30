@@ -156,6 +156,49 @@ export interface TraceUrlResponse {
   readonly expires_at: string;
 }
 
+/**
+ * Verification verdict in a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::VerificationReport``. Either field is
+ * ``null`` when the corresponding gate did not run / predates persistence.
+ */
+export interface VerificationReport {
+  readonly build_passed: boolean | null;
+  readonly lint_passed: boolean | null;
+}
+
+/**
+ * One TaskEvent inside a replay bundle. Mirrors the server's ``EventRecord``
+ * (includes ``task_id`` and optional ``ttl``, unlike the slimmer {@link TaskEvent}
+ * used by the events feed).
+ */
+export interface ReplayEvent {
+  readonly task_id: string;
+  readonly event_id: string;
+  readonly event_type: string;
+  readonly timestamp: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly ttl?: number;
+}
+
+/**
+ * Response body of ``GET /v1/tasks/{task_id}/replay`` (#515). Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayBundle``. Aggregates existing
+ * telemetry; absent sources are ``null``/empty rather than omitted.
+ */
+export interface ReplayBundle {
+  readonly task_id: string;
+  readonly workflow_ref: string | null;
+  readonly resolved_workflow: ResolvedWorkflow | null;
+  readonly prompt_version: string | null;
+  readonly events: ReplayEvent[];
+  readonly verification: VerificationReport | null;
+  readonly trace_uri: string | null;
+  readonly otel_trace_id: string | null;
+  readonly session_id: string | null;
+  readonly cost_usd: number | null;
+  readonly collected_at: string;
+}
+
 /** Task summary returned by GET /v1/tasks list responses. */
 export interface TaskSummary {
   readonly task_id: string;

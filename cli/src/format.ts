@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
@@ -353,6 +353,44 @@ export function formatWebhookDetail(webhook: WebhookDetail): string {
 /** Format data as JSON. */
 export function formatJson(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+/**
+ * Format a replay bundle (#515) as a human-readable summary: the correlation
+ * metadata as aligned key-value lines, then a compact chronological event list.
+ * Use {@link formatJson} for the machine-readable form. Absent fields render as
+ * ``—`` so the operator sees "not captured" explicitly rather than a blank.
+ */
+export function formatReplay(bundle: ReplayBundle): string {
+  const dash = '—';
+  const lines: string[] = [
+    `Task:        ${bundle.task_id}`,
+    `Workflow:    ${bundle.resolved_workflow ? `${bundle.resolved_workflow.id}@${bundle.resolved_workflow.version}` : (bundle.workflow_ref ?? dash)}`,
+    `Prompt ver:  ${bundle.prompt_version ?? dash}`,
+    `Cost:        ${bundle.cost_usd != null ? `$${Number(bundle.cost_usd).toFixed(COST_USD_DECIMALS)}` : dash}`,
+    `OTEL trace:  ${bundle.otel_trace_id ?? dash}`,
+    `Session:     ${bundle.session_id ?? dash}`,
+    `Trace URI:   ${bundle.trace_uri ?? dash}`,
+  ];
+  if (bundle.verification) {
+    const v = bundle.verification;
+    const verdict = (b: boolean | null): string => (b === null ? dash : b ? 'PASSED' : 'FAILED');
+    lines.push(`Build:       ${verdict(v.build_passed)}`);
+    lines.push(`Lint:        ${verdict(v.lint_passed)}`);
+  } else {
+    lines.push(`Verification: ${dash} (no gate result persisted)`);
+  }
+  lines.push(`Collected:   ${bundle.collected_at}`);
+  lines.push('');
+  lines.push(`Events (${bundle.events.length}):`);
+  if (bundle.events.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const e of bundle.events) {
+      lines.push(`  ${e.timestamp}  ${e.event_type}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 function formatErrorLines(task: TaskDetail): string[] {
