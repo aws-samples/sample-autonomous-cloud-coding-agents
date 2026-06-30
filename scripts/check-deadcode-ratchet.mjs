@@ -28,8 +28,9 @@
  * (someone cleaned up), it prints the new lower number so the baseline can be
  * tightened in the same PR.
  *
- * Counted categories mirror what knip surfaces for this repo today (unused
- * files, dependencies, unlisted, binaries, exports, types, enum/class members).
+ * Counted categories are knip 6.x's array-valued issue keys (unused files,
+ * dependencies, unlisted/unresolved, binaries, exports, types, enum and
+ * namespace members, duplicates, catalog) — see COUNTED_KEYS below.
  * Per-category false positives are suppressed in `knip.json`, not here.
  */
 
@@ -41,7 +42,14 @@ import { dirname, join } from 'node:path';
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const baselinePath = join(repoRoot, 'knip-baseline.json');
 
+// knip 6.x emits one issues[] entry per file; each entry carries these
+// array-valued issue keys. `file` and `owners` are labels, not findings, so
+// they are excluded. `files` (unused files) is counted here — knip lists them
+// inside issues[].files[], NOT at the top level. `duplicates` is an
+// array-of-arrays (one inner array per duplicate group), so its `.length`
+// counts groups, which is the unit we ratchet on.
 const COUNTED_KEYS = [
+  'files',
   'dependencies',
   'devDependencies',
   'optionalPeerDependencies',
@@ -50,11 +58,10 @@ const COUNTED_KEYS = [
   'unresolved',
   'exports',
   'types',
-  'nsExports',
-  'nsTypes',
   'duplicates',
   'enumMembers',
-  'classMembers',
+  'namespaceMembers',
+  'catalog',
 ];
 
 function runKnip() {
@@ -80,7 +87,7 @@ function runKnip() {
 }
 
 function countIssues(report) {
-  let total = (report.files ?? []).length;
+  let total = 0;
   for (const issue of report.issues ?? []) {
     for (const key of COUNTED_KEYS) {
       if (Array.isArray(issue[key])) total += issue[key].length;
