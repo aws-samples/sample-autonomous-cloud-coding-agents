@@ -137,3 +137,9 @@ skip_covered = true
 [tool.ty.environment]
 python-version = "3.13"
 extra-paths = ["src"]
+
+[tool.ty.src]
+# The vulture allowlist is bare-name expressions by design, not type-checkable
+# Python — ty flags each line unresolved-reference. Excluded here for the same
+# reason ruff excludes it via extend-exclude (#282).
+exclude = [".vulture_allowlist.py"]
