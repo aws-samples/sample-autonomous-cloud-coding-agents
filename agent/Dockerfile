@@ -81,7 +81,6 @@ COPY contracts/ /app/contracts/
 # ``WorkflowValidationError: workflow '...' not found at /app/workflows/...``.
 COPY agent/workflows/ /app/workflows/
 COPY agent/prepare-commit-msg.sh /app/
-COPY agent/test_sdk_smoke.py agent/test_subprocess_threading.py /app/
 
 # Create non-root user (Claude Code CLI refuses bypassPermissions as root)
 RUN useradd -m -s /bin/bash agent && \

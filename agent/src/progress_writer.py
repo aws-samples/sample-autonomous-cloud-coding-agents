@@ -7,7 +7,7 @@ Follows the same patterns as ``_TrajectoryWriter`` in ``entrypoint.py``:
   - Lazy boto3 client initialization
   - Best-effort, fail-open (never crash the agent)
   - Circuit breaker: disable after 3 consecutive *transient* DDB write
-    failures (krokoko PR #52 review finding #6 — permanent errors like
+    failures (permanent errors like
     ``ValidationException`` no longer trip the breaker).
   - Reads ``TASK_EVENTS_TABLE_NAME`` from environment (already set on AgentCore Runtime)
 
@@ -20,7 +20,7 @@ Each event is a DDB item with:
   - ``ttl`` (90-day, matching task retention)
 
 Circuit-breaker state is **shared across all writer instances for the same
-task** (krokoko PR #52 review finding #8).  Runner-level (turn/tool events)
+task** (shared circuit-breaker state).  Runner-level (turn/tool events)
 and pipeline-level (milestones) writers are two ``_ProgressWriter``
 instances with the same ``task_id``; without shared state a throttling burst
 on one would let the other keep writing, producing visible gaps in the
@@ -90,7 +90,7 @@ def _truncate_preview(value: str | None, max_len: int = _PREVIEW_MAX_LEN) -> str
 
 
 # ---------------------------------------------------------------------------
-# Error classification (krokoko PR #52 review finding #6)
+# Error classification
 # ---------------------------------------------------------------------------
 
 # DDB error codes that are NOT recoverable by retry — retrying will keep
@@ -152,7 +152,7 @@ _TRANSIENT_NETWORK_EXC_NAMES: frozenset[str] = frozenset(
 def _classify_ddb_error(exc: BaseException) -> Literal["permanent", "transient", "unknown"]:
     """Classify a DDB-layer exception for circuit-breaker accounting.
 
-    Rules (krokoko PR #52 review finding #6):
+    Rules:
 
     - ``ClientError`` with an AWS error code we recognise as permanent
       (schema/size/IAM/missing-table) → ``"permanent"``.  Drop the
@@ -195,7 +195,7 @@ def _classify_ddb_error(exc: BaseException) -> Literal["permanent", "transient",
 
 
 # ---------------------------------------------------------------------------
-# Shared circuit-breaker state (krokoko PR #52 review finding #8)
+# Shared circuit-breaker state
 # ---------------------------------------------------------------------------
 
 
@@ -385,8 +385,7 @@ class _ProgressWriter:
     def _put_event(self, event_type: str, metadata: dict) -> None:
         """Write a single progress event item to DynamoDB.
 
-        Error handling splits three ways (krokoko PR #52 review finding
-        #6):
+        Error handling splits three ways:
 
         - **ImportError** (no boto3 on the path) — disable the writer
           immediately, this is unrecoverable.

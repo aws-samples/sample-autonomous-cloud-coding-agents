@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for suggesting an idea. You may want to check the [ROADMAP](https://github.com/krokoko/bgagent/blob/main/docs/guides/ROADMAP.md) and [design docs](https://github.com/krokoko/bgagent/tree/main/docs/design) to see if something similar is already planned.
+        Thanks for suggesting an idea. You may want to check [open GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) and [design docs](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/docs/design) to see if something similar is already planned.
   - type: dropdown
     id: component
     attributes:

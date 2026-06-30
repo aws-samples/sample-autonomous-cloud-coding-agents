@@ -1181,7 +1181,7 @@ class TestTraceS3Upload:
         mock_upload,
         monkeypatch,
     ):
-        """krokoko review Finding #11 — trace=True with empty user_id now
+        """trace=True with empty user_id now
         fails at ``TaskConfig`` construction time (pre-flight validation)
         rather than silently skipping the upload and returning
         ``trace_s3_uri=None``.
