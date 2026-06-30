@@ -203,7 +203,7 @@ If `docker run --privileged` is blocked on your host (common on security-managed
 
 The stack ships with X-Ray span export to CloudWatch Logs **disabled** (`tracingEnabled` in `cdk/src/stacks/agent.ts`), so the platform deploys and runs fully without any X-Ray account setup. You do **not** need to run `aws xray update-trace-segment-destination` to get a working deployment.
 
-If you later enable tracing, it needs a one-time per-account setup — and on a security-managed AWS Organization account an SCP may block the X-Ray service from writing to `aws/spans` entirely (the `update-trace-segment-destination` call returns `AccessDeniedException` no matter what the deploying identity does; that's an Org-level policy, not a setup mistake). Treat tracing as an opt-in extra, not a prerequisite. See the [Developer Guide](/developer-guide/introduction) for the enable steps.
+If you later enable tracing, it needs a one-time per-account setup — and on a security-managed AWS Organization account an SCP may block the X-Ray service from writing to `aws/spans` entirely (the `update-trace-segment-destination` call returns `AccessDeniedException` no matter what the deploying identity does; that's an Org-level policy, not a setup mistake). Treat tracing as an opt-in extra, not a prerequisite. See the [Developer Guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for the enable steps.
 
 :::
 
