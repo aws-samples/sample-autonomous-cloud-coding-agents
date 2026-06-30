@@ -34,6 +34,20 @@ Blueprint.
 > actually changing the platform source (e.g. wiring a brand-new Bedrock model into
 > the stack — see "Model not yet wired into the runtime" below).
 
+## Gather repository details
+
+Use AskUserQuestion to collect (only the repository is required — the rest fall back to platform defaults):
+
+- **Repository** — GitHub `owner/repo`. Must match exactly what's passed to `bgagent submit --repo` later.
+- **Compute type** — `agentcore` (default) or `ecs`.
+- **Model** — default is the platform model (Sonnet 4.6). If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `us.anthropic.claude-sonnet-4-6`), not a raw `anthropic.*` foundation-model ID.
+- **Max turns** — default 100 (range 1–500).
+- **Per-repo GitHub token** — only if this repo needs a different token than the platform default (provide its Secrets Manager ARN).
+
+> **Per-task cost limits aren't set here.** `max_budget` / `max_turns` *per task* are flags on `bgagent submit` (the `submit-task` skill), not repo-onboarding fields. Onboarding sets only the per-repo **default** `max_turns`.
+
+If the repo needs config the CLI can't provision (per-repo egress, Cedar policies, system-prompt overrides, or a not-yet-granted model), use **Path B** instead.
+
 ## Path A — CLI operator onboarding (default)
 
 `bgagent repo onboard` writes (or re-activates) the repository's `RepoConfig` row in
@@ -43,10 +57,12 @@ no `cdk deploy`.**
 ```bash
 bgagent repo onboard <owner/repo>
 # common overrides:
-#   --model <inference-profile-id>     e.g. us.anthropic.claude-sonnet-4-6
+#   --model <inference-profile-id>     e.g. us.anthropic.claude-sonnet-4-6 (must be runtime-granted)
 #   --compute-type <agentcore|ecs>
-#   --max-turns <n>
+#   --max-turns <n>                    per-repo default turn limit
 #   --token-secret-arn <arn>           per-repo GitHub token (else platform default)
+#   --runtime-arn <arn>                override AgentCore runtime ARN (agentcore only)
+#   --poll-interval <ms>               agent completion poll interval
 ```
 
 Then confirm it landed:
@@ -134,6 +150,7 @@ via Path A and treat "add model X" as a separate, later change.
 | Setting | Purpose | Default |
 |---------|---------|---------|
 | `compute_type` | Execution strategy | `agentcore` |
+| `runtime_arn` | AgentCore runtime override | Platform default |
 | `model_id` | AI model for tasks (inference profile ID) | Platform default (Sonnet 4.6) |
 | `max_turns` | Turn limit per task | 100 |
 | `max_budget_usd` | Cost ceiling per task | Unlimited |
