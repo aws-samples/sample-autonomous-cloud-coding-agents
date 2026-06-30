@@ -59,6 +59,50 @@ def _parse_token_usage(raw_usage: Any) -> TokenUsage:
     return TokenUsage(**values)
 
 
+def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
+    """Wire Bedrock cost attribution for the Claude Code subprocess (#215).
+
+    Claude Code makes the ``InvokeModel`` calls, so attribution is configured
+    through *its* credential + header channels, not the agent's boto3:
+
+    1. **Per-user/repo chargeback (CUR 2.0 / Cost Explorer).** Write the
+       SessionRole ARN + ``{user_id, repo, task_id}`` STS tags to a 0600 file
+       that ``bedrock_creds_helper.py`` reads. Claude Code's managed-settings
+       ``awsCredentialExport`` runs that helper and signs Bedrock requests with
+       the tagged assumed-role credentials. Skipped when ``AGENT_SESSION_ROLE_ARN``
+       is unset (local/dev) — the helper then fails open to ambient creds.
+
+    2. **Per-call forensics (model-invocation logs).** Set
+       ``X-Amzn-Bedrock-Request-Metadata`` via ``ANTHROPIC_CUSTOM_HEADERS`` on the
+       process env. One container = one task = one Claude Code session, so a
+       static-per-process header is effectively per-task. Set via the process
+       env (not project settings) so the untrusted cloned repo cannot alter it.
+    """
+    import json
+
+    from aws_session import MAX_TAG_VALUE_LEN, build_session_tags
+
+    role_arn = os.environ.get("AGENT_SESSION_ROLE_ARN", "").strip()
+    tags = build_session_tags(config.user_id, config.repo_url, config.task_id)
+    if role_arn and tags:
+        try:
+            from bedrock_creds_helper import write_attribution_file
+
+            write_attribution_file(role_arn, tags)
+        except OSError as exc:
+            # Fail open: attribution is observability, not isolation. Bedrock
+            # still works on the compute role; we just lose tagged chargeback.
+            log("WARN", f"Bedrock attribution file not written ({exc}); spend will be untagged")
+
+    # Per-request metadata mirrors the STS tag values. Bedrock limits keys/values
+    # to 256 chars and records them under ``requestMetadata`` in invocation logs.
+    metadata = {t["Key"]: t["Value"][:MAX_TAG_VALUE_LEN] for t in tags}
+    if metadata:
+        os.environ["ANTHROPIC_CUSTOM_HEADERS"] = (
+            f"X-Amzn-Bedrock-Request-Metadata: {json.dumps(metadata, separators=(',', ':'))}"
+        )
+
+
 def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     """Configure process environment for the Claude Code CLI subprocess.
 
@@ -72,6 +116,8 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
     os.environ["GITHUB_TOKEN"] = config.github_token
     os.environ["GH_TOKEN"] = config.github_token
+
+    _setup_bedrock_cost_attribution(config)
     # DO NOT set ANTHROPIC_LOG — any logging level causes the CLI to write to
     # stderr, which fills the OS pipe buffer (64 KB) and deadlocks the
     # single-threaded Node.js CLI process (blocked stderr write prevents stdout

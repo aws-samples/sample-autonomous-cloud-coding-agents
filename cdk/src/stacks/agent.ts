@@ -458,6 +458,17 @@ export class AgentStack extends Stack {
       ],
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
+      // #215: session-tagged Bedrock grant for cost attribution — the same
+      // invokables grantInvoke-ed to the compute role above, so the grants
+      // stay in lockstep.
+      invokableModels: [
+        model,
+        inferenceProfile,
+        model3,
+        inferenceProfile3,
+        model2,
+        inferenceProfile2,
+      ],
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
