@@ -80,6 +80,8 @@ os.environ["ANTHROPIC_CUSTOM_HEADERS"] = (
 
 Set via the process env (not project settings) so the untrusted repo can't alter it. Surfaces under `requestMetadata` in `/aws/bedrock/model-invocation-logs/<stack>` (logging already enabled in `agent.ts`).
 
+> **Note — a deliberate exception to the "tenant ids out of `os.environ`" rule.** The tenant-data path keeps `{user_id, repo, task_id}` out of `os.environ` so spawned (untrusted) repo subprocesses don't inherit them. This header *must* live on `os.environ` because Claude Code reads `ANTHROPIC_CUSTOM_HEADERS` from the process env. The exposure is acceptable: the values are the task's *own* identifiers (self-referential, non-secret) — a subprocess learns only who it is already running for. `json.dumps` escaping prevents a crafted slug from injecting an extra (newline-separated) header.
+
 > **Open risk to validate against a live endpoint:** Bedrock rejects `X-Amzn-Bedrock-Request-Metadata` with `InvalidSignatureException` if the header is omitted from the SigV4 `SignedHeaders`. Whether Claude Code signs custom headers is unverified. AC#3 explicitly permits "or documented blocker if Claude Code cannot pass metadata." If it fails, per-call attribution falls back to invocation-log `identity.arn` + `RoleSessionName` (`abca-bedrock-<task_id>`) that Track 1's tagged session already provides.
 
 ## Version alignment

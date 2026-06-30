@@ -96,6 +96,14 @@ def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
 
     # Per-request metadata mirrors the STS tag values. Bedrock limits keys/values
     # to 256 chars and records them under ``requestMetadata`` in invocation logs.
+    #
+    # Unlike the tenant-data tags (kept out of os.environ so untrusted repo
+    # subprocesses don't inherit them), this header MUST go on os.environ —
+    # Claude Code reads ANTHROPIC_CUSTOM_HEADERS from the process env. The
+    # exposure is acceptable: the values are the task's OWN {user_id, repo,
+    # task_id} (self-referential, non-secret), so a spawned subprocess learns
+    # only who it is already running for. json.dumps escapes newlines/quotes, so
+    # a crafted repo slug cannot inject an extra (newline-separated) header.
     metadata = {t["Key"]: t["Value"][:MAX_TAG_VALUE_LEN] for t in tags}
     if metadata:
         os.environ["ANTHROPIC_CUSTOM_HEADERS"] = (
