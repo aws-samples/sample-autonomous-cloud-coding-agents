@@ -4,34 +4,34 @@ title: Workflows
 
 # Workflows (workflow-driven tasks)
 
-A **workflow** is a versioned, declarative document that describes how the agent should execute one *kind* of task: the ordered steps to run inside the container, the system prompt, the agent configuration (tools, MCP servers, skills, plugins, rules, Cedar policy), what context to hydrate, the post-execution gates, and what "done" means. Workflows replace the hardcoded `task_type` branches scattered across the Python agent runtime (`pipeline.py`, `post_hooks.py`, `repo.py`, `prompts/`) with a single **step runner** that interprets the workflow file.
+A **workflow** is a versioned, declarative document that describes how the agent should execute one *kind* of task: the ordered steps to run inside the container, the system prompt, the agent configuration (tools, MCP servers, skills, plugins, rules, Cedar policy), what context to hydrate, the post-execution gates, and what "done" means. Workflows replaced the hardcoded `task_type` branches that used to be scattered across the Python agent runtime (`pipeline.py`, `post_hooks.py`, `repo.py`, `prompts/`) with a single **step runner** that interprets the workflow file.
 
-The three shipped task types — `new_task`, `pr_iteration`, `pr_review` — become the first three first-party workflows, and **the `task_type` enum is removed**: this work replaces it, it does not coexist with it. New domains (research, document drafting, data analysis) are new workflow files, not new orchestrator branches. Crucially, a workflow can declare `requires_repo: false`, unlocking **repo-optional tasks**: knowledge work with no GitHub clone and no PR scaffolding.
+The three former task types — `new_task`, `pr_iteration`, `pr_review` — are now first-party workflows (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`). The `task_type` enum is **removed**; `workflow_ref` is the only task-selection field on the API. New domains (research, document drafting, data analysis) are new workflow files, not new orchestrator branches. A workflow can declare `requires_repo: false`, enabling **repo-optional tasks**: knowledge work with no GitHub clone and no PR scaffolding.
 
-- **Use this doc for:** the workflow file schema, step-kind catalog, the agent-side step runner model, how a workflow reference flows from API to agent, and the plan for replacing the `task_type` enum with workflows (it is removed, not aliased).
+- **Use this doc for:** the workflow file schema, step-kind catalog, the agent-side step runner model, and how a `workflow_ref` flows from API to agent.
 - **Related docs:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) for the deterministic-steps-wrapping-one-agentic-step model, [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for the durable lifecycle the workflow runs inside, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the per-repo **Blueprint** (a distinct concept — see [Naming](#naming-workflow-vs-blueprint)), [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) for the policy engine a workflow's `agent_config` feeds, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for tool tiers, and [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract) for the `workflow_ref` wire field.
 - **Decision record:** [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks).
 - **Tracking issue:** [#248](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/248). Pairs with the agent asset registry ([#246](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/246)) and attribution ([#245](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/245)). Scoped-down, current-architecture track of the broader AKW vision ([#99](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/99)).
 
-## The problem
+## Background: what workflows replaced
 
-Today the platform supports exactly three task types, fixed at the type level (`TaskType = 'new_task' | 'pr_iteration' | 'pr_review'`) and enforced by an exhaustiveness assert in `validation.ts`. Behavior for each type is not centralized — it is spread across eight Python files in the agent runtime plus a Cedar policy, each branching on the literal string:
+Before #248, the platform supported exactly three task types, fixed at the type level (`TaskType = 'new_task' | 'pr_iteration' | 'pr_review'`) and enforced by an exhaustiveness assert in `validation.ts`. Behavior for each type was not centralized — it was spread across eight Python files in the agent runtime plus a Cedar policy, each branching on the literal string:
 
-| Where | What branches on `task_type` |
+| Where | What used to branch on `task_type` |
 |---|---|
 | `agent/src/models.py` | `TaskType` enum + `is_pr_task` / `is_read_only` properties |
 | `agent/src/config.py` | `PR_TASK_TYPES` frozenset; required-input rules (PR ⇒ `pr_number`; else `issue`/`description`) |
 | `agent/src/server.py` | duplicate required-input validation on the `/invocations` payload |
 | `agent/src/prompts/__init__.py` | `_PROMPTS` lookup table → workflow-fragment injection |
-| `agent/src/runner.py` | `PolicyEngine(task_type=...)` — task_type becomes the Cedar principal |
+| `agent/src/runner.py` | `PolicyEngine(task_type=...)` — task_type became the Cedar principal |
 | `agent/src/repo.py` | branch selection: resume existing branch (PR tasks) vs create new |
 | `agent/src/post_hooks.py` | PR finalization: create / push+resolve / resolve-only |
 | `agent/src/pipeline.py` | skip safety-net commit and treat build as informational for `pr_review` |
 | `agent/policies/hard_deny.cedar` | read-only enforced by literal `Agent::TaskAgent::"pr_review"` |
 
-Adding a fourth task type means touching all of these. Adding a *non-coding* task type is currently impossible: every task unconditionally clones a repo (`setup_repo` runs for all three types), and the create-task API hard-requires an onboarded `repo` (`422 REPO_NOT_ONBOARDED`). "Requires a repo" is an implicit, universal assumption, not a declared property.
+Adding a fourth task type meant touching all of these. Adding a *non-coding* task type was impossible: every task unconditionally cloned a repo, and the create-task API hard-required an onboarded `repo` (`422 REPO_NOT_ONBOARDED`). "Requires a repo" was an implicit, universal assumption, not a declared property.
 
-The goal of this design is to **invert** that: make per-task-type behavior *data* (a workflow file) interpreted by one generic runner, so new task types — coding or not — are authored, not coded.
+Workflows **invert** that model: per-task-type behavior is *data* (a workflow file) interpreted by one generic runner, so new task types — coding or not — are authored, not coded.
 
 ## Naming: Workflow vs Blueprint
 
@@ -228,20 +228,20 @@ def run_workflow(workflow: Workflow, config: TaskConfig, hc: HydratedContext) ->
 
 The step runner runs inside the compute substrate, which is **not** a throwaway container: AgentCore provides persistent session storage — a per-session filesystem at `/mnt/workspace` that survives stop/resume cycles (14-day TTL, see [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute)) — and the Claude Agent SDK supports resuming a prior session by its session UUID (the runner already captures that UUID from the first `ResultMessage`). So the durability model the runner should target is **resume from where the workflow stopped**, not replay from the beginning. The runner is designed resume-aware from the start so the structured "steps" become the natural checkpoint boundaries:
 
-- **Step completion is checkpointed; resume skips completed steps.** The runner records each step's outcome to a small `workflow_state.json` on the persistent mount (`/mnt/workspace`) as it goes. On resume (orchestrator re-invokes the same session, or — per the roadmap — a replacement worker rehydrates from the [S3-backed SDK session store](#relationship-to-the-resume-roadmap)), the runner reads that checkpoint, **skips already-completed deterministic steps** (`clone_repo` need not re-clone a populated `/workspace`; a completed `verify_build` is not re-run), and **resumes the agent loop** via the persisted SDK session UUID rather than restarting it from turn 0. This is the same property the orchestrator already relies on for session start being idempotent (pre-generated, reused session id).
+- **Step completion is checkpointed; resume skips completed steps.** The runner records each step's outcome to a small `workflow_state.json` on the persistent mount (`/mnt/workspace`) as it goes. On resume (orchestrator re-invokes the same session, or — when shipped — a replacement worker rehydrates from the [S3-backed SDK session store](#relationship-to-portable-resume)), the runner reads that checkpoint, **skips already-completed deterministic steps** (`clone_repo` need not re-clone a populated `/workspace`; a completed `verify_build` is not re-run), and **resumes the agent loop** via the persisted SDK session UUID rather than restarting it from turn 0. This is the same property the orchestrator already relies on for session start being idempotent (pre-generated, reused session id).
 - **Side-effecting steps remain idempotent.** Independent of resume, `clone_repo`, `ensure_pr`, `post_review`, and `deliver_artifact` must tolerate a partial prior run (a resume can re-enter the step that was in flight when the worker died). Each documents its idempotency key — PR branch, review id, artifact S3 key = `task_id` — so re-entry reconciles rather than duplicates (today's `ensure_pr` already does this: it checks `gh pr view` before creating).
 - **`on_failure: continue` is forbidden after side effects** (validation rule 10). A failed `ensure_pr` (commits pushed, PR-create failed) must not reach a *succeeded* terminal — committed work with no PR and no compensation. `continue` is permitted only for non-side-effecting, advisory steps (e.g. an informational `verify_lint`). `skip_remaining` ends the workflow cleanly and runs terminal-outcome resolution against whatever completed; `fail` (default) is terminal `FAILED`.
 - **Granularity boundary.** Resume is *workflow-step granular on the agent side*, not a new orchestrator-side durable checkpoint per step — the orchestrator still treats the whole session as one `await-agent-completion` step, so platform invariants stay agent-external ([ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks)). What changes versus today is that the agent-side runner makes its *own* progress recoverable across a stop/resume, which today's monolithic `run_task` does not.
 
-#### Relationship to the resume roadmap
+#### Relationship to portable resume
 
-This depends on two capabilities, one shipped-in-preview and one on the roadmap — the design assumes the first and is forward-compatible with the second:
+This depends on two capabilities, one shipped-in-preview and one planned — the design assumes the first and is forward-compatible with the second:
 
 | Capability | Status | What the runner uses it for |
 |---|---|---|
 | Persistent session storage (`/mnt/workspace`, survives stop/resume) | Shipped (preview) — COMPUTE.md | Holds `workflow_state.json` checkpoint + the populated workspace so a resumed session skips completed work. |
 | Claude Agent SDK session resume (by session UUID) | SDK feature; UUID already captured by the runner | Resume the agent loop mid-task instead of from turn 0. |
-| S3-backed SDK session store (`task_id` ↔ session UUID, portable transcript) | **Roadmap** — ROADMAP.md "S3-backed SDK session store" | Resume on a *different* worker (e.g. after node loss), not just the same session. The workflow checkpoint should live alongside the session transcript so the two resume together. |
+| S3-backed SDK session store (`task_id` ↔ session UUID, portable transcript) | **Planned** — [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) | Resume on a *different* worker (e.g. after node loss), not just the same session. The workflow checkpoint should live alongside the session transcript so the two resume together. |
 
 Until the S3 session store lands, resume is bounded to what persistent session storage + same-session re-invoke provide; a total worker loss still re-runs from step 0 (mitigated by step idempotency above). When it lands, the workflow checkpoint rides with the session transcript and resume becomes worker-portable. Per-step *compensation/rollback* of completed side effects is a non-goal for this issue — called out so it is a recorded decision, not an oversight.
 

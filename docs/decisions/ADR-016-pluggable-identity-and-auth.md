@@ -92,5 +92,5 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 - [ADR-014](./ADR-014-workflow-driven-tasks.md) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
 - [IDENTITY_AND_AUTH.md](../design/IDENTITY_AND_AUTH.md) — the worked use-cases, seams table, decision tree, and Linear before/after
 - [SECURITY.md](../design/SECURITY.md) — current auth posture, the shared-PAT limitation this ADR resolves
-- [ROADMAP.md](../guides/ROADMAP.md) — "Per-repo GitHub credentials", "Layered credential derivation", "Delegation chain propagation"
+- GitHub issues — per-repo GitHub credentials, layered credential derivation, delegation chain propagation (priority labels `P0`, `P1`, etc.)
 - AgentCore Identity, Runtime, and Gateway — the [AWS Bedrock AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html) are the public sources for the flows, the `credentialProviderVendor` enum, and pricing
