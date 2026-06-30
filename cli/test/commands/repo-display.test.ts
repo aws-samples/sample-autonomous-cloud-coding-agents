@@ -33,7 +33,7 @@ const BLUEPRINT_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:Acme
 describe('formatRepoConfigForDisplay', () => {
   test('resolves platform defaults when blueprint fields are absent from RepoTable', () => {
     const display = formatRepoConfigForDisplay(
-      { repo: 'krokoko/agent-plugins', status: 'active' },
+      { repo: 'awslabs/agent-plugins', status: 'active' },
       PLATFORM,
     );
 
@@ -82,7 +82,7 @@ describe('formatRepoConfigForDisplay', () => {
 describe('buildRepoShowLines', () => {
   test('shows platform defaults instead of dash for unset blueprint fields', () => {
     const display = formatRepoConfigForDisplay(
-      { repo: 'krokoko/agent-plugins', status: 'active' },
+      { repo: 'awslabs/agent-plugins', status: 'active' },
       PLATFORM,
     );
     const lines = buildRepoShowLines(display);
@@ -97,7 +97,7 @@ describe('buildRepoShowLines', () => {
 
   test('explains platform default github token in text output', () => {
     const display = formatRepoConfigForDisplay(
-      { repo: 'krokoko/agent-plugins', status: 'active' },
+      { repo: 'awslabs/agent-plugins', status: 'active' },
       PLATFORM,
     );
 
@@ -140,7 +140,7 @@ describe('buildRepoShowLines', () => {
 
   test('warns when platform stack output is missing', () => {
     const display = formatRepoConfigForDisplay(
-      { repo: 'krokoko/agent-plugins', status: 'active' },
+      { repo: 'awslabs/agent-plugins', status: 'active' },
       { runtimeArn: null, githubTokenSecretArn: null },
     );
 

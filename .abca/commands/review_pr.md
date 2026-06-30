@@ -139,12 +139,7 @@ Documentation drift is a blocking concern on this repo. Check:
 - **Never edit `docs/src/content/docs/` by hand** — it is generated.
 - **AGENTS.md / README / package docs** — Updated if the developer flow, routing, or commands
   changed.
-- **Roadmap reflects the change** — Confirm whatever this PR fixes or delivers is marked or
-  updated in [docs/guides/ROADMAP.md](../../docs/guides/ROADMAP.md) (e.g. item checked off,
-  status moved, or a new entry added). If the change advances or completes a roadmap item and
-  the PR leaves the roadmap untouched, flag it. Remember the roadmap is a synced source — after
-  editing `docs/guides/ROADMAP.md`, the Starlight mirror `docs/src/content/docs/roadmap/Roadmap.md`
-  must be regenerated via `mise //docs:sync`.
+- **Issue tracking reflects the change** — Confirm whatever this PR fixes or delivers is filed or updated as a [GitHub issue](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) with an appropriate priority label (`P0`, `P1`, etc.). If the change completes planned work and no issue exists, flag it.
 
 ### Stage 5: Present to User
 
