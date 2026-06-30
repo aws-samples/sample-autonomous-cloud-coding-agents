@@ -1053,6 +1053,16 @@ export class AgentStack extends Stack {
           ],
           resources: ['*'],
         }),
+        // PutModelInvocationLoggingConfiguration hands bedrockLoggingRole to the
+        // Bedrock service (so Bedrock can write to the log group), which requires
+        // the caller to hold iam:PassRole on that role. Scoped to the one role —
+        // not a wildcard. (Previously masked by the empty-bucket validation error
+        // that ignoreErrorCodesMatching: '.*' swallowed; now that the call
+        // actually reaches Bedrock, this is required.)
+        new iam.PolicyStatement({
+          actions: ['iam:PassRole'],
+          resources: [bedrockLoggingRole.roleArn],
+        }),
       ]),
     });
 

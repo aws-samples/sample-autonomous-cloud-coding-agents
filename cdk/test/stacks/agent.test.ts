@@ -400,6 +400,23 @@ describe('AgentStack', () => {
     expect(create).toContain('ThrottlingException');
   });
 
+  test('model invocation logging custom resource can iam:PassRole the logging role', () => {
+    // PutModelInvocationLoggingConfiguration passes BedrockLoggingRole to the
+    // Bedrock service, so the custom resource's role needs iam:PassRole on it.
+    // Without this the API call fails at deploy (was previously masked by the
+    // empty-bucket validation error). Assert the policy grants PassRole.
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'iam:PassRole',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
   test('enables session storage with persistent filesystem', () => {
     template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
       FilesystemConfigurations: [
