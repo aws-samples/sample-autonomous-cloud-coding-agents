@@ -253,6 +253,12 @@ mirrorMarkdownFile(
   path.join('src', 'content', 'docs', 'getting-started', 'Deployment-guide.md'),
 );
 
+// --- Cost Attribution Guide: mirror to getting-started/ (operator FinOps setup) ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'COST_ATTRIBUTION.md'),
+  path.join('src', 'content', 'docs', 'getting-started', 'Cost-attribution.md'),
+);
+
 // --- Prompt Guide: mirror to customizing/ ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'PROMPT_GUIDE.md'),

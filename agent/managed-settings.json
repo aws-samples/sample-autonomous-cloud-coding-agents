@@ -1,0 +1,3 @@
+{
+  "awsCredentialExport": "/app/.venv/bin/python /app/src/bedrock_creds_helper.py"
+}

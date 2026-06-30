@@ -13,7 +13,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from models import TaskConfig
-from runner import _FULL_TOOL_SURFACE, _initialize_policy_engine_and_hooks, _resolve_allowed_tools
+from runner import (
+    _FULL_TOOL_SURFACE,
+    _initialize_policy_engine_and_hooks,
+    _resolve_allowed_tools,
+    _setup_bedrock_cost_attribution,
+)
 
 
 def _config(**overrides: Any) -> TaskConfig:
@@ -295,3 +300,42 @@ class TestResolveAllowedTools:
         assert _resolve_allowed_tools(config) == restricted
         assert "Bash" not in _resolve_allowed_tools(config)
         assert "Write" not in _resolve_allowed_tools(config)
+
+
+class TestBedrockCostAttribution:
+    """#215: wire Claude Code's Bedrock attribution channels (creds + header)."""
+
+    def test_writes_attribution_file_and_sets_metadata_header_when_role_set(self, monkeypatch):
+        monkeypatch.setenv("AGENT_SESSION_ROLE_ARN", "arn:aws:iam::1:role/SR")
+        monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+        config = _config(user_id="alice", repo_url="owner/repo", task_id="t-9")
+
+        with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
+            _setup_bedrock_cost_attribution(config)
+
+        role_arn, tags = mock_write.call_args.args
+        assert role_arn == "arn:aws:iam::1:role/SR"
+        assert {"Key": "user_id", "Value": "alice"} in tags
+
+        header = __import__("os").environ["ANTHROPIC_CUSTOM_HEADERS"]
+        name, _, value = header.partition(": ")
+        assert name == "X-Amzn-Bedrock-Request-Metadata"
+        import json as _json
+
+        assert _json.loads(value) == {
+            "user_id": "alice",
+            "repo": "owner/repo",
+            "task_id": "t-9",
+        }
+
+    def test_no_attribution_file_when_role_unset_but_header_still_set(self, monkeypatch):
+        # Local/dev: no SessionRole → no tagged creds (helper fails open), but the
+        # invocation-log metadata header is still useful and harmless.
+        monkeypatch.delenv("AGENT_SESSION_ROLE_ARN", raising=False)
+        config = _config(user_id="bob", repo_url="o/r", task_id="t-1")
+        with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
+            _setup_bedrock_cost_attribution(config)
+        mock_write.assert_not_called()
+        assert "X-Amzn-Bedrock-Request-Metadata" in __import__("os").environ.get(
+            "ANTHROPIC_CUSTOM_HEADERS", ""
+        )

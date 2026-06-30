@@ -46,8 +46,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
+# Pinned 2.1.191 to match the CLI bundled by claude-agent-sdk 0.2.110 (see
+# agent/pyproject.toml) — the SDK and the on-PATH CLI must agree on the control
+# protocol. This version also has the awsCredentialExport behavior #215 needs:
+# returned creds are cached until 5 min before the JSON's `Expiration`, so an
+# 8 h task re-assumes the 1 h-capped SessionRole before expiry. Older builds
+# only refreshed hourly on a timer, racing the role-chaining cap.
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.142 && \
+    npm install -g @anthropic-ai/claude-code@2.1.191 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
 
@@ -81,6 +87,13 @@ COPY contracts/ /app/contracts/
 # ``WorkflowValidationError: workflow '...' not found at /app/workflows/...``.
 COPY agent/workflows/ /app/workflows/
 COPY agent/prepare-commit-msg.sh /app/
+# Claude Code managed settings (#215). The highest-precedence settings layer —
+# loaded regardless of setting_sources and unoverridable by the untrusted cloned
+# repo's project .claude/settings.json. Carries awsCredentialExport so Bedrock
+# calls use session-tagged, refreshable credentials for cost attribution.
+# Placing awsCredentialExport (an arbitrary command) anywhere the target repo
+# can influence would be RCE with the compute role, so it lives ONLY here.
+COPY agent/managed-settings.json /etc/claude-code/managed-settings.json
 
 # Create non-root user (Claude Code CLI refuses bypassPermissions as root)
 RUN useradd -m -s /bin/bash agent && \
