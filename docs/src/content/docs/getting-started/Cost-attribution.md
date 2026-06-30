@@ -43,6 +43,19 @@ These steps are a one-time operator responsibility (CDK does not automate org-le
 
 ## Querying per-call detail (invocation logs)
 
+> **Model-invocation logging must be ON in the agent's Region, or there is no `requestMetadata` to query.** Bedrock records request metadata **only** when account-level model-invocation logging is enabled in the Region where the call is made. The stack provisions this automatically (a custom resource pointing at the `/aws/bedrock/model-invocation-logs/<stack>` log group), but it is **account- and Region-scoped**, so confirm it after deploy — especially if logging was previously disabled, or the stack Region differs from where you expect calls.
+>
+> Verify it is on:
+> ```
+> aws bedrock get-model-invocation-logging-configuration --region <stack-region>
+> ```
+> An empty result means logging is **off** and no metadata is being captured. Re-enable it (pointing at the stack's own log group + `BedrockLoggingRole`):
+> ```
+> aws bedrock put-model-invocation-logging-configuration --region <stack-region> \
+>   --logging-config '{"cloudWatchConfig":{"logGroupName":"/aws/bedrock/model-invocation-logs/<stack>","roleArn":"<BedrockLoggingRole ARN>"},"textDataDeliveryEnabled":true,"imageDataDeliveryEnabled":false,"embeddingDataDeliveryEnabled":false}'
+> ```
+> Do **not** include `largeDataDeliveryS3Config` with an empty bucket name — Bedrock rejects it (`min length: 3`) and the call fails. Only calls made *after* logging is enabled are recorded; re-run a task to populate logs.
+
 Request metadata lands under the top-level `requestMetadata` field of each log record. Example CloudWatch Logs Insights query (tokens per user + model):
 
 ```

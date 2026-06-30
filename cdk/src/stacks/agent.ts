@@ -1003,8 +1003,14 @@ export class AgentStack extends Stack {
             cloudWatchConfig: {
               logGroupName: invocationLogGroup.logGroupName,
               roleArn: bedrockLoggingRole.roleArn,
-              // Required by API schema but unused — text logs go to CloudWatch only.
-              largeDataDeliveryS3Config: { bucketName: '', keyPrefix: '' },
+              // largeDataDeliveryS3Config is OPTIONAL and intentionally omitted:
+              // it only governs S3 delivery of oversized payloads, which this
+              // stack does not use (text logs go to CloudWatch). Sending it with
+              // an empty bucketName fails client-side validation
+              // ("valid min length: 3") — and because the errors below are
+              // swallowed and onUpdate never re-fires (static props), that
+              // failure silently leaves model-invocation logging DISABLED, which
+              // in turn means Bedrock records no requestMetadata (#215 Track 2).
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -1012,7 +1018,11 @@ export class AgentStack extends Stack {
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
-        ignoreErrorCodesMatching: '.*',
+        // Scope the ignore to genuine service-side errors (e.g. a concurrent
+        // account-level change). Do NOT use '.*' — that also hides client-side
+        // ValidationExceptions like the empty-bucket bug above, turning a
+        // deploy-time misconfiguration into silently-absent logging.
+        ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
       // onUpdate re-applies the same config to handle drift (e.g., if another
       // stack or manual action changed the account-level logging config).
@@ -1024,7 +1034,6 @@ export class AgentStack extends Stack {
             cloudWatchConfig: {
               logGroupName: invocationLogGroup.logGroupName,
               roleArn: bedrockLoggingRole.roleArn,
-              largeDataDeliveryS3Config: { bucketName: '', keyPrefix: '' },
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -1032,7 +1041,7 @@ export class AgentStack extends Stack {
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
-        ignoreErrorCodesMatching: '.*',
+        ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
       // onDelete intentionally omitted — model invocation logging is account-level;
       // deleting one stack should not disable logging that another stack relies on.

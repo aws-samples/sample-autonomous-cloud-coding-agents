@@ -370,6 +370,36 @@ describe('AgentStack', () => {
     expect(loggingConfigs.length).toBe(1);
   });
 
+  test('model invocation logging does NOT send an empty largeDataDeliveryS3Config', () => {
+    // Regression guard (#215): sending largeDataDeliveryS3Config with an empty
+    // bucketName fails client-side validation ("valid min length: 3"), and with
+    // a catch-all ignoreErrorCodesMatching that failure silently leaves logging
+    // DISABLED — so Bedrock records no requestMetadata. The field is optional;
+    // omit it entirely. Assert it never reappears with an empty bucket.
+    const customs = template.findResources('Custom::AWS');
+    const logging = Object.values(customs).find(r =>
+      JSON.stringify(r.Properties?.Create).includes('putModelInvocationLoggingConfiguration'),
+    );
+    expect(logging).toBeDefined();
+    for (const phase of ['Create', 'Update'] as const) {
+      const body = JSON.stringify(logging!.Properties?.[phase] ?? '');
+      // Either absent, or — if ever re-added — must carry a real bucket name.
+      expect(body).not.toContain('largeDataDeliveryS3Config');
+    }
+  });
+
+  test('model invocation logging ignores only transient errors, not client-side validation', () => {
+    // A catch-all '.*' would also swallow the empty-bucket ValidationException
+    // above, hiding a deploy-time misconfiguration as silently-absent logging.
+    const customs = template.findResources('Custom::AWS');
+    const logging = Object.values(customs).find(r =>
+      JSON.stringify(r.Properties?.Create).includes('putModelInvocationLoggingConfiguration'),
+    );
+    const create = JSON.stringify(logging!.Properties?.Create ?? '');
+    expect(create).not.toContain('".*"');
+    expect(create).toContain('ThrottlingException');
+  });
+
   test('enables session storage with persistent filesystem', () => {
     template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
       FilesystemConfigurations: [
