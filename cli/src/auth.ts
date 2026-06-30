@@ -76,11 +76,6 @@ export async function login(username: string, password: string): Promise<void> {
  * REST path, so this is the only token we need.
  */
 export async function getAuthToken(): Promise<string> {
-  return getIdToken();
-}
-
-/** Get the Cognito ID token — for REST API Gateway calls. */
-export async function getIdToken(): Promise<string> {
   const creds = await ensureFreshCredentials();
   return creds.id_token;
 }

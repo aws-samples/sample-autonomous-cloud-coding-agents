@@ -477,7 +477,7 @@ describe('github-comment: renderCommentBody', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Krokoko code review finding #9 — renderCommentBody self-defends against
+// renderCommentBody self-defends against
 // uncoerced DDB string numerics
 // ---------------------------------------------------------------------------
 
@@ -562,7 +562,7 @@ describe('github-comment: renderCommentBody numeric self-defense (finding #9)', 
 });
 
 // ---------------------------------------------------------------------------
-// Krokoko code review finding #12 — Markdown injection via prUrl
+// Markdown injection via prUrl
 // ---------------------------------------------------------------------------
 
 describe('github-comment: sanitizeMarkdownLinkTarget (finding #12)', () => {

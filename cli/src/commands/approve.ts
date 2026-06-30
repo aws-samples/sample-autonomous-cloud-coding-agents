@@ -19,7 +19,7 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { ApiError, CliError } from '../errors';
+import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import type { ApprovalScope } from '../types';
 
@@ -80,33 +80,17 @@ export function makeApproveCommand(): Command {
 
 /** Map approve-specific API errors to user-facing CLI messages. */
 function mapApproveError(err: ApiError): CliError {
-  switch (err.statusCode) {
-    case 400:
-      return new CliError(`Approval rejected: ${err.message}`);
-    case 401:
-      return new CliError(
-        `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
-      );
-    case 404:
-      return new CliError(
-        `Approval request not found or not owned by you (${err.errorCode}).\n`
-        + 'Run `bgagent pending` to see active approvals.',
-      );
-    case 409:
-      return new CliError(
-        `Approval cannot be recorded: ${err.message}\n`
-        + '(The task may have been cancelled, the request already decided, '
-        + 'or it is no longer in AWAITING_APPROVAL.)',
-      );
-    case 429:
-      return new CliError(
-        `Rate limit exceeded (${err.errorCode}). Slow down — approve/deny is limited per user per minute.`,
-      );
-    case 503:
-      return new CliError(
-        `Approval service temporarily unavailable (${err.errorCode}): ${err.message}`,
-      );
-    default:
-      return new CliError(err.message);
-  }
+  return mapApiError(err, {
+    400: (e) => `Approval rejected: ${e.message}`,
+    404: (e) =>
+      `Approval request not found or not owned by you (${e.errorCode}).\n`
+      + 'Run `bgagent pending` to see active approvals.',
+    409: (e) =>
+      `Approval cannot be recorded: ${e.message}\n`
+      + '(The task may have been cancelled, the request already decided, '
+      + 'or it is no longer in AWAITING_APPROVAL.)',
+    429: (e) =>
+      `Rate limit exceeded (${e.errorCode}). Slow down — approve/deny is limited per user per minute.`,
+    503: (e) => `Approval service temporarily unavailable (${e.errorCode}): ${e.message}`,
+  });
 }

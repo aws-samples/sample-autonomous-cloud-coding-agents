@@ -37,7 +37,6 @@ from post_hooks import (
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
 from shell import log, log_error_cw
-from system_prompt import SYSTEM_PROMPT
 from telemetry import (
     _TrajectoryWriter,
     format_bytes,
@@ -1231,17 +1230,13 @@ def main():
                 config.repo_url, config.issue_number, config.github_token
             )
         prompt = assemble_prompt(config)
-        system_prompt = SYSTEM_PROMPT.replace("{repo_url}", config.repo_url)
-        system_prompt = system_prompt.replace("{task_id}", config.task_id)
-        system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
-        system_prompt = system_prompt.replace("{branch_name}", "bgagent/{task_id}/dry-run")
-        system_prompt = system_prompt.replace("{default_branch}", "main")
-        system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
-        system_prompt = system_prompt.replace("{setup_notes}", "(dry run — setup not executed)")
-        system_prompt = system_prompt.replace("{memory_context}", "(dry run — memory not loaded)")
-        overrides = config.system_prompt_overrides
-        if overrides:
-            system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
+        dry_setup = RepoSetup(
+            repo_dir=f"{AGENT_WORKSPACE}/{config.task_id}",
+            branch=f"bgagent/{config.task_id}/dry-run",
+            default_branch="main",
+            notes=["(dry run — setup not executed)"],
+        )
+        system_prompt = build_system_prompt(config, dry_setup, None, config.system_prompt_overrides)
         system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         print("\n--- SYSTEM PROMPT (REDACTED) ---")

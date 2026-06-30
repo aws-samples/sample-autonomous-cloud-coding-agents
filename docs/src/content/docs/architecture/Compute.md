@@ -87,7 +87,7 @@ The platform uses the [Claude Agent SDK](https://github.com/anthropics/claude-ag
 
 **Execution model:** Tasks are fully unattended and one-shot. The agent loop runs in a background thread so the FastAPI `/ping` endpoint stays responsive on the main thread. The agent thread uses `asyncio.run()` with the stdlib event loop (uvicorn is configured with `--loop asyncio` to avoid uvloop conflicts with subprocess SIGCHLD handling).
 
-**System prompt:** Selected by task type from a shared base template (`agent/prompts/base.py`) with per-task-type workflow sections (`new_task`, `pr_iteration`, `pr_review`). The platform defines what the agent should do; the harness executes it.
+**System prompt:** Selected by workflow from a shared base template (`agent/src/prompts/base.py`) with per-workflow sections (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`). The platform defines what the agent should do; the harness executes it.
 
 **Result contract:** The agent does not call back to the platform. It follows the contract (push work, create PR) and exits. The orchestrator infers the outcome from GitHub state and the agent's poll response.
 

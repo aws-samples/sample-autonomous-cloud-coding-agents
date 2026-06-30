@@ -1070,7 +1070,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         return []
 
     # Belt-and-braces second guard against the "cancel consumes nudges" hazard
-    # (krokoko PR #52 review finding #3).  The primary guard is the loop-level
+    # Cancel-before-nudge short-circuit.  The primary guard is the loop-level
     # break in :func:`stop_hook` which short-circuits the dispatcher as soon as
     # any earlier hook sets ``_cancel_requested``.  That assumes
     # ``_cancel_between_turns_hook`` runs BEFORE this hook — true for the
@@ -1235,7 +1235,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 # Global list of between-turns hooks.  Cancel MUST run first so it can
 # short-circuit nudges on cancelled tasks (no point injecting nudges into a
 # dying agent — worse, the nudge reader mutates DDB state that the agent will
-# never act on; see krokoko PR #52 review finding #3).  The :func:`stop_hook`
+# never act on).  The :func:`stop_hook`
 # dispatcher breaks out of the loop as soon as ``_cancel_requested`` is set,
 # and :func:`_nudge_between_turns_hook` early-returns when the flag is already
 # present — belt-and-braces in case a future ``append`` reorders this list.
@@ -1284,7 +1284,7 @@ async def stop_hook(
         "engine": engine,
     }
 
-    # Cancel-before-nudge short-circuit (krokoko PR #52 review finding #3).
+    # Cancel-before-nudge short-circuit.
     # Previously the loop ran ALL hooks before checking ``_cancel_requested``,
     # which meant the nudge hook's ``read_pending`` + ``mark_consumed`` path
     # executed even on cancelled tasks — flipping the DDB rows to consumed

@@ -1228,7 +1228,7 @@ export async function routeEvent(
  * design §6 + §8.9 expectations. Successful records are NOT in
  * ``batchItemFailures`` and advance the stream checkpoint normally.
  *
- * Refs: PR #52 krokoko code review findings #1 and #5 (the fanout
+ * Refs: PR #52 findings #1 and #5 (the fanout
  * handler returned ``void`` despite ``reportBatchItemFailures: true``,
  * and a ``routeEvent`` throw from ``resolveTokenSecretArn`` could crash
  * the whole batch).

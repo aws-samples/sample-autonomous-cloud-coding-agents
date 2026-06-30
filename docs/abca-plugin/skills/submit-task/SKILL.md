@@ -2,9 +2,9 @@
 name: submit-task
 description: >-
   Submit a coding task to the ABCA platform via CLI or REST API. Guides prompt
-  quality, task type selection, and cost controls. Use when the user says "submit a task",
+  quality, workflow selection, and cost controls. Use when the user says "submit a task",
   "create a task", "run the agent", "send task to agent", "bgagent submit",
-  "new_task", "pr_iteration", "pr_review", "review a PR", "quick submit",
+  "new task", "pr iteration", "pr review", "review a PR", "quick submit",
   "submit to ABCA", or wants to automate coding work.
 argument-hint: <repo> [description]
 ---
@@ -15,37 +15,37 @@ You are helping the user submit a well-crafted coding task to the ABCA platform.
 
 > **Running the CLI:** examples below call `node cli/lib/bin/bgagent.js …` from the repo root. In a **non-interactive or mise-managed shell** `node` may not be on `PATH` (`command not found`) — prefix with `mise exec --` (e.g. `mise exec -- node cli/lib/bin/bgagent.js submit …`), or use a global `bgagent` if installed. If `cli/lib/bin/bgagent.js` is missing, run `mise run build` first.
 
-**Quick mode:** If the user provided a repo and description inline (e.g. "submit task to owner/repo: fix the login bug"), auto-detect the task type from the description and skip to Step 5. Infer the type:
+**Quick mode:** If the user provided a repo and description inline (e.g. "submit task to owner/repo: fix the login bug"), infer the workflow from the description and skip to Step 5:
 - PR number or "review PR" → `--review-pr`
 - "iterate on PR" or "fix PR feedback" → `--pr`
 - Just a number → `--issue`
 - Otherwise → `--task` with the text description
 
-## Step 1: Determine Task Type
+## Step 1: Determine Workflow
 
 Use AskUserQuestion to understand what the user wants:
 
-| Type | When to use | Outcome |
-|------|------------|---------|
-| `new_task` | Implement a feature, fix a bug, refactor code | Creates a branch + opens a PR |
-| `pr_iteration` | Address review feedback on an existing PR | Updates the existing PR |
-| `pr_review` | Get a structured code review (read-only) | Posts review comments |
+| Workflow | When to use | CLI selector | Outcome |
+|----------|------------|--------------|---------|
+| `coding/new-task-v1` | Implement a feature, fix a bug, refactor code | `--issue` or `--task` | Creates a branch + opens a PR |
+| `coding/pr-iteration-v1` | Address review feedback on an existing PR | `--pr` | Updates the existing PR |
+| `coding/pr-review-v1` | Get a structured code review (read-only) | `--review-pr` | Posts review comments |
 
 ## Step 2: Collect Task Details
 
-Based on the task type, gather:
+Based on the workflow, gather:
 
-**For `new_task`:**
+**For `coding/new-task-v1`:**
 - Repository (`owner/repo`)
 - GitHub issue number (preferred — agent fetches full context) OR text description
 - If using text: the desired end state, scope constraints, acceptance criteria
 
-**For `pr_iteration`:**
+**For `coding/pr-iteration-v1`:**
 - Repository (`owner/repo`)
 - PR number
 - Optional: Additional guidance ("Focus on security feedback only")
 
-**For `pr_review`:**
+**For `coding/pr-review-v1`:**
 - Repository (`owner/repo`)
 - PR number
 - Optional: Review focus ("Check for SQL injection", "Review test coverage")
@@ -98,10 +98,11 @@ node cli/lib/bin/bgagent.js submit \
 
 **CLI flag reference:**
 - `--repo owner/repo` (required)
-- `--issue N` — GitHub issue number
-- `--task "description"` — Text description
-- `--pr N` — PR number (sets type to pr_iteration)
-- `--review-pr N` — PR number (sets type to pr_review)
+- `--issue N` — GitHub issue number (default workflow: `coding/new-task-v1`)
+- `--task "description"` — Text description (default workflow: `coding/new-task-v1`)
+- `--pr N` — PR number (`coding/pr-iteration-v1`)
+- `--review-pr N` — PR number (`coding/pr-review-v1`)
+- `--workflow coding/foo-v1` — Explicit workflow override (optional)
 - `--max-turns N` — Turn limit (1-500)
 - `--max-budget N` — USD cost limit ($0.01-$100)
 - `--idempotency-key KEY` — Deduplication key for safe retries
@@ -119,7 +120,7 @@ curl -X POST "$API_URL/tasks" \
   -d '{
     "repo": "owner/repo",
     "issue_number": 42,
-    "task_type": "new_task",
+    "workflow_ref": "coding/new-task-v1",
     "max_turns": 100,
     "max_budget_usd": 20
   }'

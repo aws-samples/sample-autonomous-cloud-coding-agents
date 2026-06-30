@@ -19,7 +19,7 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { ApiError, CliError } from '../errors';
+import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import { NUDGE_MAX_MESSAGE_LENGTH } from '../types';
 
@@ -74,30 +74,15 @@ export function makeNudgeCommand(): Command {
 
 /** Map nudge-specific API error codes to friendlier CLI messages. */
 function mapNudgeError(err: ApiError): CliError {
-  switch (err.statusCode) {
-    case 400:
-      // Guardrail-blocked or validation error. Pass the server's message
-      // through verbatim so guardrail reasons are visible to the user.
-      return new CliError(`Nudge rejected: ${err.message}`);
-    case 401:
-      return new CliError(
-        `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
-      );
-    case 403:
-      return new CliError(
-        `Forbidden (${err.errorCode}): this task belongs to another user.`,
-      );
-    case 404:
-      return new CliError(`Task not found (${err.errorCode}).`);
-    case 429:
-      return new CliError(
-        `Rate limit exceeded (${err.errorCode}). Slow down — nudges are limited per task; try again shortly.`,
-      );
-    case 503:
-      return new CliError(
-        `Nudge service temporarily unavailable (${err.errorCode}): ${err.message} Please retry in a moment.`,
-      );
-    default:
-      return new CliError(err.message);
-  }
+  return mapApiError(err, {
+    // 400: guardrail-blocked or validation error. Pass the server's message
+    // through verbatim so guardrail reasons are visible to the user.
+    400: (e) => `Nudge rejected: ${e.message}`,
+    403: (e) => `Forbidden (${e.errorCode}): this task belongs to another user.`,
+    404: (e) => `Task not found (${e.errorCode}).`,
+    429: (e) =>
+      `Rate limit exceeded (${e.errorCode}). Slow down — nudges are limited per task; try again shortly.`,
+    503: (e) =>
+      `Nudge service temporarily unavailable (${e.errorCode}): ${e.message} Please retry in a moment.`,
+  });
 }

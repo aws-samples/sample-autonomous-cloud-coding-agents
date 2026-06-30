@@ -20,8 +20,7 @@
 // `findLinearIssueByIdentifier` is covered by PR #275's broader test
 // suite (mocks the registry scan + GraphQL); this file only locks in
 // `extractLinearIdentifier` since it's a pure function and the g-flag
-// regex's `lastIndex` reset behavior is exactly the kind of thing that
-// breaks silently between releases. (theagenticguy PR-241 review.)
+// regex's `lastIndex` reset behavior is easy to regress across releases.
 
 import { extractLinearIdentifier } from '../../../src/handlers/shared/linear-issue-lookup';
 
@@ -58,7 +57,7 @@ describe('extractLinearIdentifier', () => {
     expect(extractLinearIdentifier('ABCA-1234567890')).toBeNull();
   });
 
-  // theagenticguy PR-241 review: the regex is g-flagged at module
+  // The regex is g-flagged at module scope.
   // scope, which means `RegExp.prototype.exec` carries `lastIndex`
   // across calls. The implementation explicitly resets it; this test
   // pins the behavior so nobody removes the reset thinking it's dead.

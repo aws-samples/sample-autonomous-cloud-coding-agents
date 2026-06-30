@@ -44,6 +44,7 @@ import {
   StoredJiraOauthToken,
 } from '../jira-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
+import { promptSecret } from '../prompt-secret';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -255,27 +256,6 @@ function isWebhookSecretPlaceholder(value: string): boolean {
     // (malformed) operator value rather than silently re-seeding over it.
     return false; // nosemgrep: ts-silent-success-masking -- unparseable secret is conservatively treated as operator-set (not the placeholder), so setup never overwrites it
   }
-}
-
-function promptSecret(label: string): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    // Mute echo so secrets don't render in the terminal as the user types.
-    const stdout = process.stdout as unknown as { write: (s: string) => boolean };
-    const origWrite = stdout.write.bind(stdout);
-    let muted = false;
-    stdout.write = ((str: string) => {
-      if (muted && str !== label) return true;
-      return origWrite(str);
-    }) as typeof stdout.write;
-    rl.question(label, (answer) => {
-      stdout.write = origWrite;
-      rl.close();
-      process.stdout.write('\n');
-      resolve(answer);
-    });
-    muted = true;
-  });
 }
 
 function promptLine(label: string): Promise<string> {

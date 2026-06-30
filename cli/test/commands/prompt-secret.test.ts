@@ -18,14 +18,16 @@
  */
 
 import { EventEmitter } from 'events';
-import { promptSecret } from '../../src/prompt-secret';
+import { __resetPipedSecretStateForTest, promptSecret } from '../../src/prompt-secret';
 
 /**
- * Stub stdin as a non-TTY readable stream. promptSecret accumulates `data`
- * chunks and resolves the trimmed buffer on `end` — the path scripted/piped
- * operators hit (e.g. `echo $PAT | bgagent github set-token`).
+ * Stub stdin as a non-TTY readable stream. Each `promptSecret` call reads one
+ * line (up to `\n`); leftover bytes stay on the stream for chained prompts.
  */
-function withPipedStdin(chunks: string[], run: () => Promise<void>): Promise<void> {
+function withPipedStdin(
+  chunks: string[],
+  run: () => Promise<void>,
+): Promise<void> {
   const fake = new EventEmitter() as EventEmitter & {
     isTTY?: boolean;
     setEncoding: jest.Mock;
@@ -42,7 +44,6 @@ function withPipedStdin(chunks: string[], run: () => Promise<void>): Promise<voi
     if (original) Object.defineProperty(process, 'stdin', original);
   });
 
-  // Emit after promptSecret has subscribed its listeners.
   setImmediate(() => {
     for (const c of chunks) fake.emit('data', c);
     fake.emit('end');
@@ -51,21 +52,32 @@ function withPipedStdin(chunks: string[], run: () => Promise<void>): Promise<voi
 }
 
 describe('promptSecret (non-TTY / piped stdin)', () => {
+  beforeEach(() => {
+    __resetPipedSecretStateForTest();
+  });
+
   test('resolves the trimmed piped value', async () => {
     await withPipedStdin(['ghp_secret_token\n'], async () => {
       await expect(promptSecret('Token: ')).resolves.toBe('ghp_secret_token');
     });
   });
 
-  test('concatenates multiple chunks', async () => {
+  test('concatenates chunks until the first newline', async () => {
     await withPipedStdin(['ghp_', 'multi', 'part\n'], async () => {
       await expect(promptSecret('Token: ')).resolves.toBe('ghp_multipart');
     });
   });
 
-  test('resolves empty string for an empty pipe (caller enforces non-empty)', async () => {
+  test('resolves empty string when the pipe closes without a line', async () => {
     await withPipedStdin([''], async () => {
       await expect(promptSecret('Token: ')).resolves.toBe('');
+    });
+  });
+
+  test('supports chained prompts (one line per call)', async () => {
+    await withPipedStdin(['signing-secret\nclient-secret\n'], async () => {
+      await expect(promptSecret('Signing Secret: ')).resolves.toBe('signing-secret');
+      await expect(promptSecret('Client Secret:  ')).resolves.toBe('client-secret');
     });
   });
 });

@@ -4,5 +4,5 @@ contact_links:
     url: https://aws.amazon.com/security/vulnerability-reporting/
     about: Do not report security vulnerabilities in public issues. Use AWS vulnerability reporting.
   - name: Documentation
-    url: https://github.com/krokoko/bgagent/tree/main/docs
-    about: Guides, design docs, and roadmap (ROADMAP.md, DEVELOPER_GUIDE.md, USER_GUIDE.md).
+    url: https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/docs
+    about: Guides and design docs (DEVELOPER_GUIDE.md, USER_GUIDE.md).

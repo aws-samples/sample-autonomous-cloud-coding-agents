@@ -45,7 +45,7 @@ import { makeTraceCommand } from '../commands/trace';
 import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
-import { ApiError, CliError } from '../errors';
+import { CliError } from '../errors';
 
 const program = new Command();
 
@@ -98,9 +98,7 @@ if (require.main === module) {
   program
     .parseAsync(process.argv)
     .catch((err: unknown) => {
-      if (err instanceof CliError || err instanceof ApiError) {
-        console.error(`Error: ${err.message}`);
-      } else if (err instanceof Error) {
+      if (err instanceof Error) {
         console.error(`Error: ${err.message}`);
       } else {
         console.error('An unexpected error occurred.');

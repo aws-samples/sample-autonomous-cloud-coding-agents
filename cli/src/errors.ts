@@ -47,3 +47,23 @@ export class ApiError extends Error {
     this.requestId = requestId;
   }
 }
+
+/**
+ * Map an {@link ApiError} to a user-facing {@link CliError}. ``cases`` supplies
+ * the command-specific messages (keyed by HTTP status); the shared 401 and
+ * fallthrough handling is the same across commands, so it lives here. A status
+ * with no case (and not 401) surfaces the server message verbatim.
+ */
+export function mapApiError(
+  err: ApiError,
+  cases: Partial<Record<number, (err: ApiError) => string>>,
+): CliError {
+  const handler = cases[err.statusCode];
+  if (handler) return new CliError(handler(err));
+  if (err.statusCode === 401) {
+    return new CliError(
+      `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
+    );
+  }
+  return new CliError(err.message);
+}
