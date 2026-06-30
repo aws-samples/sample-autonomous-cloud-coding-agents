@@ -108,6 +108,11 @@ export interface TaskDetail {
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
+  /** Post-run lint gate result (#515); null on tasks that predate the field. */
+  readonly lint_passed: boolean | null;
+  /** OTEL trace id (32-char hex) for cross-plane correlation (#515); null when
+   *  unavailable or on tasks that predate the field. */
+  readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
   /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
@@ -167,11 +172,12 @@ export interface VerificationReport {
 }
 
 /**
- * One TaskEvent inside a replay bundle. Mirrors the server's ``EventRecord``
- * (includes ``task_id`` and optional ``ttl``, unlike the slimmer {@link TaskEvent}
- * used by the events feed).
+ * Task event record as stored in DynamoDB. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::EventRecord``. The replay bundle embeds
+ * the raw records verbatim (includes ``task_id`` and optional ``ttl``, unlike
+ * the slimmer {@link TaskEvent} the events feed returns).
  */
-export interface ReplayEvent {
+export interface EventRecord {
   readonly task_id: string;
   readonly event_id: string;
   readonly event_type: string;
@@ -190,7 +196,7 @@ export interface ReplayBundle {
   readonly workflow_ref: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly prompt_version: string | null;
-  readonly events: ReplayEvent[];
+  readonly events: EventRecord[];
   readonly verification: VerificationReport | null;
   readonly trace_uri: string | null;
   readonly otel_trace_id: string | null;

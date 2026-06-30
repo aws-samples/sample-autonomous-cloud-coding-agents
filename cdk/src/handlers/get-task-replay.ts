@@ -23,6 +23,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { coerceNumericOrNull } from './shared/numeric';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { EventRecord, ReplayBundle, TaskRecord, VerificationReport } from './shared/types';
 
@@ -138,8 +139,10 @@ async function collectEvents(taskId: string, requestId: string): Promise<EventRe
  * null/empty, never omitted, so the schema is stable for consumers.
  */
 export function assembleBundle(record: TaskRecord, events: EventRecord[]): ReplayBundle {
-  const cost = record.cost_usd;
-  const costNum = typeof cost === 'string' ? Number(cost) : cost;
+  // Reuse the shared coercion (cost_usd is persisted as a string by the agent),
+  // matching toTaskDetail — it logs when a persisted numeric is unparseable, so
+  // a corrupt cost is observable rather than silently nulled.
+  const costNum = coerceNumericOrNull(record.cost_usd, { task_id: record.task_id, field: 'cost_usd' }, logger);
 
   // Verification is non-null only when at least one gate result was persisted.
   const hasVerification = record.build_passed != null || record.lint_passed != null;
@@ -157,7 +160,7 @@ export function assembleBundle(record: TaskRecord, events: EventRecord[]): Repla
     trace_uri: record.trace_s3_uri ?? null,
     otel_trace_id: record.otel_trace_id ?? null,
     session_id: record.session_id ?? null,
-    cost_usd: costNum == null || Number.isNaN(costNum) ? null : costNum,
+    cost_usd: costNum,
     collected_at: new Date().toISOString(),
   };
 }

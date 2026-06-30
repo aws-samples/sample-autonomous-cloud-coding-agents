@@ -176,6 +176,36 @@ describe('get-task-replay handler', () => {
     expect(JSON.parse(result.body).data.events).toHaveLength(2);
   });
 
+  test('caps events at MAX_REPLAY_EVENTS and stops paging despite more pages', async () => {
+    // Each page returns a full Limit-sized chunk AND a LastEvaluatedKey, i.e. an
+    // unbounded stream. The loop must stop at the cap (not run forever / not
+    // overshoot) and shrink each page's Limit so the total never exceeds it.
+    // logger.warn writes to stdout (see shared/logger.ts), so spy there.
+    const stdoutSpy = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const limits: number[] = [];
+    mockSend.mockImplementation((cmd: { _type: string; input?: { Limit?: number } }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: TASK_RECORD });
+      const limit = cmd.input?.Limit ?? 0;
+      limits.push(limit);
+      // Return a full page so the cap is reached in one query (fast), with a
+      // surviving key to prove the loop stops on the cap, not on exhaustion.
+      const items = Array.from({ length: limit }, (_, i) => ({
+        task_id: 'task-1', event_id: `e${i}`, event_type: 'x', timestamp: 't',
+      }));
+      return Promise.resolve({ Items: items, LastEvaluatedKey: { k: 1 } });
+    });
+
+    const result = await handler(makeEvent());
+    const { data } = JSON.parse(result.body);
+
+    expect(data.events).toHaveLength(MAX_REPLAY_EVENTS); // capped, did not overshoot
+    expect(limits[0]).toBe(MAX_REPLAY_EVENTS); // first page requests the full cap
+    // Truncation must be observable, not silent — a WARN line is emitted.
+    const warned = stdoutSpy.mock.calls.some(c => String(c[0]).includes('truncated'));
+    stdoutSpy.mockRestore();
+    expect(warned).toBe(true);
+  });
+
   test('returns 401 when unauthenticated', async () => {
     wireHappyPath();
     const event = makeEvent();

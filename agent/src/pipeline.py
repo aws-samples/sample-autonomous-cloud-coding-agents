@@ -1139,8 +1139,11 @@ def run_task(
                 root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
             if result.turns:
                 root_span.set_attribute("agent.turns", int(result.turns))
-            root_span.set_attribute("build.passed", result.build_passed)
-            root_span.set_attribute("lint.passed", result.lint_passed)
+            # On the repo path these are always real bools (computed by the post
+            # hooks above); coalesce for the span attribute since the field type
+            # is now tri-state (bool | None) for the repo-less/crash case.
+            root_span.set_attribute("build.passed", bool(result.build_passed))
+            root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
             root_span.set_attribute("task.duration_s", result.duration_s)
             if usage:

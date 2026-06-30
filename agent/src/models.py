@@ -326,8 +326,13 @@ class TaskResult(BaseModel):
     status: str
     agent_status: str = "unknown"
     pr_url: str | None = None
-    build_passed: bool = False
-    lint_passed: bool = False
+    # Tri-state (#515): True/False once the post-run gate runs; None when it did
+    # not (repo-less workflow has no build/lint; a crash before post-hooks). The
+    # None case is persisted as "absent" by write_terminal's `is not None` guard,
+    # so the replay bundle reports verification:null rather than a fictional
+    # build_passed:false for a gate that never executed.
+    build_passed: bool | None = None
+    lint_passed: bool | None = None
     cost_usd: float | None = None
     # Rev-5 DATA-1: historically the `turns` field was set to the SDK's
     # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
