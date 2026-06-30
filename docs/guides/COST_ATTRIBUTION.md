@@ -19,15 +19,20 @@ Why all three: the in-app meter is an estimate the platform computes; it does no
 
 ## What the platform does automatically
 
-Once deployed, each agent task makes its Bedrock calls under **session-tagged, refreshable credentials** carrying `{user_id, repo, task_id}`, and stamps the same values as **request metadata** on every call. You do **not** need to change any code. What remains is **operator setup in the AWS Billing console** — AWS does not surface tag-based cost data until you activate it.
+Once deployed, each agent task makes its Bedrock calls under **session-tagged, refreshable credentials** carrying `{user_id, repo, task_id}`, and stamps the same values as **request metadata** on every call. You do **not** need to change any code. What remains is **operator setup in the AWS Billing console** — AWS does not surface tag-based cost data until you activate it, and (see the ordering note below) you can only activate *after* the platform has run tagged tasks.
 
 ## FinOps checklist
 
 These steps are a one-time operator responsibility (CDK does not automate org-level billing — see [Out of scope](../design/BEDROCK_COST_ATTRIBUTION.md#out-of-scope-unchanged-from-issue)).
 
-1. **Activate IAM-principal cost-allocation tags.** Billing console → **Cost allocation tags** → filter by type **IAM principal** → activate `user_id` and `repo` (the low-cardinality dimensions; `task_id` is high-cardinality — keep it for logs, not Cost Explorer).
-   - Tags appear only **after** the first Bedrock call carrying them, and can take **up to 24 h** to show.
+> **Ordering matters — the tags can't be pre-activated.** IAM-principal cost-allocation tag *keys* (`user_id`, `repo`) do not exist in the Billing console until the deployed platform has actually made tagged Bedrock calls. So the sequence is: **deploy → run at least one task → wait up to 24 h → then activate** (step 1). You cannot activate them before the first tagged call exists.
+>
+> **Use the Billing console, not Tag Editor / Resource Groups.** Cost-allocation tags live at **Billing and Cost Management → Cost allocation tags** (left nav). The *Tag Editor* (Resource Groups) is a different tool — it lists taggable *resource types* (`AWS::IAM::InstanceProfile`, etc.) and is **not** where you activate these.
+
+1. **Activate IAM-principal cost-allocation tags.** Billing and Cost Management console → **Cost allocation tags** (left nav) → the **User-defined cost allocation tags** tab → the `user_id` and `repo` keys appear with tag type **IAM principal** → select them → **Activate**. (`task_id` is high-cardinality — keep it for logs, not Cost Explorer.)
+   - Keys appear only **after** the first Bedrock call carrying them, and can take **up to 24 h** to show.
    - Activation is **not retroactive** — only spend incurred after activation is tagged.
+   - IAM-principal cost-allocation tags are a recent Bedrock capability. If the keys never appear a day after running tagged tasks, your account/region may not have it enabled yet — the invocation-log path (below) attributes per call regardless.
 2. **Create a CUR 2.0 export with caller identity.** Billing console → **Data Exports** → create a CUR 2.0 export and select the option to include the **caller-identity ARN**.
    - If you already have a CUR 2.0 export, you must create a **new** one — existing exports do not backfill identity data.
 3. **Set budgets / alerts** per `user_id` or `repo` tag as needed (AWS Budgets), independent of the in-app `max_budget_usd` per-task guardrail.
