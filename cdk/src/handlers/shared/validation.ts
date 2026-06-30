@@ -286,7 +286,9 @@ export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = MAX_TOTAL_ATTACHMENT_SIZE_MB * 10
 /** Compile-time exhaustiveness check for AttachmentType. */
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
 type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TYPE_LIST)[number]> extends never ? true : never;
-const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
+// `void` keeps the compile-time exhaustiveness assertion without an unused binding
+// (tsconfig noUnusedLocals does not honor eslint's ^_ ignore pattern).
+void (true as _AssertAttachmentExhaustive);
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
 /** Allowed image MIME types (PNG and JPEG only — passed directly to Bedrock). */
@@ -411,7 +413,7 @@ export function isValidFilename(filename: string): boolean {
 }
 
 /** Generate a default filename when none was provided. */
-function generateFilename(type: string, contentType: string, index: number): string {
+function generateFilename(_type: string, contentType: string, index: number): string {
   const ext = MIME_TO_EXTENSION[contentType] ?? 'bin';
   return `attachment_${index}.${ext}`;
 }
