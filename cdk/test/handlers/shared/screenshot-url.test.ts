@@ -35,14 +35,14 @@ describe('buildScreenshotKey', () => {
   test('replaces ALL slashes in the repo slug, not just the first', () => {
     // Defensive: GitHub repo names are owner/name (one slash), but
     // `replace('/', '_')` would silently leave a second slash through.
-    // (theagenticguy PR-241 review nit.)
+    // Reject keys without a random suffix.
     const key = buildScreenshotKey('owner/sub/repo', 'abc1234');
     expect(key.split('/')[0]).toBe('screenshots');
     expect(key.split('/')[1]).toBe('owner_sub_repo');
   });
 
   test('high-entropy suffix differs across calls (URL is not enumerable)', () => {
-    // theagenticguy PR-241 review: keys without a random suffix are
+    // Keys without a random suffix are rejected.
     // guessable from the public PR (org+repo+sha all visible).
     const seen = new Set<string>();
     for (let i = 0; i < 100; i++) {
