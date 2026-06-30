@@ -421,12 +421,15 @@ export class AgentStack extends Stack {
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
 
-    // Grant the runtime invoke on each configured foundation model + its
-    // US cross-Region inference profile. The model set is a single source of
-    // truth (constructs/bedrock-models.ts), shared with the ECS task role, and
-    // overridable via the `bedrockModels` CDK context — add a model by config,
-    // no construct edits. Scoping stays per-model (no Resource:'*'); account-
-    // level Bedrock access remains the outer gate.
+    // Grant the runtime invoke on each configured foundation model + its US
+    // cross-Region inference profile. The model set is a single source of truth
+    // (constructs/bedrock-models.ts, #434), shared with the ECS task role and
+    // overridable via the `bedrockModels` CDK context. Each invokable is also
+    // collected so the same set is granted to the SessionRole below (#215 cost
+    // attribution) — the two grants derive from one list and can't drift.
+    // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
+    // remains the outer gate.
+    const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
       const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
         supportsAgents: true,
@@ -438,6 +441,7 @@ export class AgentStack extends Stack {
       });
       foundationModel.grantInvoke(runtime);
       crossRegionProfile.grantInvoke(runtime);
+      invokableBedrockModels.push(foundationModel, crossRegionProfile);
     }
 
     // --- Per-task SessionRole (#209) ---
@@ -459,16 +463,9 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       // #215: session-tagged Bedrock grant for cost attribution — the same
-      // invokables grantInvoke-ed to the compute role above, so the grants
-      // stay in lockstep.
-      invokableModels: [
-        model,
-        inferenceProfile,
-        model3,
-        inferenceProfile3,
-        model2,
-        inferenceProfile2,
-      ],
+      // invokables grantInvoke-ed to the runtime above, so the grants stay in
+      // lockstep.
+      invokableModels: invokableBedrockModels,
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
