@@ -85,31 +85,70 @@ def test_resolve_fails_open_when_no_attribution_file(attr_file):
     assert "Expiration" not in creds  # ambient creds are returned unbounded
 
 
-def test_resolve_fails_open_when_assume_role_raises(attr_file):
+def _ambient(access_key="AMB"):
+    frozen = SimpleNamespace(access_key=access_key, secret_key="S", token="T")
+    ambient = MagicMock()
+    ambient.get_credentials.return_value.get_frozen_credentials.return_value = frozen
+    return ambient
+
+
+def test_resolve_fails_open_on_expected_assume_error_and_warns(attr_file, capsys):
+    from botocore.exceptions import ClientError
+
     helper.write_attribution_file(
         "arn:aws:iam::1:role/SR", build_session_tags("u", "r", "t"), attr_file
     )
-    frozen = SimpleNamespace(access_key="AMB", secret_key="S", token="T")
-    ambient = MagicMock()
-    ambient.get_credentials.return_value.get_frozen_credentials.return_value = frozen
-
     sts = MagicMock()
-    sts.assume_role.side_effect = RuntimeError("AccessDenied")
+    sts.assume_role.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"
+    )
     with (
         patch("boto3.client", return_value=sts),
-        patch("botocore.session.get_session", return_value=ambient),
+        patch("botocore.session.get_session", return_value=_ambient()),
     ):
         creds = helper.resolve_credentials()
     assert creds["AccessKeyId"] == "AMB"
+    # Fail-open must be observable, and flagged as the expected (not unexpected) case.
+    err = capsys.readouterr().err
+    assert "assume_role failed" in err and "UNTAGGED" in err
+    assert "UNEXPECTED" not in err
 
 
-def test_resolve_emits_empty_when_no_credentials_at_all(attr_file):
+def test_resolve_flags_unexpected_error_distinctly(attr_file, capsys):
+    # A non-boto error (e.g. a logic bug, bad STS response shape) must still
+    # fail open but be labeled UNEXPECTED so it isn't mistaken for AccessDenied.
+    helper.write_attribution_file(
+        "arn:aws:iam::1:role/SR", build_session_tags("u", "r", "t"), attr_file
+    )
+    sts = MagicMock()
+    sts.assume_role.side_effect = RuntimeError("boom")
+    with (
+        patch("boto3.client", return_value=sts),
+        patch("botocore.session.get_session", return_value=_ambient()),
+    ):
+        creds = helper.resolve_credentials()
+    assert creds["AccessKeyId"] == "AMB"
+    assert "UNEXPECTED" in capsys.readouterr().err
+
+
+def test_resolve_distinguishes_corrupt_config_from_absent(attr_file, capsys):
+    # File present but malformed → louder signal than a plain absent file.
+    with open(attr_file, "w") as fh:
+        fh.write("{not json")
+    with patch("botocore.session.get_session", return_value=_ambient()):
+        creds = helper.resolve_credentials()
+    assert creds["AccessKeyId"] == "AMB"
+    assert "present but unreadable" in capsys.readouterr().err
+
+
+def test_resolve_emits_empty_when_no_credentials_at_all(attr_file, capsys):
     ambient = MagicMock()
     ambient.get_credentials.return_value = None
     with patch("botocore.session.get_session", return_value=ambient):
         creds = helper.resolve_credentials()
     # Empty object → Claude Code falls back to its own default-chain resolution.
     assert creds == {}
+    assert "no resolvable AWS credentials" in capsys.readouterr().err
 
 
 def test_main_emits_credentials_envelope(attr_file, capsys):

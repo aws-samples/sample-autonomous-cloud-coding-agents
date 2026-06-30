@@ -74,6 +74,20 @@ def write_attribution_file(
     return target
 
 
+def _warn(message: str) -> None:
+    """Emit a diagnostic to stderr.
+
+    This process's **stdout is the credential channel** — Claude Code parses it
+    as the ``awsCredentialExport`` JSON result — so diagnostics MUST go to
+    stderr or they would corrupt the credential envelope. (This is also why
+    ``shell.log``, which writes to fd 1, is unusable here.) Every fail-open path
+    logs through here so a silent, weeks-long loss of cost attribution is
+    instead a visible, correlatable signal — the fallback stays open, but it is
+    never invisible.
+    """
+    print(f"[bedrock-creds] {message}", file=sys.stderr)
+
+
 def _emit(creds: dict[str, str]) -> None:
     json.dump({"Credentials": creds}, sys.stdout)
 
@@ -95,8 +109,14 @@ def _ambient_credentials() -> dict[str, str]:
 
     creds = botocore.session.get_session().get_credentials()
     if creds is None:
-        # No resolvable credentials at all. Emit an empty object; Claude Code
-        # then falls back to its own default-chain resolution.
+        # No resolvable credentials at all — the deepest degradation. Emit an
+        # empty object; Claude Code then falls back to its own default-chain
+        # resolution. Surface it: if that fallback also fails, this stderr line
+        # is the only breadcrumb.
+        _warn(
+            "no resolvable AWS credentials; emitting empty envelope, "
+            "Claude Code will use its default chain"
+        )
         return {}
     return _frozen_to_creds(creds.get_frozen_credentials(), None)
 
@@ -109,16 +129,34 @@ def resolve_credentials() -> dict[str, str]:
             cfg = json.load(fh)
         role_arn = cfg["role_arn"]
         tags = cfg.get("tags", [])
-    except (OSError, ValueError, KeyError):
-        # Attribution not configured (local/dev) or unreadable → fail open.
+    except FileNotFoundError:
+        # Attribution not configured (local/dev, or pre-provisioning). Expected
+        # and benign — debug-level signal only.
+        _warn("attribution file absent; not configured — using ambient creds")
+        return _ambient_credentials()
+    except (OSError, ValueError, KeyError) as exc:
+        # File present but unreadable/malformed/schema-drifted. This is NOT the
+        # benign "not configured" case — it points at a write_attribution_file
+        # bug or a partial write, so it warrants a louder signal.
+        _warn(
+            f"attribution file present but unreadable ({type(exc).__name__}: {exc}); "
+            "using ambient creds"
+        )
         return _ambient_credentials()
 
     try:
         import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as exc:
+        # boto3 missing/broken in the image is a packaging defect, not the
+        # expected assume-role failure — name it explicitly so it can't hide.
+        _warn(f"boto3 unavailable ({exc}); using ambient creds — fix the image")
+        return _ambient_credentials()
 
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        task_id = next((t["Value"] for t in tags if t.get("Key") == "task_id"), "")
-        session_name = f"abca-bedrock-{task_id}"[:64] or "abca-bedrock"
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    task_id = next((t["Value"] for t in tags if t.get("Key") == "task_id"), "")
+    session_name = f"abca-bedrock-{task_id}"[:64] or "abca-bedrock"
+    try:
         resp = boto3.client("sts", region_name=region).assume_role(
             RoleArn=role_arn,
             RoleSessionName=session_name,
@@ -132,9 +170,23 @@ def resolve_credentials() -> dict[str, str]:
             "SessionToken": c["SessionToken"],
             "Expiration": c["Expiration"].isoformat(),
         }
-    except Exception:
-        # Assume failed (role not yet provisioned, transient STS error, …).
-        # Fail open so Bedrock keeps working on the compute role.
+    except (ClientError, BotoCoreError) as exc:
+        # Expected assume failure: role not yet provisioned, AccessDenied,
+        # transient STS error. Fail open so Bedrock keeps working on the
+        # compute role; spend for this task is untagged.
+        _warn(
+            f"assume_role failed ({type(exc).__name__}: {exc}); using ambient creds "
+            "— Bedrock spend will be UNTAGGED"
+        )
+        return _ambient_credentials()
+    except Exception as exc:
+        # Anything else (unexpected STS response shape, a logic bug here) is NOT
+        # the expected fallback. Still fail open — this is a billing control, not
+        # isolation — but flag it distinctly so it isn't mistaken for AccessDenied.
+        _warn(
+            f"UNEXPECTED error minting tagged creds ({type(exc).__name__}: {exc}); "
+            "using ambient creds"
+        )
         return _ambient_credentials()
 
 
