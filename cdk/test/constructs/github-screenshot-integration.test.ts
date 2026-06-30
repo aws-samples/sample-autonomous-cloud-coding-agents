@@ -175,4 +175,29 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
       },
     });
   });
+
+  test('grants dynamodb:GetItem on the TaskTable base ARN (head_sha attribution read)', () => {
+    // REGRESSION (DEM-33 / PR #339, 2026-06-30): findIterationReplyId Queries
+    // the GSI (granted above) then GetItems each candidate's head_sha on the
+    // BASE table to attribute a deploy to the right iteration (ABCA-438). The
+    // Query GSI grant does NOT cover GetItem on the base table, so the read
+    // threw AccessDenied, was swallowed non-fatally, and the preview was posted
+    // to the PR but never appended to the Linear iteration reply. Pin a GetItem
+    // statement whose resource ARN is the base table (no index/ suffix).
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: 'Allow',
+            Action: 'dynamodb:GetItem',
+            Resource: Match.objectLike({
+              'Fn::Join': Match.arrayWith([
+                Match.arrayWith([Match.stringLikeRegexp('table/')]),
+              ]),
+            }),
+          }),
+        ]),
+      },
+    });
+  });
 });

@@ -269,6 +269,15 @@ export class GitHubScreenshotIntegration extends Construct {
       // (to append the `· [preview]` link to that reply). grantWriteData does
       // NOT include dynamodb:Query nor the index ARN, so grant it narrowly —
       // Query on just that one GSI, not blanket grantReadData on the table.
+      //
+      // findIterationReplyId then GetItems each candidate's `head_sha` on the
+      // BASE table to attribute the deploy to the right iteration under
+      // overlapping iterations (ABCA-438). That GetItem read needs
+      // dynamodb:GetItem on the base-table ARN — the Query GSI grant does NOT
+      // cover it. Without this, the GetItem throws AccessDenied, is swallowed
+      // non-fatally, and the preview is captured + posted to the PR but never
+      // appended to the Linear iteration reply (live-caught on DEM-33 / PR #339,
+      // 2026-06-30 — the head_sha refinement outran its IAM grant).
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
         resources: [
@@ -276,6 +285,17 @@ export class GitHubScreenshotIntegration extends Construct {
             service: 'dynamodb',
             resource: 'table',
             resourceName: `${props.taskTable.tableName}/index/LinearIssueIndex`,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+        ],
+      }));
+      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'dynamodb',
+            resource: 'table',
+            resourceName: props.taskTable.tableName,
             arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
           }),
         ],
