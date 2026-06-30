@@ -16,7 +16,7 @@ dependencies = [
     # would degrade gracefully — but for now we keep the dep to
     # preserve the clean code path.
     "bedrock-agentcore==1.9.1", #https://pypi.org/project/bedrock-agentcore/
-    "claude-agent-sdk==0.2.82", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.82
+    "claude-agent-sdk==0.2.110", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.110 (bundles claude CLI 2.1.191; kept in lockstep with the npm CLI pin in the Dockerfile, #215)
     "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.136.1", #https://pypi.org/project/fastapi/
     "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
