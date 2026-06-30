@@ -35,6 +35,7 @@ import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
+import { resolveBedrockModelIds } from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -420,44 +421,24 @@ export class AgentStack extends Stack {
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
 
-    const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    // Create a cross-region inference profile for Claude Sonnet 4.6
-    const inferenceProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model,
-    });
-
-    const model3 = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-20250514-v1:0', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    const inferenceProfile3 = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model3,
-    });
-
-    const model2 = new bedrock.BedrockFoundationModel('anthropic.claude-haiku-4-5-20251001-v1:0', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    // Create a cross-region inference profile for Claude Haiku 4.5
-    const inferenceProfile2 = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model2,
-    });
-
-    model.grantInvoke(runtime);
-    inferenceProfile.grantInvoke(runtime);
-    model3.grantInvoke(runtime);
-    inferenceProfile3.grantInvoke(runtime);
-    model2.grantInvoke(runtime);
-    inferenceProfile2.grantInvoke(runtime);
+    // Grant the runtime invoke on each configured foundation model + its
+    // US cross-Region inference profile. The model set is a single source of
+    // truth (constructs/bedrock-models.ts), shared with the ECS task role, and
+    // overridable via the `bedrockModels` CDK context — add a model by config,
+    // no construct edits. Scoping stays per-model (no Resource:'*'); account-
+    // level Bedrock access remains the outer gate.
+    for (const modelId of resolveBedrockModelIds(this.node)) {
+      const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
+        supportsAgents: true,
+        supportsCrossRegion: true,
+      });
+      const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
+        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+        model: foundationModel,
+      });
+      foundationModel.grantInvoke(runtime);
+      crossRegionProfile.grantInvoke(runtime);
+    }
 
     // --- Per-task SessionRole (#209) ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus

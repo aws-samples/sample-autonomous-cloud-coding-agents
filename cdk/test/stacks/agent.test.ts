@@ -230,6 +230,50 @@ describe('AgentStack', () => {
     expect(serialized).toMatch(/"Fn::GetAtt":\["Runtime[0-9A-F]+","AgentRuntimeArn"\]/);
   });
 
+  test('runtime is granted the default Bedrock model set (#433)', () => {
+    // Default (no bedrockModels context): the runtime execution role must hold
+    // bedrock:InvokeModel on the three default foundation models + their US
+    // inference profiles, scoped (never Resource: '*').
+    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
+    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
+  });
+
+  test('bedrockModels context override propagates to the runtime execution role (#433)', () => {
+    // The other half of #433's acceptance criteria (the ECS side is covered in
+    // ecs-agent-cluster.test.ts): a context override must replace the runtime's
+    // granted models too — overridden model present, defaults absent, still scoped.
+    const app = new App({ context: { bedrockModels: ['anthropic.claude-opus-4-8'] } });
+    const stack = new AgentStack(app, 'OverrideAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const overridden = Template.fromStack(stack);
+
+    // Collect every bedrock:InvokeModel statement's Resource across IAM policies.
+    const policies = overridden.findResources('AWS::IAM::Policy');
+    const bedrockResources: unknown[] = [];
+    for (const p of Object.values(policies)) {
+      for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: string | string[]; Resource?: unknown }>) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
+          bedrockResources.push(s.Resource);
+        }
+      }
+    }
+    const serialized = JSON.stringify(bedrockResources);
+    expect(bedrockResources.length).toBeGreaterThan(0);
+    // Overridden model is granted...
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
+    // ...defaults are NOT (override replaces, not appends)...
+    expect(serialized).not.toContain('claude-sonnet-4-6');
+    expect(serialized).not.toContain('claude-haiku-4-5');
+    // ...and the grant is never a bare wildcard.
+    expect(serialized).not.toContain('"*"');
+  });
+
   test('outputs ApiUrl', () => {
     template.hasOutput('ApiUrl', {
       Description: 'URL of the Task API',

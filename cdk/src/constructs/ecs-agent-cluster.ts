@@ -28,6 +28,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { AgentSessionRole } from './agent-session-role';
+import { resolveBedrockModelIds } from './bedrock-models';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -49,18 +50,6 @@ export interface EcsAgentClusterProps {
    */
   readonly agentSessionRole?: AgentSessionRole;
 }
-
-/**
- * Bedrock model IDs the agent may invoke (kept in sync with the AgentCore
- * runtime grants in agent.ts). Used to scope the ECS task role's Bedrock
- * permissions to explicit foundation-model + inference-profile ARNs instead of
- * a `Resource: '*'` wildcard.
- */
-const BEDROCK_MODEL_IDS = [
-  'anthropic.claude-sonnet-4-6',
-  'anthropic.claude-opus-4-20250514-v1:0',
-  'anthropic.claude-haiku-4-5-20251001-v1:0',
-];
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
 const HTTPS_PORT = 443;
@@ -162,10 +151,12 @@ export class EcsAgentCluster extends Construct {
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime
-    // grants in agent.ts), replacing the prior Resource: '*' wildcard.
+    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set is the
+    // shared, context-overridable list (constructs/bedrock-models.ts) so the
+    // ECS and AgentCore backends can't drift.
     const stack = Stack.of(this);
     const bedrockResources: string[] = [];
-    for (const modelId of BEDROCK_MODEL_IDS) {
+    for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(
         stack.formatArn({
           service: 'bedrock',
