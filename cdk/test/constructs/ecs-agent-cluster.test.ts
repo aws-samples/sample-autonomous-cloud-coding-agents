@@ -155,6 +155,25 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('task role can read the per-workspace Linear/Jira OAuth secrets (ABCA-488)', () => {
+    // REGRESSION: a Linear/Jira-channel task resolves its per-workspace OAuth
+    // token (bgagent-linear-oauth-<slug>) at startup to fire the 👀→✅ reaction
+    // and drive the channel MCP. Without a prefix grant on the ECS task role the
+    // fetch hit AccessDenied and reactions/MCP silently no-op'd on ECS (worked on
+    // AgentCore). Pin a GetSecretValue statement whose resource ARN names the
+    // bgagent-linear-oauth-* prefix.
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    let hasLinearOauthGrant = false;
+    for (const p of Object.values(policies)) {
+      for (const s of p.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (!actions.includes('secretsmanager:GetSecretValue')) continue;
+        if (JSON.stringify(s.Resource).includes('bgagent-linear-oauth-')) hasLinearOauthGrant = true;
+      }
+    }
+    expect(hasLinearOauthGrant).toBe(true);
+  });
+
   test('task role Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard)', () => {
     const policies = baseTemplate.findResources('AWS::IAM::Policy');
     let bedrockStatement: { Resource: unknown } | undefined;

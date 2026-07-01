@@ -194,6 +194,34 @@ export class EcsAgentCluster extends Construct {
       props.payloadBucket.grantRead(taskRole);
     }
 
+    // ABCA-488: per-workspace Linear/Jira OAuth tokens live in Secrets Manager
+    // under `bgagent-linear-oauth-*` (written by the CLI at setup). For a
+    // Linear/Jira-channel task the agent resolves that token at startup
+    // (config.resolve_linear_api_token / resolve_jira_oauth_token) to fire the
+    // 👀→✅ reaction and drive the channel MCP. The AgentCore runtime role +
+    // orchestrator/fanout/screenshot roles all have this prefix grant; the ECS
+    // task role did NOT, so on ECS the token fetch hit AccessDenied and
+    // reactions/MCP silently no-op'd (ECS-parity gap, live-caught on ABCA-488).
+    // GetSecretValue only — the container reads the token; the orchestrator owns
+    // refresh/PutSecretValue.
+    taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime
     // grants in agent.ts), NOT a Resource: '*' wildcard. The model set is the
@@ -237,7 +265,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.taskDefinition, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead; CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
+        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
       },
       {
         id: 'AwsSolutions-ECS2',
