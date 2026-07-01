@@ -114,6 +114,20 @@ describe('LinearIntegration construct', () => {
     });
   });
 
+  test('webhook processor Lambda timeout accommodates the Mode B planner (ABCA-490: >=120s)', () => {
+    // The #299 decomposition planner makes up to two Bedrock InvokeModel calls;
+    // a large issue's stage-2 decomposer alone can take ~50s. The processor
+    // Lambda timeout must comfortably exceed that (was 30s → the Lambda was
+    // killed mid-call, a silent hang). Identify the processor by its unique env
+    // var and assert its Timeout is at least 120s.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const processors = Object.values(fns).filter(
+      (fn) => fn.Properties?.Environment?.Variables?.LINEAR_PROJECT_MAPPING_TABLE_NAME !== undefined,
+    );
+    expect(processors).toHaveLength(1);
+    expect(processors[0].Properties.Timeout).toBeGreaterThanOrEqual(120);
+  });
+
   test('webhook dedup table has TTL attribute for 60s expiry', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }],

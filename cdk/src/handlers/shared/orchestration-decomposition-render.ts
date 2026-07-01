@@ -149,6 +149,24 @@ export function renderSingleTaskNote(reasoning: string): string {
 }
 
 /**
+ * Render the note posted when the planner could NOT produce a breakdown — the
+ * model errored, timed out, or returned an unusable plan (ABCA-490). This is
+ * distinct from {@link renderSingleTaskNote}: we must NOT claim the issue "looks
+ * like a single cohesive change" (that's a lie when the truth is the planner
+ * failed). We fall back to running it as ONE task so the work still happens, but
+ * we say so honestly and tell the user how to get a breakdown anyway. Kept
+ * remedy-bearing (re-apply / split manually) rather than a dead end.
+ */
+export function renderPlannerErrorNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} I couldn't plan a breakdown for this issue in time, so I'm running it `
+    + 'as a single task. This usually means the issue is large enough that planning it took too '
+    + 'long. To get a decomposition, try again by re-applying the `:decompose` label, or split the '
+    + 'issue into sub-issues yourself and re-trigger (ABCA runs an existing sub-issue graph directly).'
+  );
+}
+
+/**
  * Render the note posted when ``:decompose``/``:auto`` was applied to an issue
  * that ALREADY has sub-issues — the suffix is a no-op and we run the existing
  * graph (Mode A). Surfaced so the user's stated intent isn't silently ignored.

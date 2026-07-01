@@ -45,6 +45,7 @@ import { planDecomposition, type InvokeModelFn, type PlannerInput } from './orch
 import {
   renderAlreadyDecomposedNote,
   renderCapRejection,
+  renderPlannerErrorNote,
   renderPlanProposal,
   renderSingleTaskNote,
 } from './orchestration-decomposition-render';
@@ -113,9 +114,14 @@ export async function runDecompositionProposal(
   // downstream approval gate (manual vs auto), handled below.
   const planned = await planDecomposition(plannerInput, effects.invokeModel);
   if (planned.kind === 'error') {
-    await effects.postComment(parentIssueId, renderSingleTaskNote(
-      "I couldn't plan a breakdown for this issue, so I'm running it as a single task.",
-    ));
+    // ABCA-490: the planner errored or TIMED OUT (a large issue's decomposer
+    // call exceeded the model client's request budget). Post the honest,
+    // remedy-bearing note — NOT renderSingleTaskNote, which would falsely claim
+    // "single cohesive change". We still fall back to one task so the work
+    // happens. Previously the slow call was killed by the Lambda ceiling before
+    // this line ran at all, so the user saw nothing; a bounded model client
+    // (bedrockInvokeModel) now surfaces the hang as an error inside the ceiling.
+    await effects.postComment(parentIssueId, renderPlannerErrorNote());
     return { kind: 'single_task', reason: 'planner_error' };
   }
   if (planned.kind === 'single_task') {

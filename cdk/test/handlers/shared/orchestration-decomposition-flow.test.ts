@@ -204,10 +204,31 @@ describe('runDecompositionProposal — judge + caps gates', () => {
     expect(note).toContain('cohesive'); // the assessor's rationale
   });
 
-  test('planner error → note + single_task fallback', async () => {
+  test('planner error → HONEST error note (not "single cohesive change") + single_task fallback', async () => {
+    // ABCA-490: a planner error/timeout must NOT be dressed up as a "single
+    // cohesive change" verdict — that's a lie when the truth is the planner
+    // failed. Assert the note explains it couldn't plan + gives a remedy, and is
+    // distinct from the judge-declined single-task copy.
     const e = effects({ invokeModel: jest.fn().mockRejectedValue(new Error('bedrock down')) });
     const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
     expect(r).toEqual({ kind: 'single_task', reason: 'planner_error' });
+    const note = (e.postComment as jest.Mock).mock.calls[0][1];
+    expect(note).not.toMatch(/single cohesive change/i);
+    expect(note).toMatch(/couldn't plan a breakdown/i);
+    expect(note).toMatch(/single task/i); // still honest that it falls back to one task
+    expect(note).toMatch(/:decompose|split the issue/i); // remedy present
+  });
+
+  test('planner TIMEOUT (AbortSignal.timeout fires) → same honest error path', async () => {
+    // ABCA-490 core: the real failure is a slow call aborted by the client
+    // deadline, surfacing as a TimeoutError — the flow must treat it exactly like
+    // any planner error (honest note + single-task fallback), NOT hang.
+    const timeoutErr = new Error('The operation was aborted due to timeout');
+    timeoutErr.name = 'TimeoutError';
+    const e = effects({ invokeModel: jest.fn().mockRejectedValue(timeoutErr) });
+    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
+    expect(r).toEqual({ kind: 'single_task', reason: 'planner_error' });
+    expect((e.postComment as jest.Mock).mock.calls[0][1]).toMatch(/couldn't plan a breakdown/i);
   });
 
   test('over-cap plan → rejection comment, handled/too_many_sub_issues (never trimmed/seeded, NOT a single giant task)', async () => {
