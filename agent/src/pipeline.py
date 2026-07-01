@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import os
 import subprocess
 import sys
@@ -1253,6 +1254,64 @@ def run_task(
                 pr_url=None,
             )
             raise
+
+
+#: Orchestrator payload keys that map to a differently-named ``run_task`` kwarg.
+#: The orchestrator emits ``prompt``/``model_id``; ``run_task`` calls them
+#: ``task_description``/``anthropic_model``. Everything else is a 1:1 name match.
+_PAYLOAD_KEY_ALIASES = {
+    "prompt": "task_description",
+    "model_id": "anthropic_model",
+}
+
+#: ``run_task`` kwargs that must be coerced to ``str`` — the orchestrator may
+#: emit them as numbers (issue_number, pr_number) and ``run_task`` types them as
+#: strings. ``max_turns`` is coerced to int. Absent keys are left to the
+#: ``run_task`` defaults.
+_PAYLOAD_STR_KEYS = frozenset({"issue_number", "pr_number"})
+
+#: Parameter names ``run_task`` accepts — computed once at import from the REAL
+#: signature (not inside the function, so patching ``run_task`` in tests can't
+#: shadow it). Any payload key not in this set is ignored, never passed through.
+_RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
+
+
+def run_task_from_payload(payload: dict) -> dict:
+    """Invoke :func:`run_task` from a full orchestrator payload dict.
+
+    The ECS compute path (``ecs-strategy.ts``) hands the agent the *entire*
+    orchestrator payload (via the #502 S3 pointer). Previously the ECS boot
+    command hand-listed a subset of ``run_task`` kwargs and silently dropped the
+    rest — most visibly ``channel_source``/``channel_metadata`` (no Linear/Jira
+    reactions or channel MCP on ECS — ABCA-487), plus ``build_command``,
+    ``cedar_policies``, ``base_branch``/``merge_branches``, ``attachments``, etc.
+
+    This maps the payload to ``run_task``'s real signature so no field can be
+    silently dropped again: rename the aliased keys, filter to parameters
+    ``run_task`` actually accepts (unknown keys are ignored, not passed as
+    ``**kwargs`` which ``run_task`` doesn't accept), and coerce the str/int
+    fields the orchestrator may emit as numbers. ``aws_region`` falls back to the
+    ``AWS_REGION`` env var when the payload omits it (the boot command used to
+    supply this explicitly).
+
+    Single source of truth + unit-testable, replacing the untestable inline
+    Python string that already drifted once.
+    """
+    kwargs: dict = {}
+    for key, value in (payload or {}).items():
+        target = _PAYLOAD_KEY_ALIASES.get(key, key)
+        if target not in _RUN_TASK_PARAMS:
+            continue  # not a run_task parameter — ignore (e.g. github_token_secret_arn)
+        if value is None:
+            continue  # let run_task's default apply
+        if target in _PAYLOAD_STR_KEYS:
+            value = str(value)
+        elif target == "max_turns":
+            value = int(value)
+        kwargs[target] = value
+
+    kwargs.setdefault("aws_region", os.environ.get("AWS_REGION", ""))
+    return run_task(**kwargs)
 
 
 def main():
