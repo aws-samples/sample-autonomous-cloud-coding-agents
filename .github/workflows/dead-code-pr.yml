@@ -1,0 +1,64 @@
+name: dead-code-pr
+# Advisory dead-code detection gate (issue #282, cairn MVG gate #6).
+# Steps use continue-on-error so findings surface as annotations without
+# blocking the merge queue. Flips to required/blocking once the knip
+# baseline (knip-baseline.json) is driven to zero. The eslint no-unused-vars
+# half of the gate is already blocking via the `build` check.
+on:
+  pull_request: {}
+  merge_group: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dead-code-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dead-code:
+    name: Dead-code detection (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CI: "true"
+      MISE_EXPERIMENTAL: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install mise
+        uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        run: mise run install
+
+      - name: TS dead-code ratchet (knip, advisory)
+        continue-on-error: true
+        run: |
+          if mise run check:deadcode-ratchet; then
+            echo "::notice title=knip ratchet::Dead-code count is at or below baseline."
+          else
+            echo "::warning title=knip ratchet::Dead-code count increased above the baseline (knip-baseline.json). Run 'yarn knip' locally and remove the new dead code, or suppress a false positive in knip.json."
+          fi
+
+      - name: Python dead-code scan (vulture, advisory)
+        continue-on-error: true
+        run: |
+          if mise //agent:lint:deadcode; then
+            echo "::notice title=vulture::No Python dead code above the confidence threshold."
+          else
+            echo "::warning title=vulture::vulture found unused Python code. Remove it, or add an intentional keep to agent/.vulture_allowlist.py."
+          fi

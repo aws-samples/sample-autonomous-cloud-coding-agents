@@ -28,7 +28,7 @@ import {
 import { CedarPolicyParseError, concatPolicies, parseRules } from './shared/cedar-policy';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
+import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { checkRepoOnboarded, loadRepoConfig } from './shared/repo-config';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPoliciesResponse, PolicyRuleSummary } from './shared/types';
@@ -40,7 +40,8 @@ const POLICIES_RATE_LIMIT_PER_MINUTE = Number(process.env.POLICIES_RATE_LIMIT_PE
 // In-Lambda cache keyed by repo; 5 minutes. Keeps repeated `bgagent
 // policies list` calls snappy without hitting DDB + re-parsing the
 // policy set every time. Cold starts throw the cache away.
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 interface CacheEntry {
   readonly response: GetPoliciesResponse;
   readonly expiresAt: number;
@@ -96,7 +97,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           ExpressionAttributeValues: {
             ':one': 1,
             ':max': POLICIES_RATE_LIMIT_PER_MINUTE,
-            ':ttl': nowEpoch + 120,
+            ':ttl': nowEpoch + RATE_LIMIT_ROW_TTL_SECONDS,
           },
         }));
       } catch (err: unknown) {

@@ -106,6 +106,9 @@
     "watchPathIgnorePatterns": [
       "/node_modules/"
     ],
+    "setupFiles": [
+      "<rootDir>/test/setup/disable-bundling.ts"
+    ],
     "setupFilesAfterEnv": [
       "aws-cdk-lib/testhelpers/jest-autoclean"
     ],
@@ -122,7 +125,7 @@
       "^.+\\.[t]sx?$": [
         "ts-jest",
         {
-          "tsconfig": "tsconfig.dev.json"
+          "tsconfig": "tsconfig.jest.json"
         }
       ]
     }

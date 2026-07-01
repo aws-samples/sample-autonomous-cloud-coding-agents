@@ -35,11 +35,13 @@ import {
   ErrorResponse,
   GetPendingResponse,
   GetPoliciesResponse,
+  JiraLinkResponse,
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
   SlackLinkResponse,
   PaginatedResponse,
+  ReplayBundle,
   SuccessResponse,
   TaskDetail,
   TaskEvent,
@@ -393,6 +395,15 @@ export class ApiClient {
     return res.data;
   }
 
+  /** GET /tasks/{task_id}/replay — operator replay bundle (#515). */
+  async getReplay(taskId: string): Promise<ReplayBundle> {
+    const res = await this.request<SuccessResponse<ReplayBundle>>(
+      'GET',
+      `/tasks/${encodeURIComponent(taskId)}/replay`,
+    );
+    return res.data;
+  }
+
   /** POST /webhooks — create a new webhook. */
   async createWebhook(req: CreateWebhookRequest): Promise<CreateWebhookResponse> {
     const res = await this.request<SuccessResponse<CreateWebhookResponse>>('POST', '/webhooks', req);
@@ -435,6 +446,17 @@ export class ApiClient {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
     const res = await this.request<SuccessResponse<LinearLinkResponse>>('POST', '/linear/link', body);
+    return res.data;
+  }
+
+  /** POST /jira/link — link a Jira account using a verification code.
+   *
+   * `dryRun: true` returns the identity attached to the code without
+   * writing the mapping. Mirrors linearLink. */
+  async jiraLink(code: string, opts: { dryRun?: boolean } = {}): Promise<JiraLinkResponse> {
+    const body: Record<string, unknown> = { code };
+    if (opts.dryRun) body.dry_run = true;
+    const res = await this.request<SuccessResponse<JiraLinkResponse>>('POST', '/jira/link', body);
     return res.data;
   }
 }

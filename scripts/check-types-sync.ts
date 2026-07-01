@@ -141,6 +141,7 @@ const CLI_ONLY_ALLOWLIST = new Set<string>([
   'CancelTaskResponse',
   'SlackLinkResponse',
   'LinearLinkResponse',
+  'JiraLinkResponse',
   'TraceUrlResponse',
   // Error classification — derived server-side via a function and
   // emitted on TaskDetail. The CLI consumes the resulting interface

@@ -19,6 +19,9 @@
 
 import * as crypto from 'crypto';
 
+/** Random bytes for screenshot object-key suffix (→ 16 hex chars / 64 bits). */
+const SCREENSHOT_KEY_ENTROPY_BYTES = 8;
+
 /**
  * Decide whether a `deployment_status.environment_url` is safe to navigate.
  *
@@ -66,7 +69,7 @@ export function isAllowedScreenshotUrl(rawUrl: string): boolean {
   // unique-local `fc00::/7` (e.g. `[fc00::1]`), NAT64, and IPv4-mapped
   // forms. A colon is the unambiguous IPv6 signal: DNS hostnames can't
   // contain one, and the port has already been split off onto
-  // `parsed.port`. (krokoko PR-241 round-3 finding 2.)
+  // Enumerating ranges missed by naive host checks. (screenshot URL hardening)
   if (rawHost.startsWith('[') || hostname.includes(':')) return false;
 
   // IPv4 literals: reject any dotted-quad (preview URLs come from DNS).
@@ -97,7 +100,7 @@ export function buildScreenshotKey(repo: string, sha: string, deploymentId?: num
   // 8 random bytes → 16 hex chars; 64 bits of entropy. crypto.randomBytes
   // is sync but cheap (< 1ms on Lambda) and avoids pulling in async
   // randomness machinery for one call per invocation.
-  const suffix = crypto.randomBytes(8).toString('hex');
+  const suffix = crypto.randomBytes(SCREENSHOT_KEY_ENTROPY_BYTES).toString('hex');
   return `screenshots/${repoSlug}/${sha}${id}-${suffix}.png`;
 }
 

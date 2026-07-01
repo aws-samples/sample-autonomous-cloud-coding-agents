@@ -47,6 +47,7 @@ const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
 // ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
 // Matches the ``_generate_ulid`` output in ``agent/src/progress_writer.py``.
+export const ULID_LENGTH = 26;
 const ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const ALL_STATUSES = new Set(Object.values(TaskStatus));
 
@@ -60,7 +61,7 @@ export function parseBody<T>(body: string | null): T | null {
   try {
     return JSON.parse(body) as T;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- parseBody contract: invalid JSON yields null, same as a missing body
   }
 }
 
@@ -164,7 +165,7 @@ export function decodePaginationToken(token: string | undefined): Record<string,
     const json = Buffer.from(token, 'base64').toString('utf-8');
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- invalid pagination token is rejected; undefined is the decode contract, not masked infra failure
   }
 }
 
@@ -188,7 +189,7 @@ export function encodePaginationToken(lastKey: Record<string, unknown> | undefin
  * @returns true if the value matches the ULID shape.
  */
 export function isValidUlid(value: string): boolean {
-  if (typeof value !== 'string' || value.length !== 26) return false;
+  if (typeof value !== 'string' || value.length !== ULID_LENGTH) return false;
   return ULID_PATTERN.test(value.toUpperCase());
 }
 
@@ -271,17 +272,29 @@ export function validatePrNumber(value: unknown): number | null | undefined {
 export const MAX_ATTACHMENTS_PER_TASK = 10;
 /** Maximum decoded size for inline attachments. */
 export const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
+/** Maximum total decoded inline size per request (MiB). */
+const MAX_TOTAL_INLINE_SIZE_MB = 3;
 /** Maximum total decoded inline size per request. */
-export const MAX_TOTAL_INLINE_SIZE_BYTES = 3 * 1024 * 1024;
+export const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+/** Maximum total attachment size per task (MiB). */
+const MAX_TOTAL_ATTACHMENT_SIZE_MB = 50;
 /** Maximum size per attachment (inline or presigned, decoded). */
 export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 /** Maximum total attachment size per task. */
-export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = MAX_TOTAL_ATTACHMENT_SIZE_MB * 1024 * 1024;
 
 /** Compile-time exhaustiveness check for AttachmentType. */
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
 type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TYPE_LIST)[number]> extends never ? true : never;
+// The ASSIGNMENT is the guard: if AttachmentType gains a member missing from
+// ATTACHMENT_TYPE_LIST, _AssertAttachmentExhaustive resolves to `never` and
+// assigning `true` is a hard compile error. (A `true as never` assertion would
+// NOT error — assertions are permitted whenever either side is assignable — so
+// it must stay an assignment.) `void` consumes the binding to satisfy
+// tsconfig noUnusedLocals, which — unlike @typescript-eslint/no-unused-vars,
+// already exempt via its ^_ varsIgnorePattern — does not honor the _ prefix.
 const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
+void _attachmentExhaustiveCheck;
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
 /** Allowed image MIME types (PNG and JPEG only — passed directly to Bedrock). */
@@ -304,11 +317,23 @@ const ALLOWED_FILE_MIME_TYPES = new Set([
  * Magic byte signatures for content type validation.
  * Prevents polyglot files from bypassing screening.
  */
+/* eslint-disable @typescript-eslint/no-magic-numbers -- file format magic-byte signatures */
 const MAGIC_BYTES: ReadonlyArray<{ readonly mime: string; readonly bytes: readonly number[]; readonly offset?: number }> = [
   { mime: 'image/png', bytes: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
   { mime: 'image/jpeg', bytes: [0xFF, 0xD8, 0xFF] },
   { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2D] }, // %PDF-
 ];
+/* eslint-enable @typescript-eslint/no-magic-numbers */
+
+/** Bytes scanned when validating text/JSON content for embedded nulls. */
+const TEXT_MAGIC_BYTE_CHECK_BYTES = 8192;
+
+/** First-byte markers that suggest JSON content. */
+const JSON_OBJECT_START_BYTE = 0x7B;
+const JSON_ARRAY_START_BYTE = 0x5B;
+
+/** Maximum filename length (bytes). */
+const MAX_FILENAME_LENGTH = 255;
 
 /**
  * Validate content against declared MIME type using magic bytes.
@@ -325,7 +350,7 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
 
   // Text types: valid UTF-8, no null bytes in first 8 KB
   if (contentType.startsWith('text/') || contentType === 'application/json') {
-    const check = data.subarray(0, 8192);
+    const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
     for (let i = 0; i < check.length; i++) {
       if (check[i] === 0) return false;
     }
@@ -347,7 +372,7 @@ export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
     }
   }
   // Try text detection
-  const check = data.subarray(0, 8192);
+  const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
   let hasNullByte = false;
   for (let i = 0; i < check.length; i++) {
     if (check[i] === 0) { hasNullByte = true; break; }
@@ -355,7 +380,7 @@ export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   if (!hasNullByte && data.length > 0) {
     // Guess JSON if it starts with { or [
     const first = data[0];
-    if (first === 0x7B || first === 0x5B) return 'application/json';
+    if (first === JSON_OBJECT_START_BYTE || first === JSON_ARRAY_START_BYTE) return 'application/json';
     return 'text/plain';
   }
   return null;
@@ -383,7 +408,7 @@ function isValidHttpsUrl(urlStr: string): boolean {
 
 /** Reject filenames with path traversal, null bytes, or unusual characters. */
 export function isValidFilename(filename: string): boolean {
-  if (filename.length === 0 || filename.length > 255) return false;
+  if (filename.length === 0 || filename.length > MAX_FILENAME_LENGTH) return false;
   if (filename.includes('/') || filename.includes('\\')) return false;
   if (filename.includes('\0')) return false;
   if (filename.startsWith('.') || filename.startsWith('-')) return false;
@@ -394,7 +419,7 @@ export function isValidFilename(filename: string): boolean {
 }
 
 /** Generate a default filename when none was provided. */
-function generateFilename(type: string, contentType: string, index: number): string {
+function generateFilename(_type: string, contentType: string, index: number): string {
   const ext = MIME_TO_EXTENSION[contentType] ?? 'bin';
   return `attachment_${index}.${ext}`;
 }
@@ -404,7 +429,7 @@ function filenameFromUrl(url: string, index: number): string {
   try {
     const parsed = new URL(url);
     const lastSegment = parsed.pathname.split('/').filter(Boolean).pop();
-    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= 255) {
+    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= MAX_FILENAME_LENGTH) {
       // Decode percent-encoding (e.g., %20 → space) then sanitize
       let decoded: string;
       try {

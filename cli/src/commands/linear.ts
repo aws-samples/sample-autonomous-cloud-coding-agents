@@ -45,6 +45,7 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
+import { promptSecret } from '../prompt-secret';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -1507,65 +1508,6 @@ export function makeLinearCommand(): Command {
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
-function promptSecret(label: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-      terminal: false,
-    });
-
-    process.stderr.write(label);
-
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-
-      let value = '';
-
-      const onData = (chunk: Buffer) => {
-        const str = chunk.toString();
-        for (const char of str) {
-          if (char === '\n' || char === '\r') {
-            cleanup();
-            process.stderr.write('\n');
-            resolve(value.trim());
-            return;
-          } else if (char === '\u0003') {
-            cleanup();
-            process.stderr.write('\n');
-            reject(new Error('Cancelled.'));
-            return;
-          } else if (char === '\u007f' || char === '\b') {
-            if (value.length > 0) {
-              value = value.slice(0, -1);
-              process.stderr.write('\b \b');
-            }
-          } else {
-            value += char;
-            process.stderr.write('*');
-          }
-        }
-      };
-
-      const cleanup = () => {
-        process.stdin.removeListener('data', onData);
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        rl.close();
-      };
-
-      process.stdin.on('data', onData);
-    } else {
-      rl.once('line', (line) => {
-        rl.close();
-        resolve(line.trim());
-      });
-      rl.once('close', () => reject(new Error('No input provided.')));
-    }
-  });
-}
-
 /**
  * Read a single line from stdin, with an optional default that's accepted on
  * empty input (Enter without typing). Visible echo — use only for non-secret
@@ -1723,7 +1665,7 @@ async function queryLinearWorkspaceMembers(
     return body.data?.users?.nodes ?? [];
   } catch (err) {
     console.log(`  ⚠ Could not query Linear workspace members: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- setup self-link picker is optional UX; null skips the picker without failing setup
   }
 }
 
@@ -1849,7 +1791,7 @@ async function queryLinearIdentity(
     return { viewer: body.data.viewer, organization: body.data.organization };
   } catch (err) {
     console.log(`  ⚠ Could not query Linear identity: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- auto-link is optional setup UX; null skips gracefully so admin can link manually
   }
 }
 
@@ -1958,7 +1900,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
     }
     throw err;
   }

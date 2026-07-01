@@ -1070,7 +1070,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         return []
 
     # Belt-and-braces second guard against the "cancel consumes nudges" hazard
-    # (krokoko PR #52 review finding #3).  The primary guard is the loop-level
+    # Cancel-before-nudge short-circuit.  The primary guard is the loop-level
     # break in :func:`stop_hook` which short-circuits the dispatcher as soon as
     # any earlier hook sets ``_cancel_requested``.  That assumes
     # ``_cancel_between_turns_hook`` runs BEFORE this hook — true for the
@@ -1088,6 +1088,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         pending = nudge_reader.read_pending(task_id)
     except Exception as exc:
         log("WARN", f"nudge read_pending raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; DDB blip must not block agent
         return []
 
     # Filter out any nudges already injected in this process (regardless of
@@ -1102,6 +1103,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         formatted = nudge_reader.format_as_user_message(pending)
     except Exception as exc:
         log("WARN", f"nudge format failed: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; bad nudge must not block agent
         return []
 
     # Record injection BEFORE mark_consumed so a persistent mark_consumed
@@ -1163,6 +1165,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
         pending = engine.drain_denial_injections()
     except Exception as exc:  # pragma: no cover — defensive
         log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
         return []
     if not pending:
         return []
@@ -1217,6 +1220,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
         record = task_state.get_task(task_id)
     except task_state.TaskFetchError as exc:
         log("WARN", f"cancel hook get_task raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open cancel; DDB blip delays one turn
         return []
     if record and record.get("status") == "CANCELLED":
         ctx["_cancel_requested"] = True
@@ -1231,7 +1235,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 # Global list of between-turns hooks.  Cancel MUST run first so it can
 # short-circuit nudges on cancelled tasks (no point injecting nudges into a
 # dying agent — worse, the nudge reader mutates DDB state that the agent will
-# never act on; see krokoko PR #52 review finding #3).  The :func:`stop_hook`
+# never act on).  The :func:`stop_hook`
 # dispatcher breaks out of the loop as soon as ``_cancel_requested`` is set,
 # and :func:`_nudge_between_turns_hook` early-returns when the flag is already
 # present — belt-and-braces in case a future ``append`` reorders this list.
@@ -1280,7 +1284,7 @@ async def stop_hook(
         "engine": engine,
     }
 
-    # Cancel-before-nudge short-circuit (krokoko PR #52 review finding #3).
+    # Cancel-before-nudge short-circuit.
     # Previously the loop ran ALL hooks before checking ``_cancel_requested``,
     # which meant the nudge hook's ``read_pending`` + ``mark_consumed`` path
     # executed even on cancelled tasks — flipping the DDB rows to consumed

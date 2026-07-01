@@ -84,14 +84,38 @@ export function applicationPolicy(): iam.PolicyDocument {
           'lambda:GetFunctionCodeSigningConfig',
           'lambda:GetFunctionRecursionConfig',
           'lambda:GetProvisionedConcurrencyConfig',
+          'lambda:PutProvisionedConcurrencyConfig',
+          'lambda:DeleteProvisionedConcurrencyConfig',
           'lambda:GetRuntimeManagementConfig',
           'lambda:ListVersionsByFunction',
           'lambda:InvokeFunction',
+          'lambda:PublishLayerVersion',
+          'lambda:DeleteLayerVersion',
+          'lambda:GetLayerVersion',
         ],
         resources: [
           'arn:aws:lambda:*:*:function:backgroundagent-dev-*',
           'arn:aws:lambda:*:*:function:backgroundagent-dev-AWS*',
+          'arn:aws:lambda:*:*:layer:*',
         ],
+      }),
+
+      new iam.PolicyStatement({
+        sid: 'LambdaEventSourceMappings',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'lambda:CreateEventSourceMapping',
+          'lambda:DeleteEventSourceMapping',
+          'lambda:UpdateEventSourceMapping',
+          'lambda:GetEventSourceMapping',
+          // CDK event-source constructs (e.g. DynamoDBEventSource) tag the
+          // created mapping, so the exec role needs Tag/UntagResource on
+          // event-source-mapping:* (the function:*/layer:*-scoped TagResource
+          // grant elsewhere in this policy does not cover mappings).
+          'lambda:TagResource',
+          'lambda:UntagResource',
+        ],
+        resources: ['*'],
       }),
 
       new iam.PolicyStatement({
@@ -175,6 +199,41 @@ export function applicationPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
+        sid: 'SQS',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'sqs:CreateQueue',
+          'sqs:DeleteQueue',
+          'sqs:GetQueueAttributes',
+          'sqs:SetQueueAttributes',
+          'sqs:TagQueue',
+          'sqs:UntagQueue',
+          'sqs:GetQueueUrl',
+          'sqs:ListQueueTags',
+        ],
+        resources: ['arn:aws:sqs:*:*:backgroundagent-dev-*'],
+      }),
+
+      new iam.PolicyStatement({
+        sid: 'CloudFront',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'cloudfront:CreateDistribution',
+          'cloudfront:UpdateDistribution',
+          'cloudfront:DeleteDistribution',
+          'cloudfront:GetDistribution',
+          'cloudfront:TagResource',
+          'cloudfront:UntagResource',
+          'cloudfront:ListTagsForResource',
+          'cloudfront:CreateOriginAccessControl',
+          'cloudfront:UpdateOriginAccessControl',
+          'cloudfront:DeleteOriginAccessControl',
+          'cloudfront:GetOriginAccessControl',
+        ],
+        resources: ['*'],
+      }),
+
+      new iam.PolicyStatement({
         sid: 'SecretsManager',
         effect: iam.Effect.ALLOW,
         actions: [
@@ -193,6 +252,11 @@ export function applicationPolicy(): iam.PolicyDocument {
         resources: [
           'arn:aws:secretsmanager:*:*:secret:backgroundagent-*',
           'arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*',
+          'arn:aws:secretsmanager:*:*:secret:SlackIntegration*',
+          'arn:aws:secretsmanager:*:*:secret:LinearIntegration*',
+          'arn:aws:secretsmanager:*:*:secret:JiraIntegration*',
+          'arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*',
+          'arn:aws:secretsmanager:*:*:secret:bgagent/*',
         ],
       }),
 

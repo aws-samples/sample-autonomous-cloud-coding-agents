@@ -59,13 +59,14 @@ export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions (see SlackIntegration)
  * - ``linear``: Linear label-triggered submissions (see LinearIntegration)
+ * - ``jira``: Jira Cloud label-triggered submissions (see JiraIntegration)
  *
  * Narrowed from ``string`` so switches and predicates that read
  * ``channel_source`` get exhaustiveness checking at compile time; matches the
  * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
  * Keep in sync with ``cli/src/types.ts::ChannelSource``.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /**
  * Full task record as stored in DynamoDB.
@@ -106,6 +107,15 @@ export interface TaskRecord {
   readonly cost_usd?: number;
   readonly duration_s?: number;
   readonly build_passed?: boolean;
+  /** Whether the post-run lint gate passed (#515). Written with `build_passed`
+   *  at terminal state; absent on tasks that predate the field. */
+  readonly lint_passed?: boolean;
+  /**
+   * OTEL trace id (32-char hex) of the task's root span (#515), captured at
+   * terminal write for cross-plane correlation in the replay bundle. Absent on
+   * tasks that predate the field or that ran with tracing unavailable.
+   */
+  readonly otel_trace_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
   /**
@@ -262,6 +272,11 @@ export interface TaskDetail {
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
+  /** Post-run lint gate result (#515); null on tasks that predate the field. */
+  readonly lint_passed: boolean | null;
+  /** OTEL trace id (32-char hex) for cross-plane correlation (#515); null when
+   *  unavailable or on tasks that predate the field. */
+  readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
   /** Rev-5 DATA-1: SDK-attempted turn count (may exceed `max_turns` by 1
@@ -329,6 +344,85 @@ export interface EventRecord {
   readonly timestamp: string;
   readonly metadata?: Record<string, unknown>;
   readonly ttl?: number;
+}
+
+/**
+ * A single event as embedded in a {@link ReplayBundle} (#515). Normalized to
+ * match the ``GET /tasks/{id}/events`` feed exactly — ``task_id``/``ttl`` are
+ * stripped (redundant in a task-scoped bundle) and ``metadata`` defaults to
+ * ``{}`` — so a consumer can move between the events feed and the bundle
+ * without ``event.metadata.x`` throwing on an event that stored no metadata.
+ */
+export interface ReplayEvent {
+  readonly event_id: string;
+  readonly event_type: string;
+  readonly timestamp: string;
+  readonly metadata: Record<string, unknown>;
+}
+
+/**
+ * Truncation marker embedded in a {@link ReplayBundle} (#523) when the event
+ * list was clipped. ``null`` on the bundle means the full list fit; a non-null
+ * value names which cap tripped so a consumer never mistakes a clipped replay
+ * for a complete one. Use ``GET /tasks/{id}/events`` for the full paginated feed.
+ */
+export interface ReplayTruncation {
+  readonly reason: 'max_events' | 'max_bytes';
+  /** Number of events actually embedded in the bundle. */
+  readonly returned_events: number;
+}
+
+/**
+ * Verification verdict embedded in a {@link ReplayBundle} (#515). Reconstructed
+ * from the persisted post-run gate booleans. Either field is ``null`` on tasks
+ * that predate the verification-persistence change or whose gate did not run
+ * (e.g. a repo-less workflow has no build/lint step).
+ */
+export interface VerificationReport {
+  readonly build_passed: boolean | null;
+  readonly lint_passed: boolean | null;
+}
+
+/**
+ * Operator-facing replay bundle returned by ``GET /v1/tasks/{task_id}/replay``
+ * (#515). Aggregates existing telemetry — it introduces no new persistence —
+ * so a task can be post-mortem'd / fed to the eval harness without manually
+ * correlating CloudWatch, DynamoDB, and S3.
+ *
+ * Fields sourced from stores that may not have run for a given task are
+ * ``null``/empty rather than omitted, so consumers get a stable schema:
+ * ``trace_uri`` is null when the task ran without ``--trace``; ``otel_trace_id``
+ * is null on pre-#515 tasks or when tracing was unavailable; ``verification``
+ * booleans are null when the gate did not run.
+ */
+export interface ReplayBundle {
+  readonly task_id: string;
+  /** Raw caller-supplied workflow selector (audit value); null if unset. */
+  readonly workflow_ref: string | null;
+  /** Resolved/pinned workflow ``{id, version}`` actually executed; null for
+   *  legacy tasks created before workflow resolution. */
+  readonly resolved_workflow: ResolvedWorkflow | null;
+  readonly prompt_version: string | null;
+  /** TaskEvents for this task in chronological order (ULID event_id),
+   *  normalized to the same shape as the ``/events`` feed. */
+  readonly events: ReplayEvent[];
+  /** Non-null when the event list was clipped by a cap (count or bytes); null
+   *  when the full list fit. Lets a consumer detect a partial replay. */
+  readonly events_truncation: ReplayTruncation | null;
+  /** Verification verdict, or null if no gate result was persisted. */
+  readonly verification: VerificationReport | null;
+  /** S3 URI of the ``--trace`` trajectory dump; null when the task ran without
+   *  ``--trace`` or the upload did not complete. */
+  readonly trace_uri: string | null;
+  /** OTEL trace id (32-char hex) for cross-plane correlation; null when
+   *  unavailable. */
+  readonly otel_trace_id: string | null;
+  /** AgentCore session id — the available correlation id when otel_trace_id is
+   *  absent. */
+  readonly session_id: string | null;
+  readonly cost_usd: number | null;
+  /** ISO8601 timestamp the bundle was assembled (server-side). */
+  readonly collected_at: string;
 }
 
 /**
@@ -612,6 +706,8 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
+    lint_passed: record.lint_passed ?? null,
+    otel_trace_id: record.otel_trace_id ?? null,
     max_turns: coerceNumericOrNull(record.max_turns, { ...ctx, field: 'max_turns' }, logger),
     max_budget_usd: coerceNumericOrNull(record.max_budget_usd, { ...ctx, field: 'max_budget_usd' }, logger),
     turns_attempted: coerceNumericOrNull(record.turns_attempted, { ...ctx, field: 'turns_attempted' }, logger),

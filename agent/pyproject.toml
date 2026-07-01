@@ -16,7 +16,7 @@ dependencies = [
     # would degrade gracefully — but for now we keep the dep to
     # preserve the clean code path.
     "bedrock-agentcore==1.9.1", #https://pypi.org/project/bedrock-agentcore/
-    "claude-agent-sdk==0.2.82", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.82
+    "claude-agent-sdk==0.2.110", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.110 (bundles claude CLI 2.1.191; kept in lockstep with the npm CLI pin in the Dockerfile, #215)
     "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.136.1", #https://pypi.org/project/fastapi/
     "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
@@ -52,7 +52,16 @@ dependencies = [
 [tool.uv]
 constraint-dependencies = [
     "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
+    "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j — transitive via mcp; remove when mcp bumps floor
 ]
+
+# Dead-code detection (#282, cairn MVG gate #6). ruff "F" catches unused
+# imports/locals; vulture catches unused module-level functions/classes/methods
+# that ruff cannot see. min_confidence 80 keeps the signal high; intentional
+# keeps (e.g. SDK-mandated hook params) live in .vulture_allowlist.py.
+[tool.vulture]
+paths = ["src", ".vulture_allowlist.py"]
+min_confidence = 80
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
@@ -72,11 +81,16 @@ dev = [
     "pytest",
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
+    "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
 ]
 
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+# The vulture allowlist is bare-name expressions by design (that is how vulture
+# "uses" a name to suppress it). ruff would flag every line F821/B018, so it is
+# not Python source ruff should lint. See .vulture_allowlist.py (#282).
+extend-exclude = [".vulture_allowlist.py"]
 
 [tool.ruff.lint]
 select = [
@@ -102,7 +116,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
-"src/system_prompt.py" = ["E501"]  # long prompt strings
 "src/prompts/*.py" = ["E501"]  # long prompt strings
 "tests/**" = ["S101", "S106", "S108", "E402", "PLR2004"]  # assert; test tokens; /tmp paths; importorskip; literal assertions
 
@@ -121,6 +134,16 @@ precision = 2
 show_missing = true
 skip_covered = true
 
+[tool.ty.rules]
+# asyncio.get_event_loop_policy() is deprecated in 3.14+; still valid on 3.13.
+deprecated = "ignore"
+
 [tool.ty.environment]
 python-version = "3.13"
 extra-paths = ["src"]
+
+[tool.ty.src]
+# The vulture allowlist is bare-name expressions by design, not type-checkable
+# Python — ty flags each line unresolved-reference. Excluded here for the same
+# reason ruff excludes it via extend-exclude (#282).
+exclude = [".vulture_allowlist.py"]

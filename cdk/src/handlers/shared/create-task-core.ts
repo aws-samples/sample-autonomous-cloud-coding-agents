@@ -53,7 +53,7 @@ import {
   type TaskRecord,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
@@ -522,7 +522,6 @@ export async function createTaskCore(
       if (att.delivery !== 'presigned') continue;
       const presignedAtt = att as PresignedAttachment;
       const attachmentId = ulid();
-      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${context.userId}/${taskId}/${attachmentId}/${presignedAtt.filename}`;
 
       attachmentRecords.push(createAttachmentRecord({
         attachment_id: attachmentId,
@@ -557,10 +556,13 @@ export async function createTaskCore(
 
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
-        // ``repo`` is intentionally NOT required here: a repo-less workflow
-        // (#248 Phase 3) persists no repo, so requiring it would wrongly reject
-        // a valid repo-less replay as "incomplete".
-        const requiredReplayFields = ['task_id', 'user_id', 'status', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
+        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
+        // repo-less workflow (#248 Phase 3) persists no repo and an empty
+        // ``branch_name`` (it never branches). Both are legitimately falsy on a
+        // valid repo-less record, so a falsy check would wrongly reject a valid
+        // repo-less replay as "incomplete" (500). Only the true identity/audit
+        // fields that every record must carry are required.
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
         const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
         if (missingFields.length > 0) {
           logger.error('Idempotent replay: existing task record is incomplete', {
@@ -593,9 +595,17 @@ export async function createTaskCore(
 
   // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
-  const branchName = isPrTask
-    ? 'pending:pr_resolution'
-    : generateBranchName(taskId, body.task_description ?? body.repo);
+  // A task with no repo never clones, branches, or opens a PR (the agent prompt
+  // forbids it), so a bgagent/<id>/... branch name is misleading noise. Key off
+  // the actual absence of a repo, NOT workflow.requiresRepo — a repo-OPTIONAL
+  // workflow that WAS given a repo runs the repo-bound path and still gets a
+  // branch. PR tasks resolve their real branch later; other repo-bound tasks
+  // get the generated working-branch name.
+  const branchName = !body.repo
+    ? ''
+    : isPrTask
+      ? 'pending:pr_resolution'
+      : generateBranchName(taskId, body.task_description ?? body.repo);
 
   // Determine initial status: PENDING_UPLOADS if any presigned attachments need uploading,
   // otherwise SUBMITTED (inline/url/no attachments go straight to the pipeline).
@@ -748,7 +758,7 @@ export async function createTaskCore(
       return errorResponse(500, ErrorCode.INTERNAL_ERROR,
         'Failed to generate upload instructions. Please try again.', requestId);
     }
-    const taskExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 min auto-cancel window
+    const taskExpiresAt = new Date(Date.now() + PENDING_UPLOAD_EXPIRY_MINUTES * 60 * 1000).toISOString();
     return successResponse(202, {
       ...toTaskDetail(taskRecord),
       upload_instructions: uploadInstructions,
@@ -759,12 +769,18 @@ export async function createTaskCore(
   return successResponse(201, toTaskDetail(taskRecord), requestId);
 }
 
+/** Auto-cancel window for tasks awaiting presigned uploads (minutes). */
+const PENDING_UPLOAD_EXPIRY_MINUTES = 30;
+
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Base64 encodes 3 bytes into 4 characters — length must be a multiple of this. */
+const BASE64_GROUP_SIZE = 4;
 
 /** Validate that a string is well-formed base64. */
 function isValidBase64(data: string): boolean {
   if (data.length === 0) return false;
-  if (data.length % 4 !== 0) return false;
+  if (data.length % BASE64_GROUP_SIZE !== 0) return false;
   return BASE64_PATTERN.test(data);
 }
 

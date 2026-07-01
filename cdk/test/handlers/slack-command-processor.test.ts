@@ -121,7 +121,7 @@ describe('slack-command-processor handler', () => {
   test('slash submit tells user to use @mention', async () => {
     await handler(slashCommand({ text: 'submit org/repo fix' }));
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String((opts as { body: string }).body).includes('Use `@Shoof` to submit tasks'),
+      ([_url, opts]) => String((opts as { body: string }).body).includes('Use `@Shoof` to submit tasks'),
     );
     expect(posted).toBeTruthy();
     expect(createTaskCoreMock).not.toHaveBeenCalled();
@@ -215,7 +215,7 @@ describe('slack-command-processor handler', () => {
     expect(putCall![0].input.Item.slack_identity).toMatch(/^pending#/);
     expect(putCall![0].input.Item.status).toBe('pending');
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String((opts as { body: string }).body).includes('bgagent slack link'),
+      ([_url, opts]) => String((opts as { body: string }).body).includes('bgagent slack link'),
     );
     expect(posted).toBeTruthy();
   });
@@ -223,7 +223,7 @@ describe('slack-command-processor handler', () => {
   test('help subcommand replies with usage text', async () => {
     await handler(slashCommand({ text: 'help' }));
     const posted = fetchMock.mock.calls.find(
-      ([url, opts]) => String((opts as { body: string }).body).includes('Using Shoof'),
+      ([_url, opts]) => String((opts as { body: string }).body).includes('Using Shoof'),
     );
     expect(posted).toBeTruthy();
   });

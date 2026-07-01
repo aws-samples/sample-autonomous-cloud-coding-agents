@@ -19,7 +19,7 @@
 
 ## What is ABCA
 
-**ABCA (Autonomous Background Coding Agents on AWS)** is a sample of what a self-hosted background coding agents platform might look like on AWS. You submit a coding task (via Slack, Linear, CLI, or webhook), walk away, and come back to a ready-to-review PR. The agent clones the repo, writes code, runs tests, and opens the PR autonomously in an isolated cloud environment. No babysitting, no IDE sessions, no back-and-forth.
+**ABCA (Autonomous Background Coding Agents on AWS)** is a sample of what a self-hosted background coding agents platform might look like on AWS. You submit a coding task (via Slack, Linear, Jira, CLI, or webhook), walk away, and come back to a ready-to-review PR. The agent clones the repo, writes code, runs tests, and opens the PR autonomously in an isolated cloud environment. No babysitting, no IDE sessions, no back-and-forth.
 
 ## Why it matters
 
@@ -31,7 +31,7 @@
 
 ## The Use Case
 
-Users submit tasks through webhooks, CLI, Slack,... For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository, creates a branch, works on the task, and opens a pull request.
+Users submit tasks through webhooks, CLI, Slack, Linear, Jira,... For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository, creates a branch, works on the task, and opens a pull request.
 
 Key characteristics:
 
@@ -58,7 +58,7 @@ For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
 ABCA is under active development. The platform ships iteratively — each iteration adds features and builds on the previous one.
 
-See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on current status and planned work.
+See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for planned work; use priority labels (`P0`, `P1`, etc.) to indicate urgency.
 
 ## Getting started
 
@@ -140,7 +140,7 @@ Then, follow the [User Guide](./docs/guides/USER_GUIDE.md) to learn how to use t
 
 ## Documentation
 
-A documentation site is available containing all design documents, roadmap and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
+A documentation site is available containing design documents and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
 
 ## Disclaimer
 

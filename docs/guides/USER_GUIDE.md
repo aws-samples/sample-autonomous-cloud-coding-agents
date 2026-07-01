@@ -4,15 +4,16 @@
 
 ABCA is a platform for running autonomous background coding agents on AWS. You submit a task (a GitHub repository + a task description or issue number), an agent works autonomously in an isolated environment, and delivers a pull request when done. This guide covers how to submit coding tasks, monitor their progress, and get the most out of the platform.
 
-There are five ways to interact with the platform. You can use them independently or combine them for different workflows:
+There are six ways to interact with the platform. You can use them independently or combine them for different workflows:
 
 1. **CLI** (recommended) - The `bgagent` CLI authenticates via Cognito and calls the Task API. Best for individual developers submitting tasks from the terminal. Handles login, token caching, and output formatting.
 2. **REST API** (direct) - Call the Task API endpoints directly with a JWT token. Best for building custom integrations, dashboards, or internal tools on top of the platform. Full validation, audit logging, and idempotency support.
 3. **Webhook** - External systems (CI pipelines, GitHub Actions) can create tasks via HMAC-authenticated HTTP requests. Best for automated workflows where tasks should be triggered by events (e.g., a new issue is labeled, a PR needs review). No Cognito credentials needed; uses a shared secret per integration.
 4. **Slack** - Submit tasks by @mentioning the bot and receive threaded progress notifications with reaction-based status. See the [Slack setup guide](./SLACK_SETUP_GUIDE.md).
 5. **Linear** - Apply a label to a Linear issue to trigger a task; the agent posts progress comments back on the issue via Linear's MCP server. See the [Linear setup guide](./LINEAR_SETUP_GUIDE.md).
+6. **Jira** - Add a label to a Jira Cloud issue to trigger a task; the agent posts progress comments back on the issue via the Jira REST v3 API. See the [Jira setup guide](./JIRA_SETUP_GUIDE.md).
 
-For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
+For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** or **Jira** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
 ## Roles
 
@@ -120,7 +121,7 @@ Three steps:
 
 You're in. `bgagent submit`, `bgagent list`, `bgagent status` work against the shared stack. Tasks you submit are attributed to your Cognito user; concurrency caps and budgets are scoped to you.
 
-**You do not run** `bgagent linear setup` or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#step-6-link-your-linear-account).
+**You do not run** `bgagent linear setup`, `bgagent jira setup`, or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear- or Jira-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity or Jira account to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#inviting-teammates) or [Jira user linking](./JIRA_SETUP_GUIDE.md#5-link-your-jira-identity).
 
 If something looks broken (commands fail with `Not configured` or `401 Unauthorized`), re-paste the bundle and re-run `bgagent login`. The bundle holds no secrets — your password (separate) is the credential.
 
@@ -302,11 +303,11 @@ curl -X POST "$API_URL/tasks" \
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "krokoko/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
+  -d '{"repo": "awslabs/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
 ```
 
 ```json
-{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"SUBMITTED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:30.011Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"SUBMITTED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:30.011Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
 ```
 
 To create a task from a GitHub issue:
@@ -417,7 +418,7 @@ curl "$API_URL/tasks/01KN36YGQV6BEPDD7CVMKP1PF3" -H "Authorization: $TOKEN"
 ```
 
 ```json
-{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/krokoko/agent-plugins/pull/59","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/awslabs/agent-plugins/pull/42","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
 ```
 
 ### Cancel a task
@@ -459,6 +460,30 @@ node lib/bin/bgagent.js configure \
 node lib/bin/bgagent.js login --username user@example.com
 ```
 
+### Operator commands (stack admin)
+
+Stack admins can introspect deployment state and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
+
+```bash
+# Print stack outputs (ApiUrl, UserPoolId, AppClientId, GitHubTokenSecretArn, …)
+bgagent platform outputs --stack-name backgroundagent-dev
+
+# Smoke-check API, Cognito, GitHub token, Bedrock model, onboarded repos
+bgagent platform doctor --stack-name backgroundagent-dev
+
+# List onboarded repositories
+bgagent repo list
+
+# Show RepoConfig for one repo (secret ARNs redacted)
+bgagent repo show owner/repo
+
+# Store the platform GitHub PAT (or a per-blueprint secret via --repo)
+bgagent github set-token
+bgagent github set-token --repo owner/repo
+```
+
+The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+
 ### Submitting a task
 
 ```bash
@@ -499,13 +524,13 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 **Example** (default `text` output immediately after a successful submit  - task is `SUBMITTED`, branch name reserved):
 
 ```bash
-node lib/bin/bgagent.js submit --repo krokoko/agent-plugins --task "add codeowners field to RFC issue template"
+node lib/bin/bgagent.js submit --repo awslabs/agent-plugins --task "add codeowners field to RFC issue template"
 ```
 
 ```text
 Task:        01KN37PZ77P1W19D71DTZ15X6X
 Status:      SUBMITTED
-Repo:        krokoko/agent-plugins
+Repo:        awslabs/agent-plugins
 Description: add codeowners field to RFC issue template
 Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
 Created:     2026-04-01T00:39:51.271Z
@@ -608,11 +633,11 @@ node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X
 ```text
 Task:        01KN37PZ77P1W19D71DTZ15X6X
 Status:      COMPLETED
-Repo:        krokoko/agent-plugins
+Repo:        awslabs/agent-plugins
 Description: add codeowners field to RFC issue template
 Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
 Session:     9891af91-bfc6-488f-bfe6-ce8f8c9a63cf
-PR:          https://github.com/krokoko/agent-plugins/pull/60
+PR:          https://github.com/awslabs/agent-plugins/pull/43
 Created:     2026-04-01T00:39:51.271Z
 Started:     2026-04-01T00:39:56.647Z
 Completed:   2026-04-01T00:43:49Z
@@ -899,7 +924,7 @@ The request body is identical to `POST /v1/tasks` (same `repo`, `issue_number`, 
 **Example response** (same shape as a successful `POST /tasks`  - `status` is `SUBMITTED`; session, PR, and cost fields are `null` until the run progresses):
 
 ```json
-{"data":{"task_id":"01KN38AB1SE79QA4MBNAHFBQAN","status":"SUBMITTED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN38AB1SE79QA4MBNAHFBQAN/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"error_classification":null,"created_at":"2026-04-01T00:50:25.977Z","updated_at":"2026-04-01T00:50:25.977Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
+{"data":{"task_id":"01KN38AB1SE79QA4MBNAHFBQAN","status":"SUBMITTED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN38AB1SE79QA4MBNAHFBQAN/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"error_classification":null,"created_at":"2026-04-01T00:50:25.977Z","updated_at":"2026-04-01T00:50:25.977Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
 ```
 
 **Required headers:**

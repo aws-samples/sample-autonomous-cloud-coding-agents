@@ -94,6 +94,14 @@ run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
+[tasks.deadcode]
+description = "Dead-code detection across TS workspaces via knip (#282, cairn MVG gate #6). Lists unused files/exports/deps; run `yarn knip --fix` locally to auto-remove."
+run = "yarn knip"
+
+[tasks."check:deadcode-ratchet"]
+description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
+run = "node scripts/check-deadcode-ratchet.mjs"
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages"
 run = [
@@ -130,6 +138,17 @@ run = "gitleaks git . --staged --no-banner --redact"
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
 
+[tasks."security:sast:masking"]
+description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
+# `semgrep test` validates the rules against their .semgrep/ fixtures first.
+# The scan excludes those fixtures (they trigger by design) and writes SARIF
+# to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
+run = [
+  "semgrep test .semgrep/",
+  "mkdir -p test-reports",
+  "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --sarif-output=test-reports/semgrep-silent-success-masking.sarif --error --quiet .",
+]
+
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 # Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
@@ -158,6 +177,7 @@ run = [
     { task = "security:secrets" },
     { task = "security:deps" },
     { task = "security:sast" },
+    { task = "security:sast:masking" },
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },

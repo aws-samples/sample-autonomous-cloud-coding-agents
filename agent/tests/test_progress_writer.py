@@ -437,7 +437,7 @@ class TestProgressWriterLazyInit:
 
 
 # ---------------------------------------------------------------------------
-# krokoko PR #52 review finding #6 — error classification
+# Error classification — permanent vs transient failures
 # ---------------------------------------------------------------------------
 
 
@@ -599,7 +599,7 @@ class TestProgressWriterFailOpenClassified:
 
 
 # ---------------------------------------------------------------------------
-# krokoko PR #52 review finding #8 — shared circuit-breaker state
+# Shared circuit-breaker state across progress events
 # ---------------------------------------------------------------------------
 
 

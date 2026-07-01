@@ -21,6 +21,17 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { makeConfigureCommand } from '../../src/commands/configure';
+import * as stackOutputs from '../../src/stack-outputs';
+
+jest.mock('../../src/stack-outputs', () => {
+  const actual = jest.requireActual('../../src/stack-outputs');
+  return {
+    ...actual,
+    fetchConfigureBundleFromStack: jest.fn(),
+  };
+});
+
+const fetchConfigureBundleFromStackMock = stackOutputs.fetchConfigureBundleFromStack as jest.Mock;
 
 describe('configure command', () => {
   let tmpDir: string;
@@ -30,6 +41,7 @@ describe('configure command', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-test-'));
     process.env.BGAGENT_CONFIG_DIR = tmpDir;
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+    fetchConfigureBundleFromStackMock.mockReset();
   });
 
   afterEach(() => {
@@ -121,6 +133,64 @@ describe('configure command', () => {
       'node', 'test',
       '--from-bundle', bundle,
       '--region', 'us-west-2',
+    ])).rejects.toThrow(/mutually exclusive/);
+  });
+
+  test('--stack-name reads configure fields from CloudFormation outputs', async () => {
+    fetchConfigureBundleFromStackMock.mockResolvedValue({
+      api_url: 'https://api.example.com/v1/',
+      region: 'us-east-1',
+      user_pool_id: 'us-east-1_pool',
+      client_id: 'client-from-stack',
+    });
+
+    const cmd = makeConfigureCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--stack-name', 'backgroundagent-dev',
+      '--region', 'us-east-1',
+    ]);
+
+    expect(fetchConfigureBundleFromStackMock).toHaveBeenCalledWith(
+      'us-east-1',
+      'backgroundagent-dev',
+    );
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
+    expect(config.client_id).toBe('client-from-stack');
+    expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
+  });
+
+  test('--stack-name allows explicit overrides for individual fields', async () => {
+    fetchConfigureBundleFromStackMock.mockResolvedValue({
+      api_url: 'https://api.example.com/v1/',
+      region: 'us-east-1',
+      user_pool_id: 'us-east-1_pool',
+      client_id: 'client-from-stack',
+    });
+
+    const cmd = makeConfigureCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--stack-name', 'backgroundagent-dev',
+      '--region', 'us-east-1',
+      '--api-url', 'https://override.example.com/v1/',
+    ]);
+
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
+    expect(config.api_url).toBe('https://override.example.com/v1/');
+    expect(config.client_id).toBe('client-from-stack');
+  });
+
+  test('--from-bundle is mutually exclusive with --stack-name', async () => {
+    const bundle = Buffer.from(JSON.stringify({
+      api_url: 'https://x', region: 'us-east-1', user_pool_id: 'p', client_id: 'c',
+    }), 'utf-8').toString('base64');
+
+    const cmd = makeConfigureCommand();
+    await expect(cmd.parseAsync([
+      'node', 'test',
+      '--from-bundle', bundle,
+      '--stack-name', 'backgroundagent-dev',
     ])).rejects.toThrow(/mutually exclusive/);
   });
 

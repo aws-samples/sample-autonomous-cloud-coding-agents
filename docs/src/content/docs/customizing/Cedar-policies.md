@@ -6,9 +6,9 @@ title: Cedar policy guide
 
 This guide is for **blueprint authors** — repo owners writing the Cedar policies that govern what tool calls the agent can make unattended versus which ones pause for human approval.
 
-> **If you are a task submitter** looking for how approvals work at the CLI, see [User guide — Approval gates](/using/overview#approval-gates-cedar-hitl). This guide is about *writing* the rules that cause approvals.
+> **If you are a task submitter** looking for how approvals work at the CLI, see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl). This guide is about *writing* the rules that cause approvals.
 >
-> **For the full design** (fail-closed posture, engine internals, concurrency), see [Cedar HITL gates design doc](/architecture/cedar-hitl-gates).
+> **For the full design** (fail-closed posture, engine internals, concurrency), see [Cedar HITL gates design doc](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
 
 ## Two tiers, one language
 
@@ -165,6 +165,6 @@ For unit coverage of your own rules without the cross-engine guarantee, add a ca
 
 ## Where to look next
 
-- [`docs/design/CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates) — full design: engine internals, fail-closed posture, late-approval races, concurrency.
+- [`docs/design/CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — full design: engine internals, fail-closed posture, late-approval races, concurrency.
 - [`agent/policies/hard_deny.cedar`](../../agent/policies/hard_deny.cedar) + [`agent/policies/soft_deny.cedar`](../../agent/policies/soft_deny.cedar) — the built-in rule set, good starting point for copy-paste.
-- [User guide — Approval gates](/using/overview#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny` / `policies`).
+- [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny` / `policies`).

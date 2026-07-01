@@ -15,11 +15,18 @@ from pydantic import ValidationError
 import memory as agent_memory
 import task_state
 from channel_mcp import configure_channel_mcp
-from config import AGENT_WORKSPACE, build_config, get_config, resolve_linear_api_token
+from config import (
+    AGENT_WORKSPACE,
+    build_config,
+    get_config,
+    resolve_jira_oauth_token,
+    resolve_linear_api_token,
+)
 from context import assemble_prompt, fetch_github_issue
+from jira_reactions import comment_task_finished, comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
-from observability import task_span
+from observability import current_otel_trace_id, task_span
 from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
@@ -30,7 +37,6 @@ from post_hooks import (
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
 from shell import log, log_error_cw
-from system_prompt import SYSTEM_PROMPT
 from telemetry import (
     _TrajectoryWriter,
     format_bytes,
@@ -120,6 +126,7 @@ def _maybe_upload_trace(
         artifact = trajectory.dump_gzipped_jsonl()
     except Exception as e:
         log("WARN", f"Trace dump_gzipped_jsonl failed: {type(e).__name__}: {e}")
+        # nosemgrep: py-silent-success-masking -- trace upload best-effort; missing artifact ok
         return None
     if not artifact:
         log(
@@ -356,6 +363,7 @@ def _run_repoless_task(
         cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
         cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
         trace_s3_uri=trace_s3_uri,
+        otel_trace_id=current_otel_trace_id(),
     )
     result_dict = result.model_dump()
 
@@ -795,13 +803,16 @@ def run_task(
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
-            # Channel-specific MCP wiring (Linear only, for v1). Must happen
-            # before discover_project_config so the scan picks up the file we
-            # just wrote. Resolve the API token from Secrets Manager *before*
-            # writing .mcp.json so the child SDK process inherits the env var
-            # that the MCP server entry references via ${LINEAR_API_TOKEN}.
+            # Channel-specific MCP wiring. Must happen before
+            # discover_project_config so the scan picks up the file we just
+            # wrote. Resolve the per-channel access token from Secrets
+            # Manager *before* writing .mcp.json so the child SDK process
+            # inherits the env var that the MCP server entry references
+            # (${LINEAR_API_TOKEN} / ${JIRA_API_TOKEN}).
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
+            elif config.channel_source == "jira":
+                resolve_jira_oauth_token(config.channel_metadata)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
@@ -809,6 +820,14 @@ def run_task(
             # but do not block the pipeline. Capture the reaction id so we
             # can delete it at terminal status (👀 → ✅/❌).
             linear_eyes_reaction_id = react_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # "Starting" comment on the Jira issue (REST shim — the Atlassian
+            # Remote MCP can't be used from a headless agent). No-op for
+            # non-Jira tasks. Best-effort; failures are logged, never block.
+            comment_task_started(
                 config.channel_source,
                 config.channel_metadata,
             )
@@ -1057,6 +1076,15 @@ def run_task(
                 started_reaction_id=linear_eyes_reaction_id,
             )
 
+            # Terminal status comment on the Jira issue (REST shim, with the
+            # PR link when one was opened). No-op for non-Jira tasks.
+            comment_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=(overall_status == "success"),
+                pr_url=pr_url,
+            )
+
             # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
             # ``trace_s3_uri`` can be persisted atomically with the
@@ -1100,6 +1128,7 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
+                otel_trace_id=current_otel_trace_id(),
             )
 
             result_dict = result.model_dump()
@@ -1110,8 +1139,11 @@ def run_task(
                 root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
             if result.turns:
                 root_span.set_attribute("agent.turns", int(result.turns))
-            root_span.set_attribute("build.passed", result.build_passed)
-            root_span.set_attribute("lint.passed", result.lint_passed)
+            # On the repo path these are always real bools (computed by the post
+            # hooks above); coalesce for the span attribute since the field type
+            # is now tri-state (bool | None) for the repo-less/crash case.
+            root_span.set_attribute("build.passed", bool(result.build_passed))
+            root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
             root_span.set_attribute("task.duration_s", result.duration_s)
             if usage:
@@ -1165,6 +1197,10 @@ def run_task(
                 task_id=config.task_id,
                 agent_status=agent_for_chain.status if agent_for_chain else "unknown",
                 trace_s3_uri=crash_trace_s3_uri,
+                # Still inside `with task_span()`, so the id is live — capture it
+                # here too or FAILED tasks (the primary post-mortem case for the
+                # replay bundle, #515) persist otel_trace_id: null.
+                otel_trace_id=current_otel_trace_id(),
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
@@ -1177,6 +1213,14 @@ def run_task(
                 config.channel_metadata,
                 success=False,
                 started_reaction_id=linear_eyes_reaction_id,
+            )
+            # Best-effort failure comment on the Jira issue. No-op for
+            # non-Jira tasks; network failures are swallowed.
+            comment_task_finished(
+                config.channel_source,
+                config.channel_metadata,
+                success=False,
+                pr_url=None,
             )
             raise
 
@@ -1195,17 +1239,13 @@ def main():
                 config.repo_url, config.issue_number, config.github_token
             )
         prompt = assemble_prompt(config)
-        system_prompt = SYSTEM_PROMPT.replace("{repo_url}", config.repo_url)
-        system_prompt = system_prompt.replace("{task_id}", config.task_id)
-        system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
-        system_prompt = system_prompt.replace("{branch_name}", "bgagent/{task_id}/dry-run")
-        system_prompt = system_prompt.replace("{default_branch}", "main")
-        system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
-        system_prompt = system_prompt.replace("{setup_notes}", "(dry run — setup not executed)")
-        system_prompt = system_prompt.replace("{memory_context}", "(dry run — memory not loaded)")
-        overrides = config.system_prompt_overrides
-        if overrides:
-            system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
+        dry_setup = RepoSetup(
+            repo_dir=f"{AGENT_WORKSPACE}/{config.task_id}",
+            branch=f"bgagent/{config.task_id}/dry-run",
+            default_branch="main",
+            notes=["(dry run — setup not executed)"],
+        )
+        system_prompt = build_system_prompt(config, dry_setup, None, config.system_prompt_overrides)
         system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         print("\n--- SYSTEM PROMPT (REDACTED) ---")

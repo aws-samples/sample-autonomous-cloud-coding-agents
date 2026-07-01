@@ -156,14 +156,14 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // captureScreenshot now receives a deadline-aware budget (PR-241 B1).
+    // captureScreenshot receives a deadline-aware budget.
     expect(captureScreenshotMock).toHaveBeenCalledWith(
       'https://preview.example.com',
       expect.objectContaining({ timeoutMs: expect.any(Number) }),
     );
     expect(s3Send).toHaveBeenCalledTimes(1);
     const putArg = (s3Send.mock.calls[0][0] as { input: { Key: string; ContentType: string } }).input;
-    // Key carries the high-entropy suffix added in PR-241 (key entropy).
+    // Key carries the high-entropy suffix (key entropy).
     expect(putArg.Key).toMatch(/^screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png$/);
     expect(putArg.ContentType).toBe('image/png');
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);

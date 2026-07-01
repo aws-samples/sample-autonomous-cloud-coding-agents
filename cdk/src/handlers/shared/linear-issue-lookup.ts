@@ -114,7 +114,7 @@ export async function findLinearIssueByIdentifier(
     logger.warn('Linear issue lookup: failed to scan workspace registry', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- registry scan failure degrades to "issue not found"; logged WARN, caller iterates safely
   }
 
   if (active.length === 0) {
@@ -193,7 +193,7 @@ async function queryIssueByIdentifier(accessToken: string, identifier: string): 
       identifier,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- per-workspace GraphQL blip returns miss; caller tries the next workspace
   }
 
   if (!resp.ok) {
