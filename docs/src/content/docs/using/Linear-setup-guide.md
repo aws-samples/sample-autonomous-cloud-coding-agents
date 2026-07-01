@@ -41,6 +41,8 @@ Click **Save**, then copy the **Client ID** and **Client Secret** from the app's
 
 > **Adding a second workspace?** You only need a new OAuth app if you want per-workspace isolation. Otherwise, edit your existing app and toggle **Public: ON** so it can be authorized from any workspace. Trade-off: shared apps revoke together; per-workspace apps don't.
 
+> **⚠️ Do NOT enable Linear "agent" / app-notification events on the OAuth app.** ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary Linear comments. If the OAuth app is configured as a Linear **agent** (agent-session / app-notification events turned on), Linear renders an `@mention` of the app as its **interactive agent-activity surface** instead of a normal comment thread — which breaks the reply/reaction UX (mentions appear "interactive" and the agent's comment thread doesn't behave like a comment). ABCA does not consume agent-session events; the webhook receiver ignores them and logs a WARN naming the workspace. **Leave agent/app events OFF and rely on the Issues + Comments webhook events (step 4).** If comments start behaving "interactively" instead of as threads, this toggle is the cause.
+
 ### 3. Authorize the app on the workspace
 
 For your first workspace:
@@ -230,6 +232,21 @@ aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug> --qu
 ```
 
 If the failing event's `organizationId` doesn't match any registered workspace and the stack-wide secret also doesn't match, you have a webhook configured in a Linear workspace you haven't onboarded — either onboard it via `add-workspace` or remove the webhook in Linear.
+
+### Comments render as "interactive agent activity" instead of a comment thread
+
+Symptom: when you `@mention` the bot in Linear it shows up as an interactive agent widget rather than a normal comment, and the agent's replies/reactions don't behave like a comment thread. Cause: the Linear **OAuth app is configured as an agent** — agent-session / app-notification events are enabled on it. ABCA is a comment-based integration and does not use Linear's agent model; agent mode makes Linear render mentions as agent activity, which breaks the comment-thread UX.
+
+Fix: in the Linear OAuth app settings, **turn OFF the agent / app-notification event subscriptions**. Keep only the workspace **webhook** with **Issues** and **Comments** resource types (step 4). No redeploy needed — it's a Linear-side app setting.
+
+To confirm ABCA is seeing agent-mode traffic from a workspace, grep the receiver logs:
+
+```bash
+aws logs filter-log-events --log-group-name /aws/lambda/<stack>-LinearIntegrationWebhookFn... \
+  --filter-pattern "agent-mode"
+```
+
+A `WARN … Ignoring Linear agent-mode webhook …` line (with `linear_workspace_id`) means that workspace's app has agent events on — advise disabling them.
 
 ### "Invalid redirect_uri parameter for the application" during step 3
 

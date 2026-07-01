@@ -118,6 +118,12 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
+    '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
+    '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
+    '    With agent events on, Linear renders an @mention of the app as its',
+    '    interactive agent-activity surface instead of a comment thread, which',
+    '    breaks the reply/reaction UX. Leave agent/app events OFF; the trigger comes',
+    '    from the workspace webhook (Issues + Comments), configured separately next.',
     bar,
   ].join('\n');
 }
