@@ -8,9 +8,9 @@ This guide walks through setting up the ABCA Slack integration. Once configured,
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/developer-guide/introduction))
-- A Cognito user account configured (see [User guide](/using/overview))
-- A Slack workspace where you can install apps (use a personal free workspace if your corporate Slack restricts app installs)
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
+- A Slack workspace where you are authorized to install apps (if your workspace requires admin approval for app installs, request it through your Slack administrator)
 - AWS CLI configured with credentials for your ABCA account
 
 ## Quick start
@@ -153,7 +153,7 @@ Run `/bgagent link` in Slack, then `bgagent slack link <code>` in your terminal.
 
 ### "Repository not onboarded"
 
-The repo must be registered with a Blueprint before submitting tasks. See the [User guide](/using/overview).
+The repo must be registered with a Blueprint before submitting tasks. See the [User guide](/sample-autonomous-cloud-coding-agents/using/overview).
 
 ### OAuth install fails (bad_client_secret)
 

@@ -6,7 +6,7 @@ title: Deploy preview screenshots guide
 
 Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on the open GitHub PR. If you also have Linear configured, the same screenshot is posted to the linked Linear issue as a bonus.
 
-> The pipeline only needs GitHub. Linear posting is opt-in: present iff `LinearWorkspaceRegistryTable` has at least one active row (configured via [Linear setup guide](/using/linear-setup-guide)). Without Linear, the GitHub-side screenshot still works; the Linear-side just no-ops silently.
+> The pipeline only needs GitHub. Linear posting is opt-in: present iff `LinearWorkspaceRegistryTable` has at least one active row (configured via [Linear setup guide](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide)). Without Linear, the GitHub-side screenshot still works; the Linear-side just no-ops silently.
 
 ## Works with any provider that posts `deployment_status`
 
