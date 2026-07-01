@@ -163,6 +163,15 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('REQUIRED for actor=app');
   });
 
+  test('warns against enabling Linear agent / app-notification events (breaks comment-thread UX)', () => {
+    // ABCA is a comment-based integration; an OAuth app in Linear "agent" mode
+    // makes @mentions render as interactive agent activity instead of comment
+    // threads. The template must steer operators away from that toggle.
+    const out = renderLinearAppTemplate();
+    expect(out.toLowerCase()).toContain('agent');
+    expect(out).toMatch(/do not enable .*agent/i);
+  });
+
   test('defaults the callback URL to the localhost endpoint that setup listens on', () => {
     // Phase 2.0b-O2 (shipped) uses an ephemeral localhost server during
     // `bgagent linear setup`. Printing the right URL by default

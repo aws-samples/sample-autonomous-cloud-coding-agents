@@ -58,6 +58,7 @@ process.env.LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME = 'linear-processor';
 
 import { handler } from '../../src/handlers/linear-webhook';
 import { invalidateLinearSecretCache } from '../../src/handlers/shared/linear-verify';
+import { logger } from '../../src/handlers/shared/logger';
 
 const WEBHOOK_SECRET = 'test-linear-webhook-secret';
 
@@ -150,6 +151,32 @@ describe('linear-webhook handler', () => {
     expect(result.statusCode).toBe(200);
     expect(ddbSend).not.toHaveBeenCalled();
     expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('acks agent-mode webhooks (AppUserNotification) with 200 and never forwards them', async () => {
+    // Fingerprint of an OAuth app configured as a Linear AGENT (agent/app
+    // events on). ABCA is a plain-comment integration — it must ack (so Linear
+    // stops retrying) but never forward, and it logs a WARN so an operator can
+    // spot "this workspace's app is in agent mode" (which breaks comment-thread
+    // UX). Here we assert the ack + non-forward; the WARN copy is covered by
+    // the source comment / docs, not a log-spy assertion (matches this suite).
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    for (const type of ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity']) {
+      warnSpy.mockClear();
+      const body = JSON.stringify({
+        action: 'create',
+        type,
+        webhookTimestamp: Date.now(),
+        webhookId: `wh-agent-${type}`,
+        organizationId: 'org-agentmode',
+        data: { id: `evt-${type}` },
+      });
+      const result = await handler(makeEvent(body, sign(body)));
+      expect(result.statusCode).toBe(200);
+      expect(lambdaSend).not.toHaveBeenCalled(); // never forwarded to the processor
+      expect(warnSpy).toHaveBeenCalledTimes(1); // surfaced loudly, not a silent INFO ignore
+    }
+    warnSpy.mockRestore();
   });
 
   test('forwards a Comment:create event to the processor (#247 A6 trigger)', async () => {
