@@ -19,7 +19,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.8",
-    "knip": "^6.20.0"
+    "knip": "6.20.0"
   },
   "resolutions": {
     "basic-ftp": "^5.2.2",

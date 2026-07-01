@@ -48,6 +48,12 @@ const baselinePath = join(repoRoot, 'knip-baseline.json');
 // inside issues[].files[], NOT at the top level. `duplicates` is an
 // array-of-arrays (one inner array per duplicate group), so its `.length`
 // counts groups, which is the unit we ratchet on.
+//
+// This is the complete set of countable keys for the installed knip (6.20.0,
+// pinned exactly). There is no `nsExports`/`nsTypes`/`classMembers` in this
+// schema — namespace/enum members surface as `namespaceMembers`/`enumMembers`.
+// If knip is bumped, re-derive this list from its JSON (the countIssues guard
+// below will fail loud if the top-level shape changes).
 const COUNTED_KEYS = [
   'files',
   'dependencies',
@@ -87,8 +93,20 @@ function runKnip() {
 }
 
 function countIssues(report) {
+  // Fail loud, not open: if a future knip reshapes its JSON so `issues` is no
+  // longer an array, `?? []` would yield count 0 — silently below any baseline,
+  // reporting a passing build and disabling the gate. Require the array shape so
+  // a schema change surfaces as an error instead. (knip is pinned exactly in
+  // package.json to make such a change a deliberate, reviewed bump.)
+  if (!Array.isArray(report.issues)) {
+    console.error(
+      'check-deadcode-ratchet: knip JSON has no `issues` array — its output schema may have changed. ' +
+        'Re-validate COUNTED_KEYS against the installed knip before trusting the count.',
+    );
+    process.exit(2);
+  }
   let total = 0;
-  for (const issue of report.issues ?? []) {
+  for (const issue of report.issues) {
     for (const key of COUNTED_KEYS) {
       if (Array.isArray(issue[key])) total += issue[key].length;
     }

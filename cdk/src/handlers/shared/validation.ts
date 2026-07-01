@@ -290,8 +290,9 @@ type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TY
 // ATTACHMENT_TYPE_LIST, _AssertAttachmentExhaustive resolves to `never` and
 // assigning `true` is a hard compile error. (A `true as never` assertion would
 // NOT error — assertions are permitted whenever either side is assignable — so
-// it must stay an assignment.) `void` consumes the binding so noUnusedLocals
-// and @typescript-eslint/no-unused-vars stay satisfied without weakening it.
+// it must stay an assignment.) `void` consumes the binding to satisfy
+// tsconfig noUnusedLocals, which — unlike @typescript-eslint/no-unused-vars,
+// already exempt via its ^_ varsIgnorePattern — does not honor the _ prefix.
 const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
 void _attachmentExhaustiveCheck;
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
