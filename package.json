@@ -14,10 +14,12 @@
   ],
   "scripts": {
     "install:all": "MISE_EXPERIMENTAL=1 mise run install",
-    "build": "MISE_EXPERIMENTAL=1 mise run build"
+    "build": "MISE_EXPERIMENTAL=1 mise run build",
+    "knip": "knip"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.8"
+    "@astrojs/check": "^0.9.8",
+    "knip": "6.20.0"
   },
   "resolutions": {
     "basic-ftp": "^5.2.2",

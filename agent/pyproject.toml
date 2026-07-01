@@ -55,6 +55,14 @@ constraint-dependencies = [
     "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j — transitive via mcp; remove when mcp bumps floor
 ]
 
+# Dead-code detection (#282, cairn MVG gate #6). ruff "F" catches unused
+# imports/locals; vulture catches unused module-level functions/classes/methods
+# that ruff cannot see. min_confidence 80 keeps the signal high; intentional
+# keeps (e.g. SDK-mandated hook params) live in .vulture_allowlist.py.
+[tool.vulture]
+paths = ["src", ".vulture_allowlist.py"]
+min_confidence = 80
+
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
 skips = [
@@ -73,11 +81,16 @@ dev = [
     "pytest",
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
+    "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
 ]
 
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+# The vulture allowlist is bare-name expressions by design (that is how vulture
+# "uses" a name to suppress it). ruff would flag every line F821/B018, so it is
+# not Python source ruff should lint. See .vulture_allowlist.py (#282).
+extend-exclude = [".vulture_allowlist.py"]
 
 [tool.ruff.lint]
 select = [
@@ -124,3 +137,9 @@ skip_covered = true
 [tool.ty.environment]
 python-version = "3.13"
 extra-paths = ["src"]
+
+[tool.ty.src]
+# The vulture allowlist is bare-name expressions by design, not type-checkable
+# Python — ty flags each line unresolved-reference. Excluded here for the same
+# reason ruff excludes it via extend-exclude (#282).
+exclude = [".vulture_allowlist.py"]

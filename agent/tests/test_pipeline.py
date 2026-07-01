@@ -371,6 +371,55 @@ class TestRepoLessPipeline:
         assert terminal_calls, "expected a write_terminal(..., 'FAILED', ...) call"
 
     @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_crash_path_persists_otel_trace_id(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # #523: the crash-path TaskResult must carry otel_trace_id — FAILED tasks
+        # are the primary post-mortem case the replay bundle (#515) exists for,
+        # and the crash `except` is still inside `with task_span()`, so the id is
+        # live. Force the pipeline to crash after the span opens and assert the
+        # id lands in the FAILED payload rather than persisting null.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch(
+                "pipeline.current_otel_trace_id",
+                return_value="0af7651916cd43dd8448eb211c80319c",
+            ),
+            patch("workflow.run_workflow", side_effect=RuntimeError("boom")),
+        ):
+            from pipeline import run_task
+
+            # The crash handler persists FAILED then re-raises, so the exception
+            # surfaces — we assert on what it persisted before re-raising.
+            with pytest.raises(RuntimeError, match="boom"):
+                run_task(
+                    task_description="Summarise these three papers",
+                    aws_region="us-east-1",
+                    task_id="repoless-crash",
+                    resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+                )
+
+        failed_calls = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert failed_calls, "expected a write_terminal(..., 'FAILED', ...) call"
+        payload = failed_calls[-1].args[2]
+        assert payload.get("otel_trace_id") == "0af7651916cd43dd8448eb211c80319c"
+
+    @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
