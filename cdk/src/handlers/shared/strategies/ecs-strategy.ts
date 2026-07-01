@@ -169,38 +169,28 @@ export class EcsComputeStrategy implements ComputeStrategy {
     // Override the container command to run a Python one-liner that:
     // 1. Loads the payload — from S3 (AGENT_PAYLOAD_S3_URI) when set, else the
     //    inline AGENT_PAYLOAD env var (fallback).
-    // 2. Calls entrypoint.run_task() directly with all fields.
+    // 2. Calls entrypoint.run_task_from_payload(p), which maps the WHOLE payload
+    //    dict to run_task's signature (rename prompt→task_description /
+    //    model_id→anthropic_model, filter to accepted params, coerce str/int).
+    //    This replaces the old hand-listed kwarg subset that silently dropped
+    //    channel_source/channel_metadata (no Linear/Jira reactions or channel
+    //    MCP on ECS — ABCA-487), build_command, cedar_policies, base_branch/
+    //    merge_branches, attachments, trace, user_id, etc. Single source of
+    //    truth in the agent, unit-tested (see test_run_task_from_payload).
     // 3. Exits with code 0 on success, 1 on failure.
     // This bypasses the uvicorn server entirely — no HTTP, no OTEL noise.
     const bootCommand = [
       'python', '-c',
       'import json, os, sys; '
       + 'sys.path.insert(0, "/app/src"); '
-      + 'from entrypoint import run_task; '
+      + 'from entrypoint import run_task_from_payload; '
       + '_uri = os.environ.get("AGENT_PAYLOAD_S3_URI"); '
       + 'p = ('
       + 'json.loads(__import__("boto3").client("s3").get_object('
       + 'Bucket=_uri.split("/",3)[2], Key=_uri.split("/",3)[3])["Body"].read()) '
       + 'if _uri else json.loads(os.environ["AGENT_PAYLOAD"])'
       + '); '
-      + 'r = run_task('
-      + 'repo_url=p.get("repo_url",""), '
-      + 'task_description=p.get("prompt",""), '
-      + 'issue_number=str(p.get("issue_number","")), '
-      + 'github_token=p.get("github_token",""), '
-      + 'anthropic_model=p.get("model_id",""), '
-      + 'max_turns=int(p.get("max_turns",100)), '
-      + 'max_budget_usd=p.get("max_budget_usd"), '
-      + 'aws_region=os.environ.get("AWS_REGION",""), '
-      + 'task_id=p.get("task_id",""), '
-      + 'hydrated_context=p.get("hydrated_context"), '
-      + 'system_prompt_overrides=p.get("system_prompt_overrides",""), '
-      + 'prompt_version=p.get("prompt_version",""), '
-      + 'memory_id=p.get("memory_id",""), '
-      + 'resolved_workflow=p.get("resolved_workflow"), '
-      + 'branch_name=p.get("branch_name",""), '
-      + 'pr_number=str(p.get("pr_number",""))'
-      + '); '
+      + 'r = run_task_from_payload(p); '
       + 'sys.exit(0 if r.get("status")=="success" else 1)',
     ];
 
