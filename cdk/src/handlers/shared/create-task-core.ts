@@ -53,7 +53,7 @@ import {
   type TaskRecord,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
@@ -522,7 +522,6 @@ export async function createTaskCore(
       if (att.delivery !== 'presigned') continue;
       const presignedAtt = att as PresignedAttachment;
       const attachmentId = ulid();
-      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${context.userId}/${taskId}/${attachmentId}/${presignedAtt.filename}`;
 
       attachmentRecords.push(createAttachmentRecord({
         attachment_id: attachmentId,

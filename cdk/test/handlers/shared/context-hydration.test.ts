@@ -54,7 +54,6 @@ import {
   hydrateContext,
   resolveGitHubToken,
   screenWithGuardrail,
-  type ContentTrustLevel,
   type GitHubIssueContext,
   type GuardrailScreeningResult,
   type IssueComment,

@@ -294,9 +294,9 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
 
 async function screenSingleAttachment(
   att: AttachmentRecord,
-  task: TaskRecord,
+  _task: TaskRecord,
   screeningConfig: ScreeningConfig,
-  taskId: string,
+  _taskId: string,
   meta: S3ObjectMeta,
 ): Promise<AttachmentRecord> {
   const { s3Key, versionId, sizeBytes } = meta;
@@ -530,7 +530,7 @@ async function transitionToSubmitted(
 // ---------------------------------------------------------------------------
 
 async function failTaskOnScreening(
-  task: TaskRecord,
+  _task: TaskRecord,
   taskId: string,
   filename: string,
   reason: string,

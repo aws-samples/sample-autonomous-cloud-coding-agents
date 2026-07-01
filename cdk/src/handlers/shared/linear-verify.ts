@@ -28,9 +28,6 @@ import { logger } from './logger';
 const sm = new SecretsManagerClient({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-/** Prefix for Linear-related secrets in Secrets Manager. */
-export const LINEAR_SECRET_PREFIX = 'bgagent/linear/';
-
 // In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;

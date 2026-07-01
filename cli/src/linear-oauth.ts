@@ -253,7 +253,7 @@ async function parseTokenResponse(
   let body: unknown;
   try {
     body = await response.json();
-  } catch (err) {
+  } catch (_err) {
     throw new CliError(
       `Linear /oauth/token returned non-JSON during ${contextLabel}: HTTP ${response.status}`,
     );
