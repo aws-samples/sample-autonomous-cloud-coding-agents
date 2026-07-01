@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.43.9", #https://pypi.org/project/boto3/
+    "boto3==1.43.38", #https://pypi.org/project/boto3/
     # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
     # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
     # Secrets Manager because AgentCore Identity's USER_FEDERATION
@@ -15,13 +15,13 @@ dependencies = [
     # try/except (ImportError, AttributeError), so removing this dep
     # would degrade gracefully — but for now we keep the dep to
     # preserve the clean code path.
-    "bedrock-agentcore==1.9.1", #https://pypi.org/project/bedrock-agentcore/
+    "bedrock-agentcore==1.16.0", #https://pypi.org/project/bedrock-agentcore/
     "claude-agent-sdk==0.2.110", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.110 (bundles claude CLI 2.1.191; kept in lockstep with the npm CLI pin in the Dockerfile, #215)
     "requests==2.34.2", #https://pypi.org/project/requests/
-    "fastapi==0.136.1", #https://pypi.org/project/fastapi/
-    "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro==0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
-    "mcp==1.27.1", #https://pypi.org/project/mcp/
+    "fastapi==0.139.0", #https://pypi.org/project/fastapi/
+    "uvicorn==0.49.0", #https://pypi.org/project/uvicorn/
+    "aws-opentelemetry-distro==0.18.0", #https://pypi.org/project/aws-opentelemetry-distro/
+    "mcp==1.28.1", #https://pypi.org/project/mcp/
     # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
     # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
     # CDK Lambdas) are two language bindings over the same Cedar Rust core.
