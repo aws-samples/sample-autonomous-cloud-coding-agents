@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 // --- Mocks ---
@@ -33,8 +35,6 @@ jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { assembleBundle, handler, MAX_REPLAY_EVENTS } from '../../src/handlers/get-task-replay';
 import type { EventRecord, ReplayBundle, TaskRecord } from '../../src/handlers/shared/types';
 
