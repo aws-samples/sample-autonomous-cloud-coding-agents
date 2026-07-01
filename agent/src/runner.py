@@ -132,7 +132,13 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     # writes, while the SDK is waiting on stdout).  The stderr callback in
     # ClaudeAgentOptions cannot drain fast enough to prevent this.
     os.environ.pop("ANTHROPIC_LOG", None)
-    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "anthropic.claude-haiku-4-5-20251001-v1:0"
+    # Use the cross-region INFERENCE-PROFILE id (``us.`` prefix), not the bare
+    # foundation-model id. Claude 4.x on Bedrock cannot be invoked on-demand by
+    # bare model id — that 400s with "on-demand throughput isn't supported"
+    # (seen on WebFetch's Haiku summarization sub-calls). This must match the
+    # profile the CDK stack grants (agent.ts / bedrock-models.ts). The main
+    # model (config.anthropic_model) already uses the ``us.`` profile form.
+    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     # Save OTLP endpoint/protocol configured by ADOT auto-instrumentation
     # before stripping, so we can re-use it for Claude Code CLI telemetry.

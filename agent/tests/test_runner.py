@@ -19,6 +19,7 @@ from runner import (
     _initialize_policy_engine_and_hooks,
     _resolve_allowed_tools,
     _resolve_setting_sources,
+    _setup_agent_env,
     _setup_bedrock_cost_attribution,
 )
 
@@ -365,3 +366,23 @@ class TestToolSurfaceHardening:
     def test_repo_bound_loads_project_settings(self):
         config = _config(requires_repo=True)
         assert _resolve_setting_sources(config) == ["project"]
+
+
+class TestSetupAgentEnv:
+    """Environment the Claude Code subprocess inherits."""
+
+    def test_default_haiku_model_uses_cross_region_inference_profile(self, monkeypatch):
+        # Regression: bare foundation-model id 400s on Bedrock ("on-demand
+        # throughput isn't supported") — WebFetch's Haiku sub-calls hit this.
+        # The default Haiku model must be the us.* inference profile. This env
+        # var is set at spawn time and overrides the CDK runtime value.
+        monkeypatch.setenv(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
+        _setup_agent_env(_config())
+        import os
+
+        assert (
+            os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+            == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
