@@ -14,9 +14,12 @@ from unittest.mock import MagicMock, patch
 
 from models import TaskConfig
 from runner import (
+    _DISALLOWED_TOOLS,
     _FULL_TOOL_SURFACE,
     _initialize_policy_engine_and_hooks,
     _resolve_allowed_tools,
+    _resolve_setting_sources,
+    _setup_agent_env,
     _setup_bedrock_cost_attribution,
 )
 
@@ -339,3 +342,81 @@ class TestBedrockCostAttribution:
         assert "X-Amzn-Bedrock-Request-Metadata" in __import__("os").environ.get(
             "ANTHROPIC_CUSTOM_HEADERS", ""
         )
+
+
+class TestToolSurfaceHardening:
+    """The off-session/defer vectors are hard-blocked via disallowed_tools (not
+    the allow-list, which is auto-approve only), and repo-less tasks load no
+    on-disk settings. Regression guard for the background-Workflow bug where a
+    repo-less task launched a detached Workflow and finalized prematurely."""
+
+    def test_workflow_task_agent_are_disallowed(self):
+        # These must be present so they are removed from the model's context
+        # even under permission_mode="bypassPermissions".
+        assert "Workflow" in _DISALLOWED_TOOLS
+        assert "Task" in _DISALLOWED_TOOLS
+        assert "Agent" in _DISALLOWED_TOOLS
+
+    def test_disallowed_tool_set_is_pinned(self):
+        # #523: the block list is hand-enumerated ("name varies by CLI version"),
+        # so a silent drop/rename would reopen the detached-work bug with nothing
+        # to catch it. Pin the exact set — a deliberate change must update this,
+        # forcing a look at whether a renamed off-session tool needs adding.
+        assert set(_DISALLOWED_TOOLS) == {
+            "Workflow",
+            "Task",
+            "Agent",
+            "Monitor",
+            "SendMessage",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+        }
+
+    def test_repo_less_loads_no_setting_sources(self):
+        # requires_repo=False → no cloned repo → load nothing (keeps stray
+        # on-disk skills that could spawn a background Workflow out of reach).
+        config = _config(requires_repo=False, repo_url="", github_token="")
+        assert _resolve_setting_sources(config) == []
+
+    def test_repo_bound_loads_project_settings(self):
+        config = _config(requires_repo=True)
+        assert _resolve_setting_sources(config) == ["project"]
+
+    def test_repo_optional_with_repo_loads_project_settings(self):
+        # #523: a repo-optional workflow (requires_repo=False) GIVEN a repo takes
+        # the clone path (pipeline gates on `not requires_repo and not repo_url`),
+        # so it must load the cloned repo's ``.claude/`` config. Keying on
+        # requires_repo would wrongly drop it — key on repo presence.
+        config = _config(requires_repo=False, repo_url="owner/repo")
+        assert _resolve_setting_sources(config) == ["project"]
+
+
+class TestSetupAgentEnv:
+    """Environment the Claude Code subprocess inherits."""
+
+    def test_haiku_model_env_is_set_from_config(self, monkeypatch):
+        # The env var is now sourced from config.haiku_model (not hardcoded), so
+        # it is per-task overridable like ANTHROPIC_MODEL. Regression: bare
+        # foundation-model id 400s on Bedrock — WebFetch's Haiku sub-calls hit
+        # this — so config's default must be the us.* inference profile.
+        import os
+
+        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL and
+        # CLAUDE_CODE_USE_BEDROCK straight to os.environ. Pre-claim them through
+        # monkeypatch so its teardown restores them and this test can't leak into
+        # order-dependent neighbors (#523).
+        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
+
+        config = _config(haiku_model="us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        _setup_agent_env(config)
+        assert (
+            os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+            == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
+
+    def test_config_default_haiku_model_is_an_inference_profile(self):
+        # The platform default (no override) must be a us.* profile, never a bare
+        # foundation-model id — the whole point of the fix.
+        assert _config().haiku_model.startswith("us.")
