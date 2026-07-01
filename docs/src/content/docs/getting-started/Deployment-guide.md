@@ -233,4 +233,5 @@ For users without AWS CLI access.
 - [User guide](/sample-autonomous-cloud-coding-agents/using/overview) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
+- [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/cost-attribution) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend architecture and trade-offs.
