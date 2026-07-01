@@ -417,7 +417,8 @@ Fields sourced from stores that may not have run for a given task are returned a
 - `trace_uri` is `null` when the task ran without `--trace` (or the upload had not completed).
 - `otel_trace_id` is `null` on tasks created before the field existed or that ran with tracing unavailable; `session_id` is the available correlation id in that case.
 - `verification` is `null` when no gate result was persisted (e.g. a repo-less workflow has no build/lint step).
-- The embedded `events` list is capped (server-side `MAX_REPLAY_EVENTS`); a task exceeding the cap logs a truncation warning. Use `GET /v1/tasks/{task_id}/events` for the full paginated feed.
+- The embedded `events` list is capped both by count (`MAX_REPLAY_EVENTS`) and by total size (`MAX_REPLAY_EVENT_BYTES`, to stay under Lambda's 6 MB response limit — relevant for `--trace` tasks whose events carry large previews); whichever cap trips first truncates the tail. When that happens, `events_truncation` is non-null (`{ reason: "max_events" | "max_bytes", returned_events }`) so a consumer can detect a partial list; it is `null` when the full list fit. Use `GET /v1/tasks/{task_id}/events` for the full paginated feed.
+- Each embedded event has the same shape as the `/events` feed — `event_id`, `event_type`, `timestamp`, and `metadata` (always present, `{}` when the event stored none); the internal `task_id`/`ttl` are stripped.
 
 **Response: `200 OK`**
 
@@ -429,8 +430,9 @@ Fields sourced from stores that may not have run for a given task are returned a
     "resolved_workflow": { "id": "coding/new-task-v1", "version": "1" },
     "prompt_version": "coding/new-task-v1@1",
     "events": [
-      { "task_id": "01HZX...", "event_id": "01HZX...A", "event_type": "task_started", "timestamp": "2026-06-30T17:00:00.000Z" }
+      { "event_id": "01HZX...A", "event_type": "task_started", "timestamp": "2026-06-30T17:00:00.000Z", "metadata": {} }
     ],
+    "events_truncation": null,
     "verification": { "build_passed": true, "lint_passed": true },
     "trace_uri": "s3://<trace-bucket>/traces/<user_id>/01HZX....jsonl.gz",
     "otel_trace_id": "1a2b3c4d5e6f70819293a4b5c6d7e8f9",

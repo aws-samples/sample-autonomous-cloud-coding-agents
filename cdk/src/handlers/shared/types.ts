@@ -347,6 +347,32 @@ export interface EventRecord {
 }
 
 /**
+ * A single event as embedded in a {@link ReplayBundle} (#515). Normalized to
+ * match the ``GET /tasks/{id}/events`` feed exactly — ``task_id``/``ttl`` are
+ * stripped (redundant in a task-scoped bundle) and ``metadata`` defaults to
+ * ``{}`` — so a consumer can move between the events feed and the bundle
+ * without ``event.metadata.x`` throwing on an event that stored no metadata.
+ */
+export interface ReplayEvent {
+  readonly event_id: string;
+  readonly event_type: string;
+  readonly timestamp: string;
+  readonly metadata: Record<string, unknown>;
+}
+
+/**
+ * Truncation marker embedded in a {@link ReplayBundle} (#523) when the event
+ * list was clipped. ``null`` on the bundle means the full list fit; a non-null
+ * value names which cap tripped so a consumer never mistakes a clipped replay
+ * for a complete one. Use ``GET /tasks/{id}/events`` for the full paginated feed.
+ */
+export interface ReplayTruncation {
+  readonly reason: 'max_events' | 'max_bytes';
+  /** Number of events actually embedded in the bundle. */
+  readonly returned_events: number;
+}
+
+/**
  * Verification verdict embedded in a {@link ReplayBundle} (#515). Reconstructed
  * from the persisted post-run gate booleans. Either field is ``null`` on tasks
  * that predate the verification-persistence change or whose gate did not run
@@ -377,8 +403,12 @@ export interface ReplayBundle {
    *  legacy tasks created before workflow resolution. */
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly prompt_version: string | null;
-  /** TaskEvents for this task in chronological order (ULID event_id). */
-  readonly events: EventRecord[];
+  /** TaskEvents for this task in chronological order (ULID event_id),
+   *  normalized to the same shape as the ``/events`` feed. */
+  readonly events: ReplayEvent[];
+  /** Non-null when the event list was clipped by a cap (count or bytes); null
+   *  when the full list fit. Lets a consumer detect a partial replay. */
+  readonly events_truncation: ReplayTruncation | null;
   /** Verification verdict, or null if no gate result was persisted. */
   readonly verification: VerificationReport | null;
   /** S3 URI of the ``--trace`` trajectory dump; null when the task ran without

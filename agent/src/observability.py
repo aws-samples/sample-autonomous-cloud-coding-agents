@@ -69,8 +69,10 @@ def current_otel_trace_id() -> str | None:
     ctx = span.get_span_context()
     if not ctx.is_valid:
         return None
-    # format_trace_id renders the 128-bit id as zero-padded 32-char hex, matching
-    # what appears in CloudWatch/X-Ray — so the persisted value joins directly.
+    # format_trace_id renders the 128-bit id as zero-padded 32-char hex — the
+    # OTEL format, so it joins directly in CloudWatch Transaction Search. Note
+    # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
+    # up there, transform to that form (the timestamp is the first 8 hex chars).
     return trace.format_trace_id(ctx.trace_id)
 
 

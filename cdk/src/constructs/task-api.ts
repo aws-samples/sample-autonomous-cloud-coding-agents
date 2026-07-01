@@ -581,6 +581,10 @@ export class TaskApi extends Construct {
 
     // Operator replay bundle (#515): aggregates TaskRecord + chronological
     // TaskEvents. Reads both tables; commonEnv already carries both table names.
+    // Heaviest read path — GetItem + a multi-page Query loop (up to
+    // MAX_REPLAY_EVENTS / ~5 pages) + full-bundle serialization — so it gets the
+    // raised timeout/memory the other heavy handlers use rather than the 3s /
+    // 128MB defaults, which risk INIT-timeout 502s and OOM on long histories.
     const getTaskReplayFn = new lambda.NodejsFunction(this, 'GetTaskReplayFn', {
       entry: path.join(handlersDir, 'get-task-replay.ts'),
       handler: 'handler',
@@ -588,6 +592,10 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: commonEnv,
       bundling: commonBundling,
+      timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+      // 512MB (not the 256MB standard): the bundle holds up to
+      // MAX_REPLAY_EVENT_BYTES of events in memory during serialization.
+      memorySize: SCREENING_HANDLER_MEMORY_MB,
     });
 
     // --- IAM grants ---

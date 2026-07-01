@@ -1197,6 +1197,10 @@ def run_task(
                 task_id=config.task_id,
                 agent_status=agent_for_chain.status if agent_for_chain else "unknown",
                 trace_s3_uri=crash_trace_s3_uri,
+                # Still inside `with task_span()`, so the id is live — capture it
+                # here too or FAILED tasks (the primary post-mortem case for the
+                # replay bundle, #515) persist otel_trace_id: null.
+                otel_trace_id=current_otel_trace_id(),
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.

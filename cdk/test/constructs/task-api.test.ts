@@ -139,6 +139,16 @@ describe('TaskApi construct', () => {
     }
   });
 
+  test('GetTaskReplayFn gets raised timeout/memory, not the 3s/128MB defaults (#523)', () => {
+    // Replay is the heaviest read path (GetItem + multi-page Query + full-bundle
+    // serialization); inheriting the defaults risks INIT-timeout 502s and OOM.
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const replayFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiGetTaskReplayFn'));
+    expect(replayFn).toBeDefined();
+    expect(replayFn![1].Properties.Timeout).toBe(15);
+    expect(replayFn![1].Properties.MemorySize).toBe(512);
+  });
+
   test('Lambda functions have correct environment variables', () => {
     const functions = baseTemplate.findResources('AWS::Lambda::Function');
 

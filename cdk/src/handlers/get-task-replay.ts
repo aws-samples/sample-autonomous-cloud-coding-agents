@@ -25,7 +25,7 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import type { EventRecord, ReplayBundle, TaskRecord, VerificationReport } from './shared/types';
+import type { EventRecord, ReplayBundle, ReplayEvent, ReplayTruncation, TaskRecord, VerificationReport } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
@@ -36,11 +36,27 @@ const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
  * aggregate, not a paginated feed, so we bound the response rather than expose
  * a cursor: an 8-hour task emits on the order of hundreds-to-low-thousands of
  * events, and DynamoDB Query pages at 1 MB. We page until this cap, then stop
- * and flag truncation so the bundle never grows unbounded (a runaway task can't
- * produce a multi-MB Lambda response). Callers needing the full tail use the
- * paginated ``GET /tasks/{id}/events`` endpoint.
+ * and flag truncation. Callers needing the full tail use the paginated
+ * ``GET /tasks/{id}/events`` endpoint.
  */
 export const MAX_REPLAY_EVENTS = 5000;
+
+/**
+ * Byte bound on the embedded events, enforced alongside the count cap. In
+ * ``--trace`` mode each ``agent_turn`` event carries two ~4 KB previews
+ * (``progress_writer._PREVIEW_MAX_LEN_TRACE``), so the count cap alone permits a
+ * ~40 MB bundle — well past Lambda's 6 MB synchronous-response limit → API
+ * Gateway 502 for exactly the long/expensive trace tasks operators most need to
+ * inspect. We stop paging (+ WARN) once accumulated event bytes cross this
+ * threshold, leaving headroom under 6 MB for the surrounding bundle fields.
+ *
+ * The loop includes an event *before* checking the cap, so the total can
+ * overshoot by at most one event. That is safe here because a single event is
+ * bounded (~two 4 KB previews ⇒ tens of KB), so one overshoot stays far under
+ * the ~1 MB headroom to Lambda's 6 MB limit. If per-event size ever becomes
+ * unbounded, switch to checking the cap before pushing.
+ */
+export const MAX_REPLAY_EVENT_BYTES = 5 * 1024 * 1024; // eslint-disable-line @typescript-eslint/no-magic-numbers -- 5 MiB, headroom under Lambda's 6 MB cap
 
 /**
  * ``GET /v1/tasks/{task_id}/replay`` — operator replay bundle (#515).
@@ -86,8 +102,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(403, ErrorCode.FORBIDDEN, 'You do not have access to this task.', requestId);
     }
 
-    const events = await collectEvents(taskId, requestId);
-    const bundle = assembleBundle(record, events);
+    const { events, truncation } = await collectEvents(taskId, requestId);
+    const bundle = assembleBundle(record, events, truncation);
     return successResponse(200, bundle, requestId);
   } catch (err) {
     logger.error('Failed to build task replay bundle', {
@@ -101,11 +117,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 /**
  * Query all TaskEvents for a task in chronological order (ULID ``event_id`` sort
  * key ascending), paging across DynamoDB 1 MB boundaries up to
- * {@link MAX_REPLAY_EVENTS}. Logs a WARN if the cap truncates the tail so a
- * silently-clipped replay is never mistaken for a complete one.
+ * {@link MAX_REPLAY_EVENTS} events or {@link MAX_REPLAY_EVENT_BYTES} bytes,
+ * whichever comes first. On truncation, logs a WARN *and* returns a
+ * {@link ReplayTruncation} so the bundle itself flags the clip — a WARN reaches
+ * only CloudWatch, but the operator reading the bundle is who must not mistake a
+ * clipped replay for a complete one.
  */
-async function collectEvents(taskId: string, requestId: string): Promise<EventRecord[]> {
+async function collectEvents(
+  taskId: string,
+  requestId: string,
+): Promise<{ events: EventRecord[]; truncation: ReplayTruncation | null }> {
   const events: EventRecord[] = [];
+  let bytes = 0;
+  let byteCapped = false;
   let startKey: Record<string, unknown> | undefined;
 
   do {
@@ -118,18 +142,35 @@ async function collectEvents(taskId: string, requestId: string): Promise<EventRe
       Limit: remaining,
       ExclusiveStartKey: startKey,
     }));
-    events.push(...((page.Items ?? []) as EventRecord[]));
-    startKey = page.LastEvaluatedKey;
+    for (const item of (page.Items ?? []) as EventRecord[]) {
+      bytes += Buffer.byteLength(JSON.stringify(item), 'utf8');
+      events.push(item);
+      if (bytes >= MAX_REPLAY_EVENT_BYTES) {
+        byteCapped = true;
+        break;
+      }
+    }
+    startKey = byteCapped ? undefined : page.LastEvaluatedKey;
   } while (startKey && events.length < MAX_REPLAY_EVENTS);
 
-  if (startKey) {
-    logger.warn('Replay event list truncated at MAX_REPLAY_EVENTS', {
+  // `startKey` surviving the loop means the count cap stopped us with more pages
+  // pending; `byteCapped` means the byte cap did. Either way the tail is clipped.
+  const truncation: ReplayTruncation | null = (startKey || byteCapped)
+    ? { reason: byteCapped ? 'max_bytes' : 'max_events', returned_events: events.length }
+    : null;
+
+  if (truncation) {
+    logger.warn('Replay event list truncated', {
       task_id: taskId,
+      reason: truncation.reason,
+      event_count: events.length,
+      event_bytes: bytes,
       max_events: MAX_REPLAY_EVENTS,
+      max_bytes: MAX_REPLAY_EVENT_BYTES,
       request_id: requestId,
     });
   }
-  return events;
+  return { events, truncation };
 }
 
 /**
@@ -138,11 +179,25 @@ async function collectEvents(taskId: string, requestId: string): Promise<EventRe
  * agent). ``collected_at`` is stamped server-side. Absent telemetry is
  * null/empty, never omitted, so the schema is stable for consumers.
  */
-export function assembleBundle(record: TaskRecord, events: EventRecord[]): ReplayBundle {
+export function assembleBundle(
+  record: TaskRecord,
+  events: EventRecord[],
+  truncation: ReplayTruncation | null = null,
+): ReplayBundle {
   // Reuse the shared coercion (cost_usd is persisted as a string by the agent),
   // matching toTaskDetail — it logs when a persisted numeric is unparseable, so
   // a corrupt cost is observable rather than silently nulled.
   const costNum = coerceNumericOrNull(record.cost_usd, { task_id: record.task_id, field: 'cost_usd' }, logger);
+
+  // Normalize to the SAME shape as the `/events` feed: strip task_id/ttl and
+  // default metadata to {}, so a consumer can move between the two without
+  // `event.metadata.x` throwing on an event that stored no metadata.
+  const normalizedEvents: ReplayEvent[] = events.map(e => ({
+    event_id: e.event_id,
+    event_type: e.event_type,
+    timestamp: e.timestamp,
+    metadata: e.metadata ?? {},
+  }));
 
   // Verification is non-null only when at least one gate result was persisted.
   const hasVerification = record.build_passed != null || record.lint_passed != null;
@@ -155,7 +210,10 @@ export function assembleBundle(record: TaskRecord, events: EventRecord[]): Repla
     workflow_ref: record.workflow_ref ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     prompt_version: record.prompt_version ?? null,
-    events,
+    events: normalizedEvents,
+    // null when the full event list fits; otherwise names which cap clipped the
+    // tail, so a consumer never reads a truncated bundle as complete.
+    events_truncation: truncation,
     verification,
     trace_uri: record.trace_s3_uri ?? null,
     otel_trace_id: record.otel_trace_id ?? null,

@@ -406,13 +406,20 @@ def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
 def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "project", "local"]]:
     """Which on-disk Claude Code settings the CLI may load for this task.
 
-    Repo-bound tasks load ``["project"]`` so the cloned repo's own ``.claude/``
-    config is honored. A repo-less task has no cloned repo to discover from, so
-    it loads nothing — defense-in-depth that also stops a stray on-disk skill
-    (e.g. one that spawns a background Workflow) from being reachable. Kept as a
-    named helper so the policy is unit-testable without driving the SDK.
+    A task with a cloned repo loads ``["project"]`` so the repo's own
+    ``.claude/`` config is honored. A task with no repo loads nothing —
+    defense-in-depth that also stops a stray on-disk skill (e.g. one that spawns
+    a background Workflow) from being reachable. Kept as a named helper so the
+    policy is unit-testable without driving the SDK.
+
+    Keys on ``repo_url`` (repo presence), NOT ``requires_repo`` (a static
+    workflow property): a repo-optional workflow given a repo takes the
+    repo-bound clone path (``pipeline.py`` gates on ``not requires_repo and not
+    repo_url``), so keying on ``requires_repo`` would clone the repo but drop
+    its ``.claude/`` config. Mirrors ``create-task-core.ts`` keying
+    ``branch_name`` on repo presence for the same reason.
     """
-    return ["project"] if config.requires_repo else []
+    return ["project"] if config.repo_url else []
 
 
 async def run_agent(

@@ -32,8 +32,9 @@ const BUNDLE: ReplayBundle = {
   resolved_workflow: { id: 'coding/new-task-v1', version: '1' },
   prompt_version: 'coding/new-task-v1@1',
   events: [
-    { task_id: 'abc', event_id: '01A', event_type: 'task_started', timestamp: '2026-01-01T00:00:00Z' },
+    { event_id: '01A', event_type: 'task_started', timestamp: '2026-01-01T00:00:00Z', metadata: {} },
   ],
+  events_truncation: null,
   verification: { build_passed: true, lint_passed: false },
   trace_uri: null,
   otel_trace_id: 'aabbccddeeff00112233445566778899',
@@ -73,6 +74,18 @@ describe('replay command', () => {
     expect(out).toContain('Lint:        FAILED');
     expect(out).toContain('Events (1):');
     expect(out).toContain('task_started');
+  });
+
+  test('flags a truncated event list so the operator sees the clip', async () => {
+    mockGetReplay.mockResolvedValue({
+      ...BUNDLE,
+      events_truncation: { reason: 'max_bytes', returned_events: 1 },
+    });
+    await makeReplayCommand().parseAsync(['node', 'test', 'abc']);
+    const out = consoleSpy.mock.calls[0][0] as string;
+    expect(out).toContain('Events (1, TRUNCATED):');
+    expect(out).toContain('list clipped at the size cap');
+    expect(out).toContain('bgagent events abc');
   });
 
   test('prints raw JSON with --json', async () => {

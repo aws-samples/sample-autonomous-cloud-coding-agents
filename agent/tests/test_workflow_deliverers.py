@@ -144,6 +144,31 @@ class TestDeliver:
             result = deliver("s3", _ctx(result_text=answer))
         assert result.artifact_uri == "s3://b/k"
 
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            # PR #523 review: a cited CI URL matched the old "/workflows" marker.
+            "Our CI is defined in `.github/workflows/ci.yml`. See "
+            "https://github.com/o/r/actions/workflows/ci.yml for the runs.",
+            # "running in the background" as genuine topic prose.
+            "Log compaction runs in the background, so writes are never blocked.",
+            # "watch progress" / "check back" as legitimate instructions in an answer.
+            "To watch progress of a deployment, run `bgagent watch <id>`; check back "
+            "in the console once it reports COMPLETED.",
+            # A fenced code block quoting a deferral-looking string must not trip it.
+            "Here is the guard's marker list:\n```\nresults will follow\n```\nThat is "
+            "the full answer.",
+        ],
+    )
+    def test_genuine_answer_with_colliding_tokens_not_rejected(self, monkeypatch, answer):
+        # #523: the guard was pared to full first-person deferral phrases and now
+        # strips code/URLs before matching, so answers that merely quote a token
+        # in a link, code, or topic prose still deliver.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        with patch("workflow.deliverers._upload_to_s3", return_value="s3://b/k"):
+            result = deliver("s3", _ctx(result_text=answer))
+        assert result.artifact_uri == "s3://b/k"
+
     def test_comment_writes_milestone_no_s3(self):
         progress = MagicMock()
         result = deliver("comment", _ctx(result_text="findings", progress=progress))

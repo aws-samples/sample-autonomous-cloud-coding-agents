@@ -21,6 +21,7 @@ applies, and the delivered URL surfaces on ``TaskDetail`` (``artifact_uri``).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -39,27 +40,46 @@ ARTIFACT_KEY_PREFIX = "artifacts"
 # deliverable (it is uploaded verbatim), so a message that merely PROMISES the
 # work is a silently-wrong artifact: the task would finalize COMPLETED with a
 # placeholder. The tool surface already blocks the Workflow/Task/Agent tools
-# that caused this (see runner._DISALLOWED_TOOLS), but this is the exit-path
-# backstop — if the model still ends with a deferral, we fail LOUDLY (a
-# debuggable FAILED) rather than upload the promise. Substring match, lowercased;
-# these are phrases that essentially never appear in a genuine finished answer.
+# that caused this (see runner._DISALLOWED_TOOLS), so this is only an exit-path
+# backstop — if the model STILL ends with a deferral, we fail LOUDLY (a
+# debuggable FAILED) rather than upload the promise.
+#
+# These are deliberately full-phrase, first-person deferral promises, not the
+# generic tokens they were pared down from: earlier candidates like "/workflows"
+# (a genuine answer citing `.../actions/workflows/ci.yml`), "watch progress",
+# "check back", or "running in the background" ("compaction runs in the
+# background") appear verbatim in legitimate finished prose, so matching them
+# threw away good output — strictly worse than the placeholder bug this guards.
+# Matching also runs on prose with code fences / inline code / URLs stripped
+# (see `_strip_code_and_urls`) so a cited URL or code snippet can't trip it.
 _DEFERRAL_MARKERS = (
     "results will follow",
     "report will follow",
     "will follow shortly",
-    "watch live progress",
-    "watch progress",
-    "/workflows",
-    "running in the background",
-    "is running in background",
-    "launched in the background",
+    "results will be ready shortly",
     "i'll deliver the",
     "i will deliver the",
-    "as soon as it completes",
-    "as soon as it finishes",
-    "check back",
+    "i'll share the results",
+    "i will share the results",
+    "watch live progress",
+    "the workflow is now running in the background",
+    "launched in the background",
+    "check back later",
     "come back later",
 )
+
+# Fenced blocks (```...```), inline code (`...`), and URLs. Stripped before
+# marker matching so a cited link or code sample in a genuine answer — e.g.
+# `.../actions/workflows/ci.yml` — can never be read as a deferral.
+_CODE_AND_URL_RE = re.compile(
+    r"```.*?```|`[^`]*`|https?://\S+",
+    re.DOTALL,
+)
+
+
+def _strip_code_and_urls(text: str) -> str:
+    """Remove code fences, inline code, and URLs — see ``_CODE_AND_URL_RE``."""
+    return _CODE_AND_URL_RE.sub(" ", text)
 
 
 def _reject_if_deferral(text: str) -> None:
@@ -67,11 +87,13 @@ def _reject_if_deferral(text: str) -> None:
 
     Guards the exact silently-wrong-artifact failure observed on a repo-less
     research task: the agent launched a background workflow and its final text
-    was "…is running… watch /workflows", which would have uploaded as the
-    artifact. Raising here routes to a terminal FAILED (see the pipeline
-    delivery gate) so the placeholder is never presented as the result.
+    promised results elsewhere, which would have uploaded as the artifact.
+    Raising here routes to a terminal FAILED (see the pipeline delivery gate) so
+    the placeholder is never presented as the result. Matches full deferral
+    phrases against prose with code/URLs stripped, to avoid false-FAILing a
+    genuine answer that merely quotes such a phrase in a link or snippet.
     """
-    lowered = text.lower()
+    lowered = _strip_code_and_urls(text).lower()
     hit = next((m for m in _DEFERRAL_MARKERS if m in lowered), None)
     if hit is not None:
         raise ValueError(

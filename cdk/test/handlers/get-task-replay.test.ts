@@ -35,7 +35,7 @@ jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 
-import { assembleBundle, handler, MAX_REPLAY_EVENTS } from '../../src/handlers/get-task-replay';
+import { assembleBundle, handler, MAX_REPLAY_EVENTS, MAX_REPLAY_EVENT_BYTES } from '../../src/handlers/get-task-replay';
 import type { EventRecord, ReplayBundle, TaskRecord } from '../../src/handlers/shared/types';
 
 const TASK_RECORD = {
@@ -125,6 +125,7 @@ describe('get-task-replay handler', () => {
     expect(data.verification).toEqual({ build_passed: true, lint_passed: false });
     expect(data.events).toHaveLength(2);
     expect(data.events[0].event_type).toBe('task_started');
+    expect(data.events_truncation).toBeNull(); // full list fit
     expect(typeof data.collected_at).toBe('string');
   });
 
@@ -200,7 +201,46 @@ describe('get-task-replay handler', () => {
 
     expect(data.events).toHaveLength(MAX_REPLAY_EVENTS); // capped, did not overshoot
     expect(limits[0]).toBe(MAX_REPLAY_EVENTS); // first page requests the full cap
-    // Truncation must be observable, not silent — a WARN line is emitted.
+    // Truncation must be observable — both in the logs AND in the bundle itself,
+    // so the operator reading the bundle (not just CloudWatch) sees the clip.
+    expect(data.events_truncation).toEqual({ reason: 'max_events', returned_events: MAX_REPLAY_EVENTS });
+    const warned = stdoutSpy.mock.calls.some(c => String(c[0]).includes('truncated'));
+    stdoutSpy.mockRestore();
+    expect(warned).toBe(true);
+  });
+
+  test('caps events at MAX_REPLAY_EVENT_BYTES before the count cap (6 MB Lambda limit)', async () => {
+    // #523: trace-mode events carry ~8-9 KB of previews, so the count cap alone
+    // permits a bundle well past Lambda's 6 MB response limit. A running byte
+    // bound must stop paging (+ WARN) well before MAX_REPLAY_EVENTS is reached.
+    const stdoutSpy = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const bigPreview = 'x'.repeat(9000); // ~9 KB per event, as in trace mode
+    mockSend.mockImplementation((cmd: { _type: string; input?: { Limit?: number } }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: TASK_RECORD });
+      const limit = cmd.input?.Limit ?? 0;
+      const items = Array.from({ length: limit }, (_, i) => ({
+        task_id: 'task-1',
+        event_id: `e${i}`,
+        event_type: 'agent_turn',
+        timestamp: 't',
+        metadata: { preview: bigPreview },
+      }));
+      return Promise.resolve({ Items: items, LastEvaluatedKey: { k: 1 } });
+    });
+
+    const result = await handler(makeEvent());
+    const { data } = JSON.parse(result.body);
+
+    // Stopped on bytes, far short of the count cap.
+    expect(data.events.length).toBeLessThan(MAX_REPLAY_EVENTS);
+    // The serialized response is right at the byte cap (± one 9 KB event; the
+    // handler measures raw events, the response omits stripped task_id/ttl, so
+    // it lands just under) and comfortably below Lambda's 6 MB limit.
+    const bytes = Buffer.byteLength(JSON.stringify(data.events), 'utf8');
+    expect(bytes).toBeGreaterThan(MAX_REPLAY_EVENT_BYTES - 20000);
+    expect(bytes).toBeLessThan(MAX_REPLAY_EVENT_BYTES + 20000);
+    // The bundle flags the byte-cap clip so a consumer can't read it as complete.
+    expect(data.events_truncation).toEqual({ reason: 'max_bytes', returned_events: data.events.length });
     const warned = stdoutSpy.mock.calls.some(c => String(c[0]).includes('truncated'));
     stdoutSpy.mockRestore();
     expect(warned).toBe(true);
@@ -262,10 +302,19 @@ describe('assembleBundle', () => {
     expect(MAX_REPLAY_EVENTS).toBeGreaterThan(0);
   });
 
-  test('embeds events verbatim', () => {
+  test('normalizes events to the /events feed shape (strip task_id/ttl, default metadata)', () => {
+    // #523: consumers moving between the events feed and the bundle must see the
+    // same event shape — task_id/ttl stripped, metadata always present — so
+    // `event.metadata.x` never throws on an event that stored no metadata.
     const base = { task_id: 't', user_id: 'u' } as unknown as TaskRecord;
-    const evs = EVENTS as unknown as EventRecord[];
-    expect(assembleBundle(base, evs).events).toBe(evs);
+    const evs = [
+      { task_id: 't', event_id: '01A', event_type: 'task_started', timestamp: 'ts', ttl: 123 },
+      { task_id: 't', event_id: '01B', event_type: 'agent_turn', timestamp: 'ts2', metadata: { turn: 1 } },
+    ] as unknown as EventRecord[];
+    expect(assembleBundle(base, evs).events).toEqual([
+      { event_id: '01A', event_type: 'task_started', timestamp: 'ts', metadata: {} },
+      { event_id: '01B', event_type: 'agent_turn', timestamp: 'ts2', metadata: { turn: 1 } },
+    ]);
   });
 });
 

@@ -172,18 +172,26 @@ export interface VerificationReport {
 }
 
 /**
- * Task event record as stored in DynamoDB. Mirrors
- * ``cdk/src/handlers/shared/types.ts::EventRecord``. The replay bundle embeds
- * the raw records verbatim (includes ``task_id`` and optional ``ttl``, unlike
- * the slimmer {@link TaskEvent} the events feed returns).
+ * A single event embedded in a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayEvent``. Normalized to the same
+ * shape as the events feed ({@link TaskEvent}): ``task_id``/``ttl`` stripped and
+ * ``metadata`` defaulted to ``{}``, so ``event.metadata.x`` is always safe.
  */
-export interface EventRecord {
-  readonly task_id: string;
+export interface ReplayEvent {
   readonly event_id: string;
   readonly event_type: string;
   readonly timestamp: string;
-  readonly metadata?: Record<string, unknown>;
-  readonly ttl?: number;
+  readonly metadata: Record<string, unknown>;
+}
+
+/**
+ * Truncation marker on a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayTruncation``. Non-null when the
+ * event list was clipped by a cap; ``null`` when the full list fit.
+ */
+export interface ReplayTruncation {
+  readonly reason: 'max_events' | 'max_bytes';
+  readonly returned_events: number;
 }
 
 /**
@@ -196,7 +204,8 @@ export interface ReplayBundle {
   readonly workflow_ref: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly prompt_version: string | null;
-  readonly events: EventRecord[];
+  readonly events: ReplayEvent[];
+  readonly events_truncation: ReplayTruncation | null;
   readonly verification: VerificationReport | null;
   readonly trace_uri: string | null;
   readonly otel_trace_id: string | null;
