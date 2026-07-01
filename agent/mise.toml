@@ -46,7 +46,7 @@ run = "uv run ty check"
 
 [tasks."lint:deadcode"]
 description = "Dead-code detection with vulture (#282, cairn MVG gate #6): unused functions/classes/methods ruff F cannot see. Config + allowlist in pyproject.toml / .vulture_allowlist.py."
-run = "uvx vulture"
+run = "uv run vulture"
 
 [tasks.test]
 description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"
