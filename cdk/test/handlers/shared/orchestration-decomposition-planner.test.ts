@@ -405,4 +405,26 @@ describe('bedrockInvokeModel — production invoke path', () => {
     });
     expect(await bedrockInvokeModel()('p')).toBe('kept');
   });
+
+  test('ABCA-490: bounds the call with an abort signal so a slow decomposer throws, not hangs', async () => {
+    // The send() options (2nd arg) must carry an AbortSignal so a large-issue
+    // stage-2 call is aborted by the client deadline instead of being killed
+    // mid-await by the Lambda ceiling (a silent hang). We assert the signal is
+    // present + is a real, not-yet-aborted AbortSignal.
+    mockSend.mockResolvedValue({ body: bodyOf({ content: [{ type: 'text', text: 'x' }] }) });
+    await bedrockInvokeModel()('p');
+    const opts = mockSend.mock.calls[0][1];
+    expect(opts).toBeDefined();
+    expect(opts.abortSignal).toBeInstanceOf(AbortSignal);
+    expect(opts.abortSignal.aborted).toBe(false);
+  });
+
+  test('ABCA-490: propagates a TimeoutError from an aborted call (caller maps to error)', async () => {
+    // When the deadline fires the SDK rejects; bedrockInvokeModel must NOT
+    // swallow it — the planner's try/catch turns it into { kind: 'error' }.
+    const err = new Error('aborted due to timeout');
+    err.name = 'TimeoutError';
+    mockSend.mockRejectedValue(err);
+    await expect(bedrockInvokeModel()('p')).rejects.toThrow(/timeout/i);
+  });
 });

@@ -81,6 +81,20 @@ export const SIZE_DEFAULT_BUDGET_USD: Readonly<Record<SubIssueSize, number>> = {
 /** Max tokens for the planner completion (a plan is small JSON). */
 const PLANNER_MAX_TOKENS = 4096;
 
+/**
+ * Per-call Bedrock request budget (ms). ABCA-490: a large issue's stage-2
+ * decomposer call can take ~50s (measured: 3055 output tokens ≈ 49s). Without a
+ * client-side deadline the ``send`` await runs until the Lambda's own timeout
+ * kills the whole invocation mid-flight — no exception, no logs, no user-facing
+ * comment (a silent hang + async-retry storm). Bounding the call turns that hang
+ * into a thrown ``TimeoutError`` that the flow's existing ``{kind:'error'}`` path
+ * catches and surfaces as an honest "couldn't plan in time" note. Set BELOW the
+ * webhook processor's Lambda timeout (WEBHOOK_PROCESSOR_TIMEOUT_SECONDS, 120s)
+ * with headroom for the comment-post + a preceding stage-1 assessor call, so the
+ * graceful path always wins the race against the ceiling.
+ */
+const PLANNER_INVOKE_TIMEOUT_MS = 75_000;
+
 export interface PlannerInput {
   /** The issue title. */
   readonly title: string;
@@ -473,6 +487,9 @@ export function bedrockInvokeModel(modelId: string = DEFAULT_DECOMPOSITION_MODEL
   return async (prompt: string): Promise<string> => {
     const { BedrockRuntimeClient, InvokeModelCommand } = await import('@aws-sdk/client-bedrock-runtime');
     if (!client) client = new BedrockRuntimeClient({});
+    // ABCA-490: bound the call so a slow (large-issue) decomposer surfaces as a
+    // thrown TimeoutError inside the Lambda ceiling, not a silent mid-await kill.
+    // The SDK aborts the in-flight request when the signal fires.
     const res = await client.send(new InvokeModelCommand({
       modelId,
       contentType: 'application/json',
@@ -483,7 +500,7 @@ export function bedrockInvokeModel(modelId: string = DEFAULT_DECOMPOSITION_MODEL
         temperature: 0,
         messages: [{ role: 'user', content: prompt }],
       }),
-    }));
+    }), { abortSignal: AbortSignal.timeout(PLANNER_INVOKE_TIMEOUT_MS) });
     const decoded = JSON.parse(new TextDecoder().decode(res.body)) as {
       content?: { type?: string; text?: string }[];
     };

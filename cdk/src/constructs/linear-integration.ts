@@ -36,8 +36,19 @@ import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table'
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Webhook-processor Lambda timeout (seconds). */
-const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
+/**
+ * Webhook-processor Lambda timeout (seconds). ABCA-490: the #299 Mode B
+ * decomposition planner makes up to two Bedrock ``InvokeModel`` calls, and the
+ * stage-2 decomposer on a large issue can take ~50s (measured: 3055 output
+ * tokens ≈ 49s). At the old 30s ceiling the Lambda was killed mid-call — a
+ * silent hang + async-retry storm with no user-facing comment. Raised to 120s so
+ * a legitimate large decomposition completes; the planner's own per-call budget
+ * (PLANNER_INVOKE_TIMEOUT_MS = 75s) is set below this so a genuinely-stuck call
+ * still throws into the graceful single-task fallback INSIDE this ceiling. Safe:
+ * the receiver returns 200 and async-invokes this processor (InvocationType
+ * 'Event'), so nothing waits synchronously on it.
+ */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
 
 /** Webhook-processor Lambda memory (MB). */
 const WEBHOOK_PROCESSOR_MEMORY_MB = 512;

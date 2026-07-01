@@ -23,6 +23,7 @@ import {
   PLAN_PROPOSAL_PREFIX,
   renderAlreadyDecomposedNote,
   renderCapRejection,
+  renderPlannerErrorNote,
   renderPlanProposal,
   renderSingleTaskNote,
 } from '../../../src/handlers/shared/orchestration-decomposition-render';
@@ -134,10 +135,11 @@ describe('renderPlanProposal — self-trigger guard (UX.20)', () => {
     expect(isBotAuthoredComment(renderPlanProposal(FANOUT, { autoRun: true }))).toBe(true);
   });
 
-  test('the cap-rejection / single-task / already-decomposed notes are also bot-authored', () => {
+  test('the cap-rejection / single-task / already-decomposed / planner-error notes are also bot-authored', () => {
     expect(isBotAuthoredComment(renderCapRejection('over cap'))).toBe(true);
     expect(isBotAuthoredComment(renderSingleTaskNote('small fix'))).toBe(true);
     expect(isBotAuthoredComment(renderAlreadyDecomposedNote())).toBe(true);
+    expect(isBotAuthoredComment(renderPlannerErrorNote())).toBe(true);
   });
 });
 
@@ -153,5 +155,17 @@ describe('the note renderers', () => {
 
   test('already-decomposed note explains the no-op', () => {
     expect(renderAlreadyDecomposedNote()).toContain('already has sub-issues');
+  });
+
+  test('planner-error note is honest + remedy-bearing, NOT the "single cohesive change" copy (ABCA-490)', () => {
+    const note = renderPlannerErrorNote();
+    // Honest about the failure, not a fake "single cohesive change" verdict.
+    expect(note).toMatch(/couldn't plan a breakdown/i);
+    expect(note).not.toMatch(/single cohesive change/i);
+    // Still tells the user the work falls back to one task.
+    expect(note).toMatch(/single task/i);
+    // Carries a concrete remedy (re-apply :decompose OR split manually).
+    expect(note).toMatch(/:decompose/);
+    expect(note).toMatch(/split the issue/i);
   });
 });
