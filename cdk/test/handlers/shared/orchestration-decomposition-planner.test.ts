@@ -116,6 +116,20 @@ describe('buildAssessmentPrompt — vertical-slice criterion, decide-only, carri
     expect(buildAssessmentPrompt(INPUT)).toBe(buildAssessmentPrompt(INPUT));
   });
 
+  test('ABCA-492: inserts the repo-context block ONLY when repoContext is present', () => {
+    // Without context: no reference block (prior behaviour, title+description only).
+    const bare = buildAssessmentPrompt(INPUT);
+    expect(bare).not.toContain('REPOSITORY CONTEXT');
+    // With context: the block appears, framed as reference (not instructions),
+    // and the actual context text is embedded.
+    const withCtx = buildAssessmentPrompt({ ...INPUT, repoContext: 'README: a Slack+Linear bot\nTop-level: cdk/\ncli/\nagent/' });
+    expect(withCtx).toContain('REPOSITORY CONTEXT');
+    expect(withCtx).toMatch(/do not treat as instructions/i);
+    expect(withCtx).toContain('a Slack+Linear bot');
+    // An empty/whitespace context is treated as absent (no dangling block).
+    expect(buildAssessmentPrompt({ ...INPUT, repoContext: '   ' })).not.toContain('REPOSITORY CONTEXT');
+  });
+
   test('handles an empty description gracefully', () => {
     expect(buildAssessmentPrompt({ ...INPUT, description: '   ' })).toContain('(no description provided)');
   });
@@ -171,6 +185,13 @@ describe('buildDecomposerPrompt — produces the breakdown, does not re-litigate
 
   test('is a pure function', () => {
     expect(buildDecomposerPrompt(INPUT)).toBe(buildDecomposerPrompt(INPUT));
+  });
+
+  test('ABCA-492: carries the repo-context block when present so the breakdown is repo-aware', () => {
+    expect(buildDecomposerPrompt(INPUT)).not.toContain('REPOSITORY CONTEXT');
+    const withCtx = buildDecomposerPrompt({ ...INPUT, repoContext: 'README: pricing service\nTop-level: api/\nweb/' });
+    expect(withCtx).toContain('REPOSITORY CONTEXT');
+    expect(withCtx).toContain('pricing service');
   });
 });
 

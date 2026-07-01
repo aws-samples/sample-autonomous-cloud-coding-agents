@@ -842,6 +842,9 @@ export class AgentStack extends Stack {
       // Image attachments extracted from issue descriptions upload here
       // (otherwise createTaskCore 503s "Attachment storage is not configured").
       attachmentsBucket: attachmentsBucket.bucket,
+      // ABCA-492: let the decomposition planner fetch repo context (README +
+      // tree) so a thin-but-big issue is judged against what the repo is.
+      githubTokenSecret,
     });
 
     // #247 Mode A: the reconciler consumes the TaskTable stream and

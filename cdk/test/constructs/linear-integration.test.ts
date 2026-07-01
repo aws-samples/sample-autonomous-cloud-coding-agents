@@ -23,6 +23,7 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { LinearIntegration } from '../../src/constructs/linear-integration';
 
 describe('LinearIntegration construct', () => {
@@ -257,5 +258,94 @@ describe('LinearIntegration construct — attachmentsBucket wiring', () => {
         ]),
       },
     });
+  });
+});
+
+describe('LinearIntegration construct — githubTokenSecret wiring (ABCA-492)', () => {
+  // The #299 decomposition planner reads the stack GitHub token to fetch repo
+  // context (README + tree) so a thin-but-big issue is judged against what the
+  // repo actually is. Env var + read grant are wired only when BOTH the
+  // orchestration table and a token secret are provided.
+  let template: Template;
+  let secretArnRef: string;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchTable', {
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+    const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
+    secretArnRef = stack.resolve(githubTokenSecret.secretArn).Ref;
+
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      orchestrationTable,
+      githubTokenSecret,
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('processor env includes GITHUB_TOKEN_SECRET_ARN when the secret is provided', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const processor = Object.values(fns).find(
+      (fn) => fn.Properties?.Environment?.Variables?.LINEAR_PROJECT_MAPPING_TABLE_NAME !== undefined,
+    );
+    expect(processor).toBeDefined();
+    expect(processor!.Properties.Environment.Variables.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
+  });
+
+  test('processor role gets GetSecretValue on the GitHub token secret', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(['secretsmanager:GetSecretValue']),
+            Effect: 'Allow',
+            Resource: Match.objectLike({ Ref: secretArnRef }),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('no GITHUB_TOKEN_SECRET_ARN when the secret is omitted (prior behaviour)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'NoSecretStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchTable', {
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api, userPool, taskTable, taskEventsTable, orchestrationTable,
+    });
+    const t = Template.fromStack(stack);
+    const fns = t.findResources('AWS::Lambda::Function');
+    const processor = Object.values(fns).find(
+      (fn) => fn.Properties?.Environment?.Variables?.LINEAR_PROJECT_MAPPING_TABLE_NAME !== undefined,
+    );
+    expect(processor!.Properties.Environment.Variables.GITHUB_TOKEN_SECRET_ARN).toBeUndefined();
   });
 });
