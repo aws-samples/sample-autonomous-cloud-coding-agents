@@ -65,6 +65,7 @@ import {
   looksLikeNewWork,
 } from './shared/orchestration-parent-comment';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { fetchRepoContextForPlanner, resolveGitHubTokenForContext } from './shared/orchestration-repo-context';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
@@ -86,6 +87,11 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 // #299 Mode B: model id for the decomposition judge+planner. Defaults inside
 // bedrockInvokeModel to the platform-standard Sonnet inference profile.
 const DECOMPOSITION_MODEL_ID = process.env.DECOMPOSITION_MODEL_ID;
+// ABCA-492: the stack GitHub token secret ARN. When set, the decomposition
+// planner is given repo context (README + top-level tree) so a thin-but-big
+// issue is judged against what the repo actually is. Best-effort — unset or
+// unreadable just means the planner runs on title+description as before.
+const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN;
 // #299 Mode B: TTL (seconds) for a persisted pending plan awaiting approval. A
 // week is ample for a human to approve; the row self-expires after.
 const PENDING_PLAN_TTL_SECONDS = 604_800;
@@ -680,6 +686,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       && (decompositionDecision.mode === 'decompose' || decompositionDecision.mode === 'auto')
     ) {
       const effects = buildDecompositionEffects(issue.id, workspaceId, repo, platformUserId, projectId, channelMetadata, resolvedAccessToken);
+      // ABCA-492: ground the assessor in the actual repo. The assessor otherwise
+      // sees only title+description, so a thin-but-big issue ("slack parity with
+      // linear") reads as one intertwined blob and declines to split — when in
+      // this codebase it is really several separable features. Fetch a small
+      // README+tree block (best-effort, bounded, undefined on any failure →
+      // planner behaves exactly as before). Only on the decompose/auto path.
+      const repoContext = await fetchRepoContextForPlanner(
+        repo,
+        await resolveGitHubTokenForContext(GITHUB_TOKEN_SECRET_ARN),
+      );
       const flow = await runDecompositionProposal({
         parentIssueId: issue.id,
         plannerInput: {
@@ -687,6 +703,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           description: issue.description ?? '',
           repo,
           maxSubIssues: decompositionCaps.max_sub_issues,
+          ...(repoContext && { repoContext }),
         },
         caps: decompositionCaps,
         autoRun: decompositionDecision.mode === 'auto',

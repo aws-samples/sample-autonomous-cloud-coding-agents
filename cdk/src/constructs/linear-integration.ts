@@ -125,6 +125,16 @@ export interface LinearIntegrationProps {
   /** Task retention in days for TTL computation. */
   readonly taskRetentionDays?: number;
 
+  /**
+   * Stack GitHub token secret (ABCA-492). When provided alongside
+   * ``orchestrationTable``, the webhook processor reads it to fetch repo
+   * context (README + top-level tree) for the #299 Mode B decomposition
+   * planner, so a thin-but-big issue is judged against what the repo actually
+   * is instead of title+description alone. Read-only (GetSecretValue). Omitted
+   * → the planner runs without repo context (its prior behaviour).
+   */
+  readonly githubTokenSecret?: secretsmanager.ISecret;
+
   /** Removal policy for Linear DynamoDB tables. */
   readonly removalPolicy?: RemovalPolicy;
 }
@@ -274,6 +284,12 @@ export class LinearIntegration extends Construct {
         // orchestration is enabled (the planner shares that gated path); the
         // handler defaults to the platform Sonnet profile if unset.
         ...(props.orchestrationTable && { DECOMPOSITION_MODEL_ID }),
+        // ABCA-492: stack GitHub token so the decomposition planner can fetch
+        // repo context (README + tree). Only wired when both orchestration is
+        // enabled and a token secret was provided; best-effort at runtime.
+        ...(props.orchestrationTable && props.githubTokenSecret && {
+          GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
+        }),
       },
       bundling: commonBundling,
     });
@@ -287,6 +303,11 @@ export class LinearIntegration extends Construct {
     // #331: read the user concurrency counter to throttle the root release.
     if (props.orchestrationTable && props.userConcurrencyTable) {
       props.userConcurrencyTable.grantReadData(webhookProcessorFn);
+    }
+    // ABCA-492: read the stack GitHub token so the decomposition planner can
+    // fetch repo context (README + tree). Read-only; best-effort at runtime.
+    if (props.orchestrationTable && props.githubTokenSecret) {
+      props.githubTokenSecret.grantRead(webhookProcessorFn);
     }
     // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
     // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant
