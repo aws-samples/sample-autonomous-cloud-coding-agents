@@ -309,7 +309,11 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
+      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
+      // (400 "on-demand throughput isn't supported"). Must match a granted
+      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,

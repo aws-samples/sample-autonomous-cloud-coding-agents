@@ -133,6 +133,19 @@ describe('AgentStack', () => {
     }
   });
 
+  test('default Haiku model env var is the cross-region inference profile (us.), not the bare model id', () => {
+    // Claude 4.x on Bedrock cannot be invoked on-demand by bare foundation-model
+    // id (400 "on-demand throughput isn't supported"); WebFetch's Haiku sub-calls
+    // hit this. The env var must be the granted us.* inference profile.
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    for (const rt of Object.values(runtimes)) {
+      const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
+        .Properties?.EnvironmentVariables ?? {};
+      expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+        .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    }
+  });
+
   test('outputs TaskTableName', () => {
     template.hasOutput('TaskTableName', {
       Description: 'Name of the DynamoDB task state table',
