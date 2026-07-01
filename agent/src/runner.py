@@ -348,7 +348,27 @@ _WRITE_TOOLS = frozenset(("Write", "Edit"))
 # ``bypassPermissions`` they are simply allowed. ``disallowed_tools`` is the
 # only hard lock (it removes the tool from the model's context even under
 # bypass), so the block must live there, not in the allow-list.
-_DISALLOWED_TOOLS = ["Workflow", "Task", "Agent"]
+# ``Workflow`` (background multi-agent orchestration) is the one that bit us;
+# ``Task``/``Agent`` are the sub-agent spawners (name varies by CLI version, so
+# block both); ``Monitor`` streams a background command's output mid-turn;
+# ``SendMessage`` resumes/relaunches background agents; the ``Cron*`` tools
+# schedule deferred work. All are "return now, work continues off-session"
+# vectors a one-shot task cannot await. NOT blockable here: background ``Bash``
+# (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
+# Bash child dies with the MicroVM on return, so it can't produce
+# arrives-later work the way a cloud Workflow does; the deliver-artifact
+# deferral guard (deliverers._reject_if_deferral) is the backstop for anything
+# that still ends in a placeholder.
+_DISALLOWED_TOOLS = [
+    "Workflow",
+    "Task",
+    "Agent",
+    "Monitor",
+    "SendMessage",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+]
 
 
 def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
@@ -363,8 +383,13 @@ def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
     IMPORTANT: this list only governs auto-approval, NOT the reachable surface.
     Per the Agent SDK, a tool omitted here is not blocked — it falls through to
     ``permission_mode`` (``bypassPermissions`` ⇒ allowed). The actual surface
-    lock is ``_DISALLOWED_TOOLS`` passed to ``disallowed_tools`` (plus the Cedar
-    PreToolUse hooks). Do NOT rely on this allow-list to keep a tool out.
+    lock is ``_DISALLOWED_TOOLS`` passed to ``disallowed_tools``. NOTE the Cedar
+    PreToolUse hooks are NOT a backstop for an unknown tool name: the engine
+    default-permits on no-match (``policy.py``), so it only denies the specific
+    actions it has ``forbid`` rules for (e.g. Write/Edit under read_only) —
+    ``Workflow``/``Task``/``Agent`` match nothing and would be allowed. So
+    ``disallowed_tools`` is the ONLY thing keeping them out; do not rely on this
+    allow-list, nor on Cedar, to remove a tool from the surface.
     """
     tools = list(config.allowed_tools) if config.allowed_tools else list(_FULL_TOOL_SURFACE)
     if config.read_only:

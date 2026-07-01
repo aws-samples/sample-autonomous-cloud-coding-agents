@@ -557,10 +557,13 @@ export async function createTaskCore(
 
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
-        // ``repo`` is intentionally NOT required here: a repo-less workflow
-        // (#248 Phase 3) persists no repo, so requiring it would wrongly reject
-        // a valid repo-less replay as "incomplete".
-        const requiredReplayFields = ['task_id', 'user_id', 'status', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
+        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
+        // repo-less workflow (#248 Phase 3) persists no repo and an empty
+        // ``branch_name`` (it never branches). Both are legitimately falsy on a
+        // valid repo-less record, so a falsy check would wrongly reject a valid
+        // repo-less replay as "incomplete" (500). Only the true identity/audit
+        // fields that every record must carry are required.
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
         const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
         if (missingFields.length > 0) {
           logger.error('Idempotent replay: existing task record is incomplete', {

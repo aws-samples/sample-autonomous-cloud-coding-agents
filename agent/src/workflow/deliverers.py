@@ -34,6 +34,52 @@ if TYPE_CHECKING:
 MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 ARTIFACT_KEY_PREFIX = "artifacts"
 
+# Deferral / deflection phrases that mean "the deliverable is NOT here — it will
+# arrive later / is running elsewhere". A repo-less task's final message IS the
+# deliverable (it is uploaded verbatim), so a message that merely PROMISES the
+# work is a silently-wrong artifact: the task would finalize COMPLETED with a
+# placeholder. The tool surface already blocks the Workflow/Task/Agent tools
+# that caused this (see runner._DISALLOWED_TOOLS), but this is the exit-path
+# backstop — if the model still ends with a deferral, we fail LOUDLY (a
+# debuggable FAILED) rather than upload the promise. Substring match, lowercased;
+# these are phrases that essentially never appear in a genuine finished answer.
+_DEFERRAL_MARKERS = (
+    "results will follow",
+    "report will follow",
+    "will follow shortly",
+    "watch live progress",
+    "watch progress",
+    "/workflows",
+    "running in the background",
+    "is running in background",
+    "launched in the background",
+    "i'll deliver the",
+    "i will deliver the",
+    "as soon as it completes",
+    "as soon as it finishes",
+    "check back",
+    "come back later",
+)
+
+
+def _reject_if_deferral(text: str) -> None:
+    """Fail the deliver step if the final message defers instead of delivering.
+
+    Guards the exact silently-wrong-artifact failure observed on a repo-less
+    research task: the agent launched a background workflow and its final text
+    was "…is running… watch /workflows", which would have uploaded as the
+    artifact. Raising here routes to a terminal FAILED (see the pipeline
+    delivery gate) so the placeholder is never presented as the result.
+    """
+    lowered = text.lower()
+    hit = next((m for m in _DEFERRAL_MARKERS if m in lowered), None)
+    if hit is not None:
+        raise ValueError(
+            "deliver_artifact: final message defers the work rather than "
+            f"delivering it (matched {hit!r}); refusing to upload a placeholder "
+            "artifact. The deliverable must be complete in-session."
+        )
+
 
 @dataclass(frozen=True)
 class DeliveryResult:
@@ -80,6 +126,9 @@ def _artifact_body(ctx: StepContext) -> bytes:
     text = ctx.agent_result.result_text if ctx.agent_result else ""
     if not text:
         raise ValueError("deliver_artifact: agent produced no result text to deliver")
+    # Reject a deferral/placeholder message before it can be uploaded as the
+    # deliverable (exit-path backstop to the runner tool block).
+    _reject_if_deferral(text)
     # Bound memory BEFORE encoding. UTF-8 uses ≥1 byte per character, so a string
     # whose character count already exceeds the byte cap cannot possibly fit —
     # reject it without materializing a second full copy as bytes. This is what
