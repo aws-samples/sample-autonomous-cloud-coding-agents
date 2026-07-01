@@ -31,7 +31,7 @@ from models import (  # noqa: F401
     TaskResult,
     TokenUsage,
 )
-from pipeline import main, run_task  # noqa: F401
+from pipeline import main, run_task, run_task_from_payload  # noqa: F401
 from post_hooks import (  # noqa: F401
     ensure_committed,
     ensure_pr,
