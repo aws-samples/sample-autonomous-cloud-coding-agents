@@ -17,10 +17,20 @@
  *  SOFTWARE.
  */
 
-import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
+
+/** Render a USD cost as ``$0.0000`` (shared by the detail view and replay bundle). */
+export function formatCostUsd(cost: number | string): string {
+  return `$${Number(cost).toFixed(COST_USD_DECIMALS)}`;
+}
+
+/** Render a pass/fail gate verdict; ``dash`` for a null (gate did not run). */
+export function formatVerdict(passed: boolean | null, dash = '—'): string {
+  return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
+}
 
 /** Format a TaskDetail as a key-value detail view. */
 export function formatTaskDetail(task: TaskDetail): string {
@@ -41,7 +51,11 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.task_description) {
     lines.push(`Description: ${task.task_description}`);
   }
-  lines.push(`Branch:      ${task.branch_name}`);
+  // Repo-less workflows have no branch (branch_name is ''); only show the line
+  // when there is one.
+  if (task.branch_name) {
+    lines.push(`Branch:      ${task.branch_name}`);
+  }
   if (task.max_turns !== null) {
     lines.push(`Max Turns:   ${task.max_turns}`);
   }
@@ -74,10 +88,10 @@ export function formatTaskDetail(task: TaskDetail): string {
     lines.push(`Duration:    ${task.duration_s}s`);
   }
   if (task.cost_usd != null) {
-    lines.push(`Cost:        $${Number(task.cost_usd).toFixed(COST_USD_DECIMALS)}`);
+    lines.push(`Cost:        ${formatCostUsd(task.cost_usd)}`);
   }
   if (task.build_passed !== null) {
-    lines.push(`Build:       ${task.build_passed ? 'PASSED' : 'FAILED'}`);
+    lines.push(`Build:       ${formatVerdict(task.build_passed)}`);
   }
   return lines.join('\n');
 }
@@ -353,6 +367,48 @@ export function formatWebhookDetail(webhook: WebhookDetail): string {
 /** Format data as JSON. */
 export function formatJson(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+/**
+ * Format a replay bundle (#515) as a human-readable summary: the correlation
+ * metadata as aligned key-value lines, then a compact chronological event list.
+ * Use {@link formatJson} for the machine-readable form. Absent fields render as
+ * ``—`` so the operator sees "not captured" explicitly rather than a blank.
+ */
+export function formatReplay(bundle: ReplayBundle): string {
+  const dash = '—';
+  const lines: string[] = [
+    `Task:        ${bundle.task_id}`,
+    `Workflow:    ${bundle.resolved_workflow ? `${bundle.resolved_workflow.id}@${bundle.resolved_workflow.version}` : (bundle.workflow_ref ?? dash)}`,
+    `Prompt ver:  ${bundle.prompt_version ?? dash}`,
+    `Cost:        ${bundle.cost_usd != null ? formatCostUsd(bundle.cost_usd) : dash}`,
+    `OTEL trace:  ${bundle.otel_trace_id ?? dash}`,
+    `Session:     ${bundle.session_id ?? dash}`,
+    `Trace URI:   ${bundle.trace_uri ?? dash}`,
+  ];
+  if (bundle.verification) {
+    const v = bundle.verification;
+    lines.push(`Build:       ${formatVerdict(v.build_passed, dash)}`);
+    lines.push(`Lint:        ${formatVerdict(v.lint_passed, dash)}`);
+  } else {
+    lines.push(`Verification: ${dash} (no gate result persisted)`);
+  }
+  lines.push(`Collected:   ${bundle.collected_at}`);
+  lines.push('');
+  const truncated = bundle.events_truncation;
+  lines.push(`Events (${bundle.events.length}${truncated ? ', TRUNCATED' : ''}):`);
+  if (bundle.events.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const e of bundle.events) {
+      lines.push(`  ${e.timestamp}  ${e.event_type}`);
+    }
+  }
+  if (truncated) {
+    const cap = truncated.reason === 'max_bytes' ? 'size' : 'count';
+    lines.push(`  … list clipped at the ${cap} cap — use \`bgagent events ${bundle.task_id}\` for the full feed.`);
+  }
+  return lines.join('\n');
 }
 
 function formatErrorLines(task: TaskDetail): string[] {

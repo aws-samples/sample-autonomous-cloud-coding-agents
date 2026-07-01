@@ -579,6 +579,25 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
+    // Operator replay bundle (#515): aggregates TaskRecord + chronological
+    // TaskEvents. Reads both tables; commonEnv already carries both table names.
+    // Heaviest read path — GetItem + a multi-page Query loop (up to
+    // MAX_REPLAY_EVENTS / ~5 pages) + full-bundle serialization — so it gets the
+    // raised timeout/memory the other heavy handlers use rather than the 3s /
+    // 128MB defaults, which risk INIT-timeout 502s and OOM on long histories.
+    const getTaskReplayFn = new lambda.NodejsFunction(this, 'GetTaskReplayFn', {
+      entry: path.join(handlersDir, 'get-task-replay.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_24_X,
+      architecture: Architecture.ARM_64,
+      environment: commonEnv,
+      bundling: commonBundling,
+      timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+      // 512MB (not the 256MB standard): the bundle holds up to
+      // MAX_REPLAY_EVENT_BYTES of events in memory during serialization.
+      memorySize: SCREENING_HANDLER_MEMORY_MB,
+    });
+
     // --- IAM grants ---
     // Read-write for create and cancel (write task + event)
     props.taskTable.grantReadWriteData(createTaskFn);
@@ -615,6 +634,9 @@ export class TaskApi extends Construct {
     props.taskTable.grantReadData(listTasksFn);
     props.taskTable.grantReadData(getTaskEventsFn);
     props.taskEventsTable.grantReadData(getTaskEventsFn);
+    // Replay reads the task record (ownership + fields) and its events.
+    props.taskTable.grantReadData(getTaskReplayFn);
+    props.taskEventsTable.grantReadData(getTaskReplayFn);
 
     // Grant createTask permission to invoke the orchestrator
     if (props.orchestratorFunctionArn) {
@@ -698,7 +720,7 @@ export class TaskApi extends Construct {
     }
 
     // Collect all Lambda functions for cdk-nag suppressions
-    const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn];
+    const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn, getTaskReplayFn];
     if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
     // --- API resource tree: /tasks ---
@@ -712,6 +734,11 @@ export class TaskApi extends Construct {
 
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+
+    // Operator replay bundle (#515): GET /tasks/{task_id}/replay. Same Cognito
+    // owner-scoped auth as GET /tasks/{task_id} (cognitoAuthOptions).
+    const replay = taskById.addResource('replay');
+    replay.addMethod('GET', new apigw.LambdaIntegration(getTaskReplayFn), cognitoAuthOptions);
 
     // --- Confirm-uploads endpoint: POST /tasks/{task_id}/confirm-uploads ---
     if (confirmUploadsFn) {

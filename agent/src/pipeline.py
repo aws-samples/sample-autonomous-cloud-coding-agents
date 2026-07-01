@@ -26,7 +26,7 @@ from context import assemble_prompt, fetch_github_issue
 from jira_reactions import comment_task_finished, comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
-from observability import task_span
+from observability import current_otel_trace_id, task_span
 from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
@@ -363,6 +363,7 @@ def _run_repoless_task(
         cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
         cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
         trace_s3_uri=trace_s3_uri,
+        otel_trace_id=current_otel_trace_id(),
     )
     result_dict = result.model_dump()
 
@@ -1127,6 +1128,7 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
+                otel_trace_id=current_otel_trace_id(),
             )
 
             result_dict = result.model_dump()
@@ -1137,8 +1139,11 @@ def run_task(
                 root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
             if result.turns:
                 root_span.set_attribute("agent.turns", int(result.turns))
-            root_span.set_attribute("build.passed", result.build_passed)
-            root_span.set_attribute("lint.passed", result.lint_passed)
+            # On the repo path these are always real bools (computed by the post
+            # hooks above); coalesce for the span attribute since the field type
+            # is now tri-state (bool | None) for the repo-less/crash case.
+            root_span.set_attribute("build.passed", bool(result.build_passed))
+            root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
             root_span.set_attribute("task.duration_s", result.duration_s)
             if usage:
@@ -1192,6 +1197,10 @@ def run_task(
                 task_id=config.task_id,
                 agent_status=agent_for_chain.status if agent_for_chain else "unknown",
                 trace_s3_uri=crash_trace_s3_uri,
+                # Still inside `with task_span()`, so the id is live — capture it
+                # here too or FAILED tasks (the primary post-mortem case for the
+                # replay bundle, #515) persist otel_trace_id: null.
+                otel_trace_id=current_otel_trace_id(),
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.

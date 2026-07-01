@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from config import AGENT_WORKSPACE
@@ -132,7 +132,13 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     # writes, while the SDK is waiting on stdout).  The stderr callback in
     # ClaudeAgentOptions cannot drain fast enough to prevent this.
     os.environ.pop("ANTHROPIC_LOG", None)
-    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "anthropic.claude-haiku-4-5-20251001-v1:0"
+    # Small/fast auxiliary model (WebFetch summarization etc.), from config like
+    # ANTHROPIC_MODEL above — resolved from the deployed ANTHROPIC_DEFAULT_HAIKU_MODEL
+    # env (agent.ts) with a platform default in config.py. Must be a cross-region
+    # INFERENCE-PROFILE id (``us.`` prefix): Claude 4.x cannot be invoked on-demand
+    # by bare model id on Bedrock (400 "on-demand throughput isn't supported",
+    # seen on WebFetch's Haiku sub-calls); config.py resolves that default.
+    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.haiku_model
 
     # Save OTLP endpoint/protocol configured by ADOT auto-instrumentation
     # before stripping, so we can re-use it for Claude Code CLI telemetry.
@@ -335,29 +341,85 @@ _FULL_TOOL_SURFACE = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch
 # read-only workflow.
 _WRITE_TOOLS = frozenset(("Write", "Edit"))
 
+# Tools that DEFER work off-session and are hard-blocked for every task. These
+# launch detached / cross-session orchestration that a one-shot headless agent
+# has no supervisor to await: the ``Workflow`` tool returns a task id and runs
+# in the background (its result arrives via a notification into an interactive
+# session that does not exist here), and ``Task``/``Agent`` can spawn background
+# subagents. We saw a repo-less task launch a background ``Workflow`` and then
+# finalize on the first ResultMessage with a placeholder artifact while the real
+# research ran on, detached (task 01KWDEFQH6...). CRITICAL: ``allowed_tools`` is
+# only an auto-APPROVE list — per the Agent SDK docs it does NOT restrict the
+# surface; unlisted tools fall through to ``permission_mode``, and under
+# ``bypassPermissions`` they are simply allowed. ``disallowed_tools`` is the
+# only hard lock (it removes the tool from the model's context even under
+# bypass), so the block must live there, not in the allow-list.
+# ``Workflow`` (background multi-agent orchestration) is the one that bit us;
+# ``Task``/``Agent`` are the sub-agent spawners (name varies by CLI version, so
+# block both); ``Monitor`` streams a background command's output mid-turn;
+# ``SendMessage`` resumes/relaunches background agents; the ``Cron*`` tools
+# schedule deferred work. All are "return now, work continues off-session"
+# vectors a one-shot task cannot await. NOT blockable here: background ``Bash``
+# (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
+# Bash child dies with the MicroVM on return, so it can't produce
+# arrives-later work the way a cloud Workflow does; the deliver-artifact
+# deferral guard (deliverers._reject_if_deferral) is the backstop for anything
+# that still ends in a placeholder.
+_DISALLOWED_TOOLS = [
+    "Workflow",
+    "Task",
+    "Agent",
+    "Monitor",
+    "SendMessage",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+]
+
 
 def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
-    """Resolve the SDK ``allowed_tools`` list for a task.
-
-    This is the second enforcement layer the design promises alongside Cedar's
-    ``context.read_only`` (WORKFLOWS.md §"Agent configuration"):
+    """Resolve the SDK ``allowed_tools`` (auto-approve) list for a task.
 
     - The resolved workflow's ``agent_config.allowed_tools`` (threaded onto
       ``config.allowed_tools``) is passed to the SDK verbatim. An empty list —
       legacy/batch callers that never resolved a workflow — falls back to the
       built-in full surface.
-    - ``Write``/``Edit`` are dropped whenever ``config.read_only`` is true, so a
-      read-only lane physically cannot mutate the tree even where Cedar's
-      ``read_only`` rules do not fire (e.g. a ``read_only:false`` default that
-      restricts tools by list alone, like ``default/agent-v1``).
+    - ``Write``/``Edit`` are dropped whenever ``config.read_only`` is true.
 
-    The Cedar PreToolUse hooks still enforce per-task restrictions on top of
-    whatever is allowed here; this list only ever narrows the surface.
+    IMPORTANT: this list only governs auto-approval, NOT the reachable surface.
+    Per the Agent SDK, a tool omitted here is not blocked — it falls through to
+    ``permission_mode`` (``bypassPermissions`` ⇒ allowed). The actual surface
+    lock is ``_DISALLOWED_TOOLS`` passed to ``disallowed_tools``. NOTE the Cedar
+    PreToolUse hooks are NOT a backstop for an unknown tool name: the engine
+    default-permits on no-match (``policy.py``), so it only denies the specific
+    actions it has ``forbid`` rules for (e.g. Write/Edit under read_only) —
+    ``Workflow``/``Task``/``Agent`` match nothing and would be allowed. So
+    ``disallowed_tools`` is the ONLY thing keeping them out; do not rely on this
+    allow-list, nor on Cedar, to remove a tool from the surface.
     """
     tools = list(config.allowed_tools) if config.allowed_tools else list(_FULL_TOOL_SURFACE)
     if config.read_only:
         tools = [t for t in tools if t not in _WRITE_TOOLS]
     return tools
+
+
+def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "project", "local"]]:
+    """Which on-disk Claude Code settings the CLI may load for this task.
+
+    A task with a cloned repo loads ``["project"]`` so the repo's own
+    ``.claude/`` config is honored. A task with no repo loads nothing —
+    defense-in-depth that also stops a stray on-disk skill (e.g. one that spawns
+    a background Workflow) from being reachable. Kept as a named helper so the
+    policy is unit-testable without driving the SDK.
+
+    Keys on ``repo_url`` (repo presence), NOT ``requires_repo`` (a static
+    workflow property): a repo-optional workflow given a repo takes the
+    repo-bound clone path (``pipeline.py`` gates on ``not requires_repo and not
+    repo_url``), so keying on ``requires_repo`` would clone the repo but drop
+    its ``.claude/`` config. Mirrors ``create-task-core.ts`` keying
+    ``branch_name`` on repo presence for the same reason.
+    """
+    return ["project"] if config.repo_url else []
 
 
 async def run_agent(
@@ -439,10 +501,15 @@ async def run_agent(
         model=config.anthropic_model,
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
+        # Hard surface lock (NOT allowed_tools — that is auto-approve only). Keeps
+        # off-session/defer vectors out of the model's context even under
+        # bypassPermissions, so a one-shot headless task cannot launch detached
+        # work it has no supervisor to await. See _DISALLOWED_TOOLS.
+        disallowed_tools=list(_DISALLOWED_TOOLS),
         permission_mode="bypassPermissions",
         cwd=cwd,
         max_turns=config.max_turns,
-        setting_sources=["project"],
+        setting_sources=_resolve_setting_sources(config),
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,

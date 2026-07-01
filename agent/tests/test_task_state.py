@@ -347,6 +347,65 @@ class TestWriteTerminalArtifactUri:
         )
         assert "artifact_uri" not in calls[0]["UpdateExpression"]
 
+
+class TestWriteTerminalReplayFields:
+    """#515 — write_terminal persists the verification verdict and otel_trace_id
+    so the replay bundle carries them. Regression guard: build_passed/lint_passed
+    were historically present on TaskResult but dropped by the write allowlist."""
+
+    @staticmethod
+    def _capture(monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        return calls
+
+    def test_build_and_lint_passed_written(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal("t-v", "COMPLETED", {"build_passed": True, "lint_passed": False})
+        expr = calls[0]["UpdateExpression"]
+        values = calls[0]["ExpressionAttributeValues"]
+        assert "build_passed = :bp" in expr
+        assert "lint_passed = :lp" in expr
+        assert values[":bp"] is True
+        assert values[":lp"] is False
+
+    def test_build_passed_false_is_written_not_dropped(self, monkeypatch):
+        # `is not None` guard, not truthiness — a failing build must persist.
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal("t-fail", "FAILED", {"build_passed": False})
+        assert calls[0]["ExpressionAttributeValues"][":bp"] is False
+
+    def test_otel_trace_id_written_when_present(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal(
+            "t-otel", "COMPLETED", {"otel_trace_id": "aabbccddeeff00112233445566778899"}
+        )
+        expr = calls[0]["UpdateExpression"]
+        assert "otel_trace_id = :otid" in expr
+        assert calls[0]["ExpressionAttributeValues"][":otid"] == "aabbccddeeff00112233445566778899"
+
+    def test_otel_trace_id_omitted_when_absent(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal("t-nootel", "COMPLETED", {"pr_url": "x"})
+        assert "otel_trace_id" not in calls[0]["UpdateExpression"]
+
+    def test_build_lint_omitted_when_none(self, monkeypatch):
+        # Repo-less / crash tasks leave build_passed/lint_passed as None (the
+        # gate did not run). They must be OMITTED, so the replay bundle reports
+        # verification:null rather than a fictional build_passed:false.
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal(
+            "t-repoless", "COMPLETED", {"build_passed": None, "lint_passed": None}
+        )
+        expr = calls[0]["UpdateExpression"]
+        assert "build_passed" not in expr
+        assert "lint_passed" not in expr
+
     def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
         self,
         monkeypatch,

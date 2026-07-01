@@ -557,10 +557,13 @@ export async function createTaskCore(
 
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
-        // ``repo`` is intentionally NOT required here: a repo-less workflow
-        // (#248 Phase 3) persists no repo, so requiring it would wrongly reject
-        // a valid repo-less replay as "incomplete".
-        const requiredReplayFields = ['task_id', 'user_id', 'status', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
+        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
+        // repo-less workflow (#248 Phase 3) persists no repo and an empty
+        // ``branch_name`` (it never branches). Both are legitimately falsy on a
+        // valid repo-less record, so a falsy check would wrongly reject a valid
+        // repo-less replay as "incomplete" (500). Only the true identity/audit
+        // fields that every record must carry are required.
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
         const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
         if (missingFields.length > 0) {
           logger.error('Idempotent replay: existing task record is incomplete', {
@@ -593,9 +596,17 @@ export async function createTaskCore(
 
   // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
-  const branchName = isPrTask
-    ? 'pending:pr_resolution'
-    : generateBranchName(taskId, body.task_description ?? body.repo);
+  // A task with no repo never clones, branches, or opens a PR (the agent prompt
+  // forbids it), so a bgagent/<id>/... branch name is misleading noise. Key off
+  // the actual absence of a repo, NOT workflow.requiresRepo — a repo-OPTIONAL
+  // workflow that WAS given a repo runs the repo-bound path and still gets a
+  // branch. PR tasks resolve their real branch later; other repo-bound tasks
+  // get the generated working-branch name.
+  const branchName = !body.repo
+    ? ''
+    : isPrTask
+      ? 'pending:pr_resolution'
+      : generateBranchName(taskId, body.task_description ?? body.repo);
 
   // Determine initial status: PENDING_UPLOADS if any presigned attachments need uploading,
   // otherwise SUBMITTED (inline/url/no attachments go straight to the pipeline).

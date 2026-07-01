@@ -143,6 +143,15 @@ Task conversations, tool calls, decisions, and outcomes are persisted with metad
 - **Logs** - Application and usage logs retained for 90 days in CloudWatch. Traces flow to X-Ray via CloudWatch Transaction Search.
 - **Model invocation logs** - Bedrock model invocation logging with 90-day retention for compliance and prompt injection investigation.
 
+## Task replay bundle
+
+For post-mortems, eval-harness input, and compliance export, the API exposes a single **replay bundle** per task that aggregates the telemetry stores above — chronological `TaskEvents`, the verification verdict, the `--trace` S3 URI, `prompt_version` / `workflow_ref`, the OTEL trace id (or `session_id` as the correlation proxy when absent), and cost — without manually correlating CloudWatch, DynamoDB, and S3. It reads existing stores only (no new persistence).
+
+- **API:** `GET /v1/tasks/{task_id}/replay` (Cognito, owner-scoped — same auth as task read). Schema and example in [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract#get-replay-bundle).
+- **CLI:** `bgagent replay <task-id> [--json] [--output <file>]`.
+
+Fields whose source did not run for a given task are returned `null`/empty (e.g. no `--trace` → `trace_uri: null`), so the schema is stable for consumers.
+
 ## Deployment safety
 
 Agent sessions run for up to 8 hours. CDK deployments replace Lambda functions, which can orphan in-flight orchestrator executions. The platform handles this through multiple mechanisms:

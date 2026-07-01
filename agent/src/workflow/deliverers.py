@@ -21,6 +21,7 @@ applies, and the delivered URL surfaces on ``TaskDetail`` (``artifact_uri``).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,73 @@ if TYPE_CHECKING:
 # agent's final message); 5 MiB is generous for that and bounds a runaway upload.
 MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 ARTIFACT_KEY_PREFIX = "artifacts"
+
+# Deferral / deflection phrases that mean "the deliverable is NOT here — it will
+# arrive later / is running elsewhere". A repo-less task's final message IS the
+# deliverable (it is uploaded verbatim), so a message that merely PROMISES the
+# work is a silently-wrong artifact: the task would finalize COMPLETED with a
+# placeholder. The tool surface already blocks the Workflow/Task/Agent tools
+# that caused this (see runner._DISALLOWED_TOOLS), so this is only an exit-path
+# backstop — if the model STILL ends with a deferral, we fail LOUDLY (a
+# debuggable FAILED) rather than upload the promise.
+#
+# These are deliberately full-phrase, first-person deferral promises, not the
+# generic tokens they were pared down from: earlier candidates like "/workflows"
+# (a genuine answer citing `.../actions/workflows/ci.yml`), "watch progress",
+# "check back", or "running in the background" ("compaction runs in the
+# background") appear verbatim in legitimate finished prose, so matching them
+# threw away good output — strictly worse than the placeholder bug this guards.
+# Matching also runs on prose with code fences / inline code / URLs stripped
+# (see `_strip_code_and_urls`) so a cited URL or code snippet can't trip it.
+_DEFERRAL_MARKERS = (
+    "results will follow",
+    "report will follow",
+    "will follow shortly",
+    "results will be ready shortly",
+    "i'll deliver the",
+    "i will deliver the",
+    "i'll share the results",
+    "i will share the results",
+    "watch live progress",
+    "the workflow is now running in the background",
+    "launched in the background",
+    "check back later",
+    "come back later",
+)
+
+# Fenced blocks (```...```), inline code (`...`), and URLs. Stripped before
+# marker matching so a cited link or code sample in a genuine answer — e.g.
+# `.../actions/workflows/ci.yml` — can never be read as a deferral.
+_CODE_AND_URL_RE = re.compile(
+    r"```.*?```|`[^`]*`|https?://\S+",
+    re.DOTALL,
+)
+
+
+def _strip_code_and_urls(text: str) -> str:
+    """Remove code fences, inline code, and URLs — see ``_CODE_AND_URL_RE``."""
+    return _CODE_AND_URL_RE.sub(" ", text)
+
+
+def _reject_if_deferral(text: str) -> None:
+    """Fail the deliver step if the final message defers instead of delivering.
+
+    Guards the exact silently-wrong-artifact failure observed on a repo-less
+    research task: the agent launched a background workflow and its final text
+    promised results elsewhere, which would have uploaded as the artifact.
+    Raising here routes to a terminal FAILED (see the pipeline delivery gate) so
+    the placeholder is never presented as the result. Matches full deferral
+    phrases against prose with code/URLs stripped, to avoid false-FAILing a
+    genuine answer that merely quotes such a phrase in a link or snippet.
+    """
+    lowered = _strip_code_and_urls(text).lower()
+    hit = next((m for m in _DEFERRAL_MARKERS if m in lowered), None)
+    if hit is not None:
+        raise ValueError(
+            "deliver_artifact: final message defers the work rather than "
+            f"delivering it (matched {hit!r}); refusing to upload a placeholder "
+            "artifact. The deliverable must be complete in-session."
+        )
 
 
 @dataclass(frozen=True)
@@ -80,6 +148,9 @@ def _artifact_body(ctx: StepContext) -> bytes:
     text = ctx.agent_result.result_text if ctx.agent_result else ""
     if not text:
         raise ValueError("deliver_artifact: agent produced no result text to deliver")
+    # Reject a deferral/placeholder message before it can be uploaded as the
+    # deliverable (exit-path backstop to the runner tool block).
+    _reject_if_deferral(text)
     # Bound memory BEFORE encoding. UTF-8 uses ≥1 byte per character, so a string
     # whose character count already exceeds the byte cap cannot possibly fit —
     # reject it without materializing a second full copy as bytes. This is what

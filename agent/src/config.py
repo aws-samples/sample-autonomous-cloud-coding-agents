@@ -453,6 +453,7 @@ def build_config(
     issue_number: str = "",
     github_token: str = "",
     anthropic_model: str = "",
+    haiku_model: str = "",
     max_turns: int = 10,
     max_budget_usd: float | None = None,
     aws_region: str = "",
@@ -483,6 +484,12 @@ def build_config(
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
         "ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6"
+    )
+    # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
+    # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
+    # be an inference-profile id (us.*), not a bare model id (see runner).
+    resolved_haiku_model = haiku_model or os.environ.get(
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     )
 
     # Resolve the workflow id (the create-task boundary already pinned it; local
@@ -561,6 +568,7 @@ def build_config(
         github_token=resolved_github_token,
         aws_region=resolved_aws_region,
         anthropic_model=resolved_anthropic_model,
+        haiku_model=resolved_haiku_model,
         dry_run=dry_run,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,

@@ -7,7 +7,7 @@ operations are no-ops.
 
 import os
 import time
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from shell import log, log_error_cw
 
@@ -246,7 +246,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             return
         now = _now_iso()
         expr_names = {"#s": "status"}
-        expr_values = {
+        expr_values: dict[str, Any] = {
             ":s": status,
             ":t": now,
             ":sca": f"{status}#{now}",
@@ -294,6 +294,21 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("memory_written") is not None:
                 update_parts.append("memory_written = :mw")
                 expr_values[":mw"] = result["memory_written"]
+            # Verification verdict (#515 replay bundle). build_passed/lint_passed
+            # were historically dropped here (present on TaskResult but never
+            # written), so TaskDetail.build_passed was always null. Persist both
+            # so the replay bundle carries a structured verification signal.
+            if result.get("build_passed") is not None:
+                update_parts.append("build_passed = :bp")
+                expr_values[":bp"] = bool(result["build_passed"])
+            if result.get("lint_passed") is not None:
+                update_parts.append("lint_passed = :lp")
+                expr_values[":lp"] = bool(result["lint_passed"])
+            # OTEL trace id (#515) for cross-plane correlation. Absent on tasks
+            # that predate this field and when tracing is unavailable.
+            if result.get("otel_trace_id"):
+                update_parts.append("otel_trace_id = :otid")
+                expr_values[":otid"] = result["otel_trace_id"]
             # --trace artifact URI (design §10.1). Written atomically
             # with the terminal-status transition so a consumer that
             # reads TaskRecord.trace_s3_uri immediately after

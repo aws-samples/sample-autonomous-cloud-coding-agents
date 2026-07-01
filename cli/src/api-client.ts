@@ -41,6 +41,7 @@ import {
   NudgeResponse,
   SlackLinkResponse,
   PaginatedResponse,
+  ReplayBundle,
   SuccessResponse,
   TaskDetail,
   TaskEvent,
@@ -390,6 +391,15 @@ export class ApiClient {
     const res = await this.request<SuccessResponse<TraceUrlResponse>>(
       'GET',
       `/tasks/${encodeURIComponent(taskId)}/trace`,
+    );
+    return res.data;
+  }
+
+  /** GET /tasks/{task_id}/replay — operator replay bundle (#515). */
+  async getReplay(taskId: string): Promise<ReplayBundle> {
+    const res = await this.request<SuccessResponse<ReplayBundle>>(
+      'GET',
+      `/tasks/${encodeURIComponent(taskId)}/replay`,
     );
     return res.data;
   }
