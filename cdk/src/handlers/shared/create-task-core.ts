@@ -593,9 +593,17 @@ export async function createTaskCore(
 
   // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
-  const branchName = isPrTask
-    ? 'pending:pr_resolution'
-    : generateBranchName(taskId, body.task_description ?? body.repo);
+  // A task with no repo never clones, branches, or opens a PR (the agent prompt
+  // forbids it), so a bgagent/<id>/... branch name is misleading noise. Key off
+  // the actual absence of a repo, NOT workflow.requiresRepo — a repo-OPTIONAL
+  // workflow that WAS given a repo runs the repo-bound path and still gets a
+  // branch. PR tasks resolve their real branch later; other repo-bound tasks
+  // get the generated working-branch name.
+  const branchName = !body.repo
+    ? ''
+    : isPrTask
+      ? 'pending:pr_resolution'
+      : generateBranchName(taskId, body.task_description ?? body.repo);
 
   // Determine initial status: PENDING_UPLOADS if any presigned attachments need uploading,
   // otherwise SUBMITTED (inline/url/no attachments go straight to the pipeline).

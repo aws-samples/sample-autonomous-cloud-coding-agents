@@ -132,6 +132,9 @@ describe('createTaskCore', () => {
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('SUBMITTED');
     expect(body.data.repo).toBeNull();
+    // Repo-less ⇒ no branch is created (the agent never clones/branches/PRs), so
+    // branch_name is empty rather than a misleading bgagent/<id>/... slug.
+    expect(body.data.branch_name).toBe('');
     // Repo-less ⇒ the onboarding/blueprint RepoTable lookup is skipped entirely.
     expect(mockLookupRepo).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(2); // task + event

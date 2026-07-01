@@ -41,7 +41,11 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.task_description) {
     lines.push(`Description: ${task.task_description}`);
   }
-  lines.push(`Branch:      ${task.branch_name}`);
+  // Repo-less workflows have no branch (branch_name is ''); only show the line
+  // when there is one.
+  if (task.branch_name) {
+    lines.push(`Branch:      ${task.branch_name}`);
+  }
   if (task.max_turns !== null) {
     lines.push(`Max Turns:   ${task.max_turns}`);
   }

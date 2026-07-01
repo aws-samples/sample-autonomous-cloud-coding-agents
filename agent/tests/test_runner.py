@@ -14,9 +14,11 @@ from unittest.mock import MagicMock, patch
 
 from models import TaskConfig
 from runner import (
+    _DISALLOWED_TOOLS,
     _FULL_TOOL_SURFACE,
     _initialize_policy_engine_and_hooks,
     _resolve_allowed_tools,
+    _resolve_setting_sources,
     _setup_bedrock_cost_attribution,
 )
 
@@ -339,3 +341,27 @@ class TestBedrockCostAttribution:
         assert "X-Amzn-Bedrock-Request-Metadata" in __import__("os").environ.get(
             "ANTHROPIC_CUSTOM_HEADERS", ""
         )
+
+
+class TestToolSurfaceHardening:
+    """The off-session/defer vectors are hard-blocked via disallowed_tools (not
+    the allow-list, which is auto-approve only), and repo-less tasks load no
+    on-disk settings. Regression guard for the background-Workflow bug where a
+    repo-less task launched a detached Workflow and finalized prematurely."""
+
+    def test_workflow_task_agent_are_disallowed(self):
+        # These must be present so they are removed from the model's context
+        # even under permission_mode="bypassPermissions".
+        assert "Workflow" in _DISALLOWED_TOOLS
+        assert "Task" in _DISALLOWED_TOOLS
+        assert "Agent" in _DISALLOWED_TOOLS
+
+    def test_repo_less_loads_no_setting_sources(self):
+        # requires_repo=False → no cloned repo → load nothing (keeps stray
+        # on-disk skills that could spawn a background Workflow out of reach).
+        config = _config(requires_repo=False, repo_url="", github_token="")
+        assert _resolve_setting_sources(config) == []
+
+    def test_repo_bound_loads_project_settings(self):
+        config = _config(requires_repo=True)
+        assert _resolve_setting_sources(config) == ["project"]
