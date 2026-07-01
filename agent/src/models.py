@@ -154,6 +154,11 @@ class TaskConfig(BaseModel):
     github_token: str = ""
     aws_region: str
     anthropic_model: str = "us.anthropic.claude-sonnet-4-6"
+    # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
+    # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
+    # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
+    # on-demand by bare id on Bedrock. Threaded to ANTHROPIC_DEFAULT_HAIKU_MODEL.
+    haiku_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None

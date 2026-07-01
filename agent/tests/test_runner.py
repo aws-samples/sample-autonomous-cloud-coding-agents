@@ -371,18 +371,21 @@ class TestToolSurfaceHardening:
 class TestSetupAgentEnv:
     """Environment the Claude Code subprocess inherits."""
 
-    def test_default_haiku_model_uses_cross_region_inference_profile(self, monkeypatch):
-        # Regression: bare foundation-model id 400s on Bedrock ("on-demand
-        # throughput isn't supported") — WebFetch's Haiku sub-calls hit this.
-        # The default Haiku model must be the us.* inference profile. This env
-        # var is set at spawn time and overrides the CDK runtime value.
-        monkeypatch.setenv(
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "anthropic.claude-haiku-4-5-20251001-v1:0"
-        )
-        _setup_agent_env(_config())
+    def test_haiku_model_env_is_set_from_config(self, monkeypatch):
+        # The env var is now sourced from config.haiku_model (not hardcoded), so
+        # it is per-task overridable like ANTHROPIC_MODEL. Regression: bare
+        # foundation-model id 400s on Bedrock — WebFetch's Haiku sub-calls hit
+        # this — so config's default must be the us.* inference profile.
         import os
 
+        config = _config(haiku_model="us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        _setup_agent_env(config)
         assert (
             os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
             == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         )
+
+    def test_config_default_haiku_model_is_an_inference_profile(self):
+        # The platform default (no override) must be a us.* profile, never a bare
+        # foundation-model id — the whole point of the fix.
+        assert _config().haiku_model.startswith("us.")
