@@ -250,6 +250,22 @@ describe('get-task-events handler', () => {
     expect(queryInput.ExclusiveStartKey).toBeUndefined();
   });
 
+  test('lower-case ?after is normalized to upper-case before the DDB query', async () => {
+    // ``isValidUlid`` accepts lower-case callers, but stored event_ids are
+    // upper-case Crockford Base32 and DDB compares raw bytes (lower-case sorts
+    // after upper-case). Without normalization a lower-case cursor would be
+    // "greater than" every stored id and silently return zero events.
+    const event = makeEvent({ queryStringParameters: { after: VALID_AFTER.toLowerCase() } });
+    await handler(event);
+
+    const queryInput = MockQueryCommand.mock.calls[0][0];
+    expect(queryInput.KeyConditionExpression).toBe('task_id = :tid AND event_id > :after');
+    expect(queryInput.ExpressionAttributeValues).toEqual({
+      ':tid': 'task-1',
+      ':after': VALID_AFTER, // upper-cased, not the lower-case input
+    });
+  });
+
   test('both after and next_token → after wins + WARN logged', async () => {
     const stdoutWrite = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {
