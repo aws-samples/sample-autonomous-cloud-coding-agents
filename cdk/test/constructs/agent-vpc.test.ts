@@ -149,4 +149,33 @@ describe('AgentVpc with custom props', () => {
 
     template.resourceCountIs('AWS::EC2::NatGateway', 2);
   });
+
+  test('accepts explicit availabilityZones and ignores maxAzs', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    new AgentVpc(stack, 'AgentVpc', {
+      availabilityZones: ['us-east-1b', 'us-east-1c'],
+      maxAzs: 3, // should be ignored when availabilityZones is provided
+    });
+    const template = Template.fromStack(stack);
+
+    // 2 explicit AZs × 2 subnet types = 4 subnets
+    template.resourceCountIs('AWS::EC2::Subnet', 4);
+  });
+
+  test('availabilityZones with 3 zones creates 6 subnets', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    new AgentVpc(stack, 'AgentVpc', {
+      availabilityZones: ['us-east-1b', 'us-east-1c', 'us-east-1d'],
+    });
+    const template = Template.fromStack(stack);
+
+    // 3 AZs × 2 subnet types = 6 subnets
+    template.resourceCountIs('AWS::EC2::Subnet', 6);
+  });
 });

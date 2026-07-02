@@ -201,7 +201,23 @@ export class AgentStack extends Stack {
     ]);
 
     // Network isolation — VPC with restricted egress
-    const agentVpc = new AgentVpc(this, 'AgentVpc');
+    // AgentCore only supports a subset of physical availability zones per
+    // region (for us-east-1: use1-az1, use1-az2, use1-az4). AZ *names* are
+    // aliased per-account, so the default maxAzs selection can land in an
+    // unsupported zone and cause a deploy failure. Use the CDK context key
+    // `agentcore:availabilityZones` to pin to account-specific AZ names whose
+    // physical zone IDs are AgentCore-supported.
+    //
+    // Discover your mapping:
+    //   aws ec2 describe-availability-zones --region us-east-1 \
+    //     --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
+    //
+    // Then set in cdk.context.json or via -c:
+    //   "agentcore:availabilityZones": ["us-east-1b", "us-east-1c"]
+    const agentCoreAzs = this.node.tryGetContext('agentcore:availabilityZones') as string[] | undefined;
+    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+      ...(agentCoreAzs ? { availabilityZones: agentCoreAzs } : {}),
+    });
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
     const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];
