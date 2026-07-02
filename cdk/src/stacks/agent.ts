@@ -614,6 +614,10 @@ export class AgentStack extends Stack {
         userConcurrencyTable: userConcurrencyTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
+        // F-2: grant the ECS task role read+write on AgentCore Memory so the
+        // agent's cross-task learning writes succeed on ECS (parity with the
+        // runtime's agentMemory.grantReadWrite below).
+        agentMemory,
         // #502: read-only grant so the container can fetch its payload from S3.
         payloadBucket: ecsPayloadBucket!.bucket,
         // #299 ECS-parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —

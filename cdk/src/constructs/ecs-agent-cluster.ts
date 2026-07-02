@@ -28,6 +28,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
 
@@ -74,6 +75,18 @@ export interface EcsAgentClusterProps {
    * retains the legacy direct grants.
    */
   readonly agentSessionRole?: AgentSessionRole;
+
+  /**
+   * AgentCore Memory for cross-task learning (F-2 / ABCA-488-class parity). When
+   * provided, the ECS task role is granted read+write on it so the agent's
+   * memory writes (write_task_episode / write_repo_learnings →
+   * ``bedrock-agentcore:CreateEvent``) succeed on the ECS substrate. The
+   * AgentCore runtime role already gets this via ``agentMemory.grantReadWrite``
+   * in agent.ts; without the same grant here, memory writes hit AccessDenied and
+   * silently no-op on ECS (WARN), so learning never persists on an ECS-only
+   * deployment. Omitted in isolated construct tests / memory-less deployments.
+   */
+  readonly agentMemory?: AgentMemory;
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -220,6 +233,17 @@ export class EcsAgentCluster extends Construct {
     // this bucket. Stays on the task role — delivery is a terminal step.
     if (props.artifactsBucket) {
       props.artifactsBucket.grantReadWrite(taskRole);
+    }
+
+    // F-2 (ABCA-488-class parity): grant the task role read+write on the
+    // AgentCore Memory so the agent's cross-task learning writes
+    // (write_task_episode / write_repo_learnings → bedrock-agentcore:CreateEvent)
+    // succeed on ECS. The AgentCore runtime role gets this via
+    // agentMemory.grantReadWrite(runtime) in agent.ts; without the same grant
+    // here the writes hit AccessDenied and silently no-op (WARN) on the ECS
+    // substrate, so learning never persists on an ECS-only deployment.
+    if (props.agentMemory) {
+      props.agentMemory.grantReadWrite(taskRole);
     }
 
     // ABCA-488: per-workspace Linear/Jira OAuth tokens live in Secrets Manager

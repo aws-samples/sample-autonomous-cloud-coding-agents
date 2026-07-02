@@ -26,6 +26,7 @@ import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { EcsAgentCluster } from '../../src/constructs/ecs-agent-cluster';
 
@@ -172,6 +173,64 @@ describe('EcsAgentCluster construct', () => {
       }
     }
     expect(hasLinearOauthGrant).toBe(true);
+  });
+
+  test('task role gets bedrock-agentcore:CreateEvent on the AgentMemory when wired (F-2 / ABCA-488-class)', () => {
+    // REGRESSION: the agent's cross-task learning writes (write_task_episode /
+    // write_repo_learnings) call bedrock-agentcore:CreateEvent on the AgentCore
+    // Memory. The runtime role gets this via agentMemory.grantReadWrite; the ECS
+    // task role did NOT, so writes hit AccessDenied and silently no-op'd (WARN)
+    // on the ECS substrate — learning never persisted on an ECS-only deploy.
+    // Build a stack WITH an AgentMemory and assert the CreateEvent grant exists,
+    // scoped to the memory ARN (not a wildcard).
+    const app = new App();
+    const stack = new Stack(app, 'EcsMemStack');
+    const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2 });
+    const agentImageAsset = new ecr_assets.DockerImageAsset(stack, 'AgentImage', {
+      directory: path.join(__dirname, '..', '..', '..', 'agent'),
+    });
+    const mk = (id: string) =>
+      new dynamodb.Table(stack, id, { partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING } });
+    const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+    });
+    const agentMemory = new AgentMemory(stack, 'AgentMemory');
+    new EcsAgentCluster(stack, 'EcsAgentCluster', {
+      vpc,
+      agentImageAsset,
+      taskTable: mk('TaskTable'),
+      taskEventsTable: mk('TaskEventsTable'),
+      userConcurrencyTable,
+      githubTokenSecret: new secretsmanager.Secret(stack, 'GitHubTokenSecret'),
+      agentMemory,
+    });
+    const template = Template.fromStack(stack);
+    const policies = template.findResources('AWS::IAM::Policy');
+    let hasCreateEvent = false;
+    for (const [id, p] of Object.entries(policies)) {
+      if (!id.includes('TaskDefTaskRole')) continue;
+      for (const s of p.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (actions.includes('bedrock-agentcore:CreateEvent')) {
+          hasCreateEvent = true;
+          // resource must reference the memory ARN, not a bare wildcard
+          expect(JSON.stringify(s.Resource)).toContain('MemoryArn');
+          expect(s.Resource).not.toEqual('*');
+        }
+      }
+    }
+    expect(hasCreateEvent).toBe(true);
+  });
+
+  test('task role has NO bedrock-agentcore grant when no AgentMemory is wired (isolated default)', () => {
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    for (const [id, p] of Object.entries(policies)) {
+      if (!id.includes('TaskDefTaskRole')) continue;
+      for (const s of p.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        expect(actions.some((a: string) => a.startsWith('bedrock-agentcore:'))).toBe(false);
+      }
+    }
   });
 
   test('task role Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard)', () => {
