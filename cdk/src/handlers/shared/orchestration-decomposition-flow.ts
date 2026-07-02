@@ -48,6 +48,7 @@ import {
   renderPlannerErrorNote,
   renderPlanProposal,
   renderSingleTaskNote,
+  renderUnderspecifiedDecomposeNote,
 } from './orchestration-decomposition-render';
 import type { DecompositionPlan, ProjectDecompositionCaps } from './orchestration-decomposition-types';
 import { writeBackPlan, type GraphqlFn } from './orchestration-decomposition-writeback';
@@ -98,6 +99,32 @@ export type DecompositionFlowResult =
   | { readonly kind: 'noop'; readonly reason: string };
 
 /**
+ * Character floor below which a decompose issue's description is considered too
+ * thin to break down on its own. Chosen from the ABCA-492 dogfood: a 236-char
+ * one-liner ("consider UX, look at slack api docs, testing…") that named no
+ * separable deliverables sat under this; a normal multi-part epic description
+ * runs well over it. Not a hard rule — combined with the repo-context signal.
+ */
+const THIN_DESCRIPTION_CHARS = 400;
+
+/**
+ * Whether a declined ``:decompose`` issue was UNDERSPECIFIED (→ ask for detail)
+ * vs a confident cohesive-unit decline (→ run one task). The signal is the
+ * ISSUE description length: the description is the only issue-specific statement
+ * of scope the planner has (repo context is generic background, and ABCA-492
+ * proved a decline can be wrong even WITH repo context — the fork's docs simply
+ * didn't enumerate the parity features). So on a THIN-description ``:decompose``
+ * that the planner still declined, we can't trust "it's one cohesive unit" —
+ * the planner may just have had nothing to find seams in. Ask for the missing
+ * detail rather than silently burn one large run on a spend-safe request. A
+ * substantial description that declines is trusted (the planner had enough to
+ * judge). Pure — unit-testable.
+ */
+export function isUnderspecifiedForDecompose(input: PlannerInput): boolean {
+  return (input.description ?? '').trim().length < THIN_DESCRIPTION_CHARS;
+}
+
+/**
  * Handle a ``:decompose``/``:auto`` label on an undecomposed issue.
  * Never throws — all failures post a note and return ``terminal``.
  */
@@ -125,6 +152,19 @@ export async function runDecompositionProposal(
     return { kind: 'single_task', reason: 'planner_error' };
   }
   if (planned.kind === 'single_task') {
+    // ABCA-492: distinguish a CONFIDENT decline (the issue was well-specified
+    // and genuinely cohesive — trust the assessor, run one task) from an
+    // UNDERSPECIFIED one (a one-line ":decompose" epic the planner couldn't
+    // break down because the description — and the repo context — didn't reveal
+    // the separable pieces). Silently one-shotting the latter is the worst
+    // outcome for a spend-safe ":decompose" request. Instead HOLD and ask for
+    // the missing detail. "Thin" = a short description with no repo context to
+    // compensate; a well-specified decline keeps today's single-task behaviour.
+    if (isUnderspecifiedForDecompose(plannerInput)) {
+      await effects.postComment(parentIssueId, renderUnderspecifiedDecomposeNote());
+      // Terminal — do NOT create a task. The user adds detail + re-triggers.
+      return { kind: 'handled', reason: 'underspecified' };
+    }
     await effects.postComment(parentIssueId, renderSingleTaskNote(planned.reasoning));
     // Caller still creates the single task (Mode B declined to decompose).
     return { kind: 'single_task', reason: 'judge_declined' };

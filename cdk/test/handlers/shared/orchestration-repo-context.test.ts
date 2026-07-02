@@ -31,6 +31,7 @@ import {
   clearRepoContextTokenCache,
   fetchRepoContextForPlanner,
   resolveGitHubTokenForContext,
+  selectOverviewDocs,
 } from '../../../src/handlers/shared/orchestration-repo-context';
 
 const realFetch = global.fetch;
@@ -49,6 +50,8 @@ function githubFetchStub(opts: {
   readme?: { ok: boolean; content?: string };
   repo?: { ok: boolean; branch?: string };
   tree?: { ok: boolean; entries?: { path: string; type: string }[] };
+  /** contents responses keyed by path (for overview-doc fetches). */
+  docs?: Record<string, string>;
 }): jest.Mock {
   return jest.fn(async (url: string) => {
     if (url.endsWith('/readme')) {
@@ -60,6 +63,13 @@ function githubFetchStub(opts: {
       const t = opts.tree;
       if (!t?.ok) return { ok: false, status: 404, json: async () => ({}) };
       return { ok: true, status: 200, json: async () => ({ tree: t.entries ?? [] }) };
+    }
+    const contentsMatch = url.match(/\/contents\/(.+)$/);
+    if (contentsMatch) {
+      const path = decodeURIComponent(contentsMatch[1]);
+      const body = opts.docs?.[path];
+      if (body === undefined) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ encoding: 'base64', content: b64(body) }) };
     }
     // /repos/{owner}/{repo}
     const rp = opts.repo;
@@ -119,7 +129,7 @@ describe('fetchRepoContextForPlanner', () => {
     expect(ctx).toContain('ABCA is a Slack+Linear coding agent platform.');
     expect(ctx).toContain('cdk/'); // dirs get a trailing slash
     expect(ctx).toContain('README.md'); // files do not
-    expect(ctx).toMatch(/Top-level repository structure/);
+    expect(ctx).toMatch(/Repository structure/);
   });
 
   test('sends the Authorization header only when a token is provided', async () => {
@@ -163,12 +173,76 @@ describe('fetchRepoContextForPlanner', () => {
     expect(await fetchRepoContextForPlanner('acme/repo', 't')).toBeUndefined();
   });
 
-  test('caps the tree at a bounded number of top-level entries', async () => {
-    const many = Array.from({ length: 200 }, (_, i) => ({ path: `f${i}`, type: 'blob' }));
-    global.fetch = githubFetchStub({ readme: { ok: false }, repo: { ok: true }, tree: { ok: true, entries: many } }) as unknown as typeof fetch;
+  test('caps the DISPLAYED tree while still scanning deeper for docs (ABCA-492)', async () => {
+    // 200 files + a nested ROADMAP.md that sorts past the display cap. The doc
+    // must still be discovered (scan sees the full tree) even though the shown
+    // listing is capped.
+    const many = Array.from({ length: 200 }, (_, i) => ({ path: `src/f${i}.ts`, type: 'blob' }));
+    const entries = [...many, { path: 'docs/guides/ROADMAP.md', type: 'blob' }];
+    global.fetch = githubFetchStub({
+      readme: { ok: false },
+      repo: { ok: true },
+      tree: { ok: true, entries },
+      docs: { 'docs/guides/ROADMAP.md': 'Backlog: F1 threads, F2 mapping, F3 reactions' },
+    }) as unknown as typeof fetch;
     const ctx = await fetchRepoContextForPlanner('acme/repo', 't');
-    const listed = (ctx ?? '').split('\n').filter((l) => /^f\d+$/.test(l)).length;
-    expect(listed).toBeLessThanOrEqual(60);
-    expect(listed).toBeGreaterThan(0);
+    const listed = (ctx ?? '').split('\n').filter((l) => /^src\/f\d+\.ts$/.test(l)).length;
+    expect(listed).toBeLessThanOrEqual(120); // display cap
+    // ...but the deep ROADMAP was still found + its contents fetched
+    expect(ctx).toContain('docs/guides/ROADMAP.md (excerpt)');
+    expect(ctx).toContain('F1 threads, F2 mapping');
+  });
+
+  test('fetches overview docs discovered in the tree (ROADMAP/architecture)', async () => {
+    global.fetch = githubFetchStub({
+      readme: { ok: true, content: 'platform' },
+      repo: { ok: true },
+      tree: {
+        ok: true,
+        entries: [
+          { path: 'docs/guides/ROADMAP.md', type: 'blob' },
+          { path: 'docs/design/ARCHITECTURE.md', type: 'blob' },
+          { path: 'src/index.ts', type: 'blob' },
+        ],
+      },
+      docs: {
+        'docs/guides/ROADMAP.md': 'ROADMAP: capability A, capability B, capability C',
+        'docs/design/ARCHITECTURE.md': 'ARCH: three services',
+      },
+    }) as unknown as typeof fetch;
+    const ctx = await fetchRepoContextForPlanner('acme/repo', 't');
+    expect(ctx).toContain('capability A, capability B');
+    expect(ctx).toContain('ARCH: three services');
+  });
+});
+
+describe('selectOverviewDocs (pure)', () => {
+  test('picks ROADMAP / architecture / features docs, ranked, capped at 3', () => {
+    const tree = [
+      'src/', 'src/a.ts',
+      'docs/guides/ROADMAP.md',
+      'docs/design/ARCHITECTURE.md',
+      'FEATURES.md',
+      'docs/OVERVIEW.md',
+      'README.md', // not an overview pattern here (README fetched separately)
+    ];
+    const picked = selectOverviewDocs(tree);
+    expect(picked.length).toBeLessThanOrEqual(3);
+    expect(picked[0]).toBe('docs/guides/ROADMAP.md'); // roadmap ranks first
+    expect(picked).toContain('docs/design/ARCHITECTURE.md');
+  });
+
+  test('prefers the shallowest match for a pattern', () => {
+    const tree = ['deep/nested/dir/ROADMAP.md', 'ROADMAP.md'];
+    expect(selectOverviewDocs(tree)[0]).toBe('ROADMAP.md');
+  });
+
+  test('returns [] when no overview docs are present (dirs + code only)', () => {
+    expect(selectOverviewDocs(['src/', 'src/a.ts', 'package.json'])).toEqual([]);
+  });
+
+  test('ignores directories (trailing slash), matches only files', () => {
+    // a dir literally named "roadmap.md/" (pathological) must not be picked
+    expect(selectOverviewDocs(['roadmap.md/', 'roadmap.md/child.ts'])).toEqual([]);
   });
 });

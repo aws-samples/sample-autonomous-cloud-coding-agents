@@ -167,6 +167,26 @@ export function renderPlannerErrorNote(): string {
 }
 
 /**
+ * Render the note posted when ``:decompose`` was applied to a THIN issue that
+ * the planner declined to split (ABCA-492). The user explicitly asked for a
+ * breakdown, but the one-line description didn't give the planner enough to
+ * find separable units — and the repo context didn't either. Rather than
+ * silently burn one giant agent run on an underspecified epic (``:decompose``
+ * is the spend-safe label — the user wanted a plan to approve, not a surprise
+ * PR), we hold and ask for the detail we'd need. Actionable, not a dead end.
+ */
+export function renderUnderspecifiedDecomposeNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} I couldn't confidently break this issue into sub-issues — the description `
+    + "is brief enough that I can't tell what the separable pieces are, and the repository didn't make "
+    + "them obvious either. Rather than run it as one large task (you asked to decompose it), I've held "
+    + 'off. To get a breakdown, add a bit more detail — the distinct capabilities or deliverables this '
+    + 'covers — and re-apply the `:decompose` label. (Or, if it really is one cohesive change, apply the '
+    + 'plain trigger label to run it as a single task.)'
+  );
+}
+
+/**
  * Render the note posted when ``:decompose``/``:auto`` was applied to an issue
  * that ALREADY has sub-issues — the suffix is a no-op and we run the existing
  * graph (Mode A). Surfaced so the user's stated intent isn't silently ignored.
