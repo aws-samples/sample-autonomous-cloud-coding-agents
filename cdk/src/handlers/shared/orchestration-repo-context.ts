@@ -78,18 +78,48 @@ export function clearRepoContextTokenCache(): void {
   cachedToken = undefined;
 }
 
-/** Total wall-clock budget for the README + tree fetch (ms). Small — this runs
+/** Total wall-clock budget for the whole context fetch (ms). Small — this runs
  *  inline before the planner's Bedrock calls and must not eat their budget. */
-const REPO_CONTEXT_TIMEOUT_MS = 6000;
+const REPO_CONTEXT_TIMEOUT_MS = 8000;
 
 /** README excerpt cap (chars). Enough to convey what the repo is; not the whole file. */
-const README_MAX_CHARS = 4000;
+const README_MAX_CHARS = 3000;
 
-/** Cap on top-level tree entries listed (dirs + files at the repo root). */
-const MAX_TREE_ENTRIES = 60;
+/** Cap on tree entries DISPLAYED in the prompt (recursive). Filenames are cheap;
+ *  keep enough to reveal structure (separable subsystems) without flooding it. */
+const MAX_TREE_ENTRIES = 120;
+
+/** Hard ceiling on tree paths SCANNED for doc discovery — larger than the
+ *  display cap so a nested docs/ dir is still reachable, but bounded so a giant
+ *  monorepo can't produce an unbounded array. */
+const MAX_TREE_SCAN_ENTRIES = 2000;
+
+/**
+ * Overview docs (ROADMAP / architecture / feature docs) are what actually
+ * convey a repo's *separable capabilities* — a top-level file listing rarely
+ * does (measured on ABCA-492: README+tree didn't move the decline-biased
+ * assessor; an enumerating ROADMAP did). Fetch up to this many, each capped.
+ */
+const MAX_OVERVIEW_DOCS = 3;
+const OVERVIEW_DOC_MAX_CHARS = 2500;
+
+/**
+ * Basename patterns (no directory assumptions — matched against the recursive
+ * tree, so this is derived from the repo, not a hardcoded path map) for docs
+ * that tend to enumerate a project's capabilities/roadmap. Ranked: earlier =
+ * more likely to list separable units. Kept as *patterns*, not exact paths, so
+ * any repo layout that names these surfaces them. Only ``.md`` files.
+ */
+const OVERVIEW_DOC_PATTERNS: readonly RegExp[] = [
+  /(^|\/)roadmap\.md$/i,
+  /(^|\/)(architecture|design)\.md$/i,
+  /(^|\/)features?\.md$/i,
+  /(^|\/)overview\.md$/i,
+  /(^|\/)(developer[_-]?guide|dev[_-]?guide)\.md$/i,
+];
 
 /** Overall cap on the assembled context block (chars) — a final belt-and-suspenders. */
-const CONTEXT_MAX_CHARS = 6000;
+const CONTEXT_MAX_CHARS = 12000;
 
 interface GitHubReadmeResponse {
   readonly content?: string;
@@ -128,24 +158,41 @@ export async function fetchRepoContextForPlanner(
     };
     if (token) headers.Authorization = `token ${token}`;
 
-    // Fetch README + default-branch tree concurrently under one deadline. This
-    // is a FIXED two-element array (not input-derived), so parallelism is bounded.
+    // README + recursive tree first (the tree drives doc discovery). Fixed
+    // two-element array (not input-derived), so parallelism is bounded.
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
-    const [readme, tree] = await Promise.all([
+    const [readme, fullTree] = await Promise.all([
       fetchReadme(repo, headers, controller.signal),
-      fetchTopLevelTree(repo, headers, controller.signal),
+      fetchRepoTree(repo, headers, controller.signal),
     ]);
+
+    // Overview docs are what actually convey separable capabilities. Select them
+    // from the FULL tree (derived, not hardcoded paths) BEFORE truncating the
+    // displayed listing — else a doc in a nested dir (docs/guides/ROADMAP.md)
+    // that sorts past the display cap would be missed. Then fetch their contents.
+    const docPaths = selectOverviewDocs(fullTree);
+    const docs = await fetchOverviewDocs(repo, docPaths, headers, controller.signal);
+
+    // The displayed structure is capped separately (filenames are cheap but the
+    // prompt must stay bounded); doc discovery already saw the full tree above.
+    const shownTree = fullTree.slice(0, MAX_TREE_ENTRIES);
 
     const parts: string[] = [];
     if (readme) parts.push(`README (excerpt):\n${readme}`);
-    if (tree.length > 0) parts.push(`Top-level repository structure:\n${tree.join('\n')}`);
+    for (const d of docs) parts.push(`${d.path} (excerpt):\n${d.text}`);
+    if (shownTree.length > 0) {
+      const suffix = fullTree.length > shownTree.length ? ` of ${fullTree.length}` : '';
+      parts.push(`Repository structure (${shownTree.length}${suffix} paths):\n${shownTree.join('\n')}`);
+    }
     if (parts.length === 0) return undefined;
 
     const block = parts.join('\n\n').slice(0, CONTEXT_MAX_CHARS);
     logger.info('Fetched repo context for decomposition planner', {
       repo,
       readme_chars: readme?.length ?? 0,
-      tree_entries: tree.length,
+      tree_entries: shownTree.length,
+      tree_total: fullTree.length,
+      overview_docs: docs.map((d) => d.path),
       block_chars: block.length,
     });
     return block;
@@ -185,11 +232,13 @@ async function fetchReadme(
 }
 
 /**
- * Fetch the repo's top-level entries (root dirs + files) via the git-tree API on
- * the default branch. Non-recursive so the payload stays small. Returns [] on
+ * Fetch the repo's file tree (RECURSIVE) on the default branch and return the
+ * blob/dir paths, capped at {@link MAX_TREE_ENTRIES}. Recursive (vs top-level
+ * only) so the planner sees separable subsystems and so {@link selectOverviewDocs}
+ * can find docs in nested dirs (docs/guides/ROADMAP.md, etc.). Returns [] on
  * failure.
  */
-async function fetchTopLevelTree(
+async function fetchRepoTree(
   repo: string,
   headers: Record<string, string>,
   signal: AbortSignal,
@@ -202,17 +251,74 @@ async function fetchTopLevelTree(
     if (!branch) return [];
 
     const treeResp = await fetch(
-      `${GITHUB_API}/repos/${repo}/git/trees/${encodeURIComponent(branch)}`,
+      `${GITHUB_API}/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
       { headers, signal },
     );
     if (!treeResp.ok) return [];
     const body = (await treeResp.json()) as GitHubTreeResponse;
-    const entries = (body.tree ?? [])
+    // Return the full path list (capped at a generous hard ceiling so doc
+    // discovery can see nested docs); the CALLER caps the DISPLAYED subset at
+    // MAX_TREE_ENTRIES. Keeps a huge monorepo from producing an unbounded array.
+    return (body.tree ?? [])
       .map((t) => (t.type === 'tree' ? `${t.path}/` : t.path))
       .filter((p): p is string => typeof p === 'string' && p.length > 0)
-      .slice(0, MAX_TREE_ENTRIES);
-    return entries;
+      .slice(0, MAX_TREE_SCAN_ENTRIES);
   } catch {
     return [];
   }
+}
+
+/**
+ * From the (recursive) tree paths, pick the overview docs most likely to
+ * enumerate the repo's separable capabilities. Ranked by {@link OVERVIEW_DOC_PATTERNS}
+ * (earlier pattern = higher priority), capped at {@link MAX_OVERVIEW_DOCS}.
+ * Pure — no I/O, unit-testable. Derived entirely from the tree (no hardcoded
+ * paths), so it adapts to whatever layout a repo uses.
+ */
+export function selectOverviewDocs(treePaths: readonly string[]): string[] {
+  const files = treePaths.filter((p) => !p.endsWith('/'));
+  const picked: string[] = [];
+  for (const pattern of OVERVIEW_DOC_PATTERNS) {
+    // Prefer the shallowest match for each pattern (a top-level ROADMAP.md
+    // beats a deeply-nested one) so we get the canonical overview.
+    const matches = files
+      .filter((f) => pattern.test(f) && !picked.includes(f))
+      .sort((a, b) => a.split('/').length - b.split('/').length);
+    if (matches.length > 0) picked.push(matches[0]);
+    if (picked.length >= MAX_OVERVIEW_DOCS) break;
+  }
+  return picked.slice(0, MAX_OVERVIEW_DOCS);
+}
+
+/** Fetch the contents of the selected overview docs (each capped). Best-effort
+ *  per-file; a failed fetch is simply omitted. */
+async function fetchOverviewDocs(
+  repo: string,
+  paths: readonly string[],
+  headers: Record<string, string>,
+  signal: AbortSignal,
+): Promise<{ path: string; text: string }[]> {
+  const out: { path: string; text: string }[] = [];
+  // Sequential (not Promise.all) — at most MAX_OVERVIEW_DOCS files, and it keeps
+  // us well under the shared deadline without unbounded fan-out.
+  for (const path of paths) {
+    try {
+      const resp = await fetch(
+        `${GITHUB_API}/repos/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`,
+        { headers, signal },
+      );
+      if (!resp.ok) continue;
+      const body = (await resp.json()) as GitHubReadmeResponse;
+      if (!body.content) continue;
+      const decoded = body.encoding === 'base64'
+        ? Buffer.from(body.content, 'base64').toString('utf-8')
+        : body.content;
+      const text = decoded.trim().slice(0, OVERVIEW_DOC_MAX_CHARS);
+      if (text) out.push({ path, text });
+    } catch {
+      // omit this doc; keep whatever else we gathered
+      continue;
+    }
+  }
+  return out;
 }

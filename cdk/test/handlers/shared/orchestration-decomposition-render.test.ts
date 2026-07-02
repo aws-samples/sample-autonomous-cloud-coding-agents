@@ -26,6 +26,7 @@ import {
   renderPlannerErrorNote,
   renderPlanProposal,
   renderSingleTaskNote,
+  renderUnderspecifiedDecomposeNote,
 } from '../../../src/handlers/shared/orchestration-decomposition-render';
 import type { DecompositionPlan, PlannedSubIssue } from '../../../src/handlers/shared/orchestration-decomposition-types';
 
@@ -135,11 +136,12 @@ describe('renderPlanProposal — self-trigger guard (UX.20)', () => {
     expect(isBotAuthoredComment(renderPlanProposal(FANOUT, { autoRun: true }))).toBe(true);
   });
 
-  test('the cap-rejection / single-task / already-decomposed / planner-error notes are also bot-authored', () => {
+  test('the cap-rejection / single-task / already-decomposed / planner-error / underspecified notes are also bot-authored', () => {
     expect(isBotAuthoredComment(renderCapRejection('over cap'))).toBe(true);
     expect(isBotAuthoredComment(renderSingleTaskNote('small fix'))).toBe(true);
     expect(isBotAuthoredComment(renderAlreadyDecomposedNote())).toBe(true);
     expect(isBotAuthoredComment(renderPlannerErrorNote())).toBe(true);
+    expect(isBotAuthoredComment(renderUnderspecifiedDecomposeNote())).toBe(true);
   });
 });
 
@@ -167,5 +169,14 @@ describe('the note renderers', () => {
     // Carries a concrete remedy (re-apply :decompose OR split manually).
     expect(note).toMatch(/:decompose/);
     expect(note).toMatch(/split the issue/i);
+  });
+
+  test('underspecified-decompose note holds + asks for detail, not a false one-unit claim (ABCA-492)', () => {
+    const note = renderUnderspecifiedDecomposeNote();
+    expect(note).toMatch(/couldn't confidently break this issue/i);
+    expect(note).toMatch(/add a bit more detail/i);
+    expect(note).toMatch(/:decompose/); // remedy: re-apply after adding detail
+    // must NOT claim it's a single cohesive change (that's the OTHER note)
+    expect(note).not.toMatch(/single cohesive change/i);
   });
 });
