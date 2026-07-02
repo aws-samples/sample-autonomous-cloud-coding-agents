@@ -36,7 +36,7 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 **Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](../guides/ROADMAP.md), the [ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md) two-seam design, and the [IDENTITY_AND_AUTH.md](./IDENTITY_AND_AUTH.md) worked examples).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues), the [ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md) two-seam design, and the [IDENTITY_AND_AUTH.md](./IDENTITY_AND_AUTH.md) worked examples).
 
 **Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole` or the ECS Fargate task role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
 
@@ -45,7 +45,7 @@ Two authentication mechanisms protect the platform, matching the two input chann
 
 The compute role retains only non-tenant access (Bedrock model invocation — already ARN-scoped; CloudWatch Logs; the GitHub PAT secret, read once before the SessionRole is assumed; AgentCore Memory) plus `sts:AssumeRole`/`sts:TagSession` on the SessionRole. Because the agent runs under credentials that are themselves an assumed role, its `AssumeRole` is *role chaining* — capped at one hour regardless of the role's max session duration — so the agent uses a **refreshable** credential provider that re-assumes before expiry (tasks can run up to the 8-hour `maxLifetime`). The design is backend-agnostic: the same SessionRole and agent code serve both the AgentCore and ECS backends. A compromised agent session is therefore confined to its own task's data, enforced at the IAM layer rather than by application-code conventions. The policy structure (the `dynamodb:LeadingKeys` condition on `${aws:PrincipalTag/task_id}`, per-user S3 prefixes, and `Scan` exclusion) is asserted by CDK template tests, and the refreshable-credential and session-tag flow by agent unit tests; the matching-tag → allow / mismatched-or-absent-tag → deny behaviour was additionally confirmed once via the IAM policy simulator during development.
 
-> Out of scope for this control and tracked separately on the roadmap: replacing the shared GitHub PAT (GitHub App / Token Vault), binding credentials to the MicroVM via attestation, and scoping AgentCore Memory (namespace isolation by `actorId`/`sessionId` remains its boundary).
+> Out of scope for this control and tracked separately as GitHub issues: replacing the shared GitHub PAT (GitHub App / Token Vault), binding credentials to the MicroVM via attestation, and scoping AgentCore Memory (namespace isolation by `actorId`/`sessionId` remains its boundary).
 
 ## Input validation and guardrails
 
@@ -116,7 +116,7 @@ The platform is self-hosted in the customer's AWS account. No code or repo data 
 
 ## Policy enforcement
 
-The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [ROADMAP.md](../guides/ROADMAP.md)).
+The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues)).
 
 ### Current enforcement map
 
@@ -157,7 +157,7 @@ flowchart LR
 | Finalization | Build/lint verification | `agent/src/post_hooks.py` | Task record and PR body |
 | Infrastructure | DNS Firewall, WAF | CDK constructs | CloudWatch logs |
 
-**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [ROADMAP.md](../guides/ROADMAP.md)).
+**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues)).
 
 ### Mid-execution enforcement
 
@@ -194,7 +194,7 @@ The platform's memory system ([MEMORY.md](./MEMORY.md)) faces threats from both 
 5. **Review feedback quorum** - Only promote feedback to persistent rules if the same pattern appears from multiple trusted reviewers across multiple PRs. Single review comments never become permanent rules.
 6. **Blast radius containment** - Even if poisoned rules get through, the agent cannot modify CI/CD pipelines, change branch protection, access secrets beyond its scoped token, or push to protected branches.
 
-**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [ROADMAP.md](../guides/ROADMAP.md)).
+**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues)).
 
 ## Data protection
 

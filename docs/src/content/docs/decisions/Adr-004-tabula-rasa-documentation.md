@@ -90,5 +90,4 @@ When referencing another document:
 ## References
 
 - Issue #135 — full RFC with application matrix and open questions
-- Roadmap: Documentation and specifications
 - ADR-007 — knowledge acquisition protocol (complements this standard)

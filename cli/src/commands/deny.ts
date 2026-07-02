@@ -20,7 +20,7 @@
 import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { ApiError, CliError } from '../errors';
+import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import { DENY_REASON_MAX_LENGTH } from '../types';
 
@@ -95,31 +95,14 @@ export function makeDenyCommand(): Command {
 }
 
 function mapDenyError(err: ApiError): CliError {
-  switch (err.statusCode) {
-    case 400:
-      return new CliError(`Denial rejected: ${err.message}`);
-    case 401:
-      return new CliError(
-        `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
-      );
-    case 404:
-      return new CliError(
-        `Approval request not found or not owned by you (${err.errorCode}).\n`
-        + 'Run `bgagent pending` to see active approvals.',
-      );
-    case 409:
-      return new CliError(
-        `Denial cannot be recorded: ${err.message}`,
-      );
-    case 429:
-      return new CliError(
-        `Rate limit exceeded (${err.errorCode}). Slow down — approve/deny is limited per user per minute.`,
-      );
-    case 503:
-      return new CliError(
-        `Approval service temporarily unavailable (${err.errorCode}): ${err.message}`,
-      );
-    default:
-      return new CliError(err.message);
-  }
+  return mapApiError(err, {
+    400: (e) => `Denial rejected: ${e.message}`,
+    404: (e) =>
+      `Approval request not found or not owned by you (${e.errorCode}).\n`
+      + 'Run `bgagent pending` to see active approvals.',
+    409: (e) => `Denial cannot be recorded: ${e.message}`,
+    429: (e) =>
+      `Rate limit exceeded (${e.errorCode}). Slow down — approve/deny is limited per user per minute.`,
+    503: (e) => `Approval service temporarily unavailable (${e.errorCode}): ${e.message}`,
+  });
 }

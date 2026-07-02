@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { Duration } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -64,6 +65,23 @@ export interface AgentSessionRoleProps {
    * prefix.
    */
   readonly attachmentsBucket: s3.IBucket;
+
+  /**
+   * Bedrock models / cross-region inference profiles the agent may invoke
+   * (#215, cost attribution). When provided, each is `grantInvoke`-ed to the
+   * SessionRole — the **same** grant the compute role receives, so the
+   * permission set (including the all-regions foundation-model ARNs a
+   * cross-region profile fans out to) stays in lockstep and a cross-region
+   * route can never AccessDenied. Model inference run by the Claude Code
+   * subprocess is then attributed per `{user_id, repo}` in CUR 2.0 / Cost
+   * Explorer via the session tags this role already carries.
+   *
+   * The compute role keeps its own Bedrock grant: attribution is a billing
+   * control that fails open (the credential helper falls back to compute-role
+   * creds if the assume-role fails), so model invocation never depends on this.
+   * Omit (e.g. isolated construct tests) to skip the Bedrock grant.
+   */
+  readonly invokableModels?: bedrock.IBedrockInvokable[];
 }
 
 /**
@@ -85,9 +103,12 @@ export interface AgentSessionRoleProps {
  * code. Backend-agnostic: the same role serves agents booted under either the
  * AgentCore Runtime execution role or the ECS Fargate task role.
  *
- * Bedrock model invocation and CloudWatch Logs intentionally remain on the
- * compute role (shared, non-tenant access; and keeping `InvokeModel` off the
- * 1-hour-capped chained session avoids breaking long tasks).
+ * CloudWatch Logs remains on the compute role (shared, non-tenant access). The
+ * compute role *also* keeps `InvokeModel`; this role adds a parallel, session-
+ * tagged Bedrock grant (#215) used by the Claude Code subprocess for cost
+ * attribution. Long-task safety on the 1-hour-capped chained session is handled
+ * by Claude Code's `awsCredentialExport` refresh, and the helper falls back to
+ * the compute role if assume fails — so model invocation never breaks.
  */
 export class AgentSessionRole extends Construct {
   /** Actions sufficient for the agent's DynamoDB access. Excludes Scan. */
@@ -191,6 +212,20 @@ export class AgentSessionRole extends Construct {
       }),
     );
 
+    // --- Bedrock model invocation: tagged for cost attribution (#215) ---
+    // Reuse grantInvoke so this role's Bedrock permissions exactly mirror the
+    // compute role's (cross-region profiles fan out to the foundation model in
+    // every routed region — replicating that by hand would risk an AccessDenied
+    // on a cross-region route). Claude Code assumes this role (via its
+    // awsCredentialExport helper) so InvokeModel rides the session's
+    // {user_id, repo, task_id} tags, surfacing per-user/repo Bedrock spend in
+    // CUR 2.0 / Cost Explorer. No PrincipalTag condition: the tags are for
+    // billing attribution, not access scoping, so a condition would add no
+    // isolation and only risk breakage.
+    for (const invokable of props.invokableModels ?? []) {
+      invokable.grantInvoke(this.role);
+    }
+
     // The object-level prefix conditions above already constrain access to the
     // session's own tenant prefix; the remaining wildcard is the per-object
     // suffix (task_id/attachment_id/filename), which is the intended scope.
@@ -205,7 +240,10 @@ export class AgentSessionRole extends Construct {
             + 'attachments/${aws:PrincipalTag/user_id}/*, '
             + 'artifacts/${aws:PrincipalTag/task_id}/*) and the DynamoDB item '
             + 'set gated by a dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id} '
-            + 'condition — narrower than the compute role this replaces.',
+            + 'condition — narrower than the compute role this replaces. Bedrock '
+            + 'InvokeModel resources are the explicit model + inference-profile '
+            + 'ARNs from grantInvoke (cross-region profiles fan out to per-region '
+            + 'foundation-model ARNs), matching the compute role grant (#215).',
         },
       ],
       true,

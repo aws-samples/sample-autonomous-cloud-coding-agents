@@ -304,7 +304,7 @@ function sanitizeEventType(eventType: string): string {
  * that fails validation returns ``null`` and the caller must omit the
  * Pull-request row entirely rather than risk a broken-layout comment.
  *
- * Refs: PR #52 krokoko code review finding #12 (Markdown injection
+ * Refs: PR #52 finding #12 (Markdown injection
  * possible via ``prUrl`` in GitHub comment body).
  */
 export function sanitizeMarkdownLinkTarget(url: string | null | undefined): string | null {

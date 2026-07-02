@@ -54,6 +54,12 @@ jest.mock('../../src/api-client', () => ({
   ApiClient: jest.fn(() => ({ jiraLink: jiraLinkMock })),
 }));
 
+// Shared secret prompt — avoid touching real stdin in `setup`.
+const promptSecretMock = jest.fn();
+jest.mock('../../src/prompt-secret', () => ({
+  promptSecret: (...args: unknown[]) => promptSecretMock(...args),
+}));
+
 // DynamoDB DocumentClient — capture PutCommand inputs from the `map` action.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => {
@@ -339,12 +345,9 @@ describe('jira setup action', () => {
       id_token: `header.${payload}.sig`,
     } as ReturnType<typeof config.loadCredentials>);
     const logSpy = jest.spyOn(console, 'log').mockImplementation();
-    // promptSecret reads via readline.question — return '' so setup throws
-    // "Client ID is required" right after the prompt (before the OAuth flow).
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const readline = require('readline') as typeof import('readline');
-    const rlMock = { question: (_q: string, cb: (a: string) => void) => cb(''), close: jest.fn() };
-    const rlSpy = jest.spyOn(readline, 'createInterface').mockReturnValue(rlMock as unknown as ReturnType<typeof readline.createInterface>);
+    // promptSecret returns '' so setup throws "Client ID is required" right
+    // after the prompt (before the OAuth flow).
+    promptSecretMock.mockReset().mockResolvedValue('');
     try {
       const program = makeJiraCommand();
       await expect(
@@ -353,7 +356,6 @@ describe('jira setup action', () => {
     } finally {
       credsSpy.mockRestore();
       logSpy.mockRestore();
-      rlSpy.mockRestore();
     }
   });
 });
