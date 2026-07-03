@@ -915,6 +915,17 @@ export class AgentStack extends Stack {
         }),
       ],
     }));
+    // #299 agent-native planning: a terminal ``coding/decompose-v1`` task lands
+    // here (it's a TaskTable stream record like any other), and the reconciler
+    // reads the plan artifact the agent uploaded to ``artifacts/<task_id>/`` to
+    // seed / propose the sub-issue graph. Grant READ on that bucket + surface
+    // its name (the same bucket the agent's deliver_artifact wrote to — see
+    // ARTIFACTS_BUCKET_NAME on the runtime env above).
+    traceArtifactsBucket.bucket.grantRead(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment(
+      'ARTIFACTS_BUCKET_NAME',
+      traceArtifactsBucket.bucket.bucketName,
+    );
 
     // #303: scheduled backstop that recovers orchestrations whose terminal
     // events were lost while the live reconciler was unavailable. Runs the

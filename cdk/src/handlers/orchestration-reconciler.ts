@@ -37,6 +37,7 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
   BatchGetCommand,
   DynamoDBDocumentClient,
@@ -48,8 +49,18 @@ import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, transitionIssueState, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, replyToComment, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
+import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
+import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
+import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
+import { renderPlannerErrorNote } from './shared/orchestration-decomposition-render';
+import { putPendingPlan } from './shared/orchestration-decomposition-store';
+import type { ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
+import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
+import { discoverOrchestration } from './shared/orchestration-discovery';
+import { declarativeGraphSource } from './shared/orchestration-graph-source';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
 import {
@@ -67,6 +78,7 @@ import {
   loadOrchestration,
   setStatusCommentId,
   type OrchestrationChildRow,
+  type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import type { ChannelSource } from './shared/types';
@@ -88,6 +100,19 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 // table → no throttle (release-all, back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
+// #299 agent-native planning: the artifacts bucket a coding/decompose-v1 task
+// wrote its plan JSON to (artifacts/{task_id}/result.md). Unset → the decompose
+// terminal branch can't read plans and logs+skips (defensive; the construct
+// wires this alongside the read grant).
+const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET_NAME;
+// #299 TTL for a persisted pending plan awaiting @bgagent approve — mirrors the
+// webhook's PENDING_PLAN_TTL_SECONDS (a week).
+const PENDING_PLAN_TTL_SECONDS = 604_800;
+let sharedS3: S3Client | undefined;
+function s3(): S3Client {
+  if (!sharedS3) sharedS3 = new S3Client({});
+  return sharedS3;
+}
 
 /** Terminal task statuses that the reconciler reacts to. */
 const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>([
@@ -1170,9 +1195,332 @@ async function resolvePrNumber(taskId?: string): Promise<number | null> {
  * stream retries the batch (idempotent replay is safe). Non-terminal /
  * non-orchestration records are skipped cheaply.
  */
+/**
+ * #299 agent-native planning: a terminal ``coding/decompose-v1`` PLANNING task,
+ * extracted from a TaskTable stream record. Distinct from {@link TerminalTaskEvent}
+ * — it carries no orchestration_id (it CREATES the graph) and instead carries the
+ * decompose mode + caps + parent + the plan-artifact URI (all set by the webhook
+ * in channel_metadata / by the agent's deliver_artifact).
+ */
+interface DecomposePlanEvent {
+  readonly taskId: string;
+  readonly status: TaskStatusType;
+  readonly parentIssueId: string;
+  readonly workspaceId: string;
+  readonly repo: string;
+  readonly projectId: string;
+  readonly platformUserId: string;
+  readonly mode: 'decompose' | 'auto';
+  readonly maxSubIssues: number;
+  readonly decomposeAllowed: boolean;
+  readonly maxParentBudgetUsd?: number;
+  readonly artifactUri?: string;
+  /**
+   * The planning task's own task_description (the issue title+body — see the
+   * webhook's buildDecompositionTaskDescription). Reused as the single-task
+   * fallback description when the agent declines to decompose (the reconciler
+   * doesn't re-fetch the Linear issue).
+   */
+  readonly taskDescription?: string;
+}
+
+/**
+ * Detect + extract a terminal decompose-planning task from a stream record.
+ * Returns null for anything that isn't a coding/decompose-v1 task (the common
+ * case — the reconciler is the whole table's consumer). Keyed on the resolved
+ * workflow id in the NewImage; the decompose_* channel_metadata (set by the
+ * webhook) carries the mode/caps/parent so we act without re-deriving them.
+ */
+export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanEvent | null {
+  const img = record.dynamodb?.NewImage;
+  if (!img) return null;
+  const taskId = img.task_id?.S;
+  const status = img.status?.S as TaskStatusType | undefined;
+  if (!taskId || !status || !TERMINAL.has(status)) return null;
+
+  // Only coding/decompose-v1 tasks. resolved_workflow persists as a MAP.
+  const workflowId = img.resolved_workflow?.M?.id?.S;
+  if (workflowId !== 'coding/decompose-v1') return null;
+
+  const cm = img.channel_metadata?.M;
+  const parentIssueId = cm?.decompose_parent_issue_id?.S ?? cm?.linear_issue_id?.S;
+  const workspaceId = cm?.linear_workspace_id?.S;
+  const projectId = cm?.linear_project_id?.S;
+  const mode = cm?.decompose_mode?.S as ('decompose' | 'auto' | undefined);
+  if (!parentIssueId || !workspaceId || !projectId || (mode !== 'decompose' && mode !== 'auto')) {
+    logger.warn('Decompose plan task terminal but missing routing metadata — skipping', {
+      task_id: taskId, parent_issue_id: parentIssueId, mode,
+    });
+    return null;
+  }
+  const platformUserId = img.user_id?.S ?? '';
+  const repo = img.repo?.S ?? '';
+  // Cap defaults MUST match readProjectCaps / DEFAULT_MAX_SUB_ISSUES (8) so a
+  // task whose caps weren't stamped (older webhook) gates the same as the flow.
+  const maxSubIssues = Number(cm?.decompose_caps_max_sub_issues?.S ?? '8');
+  const decomposeAllowed = (cm?.decompose_caps_allowed?.S ?? 'true') === 'true';
+  const budgetStr = cm?.decompose_caps_max_parent_budget_usd?.S;
+  const artifactUri = img.artifact_uri?.S;
+  const taskDescription = img.task_description?.S;
+
+  return {
+    taskId,
+    status,
+    parentIssueId,
+    workspaceId,
+    repo,
+    projectId,
+    platformUserId,
+    mode,
+    maxSubIssues,
+    decomposeAllowed,
+    ...(budgetStr !== undefined && Number.isFinite(Number(budgetStr)) && { maxParentBudgetUsd: Number(budgetStr) }),
+    ...(artifactUri !== undefined && { artifactUri }),
+    ...(taskDescription !== undefined && { taskDescription }),
+  };
+}
+
+/** Fetch the plan artifact (the agent's plan JSON at artifacts/{task_id}/result.md). */
+async function fetchPlanArtifact(evt: DecomposePlanEvent): Promise<string | null> {
+  if (!ARTIFACTS_BUCKET) {
+    logger.warn('Decompose plan: ARTIFACTS_BUCKET_NAME unset — cannot read plan', { task_id: evt.taskId });
+    return null;
+  }
+  // Prefer the URI the agent recorded; fall back to the conventional key.
+  let bucket = ARTIFACTS_BUCKET;
+  let key = `artifacts/${evt.taskId}/result.md`;
+  if (evt.artifactUri?.startsWith('s3://')) {
+    const rest = evt.artifactUri.slice('s3://'.length);
+    const slash = rest.indexOf('/');
+    if (slash > 0) { bucket = rest.slice(0, slash); key = rest.slice(slash + 1); }
+  }
+  try {
+    const res = await s3().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const body = await res.Body?.transformToString();
+    return body ?? null;
+  } catch (err) {
+    logger.error('Decompose plan: failed to read plan artifact from S3', {
+      task_id: evt.taskId, bucket, key, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * #299 agent-native planning terminal handler. A coding/decompose-v1 task
+ * finished: read its plan artifact, then run the SAME caps → propose/seed tail
+ * the inline webhook planner used ({@link applyDecompositionResult}) — either
+ * PROPOSE the plan (``:decompose`` → comment + pending plan awaiting
+ * ``@bgagent approve``) or SEED immediately (``:auto`` → write back sub-issues +
+ * run Mode A). The only new thing vs the old planner is WHERE the plan came from
+ * (an agent artifact, planned in a real clone with full repo context, instead of
+ * a blind 30s Lambda Bedrock call). On a ``seed`` result we release roots +
+ * post the panel via the reconciler's own primitives (mirrors the webhook's
+ * seedAndReleaseFromGraph). Never throws — the handler loop treats a decompose
+ * event as processed regardless.
+ */
+async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
+  if (!WORKSPACE_REGISTRY_TABLE) {
+    // No per-workspace token source → can't post the proposal/note or write back.
+    // (Same gate the webhook's Mode B path uses; without it there is nothing to do.)
+    logger.warn('Decompose plan terminal but workspace registry table unset — skipping', {
+      task_id: evt.taskId,
+    });
+    return;
+  }
+  const registryTable = WORKSPACE_REGISTRY_TABLE;
+  const feedbackCtx: LinearFeedbackContext = {
+    linearWorkspaceId: evt.workspaceId, registryTableName: registryTable,
+  };
+  const postComment = async (issueId: string, body: string): Promise<string | null> =>
+    upsertStatusComment(feedbackCtx, issueId, body);
+
+  // Planning task failed / was cancelled → honest planner-error note. We do NOT
+  // auto-create a single task here: the webhook already declined to (it dispatched
+  // planning instead), and the note tells the user how to proceed (re-label / split).
+  if (evt.status !== TaskStatus.COMPLETED) {
+    logger.info('Decompose planning task did not complete — posting planner-error note', {
+      task_id: evt.taskId, status: evt.status,
+    });
+    await postComment(evt.parentIssueId, renderPlannerErrorNote());
+    return;
+  }
+
+  const planText = await fetchPlanArtifact(evt);
+  if (!planText) {
+    await postComment(evt.parentIssueId, renderPlannerErrorNote());
+    return;
+  }
+
+  // Parse + validate the agent's plan JSON with the SAME helper the inline
+  // planner's decomposer output flowed through (markdown-fence tolerant, <2-node
+  // collapse to single_task, DAG-validated). Produces a DecompositionResult the
+  // shared tail consumes exactly as it consumes planDecomposition's output.
+  const parsed = parseDecomposerResponse(planText, evt.maxSubIssues, '');
+
+  // Resolve the workspace token once — the :auto write-back needs a GraphQL
+  // transport. A resolution failure only matters for the auto (write-back) path;
+  // the manual proposal path posts via upsertStatusComment (own token) + persists
+  // a pending plan (approve resolves its own token later).
+  const resolved = await resolveLinearOauthToken(evt.workspaceId, registryTable);
+  if (evt.mode === 'auto' && parsed.kind === 'plan' && !resolved) {
+    logger.warn('Decompose :auto: could not resolve OAuth token for write-back', {
+      parent_issue_id: evt.parentIssueId,
+    });
+    await postComment(evt.parentIssueId, renderPlannerErrorNote());
+    return;
+  }
+
+  const caps: ProjectDecompositionCaps = {
+    decompose_allowed: evt.decomposeAllowed,
+    max_sub_issues: evt.maxSubIssues,
+    ...(evt.maxParentBudgetUsd !== undefined && { max_parent_budget_usd: evt.maxParentBudgetUsd }),
+  };
+
+  const result = await applyDecompositionResult({
+    parentIssueId: evt.parentIssueId,
+    planned: parsed,
+    // The agent planned with FULL repo context (the whole point of #299), so a
+    // decline is trusted — there is no repo-blindness left to compensate for, so
+    // never route to the "underspecified, ask for detail" branch here.
+    underspecified: false,
+    caps,
+    autoRun: evt.mode === 'auto',
+    effects: {
+      postComment,
+      putPendingPlan: async ({ nodes, proposalCommentId }) => putPendingPlan({
+        ddb,
+        tableName: ORCHESTRATION_TABLE,
+        parentLinearIssueId: evt.parentIssueId,
+        linearWorkspaceId: evt.workspaceId,
+        repo: evt.repo,
+        ...(evt.projectId && { linearProjectId: evt.projectId }),
+        nodes,
+        platformUserId: evt.platformUserId,
+        ...(proposalCommentId !== undefined && { proposalCommentId }),
+        now: new Date().toISOString(),
+        ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
+      }),
+      // Only used on the :auto path; a null token there was already handled above.
+      graphql: linearGraphqlFn(resolved?.accessToken ?? ''),
+    },
+  });
+
+  if (result.kind === 'seed') {
+    // :auto wrote back real Linear sub-issues → seed the executor + release roots.
+    await seedDecomposedGraph(evt, result.children, resolved!.oauthSecretArn, resolved!.workspaceSlug);
+    return;
+  }
+  if (result.kind === 'single_task') {
+    // The agent judged one cohesive unit (or caps disabled) — applyDecompositionResult
+    // already posted the note; run it as a single task so the work still happens.
+    logger.info('Decompose planner declined — creating single task', {
+      parent_issue_id: evt.parentIssueId, reason: result.reason,
+    });
+    await createTaskCore(
+      {
+        repo: evt.repo,
+        task_description: evt.taskDescription ?? `Implement ${evt.parentIssueId}`,
+      },
+      {
+        userId: evt.platformUserId,
+        channelSource: 'linear',
+        channelMetadata: {
+          linear_issue_id: evt.parentIssueId,
+          linear_workspace_id: evt.workspaceId,
+          linear_project_id: evt.projectId,
+        },
+      },
+      `decompose-single-${evt.taskId}`.slice(0, MAX_IDEMPOTENCY_KEY_LENGTH),
+    );
+    return;
+  }
+  // 'handled' (awaiting approval / over-cap / write-back error) or 'noop'
+  // (redelivery) → nothing more; a comment was already posted.
+  logger.info('Decompose plan reconciled', { parent_issue_id: evt.parentIssueId, result: result.kind, reason: result.reason });
+}
+
+/**
+ * Seed the #247 orchestration from a decompose plan's written-back children +
+ * release roots. Mirrors the webhook's seedAndReleaseFromGraph, using the
+ * reconciler's own primitives (discoverOrchestration over a declarativeGraphSource
+ * → releaseReadyChildren → panel).
+ */
+async function seedDecomposedGraph(
+  evt: DecomposePlanEvent,
+  children: readonly SubIssueNode[],
+  oauthSecretArn: string,
+  workspaceSlug: string,
+): Promise<void> {
+  const releaseContext: OrchestrationReleaseContext = {
+    platform_user_id: evt.platformUserId,
+    channel_source: 'linear',
+    linear_oauth_secret_arn: oauthSecretArn,
+    linear_workspace_slug: workspaceSlug,
+    linear_project_id: evt.projectId,
+  };
+  const discovery = await discoverOrchestration({
+    ddb,
+    tableName: ORCHESTRATION_TABLE,
+    accessToken: '',
+    parentLinearIssueId: evt.parentIssueId,
+    linearWorkspaceId: evt.workspaceId,
+    repo: evt.repo,
+    now: new Date().toISOString(),
+    releaseContext,
+    graphSource: declarativeGraphSource(children),
+  });
+  if (discovery.kind !== 'seeded') {
+    logger.info('Decompose :auto seed: discovery non-seeded', { parent_issue_id: evt.parentIssueId, kind: discovery.kind });
+    return;
+  }
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+  if (snapshot) {
+    const budget = USER_CONCURRENCY_TABLE
+      ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, snapshot.meta.release_context.platform_user_id, MAX_CONCURRENT)
+      : undefined;
+    await releaseReadyChildren(
+      ddb, ORCHESTRATION_TABLE, snapshot.children, snapshot.meta.release_context,
+      createTaskCore, new Date().toISOString(), snapshot.children, 'main', budget,
+    );
+  }
+  if (WORKSPACE_REGISTRY_TABLE) {
+    try {
+      const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      if (fresh) {
+        const commentId = await upsertEpicPanel({
+          ctx: { linearWorkspaceId: evt.workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+          parentLinearIssueId: evt.parentIssueId,
+          children: fresh.children,
+          inProgress: true,
+          mirrorParentState: true,
+        });
+        if (commentId) await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
+      }
+    } catch (err) {
+      logger.warn('Decompose :auto seed: panel post failed (non-fatal)', {
+        parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  logger.info('Decompose :auto: orchestration seeded from agent plan', {
+    parent_issue_id: evt.parentIssueId, orchestration_id: discovery.orchestrationId, child_count: discovery.childCount,
+  });
+}
+
 export async function handler(event: DynamoDBStreamEvent): Promise<void> {
   let processed = 0;
   for (const record of event.Records) {
+    // #299 agent-native planning: a terminal coding/decompose-v1 PLANNING task
+    // isn't an orchestration child (it has no orchestration_id — it CREATES the
+    // graph). Detect + handle it BEFORE parseTerminalTaskRecord, which would
+    // return null on it (no orchestration_id) and drop it silently.
+    const decomposeEvt = parseDecomposePlanRecord(record);
+    if (decomposeEvt) {
+      await reconcileDecomposePlan(decomposeEvt);
+      processed += 1;
+      continue;
+    }
     const evt = parseTerminalTaskRecord(record);
     if (!evt) continue;
     // A6 cascade: an iteration/restack task on a node X (NOT a child-row task)

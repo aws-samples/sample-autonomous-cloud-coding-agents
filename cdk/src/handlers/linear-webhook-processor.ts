@@ -43,7 +43,6 @@ import { logger } from './shared/logger';
 import { buildIterationInstruction, parseCommentTrigger, parsePlanVerdict, type CommentTrigger } from './shared/orchestration-comment-trigger';
 import { readProjectCaps } from './shared/orchestration-decomposition-caps';
 import {
-  runDecompositionProposal,
   runPlanVerdict,
   type DecompositionEffects,
 } from './shared/orchestration-decomposition-flow';
@@ -65,7 +64,6 @@ import {
   looksLikeNewWork,
 } from './shared/orchestration-parent-comment';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
-import { fetchRepoContextForPlanner, resolveGitHubTokenForContext } from './shared/orchestration-repo-context';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
@@ -87,11 +85,6 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 // #299 Mode B: model id for the decomposition judge+planner. Defaults inside
 // bedrockInvokeModel to the platform-standard Sonnet inference profile.
 const DECOMPOSITION_MODEL_ID = process.env.DECOMPOSITION_MODEL_ID;
-// ABCA-492: the stack GitHub token secret ARN. When set, the decomposition
-// planner is given repo context (README + top-level tree) so a thin-but-big
-// issue is judged against what the repo actually is. Best-effort — unset or
-// unreadable just means the planner runs on title+description as before.
-const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN;
 // #299 Mode B: TTL (seconds) for a persisted pending plan awaiting approval. A
 // week is ample for a human to approve; the row self-expires after.
 const PENDING_PLAN_TTL_SECONDS = 604_800;
@@ -685,49 +678,49 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       resolvedAccessToken
       && (decompositionDecision.mode === 'decompose' || decompositionDecision.mode === 'auto')
     ) {
-      const effects = buildDecompositionEffects(issue.id, workspaceId, repo, platformUserId, projectId, channelMetadata, resolvedAccessToken);
-      // ABCA-492: ground the assessor in the actual repo. The assessor otherwise
-      // sees only title+description, so a thin-but-big issue ("slack parity with
-      // linear") reads as one intertwined blob and declines to split — when in
-      // this codebase it is really several separable features. Fetch a small
-      // README+tree block (best-effort, bounded, undefined on any failure →
-      // planner behaves exactly as before). Only on the decompose/auto path.
-      const repoContext = await fetchRepoContextForPlanner(
-        repo,
-        await resolveGitHubTokenForContext(GITHUB_TOKEN_SECRET_ARN),
-      );
-      const flow = await runDecompositionProposal({
-        parentIssueId: issue.id,
-        plannerInput: {
-          title: issue.title ?? issue.identifier ?? issue.id,
-          description: issue.description ?? '',
+      // #299 agent-native planning: dispatch a coding/decompose-v1 AGENT TASK
+      // instead of the old inline two-call Bedrock planner. The agent clones the
+      // repo and plans with FULL context on the tunable substrate (root-fixes
+      // ABCA-490's 30s Lambda ceiling + ABCA-492's repo-blindness), emitting the
+      // plan JSON as an artifact. The reconciler's terminal branch reads that
+      // artifact and seeds the sub-issues (caps + approval gate preserved there).
+      // The decompose mode + caps + parent context ride in channel_metadata so
+      // the terminal handler can act without re-deriving them.
+      const planMeta: Record<string, string> = {
+        ...channelMetadata,
+        decompose_mode: decompositionDecision.mode, // 'decompose' | 'auto'
+        decompose_parent_issue_id: issue.id,
+        decompose_caps_max_sub_issues: String(decompositionCaps.max_sub_issues),
+        decompose_caps_allowed: String(decompositionCaps.decompose_allowed),
+        ...(decompositionCaps.max_parent_budget_usd !== undefined && {
+          decompose_caps_max_parent_budget_usd: String(decompositionCaps.max_parent_budget_usd),
+        }),
+      };
+      const planReqId = crypto.randomUUID();
+      const planResult = await createTaskCore(
+        {
           repo,
-          maxSubIssues: decompositionCaps.max_sub_issues,
-          ...(repoContext && { repoContext }),
+          workflow_ref: 'coding/decompose-v1',
+          task_description: buildDecompositionTaskDescription(issue),
         },
-        caps: decompositionCaps,
-        autoRun: decompositionDecision.mode === 'auto',
-        effects,
-      });
-      logger.info('Mode B decomposition flow result', { issue_id: issue.id, mode: decompositionDecision.mode, kind: flow.kind, reason: 'reason' in flow ? flow.reason : undefined });
-      if (flow.kind === 'seed') {
-        await seedAndReleaseFromGraph({
-          parentIssueId: issue.id,
-          workspaceId,
-          repo,
-          projectId,
-          platformUserId,
-          channelMetadata,
-          children: flow.children,
+        { userId: platformUserId, channelSource: 'linear', channelMetadata: planMeta },
+        planReqId,
+      );
+      if (planResult.statusCode !== 201) {
+        logger.warn('Mode B decompose-planning task creation returned non-201', {
+          status: planResult.statusCode, issue_id: issue.id,
         });
+        await safeReportIssueFailure(
+          issue.id, workspaceId,
+          buildCreateTaskFailureMessage(planResult.statusCode, planResult.body),
+        );
         return;
       }
-      if (flow.kind === 'handled' || flow.kind === 'noop') {
-        // A proposal/rejection/error comment was posted (or a redelivery
-        // no-op). The parent spawns no task here.
-        return;
-      }
-      // flow.kind === 'single_task' → planner declined; fall through.
+      logger.info('Mode B decompose-planning task dispatched (agent-native)', {
+        issue_id: issue.id, mode: decompositionDecision.mode, request_id: planReqId,
+      });
+      // The planning agent runs; the reconciler seeds on its terminal event.
+      return;
     }
   }
 
@@ -1462,6 +1455,27 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
     return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;
   }
   return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
+}
+
+/**
+ * #299 agent-native planning: the task description handed to a
+ * ``coding/decompose-v1`` planning agent — the issue's own title + description.
+ * The agent's prompt (decompose.py) tells it to clone the repo, plan, and emit
+ * the plan JSON as its artifact; no context hint, since it gathers context from
+ * the clone itself (the whole point of moving planning into the agent).
+ */
+function buildDecompositionTaskDescription(issue: LinearIssueEvent['data']): string {
+  const parts: string[] = [];
+  if (issue.identifier && issue.title) {
+    parts.push(`${issue.identifier}: ${issue.title}`);
+  } else if (issue.title) {
+    parts.push(issue.title);
+  }
+  if (issue.description && issue.description.trim()) {
+    parts.push('');
+    parts.push(issue.description.trim());
+  }
+  return parts.join('\n') || 'Plan a decomposition for this Linear issue.';
 }
 
 function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: string = ''): string {

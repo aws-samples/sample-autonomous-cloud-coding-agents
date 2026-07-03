@@ -41,7 +41,7 @@
 import type { SubIssueNode } from './linear-subissue-fetch';
 import { logger } from './logger';
 import { applyPlanCaps } from './orchestration-decomposition-caps';
-import { planDecomposition, type InvokeModelFn, type PlannerInput } from './orchestration-decomposition-planner';
+import { planDecomposition, type DecompositionResult, type InvokeModelFn, type PlannerInput } from './orchestration-decomposition-planner';
 import {
   renderAlreadyDecomposedNote,
   renderCapRejection,
@@ -127,6 +127,13 @@ export function isUnderspecifiedForDecompose(input: PlannerInput): boolean {
 /**
  * Handle a ``:decompose``/``:auto`` label on an undecomposed issue.
  * Never throws — all failures post a note and return ``terminal``.
+ *
+ * NOTE (#299 agent-native planning): this inline-planner path is being retired
+ * in favour of the ``coding/decompose-v1`` agent workflow (planning runs in a
+ * real clone with full repo context, then the reconciler consumes the plan
+ * artifact). The caps→propose/seed TAIL is shared with that path via
+ * {@link applyDecompositionResult} — only the "how the plan was produced" head
+ * (a blind Bedrock call here, an agent artifact there) differs.
  */
 export async function runDecompositionProposal(
   params: RunProposalParams,
@@ -140,60 +147,96 @@ export async function runDecompositionProposal(
   // only yields the layer-split anti-pattern). The label affects only the
   // downstream approval gate (manual vs auto), handled below.
   const planned = await planDecomposition(plannerInput, effects.invokeModel);
+  return applyDecompositionResult({
+    parentIssueId,
+    planned,
+    // ABCA-492 thin-issue heuristic: the inline (repo-blind) planner may decline
+    // simply because it couldn't see the seams. Only meaningful for THIS path.
+    underspecified: isUnderspecifiedForDecompose(plannerInput),
+    caps,
+    autoRun,
+    effects,
+  });
+}
+
+export interface ApplyDecompositionResultParams {
+  readonly parentIssueId: string;
+  /** The produced plan/decline/error — from the inline planner OR an agent artifact. */
+  readonly planned: DecompositionResult;
+  /**
+   * Whether a ``single_task`` decline should be treated as UNDERSPECIFIED (ask
+   * for detail) rather than a confident cohesive-unit decline. The inline planner
+   * passes {@link isUnderspecifiedForDecompose}; the agent-native path passes
+   * ``false`` — the agent planned with full repo context, so a decline is trusted
+   * (there is no repo-blindness left to compensate for).
+   */
+  readonly underspecified: boolean;
+  readonly caps: ProjectDecompositionCaps;
+  readonly autoRun: boolean;
+  /**
+   * Only the boundaries the tail actually touches — posting the note/proposal,
+   * persisting a pending plan (manual gate), and the GraphQL transport for
+   * write-back (auto). The agent-native caller (reconciler) supplies just these
+   * three; it never invokes a model or consumes/discards a pending plan here.
+   */
+  readonly effects: Pick<DecompositionEffects, 'postComment' | 'putPendingPlan' | 'graphql'>;
+}
+
+/**
+ * Shared caps → propose/seed tail. Given an already-PRODUCED decomposition
+ * result, gate it against project caps and either seed (auto), propose + persist
+ * a pending plan (manual), or decline with the right note. Extracted so the
+ * inline planner ({@link runDecompositionProposal}) and the #299 agent-native
+ * planner (the reconciler's plan-artifact consumer) run the SAME caps + approval
+ * logic — the only difference between them is where ``planned`` came from.
+ * Never throws.
+ */
+export async function applyDecompositionResult(
+  params: ApplyDecompositionResultParams,
+): Promise<DecompositionFlowResult> {
+  const { parentIssueId, planned, underspecified, caps, autoRun, effects } = params;
+
   if (planned.kind === 'error') {
-    // ABCA-490: the planner errored or TIMED OUT (a large issue's decomposer
-    // call exceeded the model client's request budget). Post the honest,
+    // ABCA-490: the planner errored or TIMED OUT. Post the honest,
     // remedy-bearing note — NOT renderSingleTaskNote, which would falsely claim
-    // "single cohesive change". We still fall back to one task so the work
-    // happens. Previously the slow call was killed by the Lambda ceiling before
-    // this line ran at all, so the user saw nothing; a bounded model client
-    // (bedrockInvokeModel) now surfaces the hang as an error inside the ceiling.
+    // "single cohesive change". We still fall back to one task so the work happens.
     await effects.postComment(parentIssueId, renderPlannerErrorNote());
     return { kind: 'single_task', reason: 'planner_error' };
   }
   if (planned.kind === 'single_task') {
-    // ABCA-492: distinguish a CONFIDENT decline (the issue was well-specified
-    // and genuinely cohesive — trust the assessor, run one task) from an
-    // UNDERSPECIFIED one (a one-line ":decompose" epic the planner couldn't
-    // break down because the description — and the repo context — didn't reveal
-    // the separable pieces). Silently one-shotting the latter is the worst
-    // outcome for a spend-safe ":decompose" request. Instead HOLD and ask for
-    // the missing detail. "Thin" = a short description with no repo context to
-    // compensate; a well-specified decline keeps today's single-task behaviour.
-    if (isUnderspecifiedForDecompose(plannerInput)) {
+    // ABCA-492: distinguish a CONFIDENT decline (well-specified + genuinely
+    // cohesive — trust it, run one task) from an UNDERSPECIFIED one (nothing to
+    // break down was visible). Silently one-shotting the latter is the worst
+    // outcome for a spend-safe ":decompose"; HOLD and ask for detail instead.
+    if (underspecified) {
       await effects.postComment(parentIssueId, renderUnderspecifiedDecomposeNote());
-      // Terminal — do NOT create a task. The user adds detail + re-triggers.
       return { kind: 'handled', reason: 'underspecified' };
     }
     await effects.postComment(parentIssueId, renderSingleTaskNote(planned.reasoning));
-    // Caller still creates the single task (Mode B declined to decompose).
     return { kind: 'single_task', reason: 'judge_declined' };
   }
 
-  // 2. Caps (B2). Over-cap → reject with a message (never trim).
+  // Caps (B2). Over-cap → reject with a message (never trim).
   const capResult = applyPlanCaps(planned.plan, caps);
   if (capResult.kind === 'not_allowed') {
-    // Decomposition isn't enabled for this project — fall back to single task,
-    // explained. (Shouldn't reach here — the label gate checks too — but be safe.)
     await effects.postComment(parentIssueId, renderSingleTaskNote(
       'Auto-decomposition is not enabled for this project — running as a single task.',
     ));
     return { kind: 'single_task', reason: 'not_allowed' };
   }
   if (capResult.kind === 'rejected') {
-    // Over-cap is a HARD stop (user must raise the cap / split) — NOT a silent
-    // fall-through to a single giant task. Handled terminally.
+    // Over-cap is a HARD stop (raise the cap / split) — NOT a silent giant task.
     await effects.postComment(parentIssueId, renderCapRejection(capResult.message));
     return { kind: 'handled', reason: capResult.reason };
   }
 
-  // 3a. AUTO: write back immediately, return the graph to seed.
+  // AUTO: write back immediately, return the graph to seed.
   if (autoRun) {
     await effects.postComment(parentIssueId, renderPlanProposal(planned.plan, { autoRun: true }));
     return finalizeWriteBack(parentIssueId, planned.plan, effects);
   }
 
-  // 3b. MANUAL: persist the pending plan + post the proposal, then wait.
+  // MANUAL: persist the pending plan + post the proposal, then wait for approval.
   const proposalCommentId = await effects.postComment(
     parentIssueId, renderPlanProposal(planned.plan, { autoRun: false }),
   );
@@ -202,7 +245,6 @@ export async function runDecompositionProposal(
     ...(proposalCommentId !== null && { proposalCommentId }),
   });
   if (!persisted) {
-    // A redelivery already persisted + posted; this is a duplicate proposal.
     logger.info('Mode B proposal: pending plan already existed (redelivery)', { parent_issue_id: parentIssueId });
     return { kind: 'noop', reason: 'duplicate_proposal' };
   }
@@ -256,7 +298,7 @@ export async function runPlanVerdict(params: RunVerdictParams): Promise<Decompos
 async function finalizeWriteBack(
   parentIssueId: string,
   plan: DecompositionPlan,
-  effects: DecompositionEffects,
+  effects: Pick<DecompositionEffects, 'postComment' | 'graphql'>,
 ): Promise<DecompositionFlowResult> {
   const wb = await writeBackPlan({ graphql: effects.graphql, parentIssueId, nodes: plan.nodes });
   if (wb.kind === 'error') {
