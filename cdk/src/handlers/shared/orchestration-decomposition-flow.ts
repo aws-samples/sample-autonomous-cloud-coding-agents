@@ -20,28 +20,32 @@
 /**
  * #299 Mode B — the decomposition FLOW orchestrator (B6 core).
  *
- * Ties the B1–B5 pieces into the two events Mode B reacts to, with all I/O
- * injected so the control flow is unit-testable without Bedrock / Linear / DDB:
+ * Ties the B2/B4/B5 pieces into the caps→propose/seed logic Mode B needs, with
+ * all I/O injected so the control flow is unit-testable without Linear / DDB:
  *
- *  1. {@link runDecompositionProposal} — a ``:decompose`` / ``:auto`` label on
- *     an UNDECOMPOSED issue. Judge+plan (B3) → caps (B2) → either post a
- *     proposal and persist a pending plan (manual), or write back + return the
- *     graph for immediate seeding (auto).
+ *  1. {@link applyDecompositionResult} — given an already-PRODUCED plan (parsed
+ *     from the ``coding/decompose-v1`` agent's plan artifact by the reconciler),
+ *     caps (B2) → either post a proposal and persist a pending plan (manual), or
+ *     write back + return the graph for immediate seeding (auto).
  *  2. {@link runPlanVerdict} — an ``@bgagent approve``/``reject`` comment on the
  *     parent. Approve → consume the pending plan → write back → return the
  *     graph for seeding. Reject → discard + acknowledge.
  *
- * Both return a discriminated result the processor maps to its existing
- * machinery: a ``seed`` result carries a ``SubIssueNode[]`` the processor hands
- * to ``discoverOrchestration`` via ``declarativeGraphSource`` (then releases
- * roots exactly as Mode A does); the other results are terminal (a comment was
- * posted, nothing to seed).
+ * Both return a discriminated result the caller maps to its existing machinery:
+ * a ``seed`` result carries a ``SubIssueNode[]`` handed to ``discoverOrchestration``
+ * via ``declarativeGraphSource`` (then releases roots exactly as Mode A does);
+ * the other results are terminal (a comment was posted, nothing to seed).
+ *
+ * #299 agent-native planning: the MODEL-INVOKE head (the old ``runDecompositionProposal``
+ * that called Bedrock inline) was RETIRED — planning moved into the agent, which
+ * clones the repo and plans with full context. This module keeps only the parts
+ * downstream of "a plan exists".
  */
 
 import type { SubIssueNode } from './linear-subissue-fetch';
 import { logger } from './logger';
 import { applyPlanCaps } from './orchestration-decomposition-caps';
-import { planDecomposition, type DecompositionResult, type InvokeModelFn, type PlannerInput } from './orchestration-decomposition-planner';
+import type { DecompositionResult } from './orchestration-decomposition-planner';
 import {
   renderAlreadyDecomposedNote,
   renderCapRejection,
@@ -57,10 +61,14 @@ import { writeBackPlan, type GraphqlFn } from './orchestration-decomposition-wri
  * Injected effects the flow needs. Each is a thin async fn the processor wires
  * to its real helpers; tests pass spies. Keeping them granular (vs. passing the
  * whole processor) is what makes the flow testable in isolation.
+ *
+ * #299 agent-native planning: the model-invoke boundary was RETIRED here —
+ * planning now runs in a ``coding/decompose-v1`` agent (full repo context), so
+ * this flow only PROPOSES/SEEDS an already-produced plan. The verdict path
+ * (approve/reject) still lives here; the reconciler's plan-artifact consumer
+ * reuses {@link applyDecompositionResult} via a narrowed effects Pick.
  */
 export interface DecompositionEffects {
-  /** The LLM boundary (planner B3). */
-  readonly invokeModel: InvokeModelFn;
   /** Linear GraphQL transport for write-back (B5). */
   readonly graphql: GraphqlFn;
   /** Post a top-level comment on the parent; returns the new comment id (or null). */
@@ -76,15 +84,6 @@ export interface DecompositionEffects {
   readonly discardPendingPlan: () => Promise<void>;
 }
 
-export interface RunProposalParams {
-  readonly parentIssueId: string;
-  readonly plannerInput: PlannerInput;
-  readonly caps: ProjectDecompositionCaps;
-  /** ``:auto`` skips the approval gate; ``:decompose`` waits. */
-  readonly autoRun: boolean;
-  readonly effects: DecompositionEffects;
-}
-
 /** Outcome of a proposal/verdict run — tells the processor exactly what to do next. */
 export type DecompositionFlowResult =
   // The graph is ready: seed the executor from these real-Linear-id nodes.
@@ -98,77 +97,19 @@ export type DecompositionFlowResult =
   // Idempotent no-op (redelivery) — do NOT create a task.
   | { readonly kind: 'noop'; readonly reason: string };
 
-/**
- * Character floor below which a decompose issue's description is considered too
- * thin to break down on its own. Chosen from the ABCA-492 dogfood: a 236-char
- * one-liner ("consider UX, look at slack api docs, testing…") that named no
- * separable deliverables sat under this; a normal multi-part epic description
- * runs well over it. Not a hard rule — combined with the repo-context signal.
- */
-const THIN_DESCRIPTION_CHARS = 400;
-
-/**
- * Whether a declined ``:decompose`` issue was UNDERSPECIFIED (→ ask for detail)
- * vs a confident cohesive-unit decline (→ run one task). The signal is the
- * ISSUE description length: the description is the only issue-specific statement
- * of scope the planner has (repo context is generic background, and ABCA-492
- * proved a decline can be wrong even WITH repo context — the fork's docs simply
- * didn't enumerate the parity features). So on a THIN-description ``:decompose``
- * that the planner still declined, we can't trust "it's one cohesive unit" —
- * the planner may just have had nothing to find seams in. Ask for the missing
- * detail rather than silently burn one large run on a spend-safe request. A
- * substantial description that declines is trusted (the planner had enough to
- * judge). Pure — unit-testable.
- */
-export function isUnderspecifiedForDecompose(input: PlannerInput): boolean {
-  return (input.description ?? '').trim().length < THIN_DESCRIPTION_CHARS;
-}
-
-/**
- * Handle a ``:decompose``/``:auto`` label on an undecomposed issue.
- * Never throws — all failures post a note and return ``terminal``.
- *
- * NOTE (#299 agent-native planning): this inline-planner path is being retired
- * in favour of the ``coding/decompose-v1`` agent workflow (planning runs in a
- * real clone with full repo context, then the reconciler consumes the plan
- * artifact). The caps→propose/seed TAIL is shared with that path via
- * {@link applyDecompositionResult} — only the "how the plan was produced" head
- * (a blind Bedrock call here, an agent artifact there) differs.
- */
-export async function runDecompositionProposal(
-  params: RunProposalParams,
-): Promise<DecompositionFlowResult> {
-  const { parentIssueId, plannerInput, caps, autoRun, effects } = params;
-
-  // 1. Assess + (if warranted) decompose — two-stage planner. The AGENT'S
-  // ASSESSMENT decides whether to split, for BOTH labels: a one-cohesive-unit
-  // verdict returns single_task with the reasoning (we never manufacture a
-  // breakdown the assessor judged incoherent just because the label asked — that
-  // only yields the layer-split anti-pattern). The label affects only the
-  // downstream approval gate (manual vs auto), handled below.
-  const planned = await planDecomposition(plannerInput, effects.invokeModel);
-  return applyDecompositionResult({
-    parentIssueId,
-    planned,
-    // ABCA-492 thin-issue heuristic: the inline (repo-blind) planner may decline
-    // simply because it couldn't see the seams. Only meaningful for THIS path.
-    underspecified: isUnderspecifiedForDecompose(plannerInput),
-    caps,
-    autoRun,
-    effects,
-  });
-}
-
 export interface ApplyDecompositionResultParams {
   readonly parentIssueId: string;
-  /** The produced plan/decline/error — from the inline planner OR an agent artifact. */
+  /** The produced plan/decline/error — parsed from the agent's plan artifact. */
   readonly planned: DecompositionResult;
   /**
    * Whether a ``single_task`` decline should be treated as UNDERSPECIFIED (ask
-   * for detail) rather than a confident cohesive-unit decline. The inline planner
-   * passes {@link isUnderspecifiedForDecompose}; the agent-native path passes
-   * ``false`` — the agent planned with full repo context, so a decline is trusted
-   * (there is no repo-blindness left to compensate for).
+   * for detail — {@link renderUnderspecifiedDecomposeNote}) rather than a
+   * confident cohesive-unit decline. The agent-native path (the only caller
+   * today) passes ``false`` — the agent planned with FULL repo context, so a
+   * decline is trusted (no repo-blindness left to compensate for, unlike the
+   * retired inline planner that judged from title+description alone — ABCA-492).
+   * Kept as a parameter so a future blind-planner caller can opt into the
+   * ask-for-detail path.
    */
   readonly underspecified: boolean;
   readonly caps: ProjectDecompositionCaps;
@@ -185,10 +126,11 @@ export interface ApplyDecompositionResultParams {
 /**
  * Shared caps → propose/seed tail. Given an already-PRODUCED decomposition
  * result, gate it against project caps and either seed (auto), propose + persist
- * a pending plan (manual), or decline with the right note. Extracted so the
- * inline planner ({@link runDecompositionProposal}) and the #299 agent-native
- * planner (the reconciler's plan-artifact consumer) run the SAME caps + approval
- * logic — the only difference between them is where ``planned`` came from.
+ * a pending plan (manual), or decline with the right note. The #299 agent-native
+ * planner (the reconciler's plan-artifact consumer) calls this after parsing the
+ * agent's plan artifact; the ``@bgagent approve`` verdict path ({@link runPlanVerdict})
+ * reuses its write-back tail. Consolidating here keeps caps + approval logic in
+ * one place regardless of where ``planned`` came from.
  * Never throws.
  */
 export async function applyDecompositionResult(

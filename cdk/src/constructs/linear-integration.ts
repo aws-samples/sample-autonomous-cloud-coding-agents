@@ -54,15 +54,6 @@ const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
 const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
 /**
- * #299 Mode B: foundation model for the decomposition judge+planner. The
- * processor invokes it via the ``us.``-prefixed cross-region inference profile
- * (platform standard — parity with ecs-agent-cluster.ts). Kept in sync with the
- * handler's ``bedrockInvokeModel`` default.
- */
-const DECOMPOSITION_MODEL = 'anthropic.claude-sonnet-4-6';
-const DECOMPOSITION_MODEL_ID = `us.${DECOMPOSITION_MODEL}`;
-
-/**
  * Properties for LinearIntegration construct.
  */
 export interface LinearIntegrationProps {
@@ -124,16 +115,6 @@ export interface LinearIntegrationProps {
 
   /** Task retention in days for TTL computation. */
   readonly taskRetentionDays?: number;
-
-  /**
-   * Stack GitHub token secret (ABCA-492). When provided alongside
-   * ``orchestrationTable``, the webhook processor reads it to fetch repo
-   * context (README + top-level tree) for the #299 Mode B decomposition
-   * planner, so a thin-but-big issue is judged against what the repo actually
-   * is instead of title+description alone. Read-only (GetSecretValue). Omitted
-   * → the planner runs without repo context (its prior behaviour).
-   */
-  readonly githubTokenSecret?: secretsmanager.ISecret;
 
   /** Removal policy for Linear DynamoDB tables. */
   readonly removalPolicy?: RemovalPolicy;
@@ -280,16 +261,6 @@ export class LinearIntegration extends Construct {
           USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
-        // #299 Mode B: decomposition judge+planner model id. Only wired when
-        // orchestration is enabled (the planner shares that gated path); the
-        // handler defaults to the platform Sonnet profile if unset.
-        ...(props.orchestrationTable && { DECOMPOSITION_MODEL_ID }),
-        // ABCA-492: stack GitHub token so the decomposition planner can fetch
-        // repo context (README + tree). Only wired when both orchestration is
-        // enabled and a token secret was provided; best-effort at runtime.
-        ...(props.orchestrationTable && props.githubTokenSecret && {
-          GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
-        }),
       },
       bundling: commonBundling,
     });
@@ -303,11 +274,6 @@ export class LinearIntegration extends Construct {
     // #331: read the user concurrency counter to throttle the root release.
     if (props.orchestrationTable && props.userConcurrencyTable) {
       props.userConcurrencyTable.grantReadData(webhookProcessorFn);
-    }
-    // ABCA-492: read the stack GitHub token so the decomposition planner can
-    // fetch repo context (README + tree). Read-only; best-effort at runtime.
-    if (props.orchestrationTable && props.githubTokenSecret) {
-      props.githubTokenSecret.grantRead(webhookProcessorFn);
     }
     // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
     // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant
@@ -348,33 +314,10 @@ export class LinearIntegration extends Construct {
         ],
       }));
     }
-    // #299 Mode B: the decomposition judge+planner calls bedrock:InvokeModel.
-    // Scoped to the explicit foundation-model + ``us.``-prefixed cross-region
-    // inference-profile ARNs (parity with ecs-agent-cluster.ts — no wildcard
-    // resource). Only granted when orchestration is enabled (the planner runs
-    // only on that path).
-    if (props.orchestrationTable) {
-      const stack = Stack.of(this);
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:InvokeModel'],
-        resources: [
-          stack.formatArn({
-            service: 'bedrock',
-            region: '*',
-            account: '',
-            resource: 'foundation-model',
-            resourceName: DECOMPOSITION_MODEL,
-            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          }),
-          stack.formatArn({
-            service: 'bedrock',
-            resource: 'inference-profile',
-            resourceName: DECOMPOSITION_MODEL_ID,
-            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          }),
-        ],
-      }));
-    }
+    // #299 agent-native planning: the webhook processor no longer calls
+    // bedrock:InvokeModel — decomposition planning moved into the
+    // ``coding/decompose-v1`` agent (which has its own model grant), so the
+    // former inline-planner InvokeModel grant was removed (least-privilege).
     // Issue descriptions can carry markdown `![alt](https://…)` images, which
     // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
     // URL attachments. `createTaskCore` then uploads the screened bytes to

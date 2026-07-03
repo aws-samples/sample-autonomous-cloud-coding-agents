@@ -1302,7 +1302,7 @@ async function fetchPlanArtifact(evt: DecomposePlanEvent): Promise<string | null
     logger.error('Decompose plan: failed to read plan artifact from S3', {
       task_id: evt.taskId, bucket, key, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- best-effort plan read; null → reconcileDecomposePlan posts the planner-error note (honest fallback, not a masked success)
   }
 }
 

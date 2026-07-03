@@ -47,7 +47,6 @@ import {
   type DecompositionEffects,
 } from './shared/orchestration-decomposition-flow';
 import { parseDecompositionMode, triggerLabelVariants } from './shared/orchestration-decomposition-mode';
-import { bedrockInvokeModel } from './shared/orchestration-decomposition-planner';
 import {
   consumePendingPlan as consumePendingPlanRow,
   discardPendingPlan as discardPendingPlanRow,
@@ -82,9 +81,6 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
 // budget. Unset → release all roots (back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
-// #299 Mode B: model id for the decomposition judge+planner. Defaults inside
-// bedrockInvokeModel to the platform-standard Sonnet inference profile.
-const DECOMPOSITION_MODEL_ID = process.env.DECOMPOSITION_MODEL_ID;
 // #299 Mode B: TTL (seconds) for a persisted pending plan awaiting approval. A
 // week is ample for a human to approve; the row self-expires after.
 const PENDING_PLAN_TTL_SECONDS = 604_800;
@@ -768,11 +764,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 }
 
 /**
- * #299 Mode B — build the {@link DecompositionEffects} the flow needs, binding
- * the injected boundaries to this request's real helpers (Bedrock, the Linear
- * GraphQL transport, the feedback comment poster, the pending-plan store).
+ * #299 Mode B — build the {@link DecompositionEffects} the ``@bgagent
+ * approve``/``reject`` verdict flow ({@link runPlanVerdict}) needs, binding the
+ * injected boundaries to this request's real helpers (the Linear GraphQL
+ * transport for write-back, the feedback comment poster, the pending-plan store).
  * Kept as a factory so the flow stays free of module-global wiring and is
  * unit-testable in isolation.
+ *
+ * #299 agent-native planning: the model-invoke boundary was removed — planning
+ * now runs in the ``coding/decompose-v1`` agent and the reconciler seeds from its
+ * artifact. This factory serves only the verdict path (which never plans).
  */
 function buildDecompositionEffects(
   parentIssueId: string,
@@ -785,7 +786,6 @@ function buildDecompositionEffects(
 ): DecompositionEffects {
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE! };
   return {
-    invokeModel: bedrockInvokeModel(DECOMPOSITION_MODEL_ID),
     graphql: linearGraphqlFn(accessToken),
     postComment: async (issueId, body) =>
       WORKSPACE_REGISTRY_TABLE ? upsertStatusComment(feedbackCtx, issueId, body) : null,

@@ -20,11 +20,10 @@
 import { parsePlanVerdict } from '../../../src/handlers/shared/orchestration-comment-trigger';
 import {
   applyDecompositionResult,
-  runDecompositionProposal,
   runPlanVerdict,
   type DecompositionEffects,
 } from '../../../src/handlers/shared/orchestration-decomposition-flow';
-import type { DecompositionResult, PlannerInput } from '../../../src/handlers/shared/orchestration-decomposition-planner';
+import type { DecompositionResult } from '../../../src/handlers/shared/orchestration-decomposition-planner';
 import type { DecompositionPlan, ProjectDecompositionCaps } from '../../../src/handlers/shared/orchestration-decomposition-types';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
@@ -32,46 +31,7 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 }));
 
 const PARENT = 'parent-uuid';
-// A WELL-SPECIFIED input: description long enough that a decline is trusted as a
-// genuine one-cohesive-unit judgement (not "underspecified"). ABCA-492 added the
-// thin-description guard — the shared input must be substantial so the existing
-// judge_declined tests exercise the confident-decline path, not the ask-for-detail one.
-const PLANNER_INPUT: PlannerInput = {
-  title: 'T',
-  description: 'This change reworks the single authentication middleware so that token '
-    + 'validation, refresh, and error mapping all live in one cohesive module with a shared '
-    + 'config surface. The pieces are tightly coupled and only make sense together: the refresh '
-    + 'path reads the same in-memory token cache the validation path writes, and the error mapper '
-    + 'translates failures from both into a single response contract. Splitting these across '
-    + 'sub-issues would force error-prone hand-offs over shared mutable state with no standalone '
-    + 'value per piece, so this is deliberately described as one well-specified cohesive unit.',
-  repo: 'a/b',
-  maxSubIssues: 8,
-};
 const CAPS: ProjectDecompositionCaps = { decompose_allowed: true, max_sub_issues: 8 };
-
-/** The decomposer's 2-node chain breakdown (stage 2 shape). */
-const CHAIN_PLAN = JSON.stringify({
-  reasoning: 'two units',
-  sub_issues: [
-    { title: 'A', description: 'a', size: 'S', depends_on: [] },
-    { title: 'B', description: 'b', size: 'M', depends_on: [0] },
-  ],
-});
-
-/**
- * A two-stage planner mock: returns the assessor verdict for stage-1 prompts
- * (they ask for ``"decompose": boolean``) and the decomposer breakdown for
- * stage-2 prompts. ``decompose`` controls the assessor's verdict.
- */
-function twoStageInvoke(decompose: boolean, plan: string = CHAIN_PLAN): jest.Mock {
-  return jest.fn(async (prompt: string) => {
-    if (prompt.includes('"decompose": boolean')) {
-      return JSON.stringify({ decompose, reasoning: decompose ? 'multi-part' : 'cohesive' });
-    }
-    return plan; // stage 2 — the decomposer breakdown
-  });
-}
 
 /** A fake Linear that creates issues new-<title> and accepts relations. */
 function fakeGraphql() {
@@ -87,9 +47,11 @@ function fakeGraphql() {
   });
 }
 
+// #299 agent-native planning: the flow no longer invokes a model — the effects
+// carry only the write-back / comment / pending-plan boundaries. applyDecompositionResult
+// takes an already-parsed plan; runPlanVerdict handles approve/reject.
 function effects(over: Partial<DecompositionEffects> = {}): DecompositionEffects {
   return {
-    invokeModel: twoStageInvoke(true),
     graphql: fakeGraphql(),
     postComment: jest.fn().mockResolvedValue('comment-1'),
     putPendingPlan: jest.fn().mockResolvedValue(true),
@@ -156,141 +118,6 @@ describe('parsePlanVerdict', () => {
   });
 });
 
-describe('runDecompositionProposal — manual (:decompose)', () => {
-  test('posts a proposal + persists a pending plan, returns handled/awaiting', async () => {
-    const e = effects();
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'handled', reason: 'awaiting_approval' });
-    expect(e.postComment).toHaveBeenCalledTimes(1);
-    expect((e.postComment as jest.Mock).mock.calls[0][1]).toContain('@bgagent approve');
-    expect(e.putPendingPlan).toHaveBeenCalledTimes(1);
-    // The proposal comment id is threaded into the pending plan.
-    expect((e.putPendingPlan as jest.Mock).mock.calls[0][0].proposalCommentId).toBe('comment-1');
-    // Manual mode does NOT write back yet.
-    expect(e.graphql).not.toHaveBeenCalled();
-  });
-
-  test('a redelivery (pending plan already existed) → noop', async () => {
-    const e = effects({ putPendingPlan: jest.fn().mockResolvedValue(false) });
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
-    expect(r.kind).toBe('noop');
-  });
-});
-
-describe('runDecompositionProposal — auto (:auto)', () => {
-  test('writes back immediately and returns a seed graph with real ids', async () => {
-    const e = effects();
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: true, effects: e });
-    expect(r.kind).toBe('seed');
-    if (r.kind === 'seed') {
-      expect(r.children.map((c) => c.id)).toEqual(['new-A', 'new-B']);
-      expect(r.children[1].depends_on).toEqual(['new-A']);
-    }
-    // Auto posts the proposal (informational) and does NOT persist a pending plan.
-    expect(e.putPendingPlan).not.toHaveBeenCalled();
-    expect((e.postComment as jest.Mock).mock.calls[0][1]).toContain('Auto-run is on');
-  });
-});
-
-describe('runDecompositionProposal — judge + caps gates', () => {
-  test(':auto + one-cohesive-unit verdict → single_task, one model call, no write-back', async () => {
-    // The assessor's verdict stands; the decomposer is never reached.
-    const invokeModel = twoStageInvoke(false);
-    const e = effects({ invokeModel });
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: true, effects: e });
-    expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
-    expect(invokeModel).toHaveBeenCalledTimes(1); // assessor only, no decomposer
-    expect(e.putPendingPlan).not.toHaveBeenCalled();
-  });
-
-  test(':decompose + one-cohesive-unit verdict → single_task with reasoning (NO forced plan)', async () => {
-    // The agent's assessment drives for BOTH labels. On an explicit :decompose the
-    // verdict still stands — we post the reasoning and run one task; we do NOT
-    // manufacture a breakdown the assessor judged incoherent (that could only be
-    // the layer-split anti-pattern). The label affects only the approval gate.
-    const invokeModel = twoStageInvoke(false);
-    const e = effects({ invokeModel });
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
-    expect(invokeModel).toHaveBeenCalledTimes(1); // assessor only — decomposer never forced
-    expect(e.putPendingPlan).not.toHaveBeenCalled();
-    // posts the single-task note explaining WHY it wasn't split (the reasoning)
-    const note = (e.postComment as jest.Mock).mock.calls[0][1];
-    expect(note).toMatch(/single cohesive change/i);
-    expect(note).toContain('cohesive'); // the assessor's rationale
-  });
-
-  test('ABCA-492: :decompose + decline on a THIN issue → HOLD + ask for detail, NO single task', async () => {
-    // A one-line ":decompose" epic the planner declined: we can't trust "one
-    // cohesive unit" (the planner may just have had nothing to find seams in),
-    // and silently running one giant task is the worst outcome for a spend-safe
-    // request. Hold (kind: handled) and post the underspecified note — do NOT
-    // fall through to a single task.
-    const invokeModel = twoStageInvoke(false); // assessor declines
-    const e = effects({ invokeModel });
-    const thin: PlannerInput = { title: 'slack parity with linear', description: 'make slack like linear', repo: 'a/b', maxSubIssues: 8 };
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: thin, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'handled', reason: 'underspecified' });
-    const note = (e.postComment as jest.Mock).mock.calls[0][1];
-    expect(note).toMatch(/couldn't confidently break this issue/i);
-    expect(note).toMatch(/add a bit more detail/i);
-    expect(note).not.toMatch(/single cohesive change/i); // NOT the confident-decline copy
-  });
-
-  test('ABCA-492: a thin issue with repo context that STILL declines is treated as underspecified (asks for detail)', async () => {
-    // The description is the issue-specific scope signal; repo context is generic
-    // background and can be present yet a decline still be wrong (ABCA-492 live).
-    // So a thin description that declines → ask for detail regardless of context.
-    const invokeModel = twoStageInvoke(false);
-    const e = effects({ invokeModel });
-    const thinWithCtx: PlannerInput = { title: 'slack parity', description: 'do the slack thing', repo: 'a/b', maxSubIssues: 8, repoContext: 'README: a big platform\nsrc/... many files' };
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: thinWithCtx, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'handled', reason: 'underspecified' });
-  });
-
-  test('planner error → HONEST error note (not "single cohesive change") + single_task fallback', async () => {
-    // ABCA-490: a planner error/timeout must NOT be dressed up as a "single
-    // cohesive change" verdict — that's a lie when the truth is the planner
-    // failed. Assert the note explains it couldn't plan + gives a remedy, and is
-    // distinct from the judge-declined single-task copy.
-    const e = effects({ invokeModel: jest.fn().mockRejectedValue(new Error('bedrock down')) });
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'single_task', reason: 'planner_error' });
-    const note = (e.postComment as jest.Mock).mock.calls[0][1];
-    expect(note).not.toMatch(/single cohesive change/i);
-    expect(note).toMatch(/couldn't plan a breakdown/i);
-    expect(note).toMatch(/single task/i); // still honest that it falls back to one task
-    expect(note).toMatch(/:decompose|split the issue/i); // remedy present
-  });
-
-  test('planner TIMEOUT (AbortSignal.timeout fires) → same honest error path', async () => {
-    // ABCA-490 core: the real failure is a slow call aborted by the client
-    // deadline, surfacing as a TimeoutError — the flow must treat it exactly like
-    // any planner error (honest note + single-task fallback), NOT hang.
-    const timeoutErr = new Error('The operation was aborted due to timeout');
-    timeoutErr.name = 'TimeoutError';
-    const e = effects({ invokeModel: jest.fn().mockRejectedValue(timeoutErr) });
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: CAPS, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'single_task', reason: 'planner_error' });
-    expect((e.postComment as jest.Mock).mock.calls[0][1]).toMatch(/couldn't plan a breakdown/i);
-  });
-
-  test('over-cap plan → rejection comment, handled/too_many_sub_issues (never trimmed/seeded, NOT a single giant task)', async () => {
-    const e = effects();
-    const tightCaps: ProjectDecompositionCaps = { decompose_allowed: true, max_sub_issues: 1 };
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: tightCaps, autoRun: true, effects: e });
-    expect(r).toEqual({ kind: 'handled', reason: 'too_many_sub_issues' });
-    expect((e.postComment as jest.Mock).mock.calls[0][1]).toContain('limit');
-    expect(e.graphql).not.toHaveBeenCalled(); // no write-back on rejection
-  });
-
-  test('decompose disabled → single-task note, single_task/not_allowed', async () => {
-    const e = effects();
-    const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: { decompose_allowed: false, max_sub_issues: 8 }, autoRun: false, effects: e });
-    expect(r).toEqual({ kind: 'single_task', reason: 'not_allowed' });
-  });
-});
-
 describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan, no model call)', () => {
   const PLAN: DecompositionPlan = {
     shouldDecompose: true,
@@ -315,8 +142,7 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     expect(r).toEqual({ kind: 'handled', reason: 'awaiting_approval' });
     expect((e.postComment as jest.Mock).mock.calls[0][1]).toContain('@bgagent approve');
     expect((e.putPendingPlan as jest.Mock).mock.calls[0][0].proposalCommentId).toBe('comment-1');
-    // The tail never plans — invokeModel isn't even on the Pick'd effects here.
-    expect(e.invokeModel).not.toHaveBeenCalled();
+    // Manual mode does NOT write back yet (no model invoke exists on this path).
     expect(e.graphql).not.toHaveBeenCalled();
   });
 
