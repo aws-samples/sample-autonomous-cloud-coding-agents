@@ -431,6 +431,76 @@ class TestRepoLessPipeline:
         assert result["status"] == "success"
         assert result["pr_url"] == "https://github.com/org/repo/pull/1"
 
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_decompose_workflow_delivers_plan_artifact_and_skips_pr(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # #299 agent-native decompose: coding/decompose-v1 is REPO-FUL (clones for
+        # context) but its terminal outcome is an ARTIFACT (the plan JSON), not a
+        # PR. It must take the repo-bound path (clone), then deliver the plan as an
+        # artifact and SKIP the build/PR post-hooks entirely.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+        plan_json = '{"decompose": true, "reasoning": "two features", "sub_issues": []}'
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(
+                status="success", turns=3, cost_usd=0.05, num_turns=3, result_text=plan_json
+            )
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch(
+                "pipeline._deliver_plan_artifact",
+                return_value="s3://artifacts-bkt/artifacts/decompose-1/result.md",
+            ) as mock_deliver,
+            patch("pipeline.ensure_pr") as mock_ensure_pr,
+            patch("pipeline.verify_build") as mock_verify_build,
+            patch("pipeline.ensure_committed") as mock_ensure_committed,
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="Add auth + billing + admin",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="decompose-1",
+                resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            )
+
+        # Repo-bound path ran (clone), plan delivered as artifact, PR/build skipped.
+        mock_setup_repo.assert_called_once()
+        mock_deliver.assert_called_once()
+        mock_ensure_pr.assert_not_called()
+        mock_verify_build.assert_not_called()
+        mock_ensure_committed.assert_not_called()
+        assert result["status"] == "success"
+        assert result["pr_url"] is None
+        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/decompose-1/result.md"
+
 
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):
