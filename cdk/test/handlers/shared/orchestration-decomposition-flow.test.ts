@@ -19,12 +19,13 @@
 
 import { parsePlanVerdict } from '../../../src/handlers/shared/orchestration-comment-trigger';
 import {
+  applyDecompositionResult,
   runDecompositionProposal,
   runPlanVerdict,
   type DecompositionEffects,
 } from '../../../src/handlers/shared/orchestration-decomposition-flow';
-import type { PlannerInput } from '../../../src/handlers/shared/orchestration-decomposition-planner';
-import type { ProjectDecompositionCaps } from '../../../src/handlers/shared/orchestration-decomposition-types';
+import type { DecompositionResult, PlannerInput } from '../../../src/handlers/shared/orchestration-decomposition-planner';
+import type { DecompositionPlan, ProjectDecompositionCaps } from '../../../src/handlers/shared/orchestration-decomposition-types';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -287,6 +288,104 @@ describe('runDecompositionProposal — judge + caps gates', () => {
     const e = effects();
     const r = await runDecompositionProposal({ parentIssueId: PARENT, plannerInput: PLANNER_INPUT, caps: { decompose_allowed: false, max_sub_issues: 8 }, autoRun: false, effects: e });
     expect(r).toEqual({ kind: 'single_task', reason: 'not_allowed' });
+  });
+});
+
+describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan, no model call)', () => {
+  const PLAN: DecompositionPlan = {
+    shouldDecompose: true,
+    reasoning: 'two units',
+    nodes: [
+      { title: 'A', description: 'a', size: 'S', max_budget_usd: 1, depends_on: [] },
+      { title: 'B', description: 'b', size: 'M', max_budget_usd: 3, depends_on: [0] },
+    ],
+  };
+  const planResult: DecompositionResult = { kind: 'plan', plan: PLAN };
+
+  test('manual (:decompose) → proposal + pending plan, handled/awaiting; never invokes a model', async () => {
+    const e = effects();
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: planResult,
+      underspecified: false,
+      caps: CAPS,
+      autoRun: false,
+      effects: e,
+    });
+    expect(r).toEqual({ kind: 'handled', reason: 'awaiting_approval' });
+    expect((e.postComment as jest.Mock).mock.calls[0][1]).toContain('@bgagent approve');
+    expect((e.putPendingPlan as jest.Mock).mock.calls[0][0].proposalCommentId).toBe('comment-1');
+    // The tail never plans — invokeModel isn't even on the Pick'd effects here.
+    expect(e.invokeModel).not.toHaveBeenCalled();
+    expect(e.graphql).not.toHaveBeenCalled();
+  });
+
+  test('auto (:auto) → writes back immediately, returns a seed graph with real ids', async () => {
+    const e = effects();
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: planResult,
+      underspecified: false,
+      caps: CAPS,
+      autoRun: true,
+      effects: e,
+    });
+    expect(r.kind).toBe('seed');
+    if (r.kind === 'seed') {
+      expect(r.children.map((c) => c.id)).toEqual(['new-A', 'new-B']);
+      expect(r.children[1].depends_on).toEqual(['new-A']);
+    }
+    expect(e.putPendingPlan).not.toHaveBeenCalled();
+  });
+
+  test('agent decline is TRUSTED (underspecified:false) → single_task, NOT the ask-for-detail path', async () => {
+    // The agent planned with full repo context, so a decline is a confident
+    // one-cohesive-unit judgement — even for a short reasoning. The reconciler
+    // always passes underspecified:false; assert we never route to the HOLD note.
+    const e = effects();
+    const declined: DecompositionResult = { kind: 'single_task', reasoning: 'one cohesive change' };
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: declined,
+      underspecified: false,
+      caps: CAPS,
+      autoRun: false,
+      effects: e,
+    });
+    expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
+    const note = (e.postComment as jest.Mock).mock.calls[0][1];
+    expect(note).toMatch(/single cohesive change/i);
+    expect(note).not.toMatch(/add a bit more detail/i);
+  });
+
+  test('unparseable/invalid plan (kind:error) → honest planner-error note + single_task', async () => {
+    const e = effects();
+    const errResult: DecompositionResult = { kind: 'error', message: 'bad plan' };
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: errResult,
+      underspecified: false,
+      caps: CAPS,
+      autoRun: true,
+      effects: e,
+    });
+    expect(r).toEqual({ kind: 'single_task', reason: 'planner_error' });
+    expect((e.postComment as jest.Mock).mock.calls[0][1]).toMatch(/couldn't plan a breakdown/i);
+    expect(e.graphql).not.toHaveBeenCalled();
+  });
+
+  test('over-cap plan → rejection comment, handled/too_many_sub_issues (no write-back)', async () => {
+    const e = effects();
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: planResult,
+      underspecified: false,
+      caps: { decompose_allowed: true, max_sub_issues: 1 },
+      autoRun: true,
+      effects: e,
+    });
+    expect(r).toEqual({ kind: 'handled', reason: 'too_many_sub_issues' });
+    expect(e.graphql).not.toHaveBeenCalled();
   });
 });
 

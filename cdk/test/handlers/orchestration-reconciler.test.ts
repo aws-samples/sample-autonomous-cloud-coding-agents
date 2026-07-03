@@ -64,7 +64,7 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 // workspace registry is configured. Set it so the surfacing path is exercised.
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
 
-import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
+import { handler, parseDecomposePlanRecord, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
 
 /** Build a TaskTable stream MODIFY record. */
 function taskRecord(fields: {
@@ -135,6 +135,107 @@ describe('parseTerminalTaskRecord', () => {
 
   test('skips records with no NewImage', () => {
     expect(parseTerminalTaskRecord({ eventName: 'MODIFY', dynamodb: {} } as DynamoDBRecord)).toBeNull();
+  });
+
+  test('skips a coding/decompose-v1 planning task (it has no orchestration_id — routed elsewhere)', () => {
+    // The decompose planning task is NOT an orchestration child; it must fall
+    // through parseTerminalTaskRecord (no orchestration_id) so the dedicated
+    // decompose branch handles it. Guards against it being mis-gated as a child.
+    expect(parseTerminalTaskRecord(decomposeRecord({ task_id: 'P1', status: 'COMPLETED', mode: 'decompose' }))).toBeNull();
+  });
+});
+
+/** Build a terminal ``coding/decompose-v1`` planning-task stream record. */
+function decomposeRecord(fields: {
+  task_id?: string;
+  status?: string;
+  workflow_id?: string;
+  mode?: 'decompose' | 'auto' | string;
+  parent_issue_id?: string;
+  workspace_id?: string;
+  project_id?: string;
+  max_sub_issues?: string;
+  decompose_allowed?: string;
+  max_parent_budget_usd?: string;
+  artifact_uri?: string;
+  task_description?: string;
+  eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
+}): DynamoDBRecord {
+  const img: Record<string, unknown> = {};
+  if (fields.task_id) img.task_id = { S: fields.task_id };
+  if (fields.status) img.status = { S: fields.status };
+  img.resolved_workflow = { M: { id: { S: fields.workflow_id ?? 'coding/decompose-v1' }, version: { S: '1.0.0' } } };
+  img.user_id = { S: 'user-1' };
+  img.repo = { S: 'o/r' };
+  if (fields.artifact_uri) img.artifact_uri = { S: fields.artifact_uri };
+  if (fields.task_description) img.task_description = { S: fields.task_description };
+  const cm: Record<string, unknown> = {};
+  cm.linear_workspace_id = { S: fields.workspace_id ?? 'WS' };
+  cm.linear_project_id = { S: fields.project_id ?? 'PROJ' };
+  cm.decompose_parent_issue_id = { S: fields.parent_issue_id ?? 'PARENT' };
+  if (fields.mode) cm.decompose_mode = { S: fields.mode };
+  if (fields.max_sub_issues) cm.decompose_caps_max_sub_issues = { S: fields.max_sub_issues };
+  if (fields.decompose_allowed) cm.decompose_caps_allowed = { S: fields.decompose_allowed };
+  if (fields.max_parent_budget_usd) cm.decompose_caps_max_parent_budget_usd = { S: fields.max_parent_budget_usd };
+  img.channel_metadata = { M: cm };
+  return {
+    eventName: fields.eventName ?? 'MODIFY',
+    dynamodb: { NewImage: img as never },
+  } as DynamoDBRecord;
+}
+
+describe('parseDecomposePlanRecord', () => {
+  test('extracts a terminal decompose-planning task with mode + caps + artifact', () => {
+    const evt = parseDecomposePlanRecord(decomposeRecord({
+      task_id: 'P1',
+      status: 'COMPLETED',
+      mode: 'decompose',
+      max_sub_issues: '5',
+      decompose_allowed: 'true',
+      max_parent_budget_usd: '20',
+      artifact_uri: 's3://bucket/artifacts/P1/result.md',
+      task_description: 'ENG-1: do it',
+    }));
+    expect(evt).toEqual({
+      taskId: 'P1',
+      status: 'COMPLETED',
+      parentIssueId: 'PARENT',
+      workspaceId: 'WS',
+      repo: 'o/r',
+      projectId: 'PROJ',
+      platformUserId: 'user-1',
+      mode: 'decompose',
+      maxSubIssues: 5,
+      decomposeAllowed: true,
+      maxParentBudgetUsd: 20,
+      artifactUri: 's3://bucket/artifacts/P1/result.md',
+      taskDescription: 'ENG-1: do it',
+    });
+  });
+
+  test('captures :auto mode and defaults caps (max_sub_issues → 8) when unstamped', () => {
+    const evt = parseDecomposePlanRecord(decomposeRecord({ task_id: 'P2', status: 'COMPLETED', mode: 'auto' }));
+    expect(evt?.mode).toBe('auto');
+    expect(evt?.maxSubIssues).toBe(8);
+    expect(evt?.decomposeAllowed).toBe(true);
+    expect(evt?.maxParentBudgetUsd).toBeUndefined();
+  });
+
+  test('returns the event on a FAILED planning task (the handler posts the error note)', () => {
+    const evt = parseDecomposePlanRecord(decomposeRecord({ task_id: 'P3', status: 'FAILED', mode: 'decompose' }));
+    expect(evt?.status).toBe('FAILED');
+  });
+
+  test('null for a non-decompose workflow (a normal coding task)', () => {
+    expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P4', status: 'COMPLETED', mode: 'decompose', workflow_id: 'coding/new-task-v1' }))).toBeNull();
+  });
+
+  test('null for a non-terminal status', () => {
+    expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P5', status: 'RUNNING', mode: 'decompose' }))).toBeNull();
+  });
+
+  test('null when the decompose_mode is missing/invalid (not a Mode B task)', () => {
+    expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P6', status: 'COMPLETED', mode: 'bogus' }))).toBeNull();
   });
 });
 
