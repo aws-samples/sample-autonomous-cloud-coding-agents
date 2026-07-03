@@ -158,6 +158,49 @@ def _maybe_upload_trace(
     return trace_s3_uri
 
 
+def _deliver_plan_artifact(
+    workflow,
+    config,
+    hydrated,
+    progress,
+    trajectory,
+    setup,
+    prompt: str,
+    agent_result,
+) -> str | None:
+    """Deliver a decompose-planning agent's plan as the task artifact (#299).
+
+    ``coding/decompose-v1`` is a repo-ful workflow whose primary terminal outcome
+    is an ARTIFACT (the decomposition plan), not a PR. It clones the repo for full
+    planning context but produces no code change — so the build/PR post-hooks do
+    not apply. This uploads the agent's final result text (the plan JSON) via the
+    SAME ``deliver_artifact`` uploader web-research uses (``artifacts/{task_id}/``),
+    returning the ``s3://`` URI. Raises on delivery failure — delivery is the
+    terminal side effect, so a failure must surface as a FAILED task (caught by
+    the pipeline's outer handler), not a silent "planned nothing".
+    """
+    from workflow import StepContext
+    from workflow.deliverers import deliver as deliver_artifact
+
+    deliver_ctx = StepContext(
+        workflow=workflow,
+        config=config,
+        hydrated=hydrated,
+        progress=progress,
+        trajectory=trajectory,
+        setup=setup,
+        system_prompt="",
+        user_prompt=prompt,
+    )
+    deliver_ctx.agent_result = agent_result
+    result = deliver_artifact("s3", deliver_ctx)
+    artifact_uri = result.artifact_uri
+    log("POST", f"decompose plan delivered as artifact: {artifact_uri}")
+    if artifact_uri:
+        progress.write_agent_milestone("artifact_delivered", artifact_uri)
+    return artifact_uri
+
+
 def _execute_agent_step(
     prompt: str,
     system_prompt: str,
@@ -1028,61 +1071,95 @@ def run_task(
                 )
                 ensure_pr_strategy = "create"
 
+            # #299 agent-native decompose: a REPO-FUL workflow whose primary
+            # terminal outcome is an ARTIFACT (coding/decompose-v1) clones the
+            # repo for context but produces a plan, not a PR. Skip the build/PR
+            # post-hooks; deliver the agent's result text (the plan JSON) as the
+            # artifact so the platform can read it and seed the sub-issues.
+            #
+            # BOTH conditions matter: a repo-LESS artifact workflow
+            # (default/agent-v1, web-research) never reaches this repo-bound
+            # branch, but default/agent-v1 is repo-OPTIONAL — run WITH a repo it
+            # takes THIS path yet still expects a PR (primary: artifact but
+            # requires_repo: false). So gate on requires_repo too, or a
+            # repo-optional default-agent run would wrongly skip its PR.
+            artifact_workflow = bool(
+                _workflow
+                and getattr(_workflow.terminal_outcomes, "primary", None) == "artifact"
+                and getattr(_workflow, "requires_repo", False)
+            )
+            artifact_uri: str | None = None  # set by the decompose (artifact) branch below
+
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
-                # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)
-                safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
-                post_span.set_attribute("safety_net.committed", safety_committed)
-
-                build_outcome = verify_build(setup.repo_dir, config.build_command)
-                build_passed = build_outcome.passed
-                # Distinct diagnosis: a build that exceeded BUILD_VERIFY_TIMEOUT_S
-                # was KILLED, not failed — surface "timed out" rather than the
-                # misleading "build/tests failed" (a build that never finished is
-                # a different problem than a broken build). Threaded into the task
-                # error_message below so the platform's failure copy reflects it.
-                build_timed_out = build_outcome.timed_out
-                # K8: an INERT build gate (exit 127 / no-such-task — the command
-                # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
-                # the lint-inert path: do NOT gate on it (it's a config problem,
-                # not the agent's code), and treat build as passing for the gate
-                # so we don't emit a false "build failed". The honest signal is
-                # carried in error_message (build_ok=inert) for the platform copy.
-                build_inert = build_outcome.inert
-                if build_inert:
-                    log(
-                        "POST",
-                        "Post-agent build gate is INERT (command couldn't run) "
-                        "— not gating on it; surfacing as inert, not a failure",
-                    )
+                if artifact_workflow:
+                    # Plan-only task: no build/lint/PR gate — the plan IS the deliverable.
                     build_passed = True
-                # #72: when lint is INERT for this repo (no runnable lint task and
-                # no configured lint_command — see repo.py setup), running the
-                # default `mise run lint` would just fail "no such task" and
-                # record a misleading lint_passed=False. Skip the post-agent lint
-                # run entirely in that case and treat lint as passing (it never
-                # gates the verdict regardless; this keeps the persisted signal
-                # honest rather than a false red).
-                if getattr(setup, "lint_gate_inert", False):
-                    log(
-                        "POST",
-                        "Skipping post-agent lint verification "
-                        "(lint gating is INERT for this repo)",
-                    )
                     lint_passed = True
+                    build_timed_out = False
+                    build_inert = False
+                    safety_committed = False
+                    pr_url = None
+                    artifact_uri = _deliver_plan_artifact(
+                        _workflow, config, hc, progress, trajectory, setup, prompt, agent_result
+                    )
+                    post_span.set_attribute("artifact.uri", artifact_uri or "")
                 else:
-                    lint_passed = verify_lint(setup.repo_dir, config.lint_command).passed
-                pr_url = ensure_pr(
-                    config,
-                    setup,
-                    build_passed,
-                    lint_passed,
-                    agent_result=agent_result,
-                    strategy=ensure_pr_strategy,
-                )
-                post_span.set_attribute("build.passed", build_passed)
-                post_span.set_attribute("lint.passed", lint_passed)
-                post_span.set_attribute("pr.url", pr_url or "")
+                    # Safety net: commit any uncommitted tracked changes (skip read-only tasks)
+                    safety_committed = (
+                        False if workflow_read_only else ensure_committed(setup.repo_dir)
+                    )
+                    post_span.set_attribute("safety_net.committed", safety_committed)
+
+                    build_outcome = verify_build(setup.repo_dir, config.build_command)
+                    build_passed = build_outcome.passed
+                    # Distinct diagnosis: a build that exceeded BUILD_VERIFY_TIMEOUT_S
+                    # was KILLED, not failed — surface "timed out" rather than the
+                    # misleading "build/tests failed" (a build that never finished is
+                    # a different problem than a broken build). Threaded into the task
+                    # error_message below so the platform's failure copy reflects it.
+                    build_timed_out = build_outcome.timed_out
+                    # K8: an INERT build gate (exit 127 / no-such-task — the command
+                    # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
+                    # the lint-inert path: do NOT gate on it (it's a config problem,
+                    # not the agent's code), and treat build as passing for the gate
+                    # so we don't emit a false "build failed". The honest signal is
+                    # carried in error_message (build_ok=inert) for the platform copy.
+                    build_inert = build_outcome.inert
+                    if build_inert:
+                        log(
+                            "POST",
+                            "Post-agent build gate is INERT (command couldn't run) "
+                            "— not gating on it; surfacing as inert, not a failure",
+                        )
+                        build_passed = True
+                    # #72: when lint is INERT for this repo (no runnable lint task and
+                    # no configured lint_command — see repo.py setup), running the
+                    # default `mise run lint` would just fail "no such task" and
+                    # record a misleading lint_passed=False. Skip the post-agent lint
+                    # run entirely in that case and treat lint as passing (it never
+                    # gates the verdict regardless; this keeps the persisted signal
+                    # honest rather than a false red).
+                    if getattr(setup, "lint_gate_inert", False):
+                        log(
+                            "POST",
+                            "Skipping post-agent lint verification "
+                            "(lint gating is INERT for this repo)",
+                        )
+                        lint_passed = True
+                    else:
+                        lint_passed = verify_lint(setup.repo_dir, config.lint_command).passed
+                    pr_url = ensure_pr(
+                        config,
+                        setup,
+                        build_passed,
+                        lint_passed,
+                        agent_result=agent_result,
+                        strategy=ensure_pr_strategy,
+                    )
+                    post_span.set_attribute("build.passed", build_passed)
+                    post_span.set_attribute("lint.passed", lint_passed)
+                    post_span.set_attribute("pr.url", pr_url or "")
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
 
@@ -1212,6 +1289,10 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
+                # #299: a decompose (artifact) workflow carries the plan artifact
+                # URI here so the platform can read the plan and seed sub-issues;
+                # None for a normal PR workflow.
+                artifact_uri=artifact_uri,
                 code_changed=code_changed,
                 # Only carry the answer text on a no-change iteration (where it
                 # becomes the reply); a normal edit's reply is the PR link.
