@@ -9,6 +9,7 @@ the fallback for an unknown/absent id.
 from shell import log
 
 from .base import BASE_PROMPT
+from .decompose import DECOMPOSE_WORKFLOW
 from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
@@ -30,6 +31,10 @@ _PROMPTS = {
     # A6 re-stack (#305): re-merge a changed predecessor into an existing
     # stacked-child branch. push_resolve to the existing PR; not new work.
     "coding/restack-v1": BASE_PROMPT.replace("{workflow}", RESTACK_WORKFLOW),
+    # #299 Mode B agent-native planning: clone the repo, decide + draft a
+    # decomposition plan, emit it as the artifact. Repo-ful (uses BASE_PROMPT's
+    # clone env) but PR-less — the platform seeds sub-issues from the plan.
+    "coding/decompose-v1": BASE_PROMPT.replace("{workflow}", DECOMPOSE_WORKFLOW),
     # Repo-less knowledge workflow (#248 Phase 3) — no git/branch/PR placeholders.
     "default/agent-v1": DEFAULT_AGENT_PROMPT,
     # Repo-less reference knowledge workflow (#248) — research-specialized prompt
