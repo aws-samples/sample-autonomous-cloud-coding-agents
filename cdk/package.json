@@ -32,9 +32,9 @@
     "@smithy/protocol-http": "^5.5.5",
     "@smithy/signature-v4": "^5.6.1",
     "aws-cdk-lib": "^2.260.0",
-    "cdk-nag": "^2.38.2",
+    "cdk-nag": "^3.0.1",
     "constructs": "^10.6.0",
-    "js-yaml": "^4.1.1",
+    "js-yaml": "^5.2.0",
     "pdf-parse": "^2.4.5",
     "ulid": "^3.0.2",
     "ws": "^8.21.0"
