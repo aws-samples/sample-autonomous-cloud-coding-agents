@@ -179,25 +179,35 @@ function normalizeSize(v: unknown): SubIssueSize {
   return 'M';
 }
 
+/** A parsed object "looks like a plan" if it carries any of the plan keys. Used
+ *  to pick the RIGHT object out of a message that also contains other JSON-ish
+ *  braces (e.g. inline CSS ``.nav { … }`` in the agent's prose findings — live-
+ *  caught on ABCA-504, where the first ``{`` was CSS, not the plan). */
+function looksLikePlan(obj: Record<string, unknown>): boolean {
+  return 'decompose' in obj || 'sub_issues' in obj || 'reasoning' in obj;
+}
+
 /**
- * Extract the first balanced top-level JSON object from a model completion.
- * Tolerates markdown fences and leading/trailing prose. Returns the parsed
- * object, or null if no parseable object is found.
+ * Extract the decomposition-plan JSON object from a model/agent completion.
+ * Tolerates markdown fences and leading/trailing prose. The agent's message may
+ * contain OTHER brace groups before the plan (prose that quotes CSS/code), so we
+ * do NOT just balance from the first ``{``: we scan every top-level object and
+ * return the LAST one that both parses AND looks like a plan (the emitted answer
+ * is at the end). Falls back to the last parseable object, then null.
  */
 function extractJsonObject(raw: string): Record<string, unknown> | null {
   if (!raw) return null;
   // Fast path: the whole thing is JSON.
-  const trimmed = raw.trim();
-  const direct = tryParseObject(trimmed);
+  const direct = tryParseObject(raw.trim());
   if (direct) return direct;
 
-  // Scan for the first '{' and find its matching '}' (brace-balanced, string-aware).
-  const start = raw.indexOf('{');
-  if (start < 0) return null;
+  // Collect every balanced top-level {...} span (string-aware), in order.
+  const candidates: Record<string, unknown>[] = [];
+  let start = -1;
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let i = start; i < raw.length; i++) {
+  for (let i = 0; i < raw.length; i++) {
     const ch = raw[i];
     if (inString) {
       if (escaped) escaped = false;
@@ -205,12 +215,22 @@ function extractJsonObject(raw: string): Record<string, unknown> | null {
       else if (ch === '"') inString = false;
       continue;
     }
-    if (ch === '"') {inString = true;} else if (ch === '{') {depth++;} else if (ch === '}') {
-      depth--;
-      if (depth === 0) return tryParseObject(raw.slice(start, i + 1));
+    if (ch === '"') { inString = true; } else if (ch === '{') { if (depth === 0) start = i; depth++; } else if (ch === '}') {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          const obj = tryParseObject(raw.slice(start, i + 1));
+          if (obj) candidates.push(obj);
+          start = -1;
+        }
+      }
     }
   }
-  return null;
+  if (candidates.length === 0) return null;
+  // Prefer the LAST plan-shaped object (the agent's emitted answer); else the
+  // last parseable object (back-compat with a lone non-annotated object).
+  const plans = candidates.filter(looksLikePlan);
+  return plans.length > 0 ? plans[plans.length - 1] : candidates[candidates.length - 1];
 }
 
 function tryParseObject(s: string): Record<string, unknown> | null {

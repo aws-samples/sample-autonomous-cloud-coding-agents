@@ -92,6 +92,28 @@ describe('parseDecomposerResponse — golden plans', () => {
       + '\n```\nLet me know if you want changes.';
     expect(parseDecomposerResponse(raw, 8, FALLBACK_REASON).kind).toBe('plan');
   });
+
+  test('picks the plan object even when earlier prose contains OTHER braces (ABCA-504 live: inline CSS)', () => {
+    // The agent's final message quoted CSS (`.nav { padding: 20px 40px; }`) in its
+    // findings BEFORE the fenced plan JSON. The old extractor balanced from the
+    // first `{` (the CSS) and returned error; it must scan past it to the real plan.
+    const raw = [
+      'Key findings:',
+      '- Current nav CSS: `.nav { padding: 20px 40px; justify-content: space-between; }`',
+      '- Mobile override: `.nav { padding: 18px 24px; }`',
+      '',
+      'Here is the breakdown:',
+      '```json',
+      DECOMPOSER_JSON([
+        { title: 'One', description: 'a', size: 'S', depends_on: [] },
+        { title: 'Two', description: 'b', size: 'M', depends_on: [0] },
+      ]),
+      '```',
+    ].join('\n');
+    const r = parseDecomposerResponse(raw, 8, FALLBACK_REASON);
+    expect(r.kind).toBe('plan');
+    if (r.kind === 'plan') expect(r.plan.nodes).toHaveLength(2);
+  });
 });
 
 describe('parseDecomposerResponse — <2 nodes collapses to single_task', () => {
@@ -105,6 +127,25 @@ describe('parseDecomposerResponse — <2 nodes collapses to single_task', () => 
 
   test('zero nodes → single_task', () => {
     expect(parseDecomposerResponse(DECOMPOSER_JSON([]), 8, 'cohesive').kind).toBe('single_task');
+  });
+
+  test('ABCA-504 live: a decompose:false decline after CSS-in-prose → single_task (NOT error)', () => {
+    // The real cohesive-decline artifact: prose quoting `.nav { … }` then the
+    // fenced verdict. Must parse to single_task with the agent's own reasoning,
+    // so the platform posts the honest "single cohesive change" note — not the
+    // planner-error note (which the first-`{` extractor wrongly produced live).
+    const raw = [
+      'Key findings:',
+      '- Current nav CSS: `.nav { padding: 20px 40px; }`',
+      '',
+      'This is one cohesive unit of work.',
+      '```json',
+      '{"decompose": false, "reasoning": "single CSS tweak across all files", "sub_issues": []}',
+      '```',
+    ].join('\n');
+    const r = parseDecomposerResponse(raw, 8, '');
+    expect(r.kind).toBe('single_task');
+    if (r.kind === 'single_task') expect(r.reasoning).toBe('single CSS tweak across all files');
   });
 });
 
