@@ -27,6 +27,19 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   BatchGetCommand: jest.fn((input: unknown) => ({ _type: 'BatchGet', input })),
+  PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
+}));
+
+// #299 agent-native decompose: the reconciler reads the plan artifact from S3.
+const s3SendMock = jest.fn();
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({ send: s3SendMock })),
+  GetObjectCommand: jest.fn((input: unknown) => ({ _type: 'S3Get', input })),
+}));
+
+const resolveLinearOauthTokenMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
+  resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -63,6 +76,8 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 // A6 surfacing (#34/#35): the cascade posts Linear comments only when the
 // workspace registry is configured. Set it so the surfacing path is exercised.
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
+// #299 agent-native decompose: the reconciler reads the plan artifact from here.
+process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
 import { handler, parseDecomposePlanRecord, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
 
@@ -236,6 +251,74 @@ describe('parseDecomposePlanRecord', () => {
 
   test('null when the decompose_mode is missing/invalid (not a Mode B task)', () => {
     expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P6', status: 'COMPLETED', mode: 'bogus' }))).toBeNull();
+  });
+});
+
+describe('reconcileDecomposePlan — idempotency (live-caught: ABCA-498 3 duplicate proposals)', () => {
+  // The TaskTable stream is at-least-once AND the agent writes the terminal row
+  // several times (status, then artifact_uri, then cost/duration), so the same
+  // terminal decompose event re-delivers. Without a claim, each delivery re-runs
+  // the handler and posts a fresh :decompose proposal. Assert the claim gates the
+  // whole handler: proposal posted exactly ONCE across two identical deliveries.
+  const PLAN_JSON = JSON.stringify({
+    decompose: true,
+    reasoning: 'two separable slices',
+    sub_issues: [
+      { title: 'A', description: 'a', size: 'S', depends_on: [] },
+      { title: 'B', description: 'b', size: 'M', depends_on: [0] },
+    ],
+  });
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    s3SendMock.mockReset();
+    upsertStatusCommentMock.mockReset();
+    resolveLinearOauthTokenMock.mockReset();
+    // The plan artifact S3 read returns the agent's plan JSON.
+    s3SendMock.mockImplementation(async () => ({
+      Body: { transformToString: async () => PLAN_JSON },
+    }));
+    upsertStatusCommentMock.mockResolvedValue('proposal-comment-1');
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 't', oauthSecretArn: 'arn:secret', workspaceSlug: 'ws',
+    });
+  });
+
+  test(':decompose proposal is posted exactly once across a redelivered terminal event', async () => {
+    // ddb: the ack-claim (Update w/ attribute_not_exists) wins ONCE; a redelivery
+    // hits ConditionalCheckFailedException. putPendingPlan (Put) succeeds. No
+    // reads reached on the losing delivery.
+    let ackClaims = 0;
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Update' && String(cmd.input.ConditionExpression ?? '').includes('attribute_not_exists')) {
+        ackClaims += 1;
+        if (ackClaims > 1) {
+          const err = new Error('conditional'); (err as { name?: string }).name = 'ConditionalCheckFailedException'; throw err;
+        }
+        return {};
+      }
+      if (cmd._type === 'Put') return {}; // putPendingPlan create-once
+      return {};
+    });
+
+    const rec = decomposeRecord({
+      task_id: 'PLAN-1',
+      status: 'COMPLETED',
+      mode: 'decompose',
+      artifact_uri: 's3://ArtifactsBucket/artifacts/PLAN-1/result.md',
+      max_sub_issues: '6',
+    });
+    // Two identical terminal deliveries of the SAME task (the bug repro).
+    await handler({ Records: [rec] } as never);
+    await handler({ Records: [rec] } as never);
+
+    // Proposal comment posted exactly once (the fix). Before the claim it was 2.
+    const proposals = upsertStatusCommentMock.mock.calls.filter(
+      (c) => typeof c[2] === 'string' && (c[2] as string).includes('Proposed breakdown'),
+    );
+    expect(proposals).toHaveLength(1);
+    // The losing redelivery never reached the S3 plan fetch.
+    expect(s3SendMock).toHaveBeenCalledTimes(1);
   });
 });
 

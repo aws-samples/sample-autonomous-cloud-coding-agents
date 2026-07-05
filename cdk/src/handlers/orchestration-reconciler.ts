@@ -73,8 +73,10 @@ import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestrat
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { cascadeNodeLabel, upsertEpicPanel } from './shared/orchestration-rollup';
 import {
+  claimCommentAck,
   claimRollup,
   clearRollupClaim,
+  deriveOrchestrationId,
   loadOrchestration,
   setStatusCommentId,
   type OrchestrationChildRow,
@@ -1329,6 +1331,28 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     return;
   }
   const registryTable = WORKSPACE_REGISTRY_TABLE;
+
+  // Idempotency: the TaskTable stream is at-least-once AND the agent writes the
+  // terminal row several times (status, then artifact_uri, then cost/duration —
+  // each a MODIFY that re-delivers this terminal event). Without a claim we'd
+  // re-run the whole handler per delivery and post a fresh proposal comment each
+  // time (live-caught on ABCA-498: 3 duplicate proposals; the pending-plan
+  // create-once gate kept STATE correct but not the comment). Claim once per
+  // planning task_id — the create-once conditional write means only the first
+  // delivery proceeds; every replay no-ops here. (The webhook's inline path was
+  // shielded by its 60s dedup table; the reconciler has no such upstream gate.)
+  const claimOrchestrationId = deriveOrchestrationId(evt.parentIssueId);
+  const claimed = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, claimOrchestrationId, `decompose#${evt.taskId}`,
+    new Date().toISOString(), Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
+  );
+  if (!claimed) {
+    logger.info('Decompose plan already reconciled for this task — skipping redelivery', {
+      task_id: evt.taskId, parent_issue_id: evt.parentIssueId,
+    });
+    return;
+  }
+
   const feedbackCtx: LinearFeedbackContext = {
     linearWorkspaceId: evt.workspaceId, registryTableName: registryTable,
   };
