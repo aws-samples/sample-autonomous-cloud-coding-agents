@@ -669,10 +669,11 @@ describe('loadBlueprintConfig', () => {
     expect(config.cedar_policies).toBeUndefined();
   });
 
-  // Read-only workflows (decompose planning, pr-review) clone to READ — they run
-  // no build, so they must NOT inherit a repo's heavy ecs build substrate. Pinning
-  // them to agentcore avoids a hard "ECS compute strategy requires ECS_CLUSTER_ARN…"
-  // session-start failure on any stack without the ECS substrate wired (live-caught).
+  // Compute substrate is a per-repo property that applies to ALL workflows: a
+  // read-only decompose/review task clones + reads the SAME repo, so it needs the
+  // SAME compute (a repo big enough to need the 64GB ECS tier to build also OOMs
+  // the AgentCore microVM just reading it). So an ecs repo's ecs compute_type
+  // flows through regardless of the workflow's read-only-ness.
   const ecsRepoConfig = {
     repo: 'org/repo',
     status: 'active' as const,
@@ -681,21 +682,14 @@ describe('loadBlueprintConfig', () => {
     compute_type: 'ecs' as const,
   };
 
-  test('a coding/decompose-v1 (read-only) task on an ecs repo is PINNED to agentcore', async () => {
+  test('a read-only workflow (coding/decompose-v1) on an ecs repo INHERITS ecs (same repo, same footprint)', async () => {
     mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
     const planTask = { ...baseTask, resolved_workflow: { id: 'coding/decompose-v1', version: '1.0.0' } };
     const config = await loadBlueprintConfig(planTask as any);
-    expect(config.compute_type).toBe('agentcore');
+    expect(config.compute_type).toBe('ecs');
   });
 
-  test('a coding/pr-review-v1 (read-only) task on an ecs repo is PINNED to agentcore', async () => {
-    mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
-    const reviewTask = { ...baseTask, resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' } };
-    const config = await loadBlueprintConfig(reviewTask as any);
-    expect(config.compute_type).toBe('agentcore');
-  });
-
-  test('a WRITEABLE workflow (coding/new-task-v1) on an ecs repo KEEPS ecs (it builds)', async () => {
+  test('a writeable workflow (coding/new-task-v1) on an ecs repo also uses ecs', async () => {
     mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
     const buildTask = { ...baseTask, resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' } };
     const config = await loadBlueprintConfig(buildTask as any);
