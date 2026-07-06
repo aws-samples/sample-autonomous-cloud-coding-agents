@@ -142,6 +142,31 @@ describe('seedOrchestration — first write', () => {
     expect(a.title).toBe('Do thing');
   });
 
+  test('PM-4: persists the planner description onto the child row (and omits an empty one)', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+
+    await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentLinearIssueId: 'PARENT',
+      linearWorkspaceId: 'WS',
+      repo: 'o/r',
+      children: [
+        child('A', [], { title: 'Dashboard', description: 'Create `dashboard.html` at the root.' }),
+        child('B', [], { title: 'No scope' }), // no description
+      ],
+      now: NOW,
+      releaseContext: RC,
+    });
+
+    const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+    const a = puts.find((p) => p.PutRequest.Item.sub_issue_id === 'A')!.PutRequest.Item;
+    const b = puts.find((p) => p.PutRequest.Item.sub_issue_id === 'B')!.PutRequest.Item;
+    expect(a.description).toBe('Create `dashboard.html` at the root.');
+    expect(b).not.toHaveProperty('description'); // absent, not an empty string
+  });
+
   test('chunks BatchWrite into groups of 25', async () => {
     const ddb = makeDdb();
     ddb.send.mockResolvedValue({}); // Get + all batches

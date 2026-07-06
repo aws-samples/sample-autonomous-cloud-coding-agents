@@ -128,13 +128,23 @@ export function renderPlanProposal(
   lines.push('');
   lines.push('---');
   const cp = criticalPathLength(plan);
+  const n = plan.nodes.length;
   // Plain-English summary. "critical path" and "cost ceiling" are developer
   // terms (customer-caught jargon) — say what they MEAN instead: how many will
-  // run one-after-another, and the most it could cost. ``cp === 1`` means every
-  // sub-issue is independent, so phrase that case as "all in parallel".
-  const sequencing = cp <= 1
-    ? 'they can all run at the same time'
-    : `up to ${cp} run one after another (the rest run at the same time)`;
+  // run one-after-another, and the most it could cost. Three real shapes:
+  //  - cp <= 1        → every sub-issue independent: "all at the same time".
+  //  - cp === n       → a pure chain: EVERY piece is in the sequence, so there
+  //                     is no "rest" running in parallel (PM-5: the old copy
+  //                     tacked on "(the rest run at the same time)" even here).
+  //  - 1 < cp < n     → mixed: a chain of ``cp`` with the remainder parallel.
+  let sequencing: string;
+  if (cp <= 1) {
+    sequencing = 'they can all run at the same time';
+  } else if (cp >= n) {
+    sequencing = 'they run one after another';
+  } else {
+    sequencing = `up to ${cp} run one after another (the rest run at the same time)`;
+  }
   lines.push(
     `**In short:** ${plan.nodes.length} pieces — ${sequencing}. `
     + `Most this could cost is **$${formatUsd(totalBudget(plan))}** `
@@ -198,6 +208,23 @@ export function renderRevisionFailedNote(): string {
 }
 
 /**
+ * PM-6: the IMMEDIATE ack posted the instant a ``:decompose``/``:auto`` label
+ * dispatches the planning agent. Planning clones the repo and reasons over full
+ * context — 30-120s — during which the issue was previously silent (the first
+ * comment the user saw was the finished plan, so a slow plan read as "nothing
+ * happened"). This kills that gap, mirroring the 👀 ack a normal task posts at
+ * trigger time. ``auto`` tunes the copy: :auto starts right after planning (no
+ * approval), :decompose posts a plan to approve first.
+ */
+export function renderDecomposeStartedNote(auto: boolean): string {
+  return auto
+    ? `${PLAN_PROPOSAL_PREFIX} On it — working out how to break this up, then I'll create the pieces and start. `
+      + 'This takes a moment while I read the repo.'
+    : `${PLAN_PROPOSAL_PREFIX} On it — working out how to break this into a plan for you to approve. `
+      + 'This takes a moment while I read the repo; I\'ll post the breakdown here shortly.';
+}
+
+/**
  * #299 revise loop: the ack posted when a re-plan is dispatched from feedback.
  * The ``round`` argument is kept for the caller's logging/signature stability
  * but is intentionally NOT surfaced in the copy — a reviewer shouldn't see an
@@ -245,7 +272,11 @@ export function renderLabelHelp(base: string): string {
     '',
     'A few things worth knowing:',
     '- If an issue already has sub-issues, I just run those in order — no need for a special label.',
-    `- Once I'm working, you can reply to my comments with **\`@${base} <what you want>\`** to ask a `
+    // The reply MENTION is my Linear app handle (@bgagent) — fixed, and separate
+    // from the trigger LABEL (which the project can rename). PM-2: this line used
+    // to derive it from the label base (`@${base}`), telling users to reply
+    // `@abca` when only `@bgagent` fires. Match the real, working mention token.
+    '- Once I\'m working, you can reply to my comments with **`@bgagent <what you want>`** to ask a '
       + 'question or request a change.',
     '- Not sure which to use? Use `' + base + ':decompose` for anything with more than one part — '
       + 'you\'ll see the plan and cost before I spend anything.',

@@ -143,6 +143,40 @@ describe('releaseChild — happy path', () => {
     expect(update.input.ExpressionAttributeValues![':released']).toBe('released');
   });
 
+  test('PM-4: the planner scope (description) reaches the child task_description below the title', async () => {
+    const createTaskCore = created('T-desc');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        title: 'Add a team dashboard page',
+        description: 'Create `dashboard.html` at the site root showing per-team stats.',
+      }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const body = createTaskCore.mock.calls[0][0];
+    // Title headline AND the promised deliverable both reach the agent.
+    expect(body.task_description).toContain('ENG-1: Add a team dashboard page');
+    expect(body.task_description).toContain('dashboard.html');
+  });
+
+  test('PM-4: description that just echoes the title is not duplicated', async () => {
+    const createTaskCore = created('T-echo');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ title: 'Fix the header', description: 'Fix the header' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const body = createTaskCore.mock.calls[0][0];
+    // "Fix the header" appears once (in the "ENG-1: ..." line), not twice.
+    expect(body.task_description.match(/Fix the header/g)?.length).toBe(1);
+  });
+
   test('defaults channelSource to linear when omitted (#247 back-compat)', async () => {
     const createTaskCore = created('T-def');
     await releaseChild({
