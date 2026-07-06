@@ -2,7 +2,7 @@
 title: Workflows
 ---
 
-Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. If you specify nothing, the platform resolves a default (your repo's Blueprint default, or the conservative `default/agent-v1`). Workflows replace the old `task_type` field — see [Workflows](/architecture/workflows) for the full design and how to author your own.
+Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. If you specify nothing, the platform resolves a default (your repo's Blueprint default, or the conservative `default/agent-v1`). Workflows replace the old `task_type` field — see [Workflows](/sample-autonomous-cloud-coding-agents/architecture/workflows) for the full design and how to author your own.
 
 The shipped workflows that cover the full lifecycle of a code change:
 

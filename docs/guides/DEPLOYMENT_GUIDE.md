@@ -229,4 +229,5 @@ For users without AWS CLI access.
 - [User guide](./USER_GUIDE.md) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](../design/COST_MODEL.md) -- Per-task costs, cost guardrails, cost at scale.
+- [COST_ATTRIBUTION.md](./COST_ATTRIBUTION.md) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](../design/COMPUTE.md) -- Compute backend architecture and trade-offs.

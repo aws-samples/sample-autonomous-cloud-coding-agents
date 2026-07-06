@@ -6,7 +6,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 # Quick start
 
-Go from zero to your first agent-created pull request in about 30 minutes. This guide covers only the minimum path - see the [Developer guide](/developer-guide/introduction) and [User guide](/using/overview) for the full details.
+Go from zero to your first agent-created pull request in about 30 minutes. This guide covers only the minimum path - see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) and [User guide](/sample-autonomous-cloud-coding-agents/using/overview) for the full details.
 
 Steps 4–6 offer **ABCA CLI** and **AWS CLI** tabs on each step (ABCA CLI is the default). Steps 4–5 share the same tab choice; Step 6 uses a separate tab group because submit adds a REST API call via `curl` on the AWS CLI path.
 
@@ -16,11 +16,21 @@ Install these before you begin:
 
 - **AWS account** with credentials configured (`aws configure`). If you use named profiles, set `AWS_PROFILE` before running any commands in this guide.
 - **Amazon Bedrock** — The agent invokes Claude through Bedrock. IAM `grantInvoke` in the CDK stack is required but **not sufficient**: your account must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for the model you use (including Anthropic first-time use where applicable, Marketplace subscription flow on first serverless use, and a valid payment method for Marketplace-backed models). See **Amazon Bedrock before your first task** after Step 3.
-- **Docker** - for building the agent container image
+- **Docker** - for building the agent container image. On an **x86_64** host you also need QEMU/binfmt to build the arm64 (Graviton) image — see the caution in Step 3.
 - **Node.js** v20 or later (Node 24 is the supported maximum — see CI matrix)
 - **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
 - **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
 - **GitHub account** — You need a [GitHub profile](https://github.com/join) to fork the sample repository and create a **fine-grained personal access token (PAT)** the agent uses to push branches and open pull requests. A free github.com account is sufficient.
+
+:::note[mise provisions Node, Yarn, and the CDK CLI for you]
+
+If a prerequisite check reports Node, Yarn, **and** CDK as "not found" all at once, your environment isn't broken — mise installs those tool versions in Step 1, so they only appear on `PATH` after `mise install` + shell activation. A few mise gotchas worth knowing up front:
+
+- **Non-interactive / spawned shells** (CI, scripts, some agent runners) don't pick up mise's shell hook, so `mise`/`node`/`yarn` may not be on `PATH`. Use the full path `~/.local/bin/mise` or prefix commands with `mise exec --`.
+- **Headless Linux** (EC2, containers) often lacks a working `gpg-agent`, so `mise install` can fail Node on GPG signature verification. If so, run `mise settings set node.gpg_verify false` (downloads are still checksum-verified) and retry.
+- **Two trust prompts**: you may need to `mise trust` both the project `mise.toml` *and* your user-global `~/.config/mise/config.toml` if you change a global setting.
+
+:::
 
 ## Step 1 - Clone and install
 
@@ -45,6 +55,12 @@ mise run build
 ```
 
 `mise run install` installs all JavaScript and Python dependencies across the monorepo. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
+
+:::note[Expect noisy build output — trust the exit code]
+
+`mise run build` prints many `ERROR`/`WARN` lines, cdk-nag warnings, and sometimes `A worker process has failed to exit gracefully`. These are **benign** — test fixtures deliberately exercise failure paths. The only reliable success signal is the **exit code: `0` means the build passed.** Don't be alarmed by the log volume.
+
+:::
 
 :::note[ABCA CLI commands in this guide]
 
@@ -152,7 +168,7 @@ If you have not yet added `blueprintRepo` to `cdk/cdk.json`, go back to [Registe
 
 :::note[Collaborator or cross-org repos?]
 
-Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/architecture/readme#github-pat--minimal-permissions) for details.
+Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for details.
 
 :::
 
@@ -161,22 +177,35 @@ Fine-grained tokens only work for repos you own (or orgs that have opted in). If
 The CDK stack deploys the full platform: API Gateway, Lambda functions (orchestrator, task CRUD, webhooks), DynamoDB tables, AgentCore Runtime, VPC with network isolation, Cognito user pool, and CloudWatch dashboards.
 
 ```bash
-# One-time account setup: allow X-Ray to write spans to CloudWatch Logs.
-# On a fresh account, X-Ray needs a resource policy before the destination can be set.
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws logs put-resource-policy \
-  --policy-name xray-spans-policy \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"XRaySpansAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"xray.amazonaws.com\"},\"Action\":[\"logs:PutLogEvents\",\"logs:CreateLogGroup\",\"logs:CreateLogStream\"],\"Resource\":[\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans\",\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans:*\"]}]}"
-aws xray update-trace-segment-destination --destination CloudWatchLogs
-
 # Bootstrap CDK (first time only)
 mise //cdk:bootstrap
 
-# Deploy the stack (~10 minutes)
-mise //cdk:deploy
+# Deploy the stack (~10 minutes). --require-approval never lets it run
+# unattended; drop the flag if you want to review IAM/security-group changes.
+mise //cdk:deploy -- --require-approval never
 ```
 
-The X-Ray commands are a one-time per-account setup. On a fresh account the `put-resource-policy` call is required first — without it, the `update-trace-segment-destination` command fails with an `AccessDeniedException` because X-Ray cannot write to the `aws/spans` log group. CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes - most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
+CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes — most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
+
+:::caution[Building on an x86 host? Register arm64 emulation first.]
+
+The agent runs on AgentCore (**Graviton / arm64**), so the container image is built for `linux/arm64`. On an **x86_64** build host (most cloud dev boxes, many laptops), the image build fails partway with `exec /bin/sh: exec format error` unless QEMU emulation is registered:
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+```
+
+If `docker run --privileged` is blocked on your host (common on security-managed machines), build from a **native arm64 host** instead (Graviton EC2 or Apple Silicon) — no emulation needed. Apple Silicon and other arm64 hosts can skip this step entirely. Note that the emulated build is noticeably slower than a native one.
+
+:::
+
+:::note[X-Ray → CloudWatch Logs tracing is optional — skip it for your first deploy.]
+
+The stack ships with X-Ray span export to CloudWatch Logs **disabled** (`tracingEnabled` in `cdk/src/stacks/agent.ts`), so the platform deploys and runs fully without any X-Ray account setup. You do **not** need to run `aws xray update-trace-segment-destination` to get a working deployment.
+
+If you later enable tracing, it needs a one-time per-account setup — and on a security-managed AWS Organization account an SCP may block the X-Ray service from writing to `aws/spans` entirely (the `update-trace-segment-destination` call returns `AccessDeniedException` no matter what the deploying identity does; that's an Org-level policy, not a setup mistake). Treat tracing as an opt-in extra, not a prerequisite. See the [Developer Guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for the enable steps.
+
+:::
 
 ### Amazon Bedrock before your first task
 
@@ -377,7 +406,7 @@ Poll task status until `COMPLETED` (or a terminal failure state):
 curl "$API_URL/tasks/<TASK_ID>" -H "Authorization: $TOKEN"
 ```
 
-See [User guide → Using the REST API](/using/using-the-rest-api) for list, cancel, and events endpoints.
+See [User guide → Using the REST API](/sample-autonomous-cloud-coding-agents/using/using-the-rest-api) for list, cancel, and events endpoints.
 
 </TabItem>
 
@@ -461,7 +490,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve write_path:tests/**
 ```
 
-Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/using/overview#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/customizing/cedar-policies).
+Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
 
 ## What happened behind the scenes
 
@@ -479,10 +508,12 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 |---|---|---|
 | `yarn: command not found` | Corepack not enabled or mise not activated in your shell | Run `eval "$(mise activate zsh)"`, then `corepack enable && corepack prepare yarn@1.22.22 --activate` |
 | `MISE_EXPERIMENTAL required` | Namespaced tasks need the experimental flag | `export MISE_EXPERIMENTAL=1` |
-| `AccessDeniedException` on `update-trace-segment-destination` | Fresh account missing CloudWatch Logs resource policy for X-Ray | Run `aws logs put-resource-policy` first (see Step 3) |
-| CDK deploy fails with "X-Ray Delivery Destination..." | Missing one-time account setup | Run both X-Ray commands in Step 3 |
+| `exec /bin/sh: exec format error` during image build | x86 host building the arm64 (Graviton) agent image without QEMU/binfmt | Run `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or build from a native arm64 host (see Step 3 caution) |
+| `AccessDeniedException` on `update-trace-segment-destination` | X-Ray → CloudWatch Logs tracing is optional and the call may be SCP-blocked on Org accounts | **Skip it** — tracing is disabled by default and not required to deploy (see Step 3 note) |
 | `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |
-| CDK deploy prompts for approval and hangs | Non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` to `cdk deploy` or use an interactive terminal |
+| CDK deploy prompts for approval and hangs | Non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` to `cdk deploy` (Step 3 uses it) or use an interactive terminal |
+| Deploy rolled back; can't redeploy (`ROLLBACK_COMPLETE`) | A first-create failure leaves the stack un-updatable | `mise //cdk:destroy` (or delete the stack), then deploy again. Do **not** force-delete past stuck VPC resources — it orphans the VPC, and VPCs are quota-capped per Region |
+| Stack stuck in `DELETE_FAILED` on a security group / subnet | AgentCore's service-managed (Hyperplane) ENIs reclaim asynchronously after the runtime is gone | Wait ~20–40 min for AWS to release the ENIs, then retry `mise //cdk:destroy`. You cannot force-detach an `amazon-aws`-owned ENI |
 | `put-secret-value` returns double-dot endpoint | `REGION` variable is empty | Set `REGION=us-east-1` (or your actual region) before running the command |
 | Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above; confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID such as `us.anthropic.claude-sonnet-4-6` where required; keep `grantInvoke` in `agent.ts` aligned with that model |
 | `REPO_NOT_ONBOARDED` on task submit | Blueprint `repo` does not match what you passed to the CLI | Confirm `BLUEPRINT_REPO`, CDK context `blueprintRepo`, or the `repo` prop on the `Blueprint` in `cdk/src/stacks/agent.ts` resolves to exactly the same `owner/repo` you pass to the CLI |
@@ -507,7 +538,7 @@ new Blueprint(this, 'MyServiceBlueprint', {
 
 ### Per-repo configuration
 
-Blueprints accept optional overrides to customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See the [User guide - Per-repo overrides](/using/overview) for the full list.
+Blueprints accept optional overrides to customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See the [User guide - Per-repo overrides](/sample-autonomous-cloud-coding-agents/using/overview) for the full list.
 
 ```typescript
 new Blueprint(this, 'CustomBlueprint', {
@@ -523,11 +554,11 @@ new Blueprint(this, 'CustomBlueprint', {
 
 ### Add a CLAUDE.md to your repository
 
-The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). This is the most effective way to improve agent output for a specific repo - tell it your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](/customizing/prompt-engineering) for examples and best practices.
+The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). This is the most effective way to improve agent output for a specific repo - tell it your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering) for examples and best practices.
 
 ### Set up webhook integrations
 
-Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials, using HMAC-SHA256 authentication. This is useful for automating PR review on every PR, or triggering code changes from CI events. See the [User guide - Webhooks](/using/overview) for setup instructions.
+Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials, using HMAC-SHA256 authentication. This is useful for automating PR review on every PR, or triggering code changes from CI events. See the [User guide - Webhooks](/sample-autonomous-cloud-coding-agents/using/overview) for setup instructions.
 
 ## Next steps
 
@@ -536,9 +567,9 @@ Run from the `cli/` directory (`cd cli` from the repo root):
 - **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
 - **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
 - **Review a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --review-pr 1`
-- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](/using/workflows)
+- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](/sample-autonomous-cloud-coding-agents/using/workflows)
 - **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` — stream progress events
 - **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` — mid-run guidance
 - **Enable tracing**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace` then `node lib/bin/bgagent.js trace download <TASK_ID>`
 - **Manage webhooks**: `node lib/bin/bgagent.js webhook create --name "My CI"` — automate task submission from external systems
-- **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](/developer-guide/introduction)
+- **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)

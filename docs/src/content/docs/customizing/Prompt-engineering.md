@@ -10,7 +10,7 @@ Writing effective task descriptions for ABCA.
 
 ABCA agents are unattended - once a task is submitted, the agent works autonomously from start to finish. It cannot ask clarifying questions or pause for feedback. Every decision is made based on what you provide upfront, so prompt quality directly determines task success.
 
-This guide covers how to write descriptions that lead to good pull requests. For submission mechanics (CLI flags, API fields, webhook setup), see the [User guide](/using/overview).
+This guide covers how to write descriptions that lead to good pull requests. For submission mechanics (CLI flags, API fields, webhook setup), see the [User guide](/sample-autonomous-cloud-coding-agents/using/overview).
 
 ## Choosing the right input mode
 
