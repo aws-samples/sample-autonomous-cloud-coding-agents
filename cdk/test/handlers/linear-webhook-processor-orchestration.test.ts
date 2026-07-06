@@ -309,6 +309,98 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     expect(discoverOrchestrationMock).not.toHaveBeenCalled();
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
+
+  // Customer-caught label discoverability (#2/#3): the :help explainer and the
+  // multi-part hint. Tested at the handler seam (real webhook → real routing),
+  // per [[feedback_test_mock_layer]].
+  describe(':help label + multi-part hint', () => {
+    function helpIssue(): Record<string, unknown> {
+      return issue({
+        data: {
+          id: 'issue-1',
+          identifier: 'ABC-42',
+          title: 'Anything',
+          description: 'x',
+          projectId: 'project-1',
+          teamId: 'team-1',
+          labels: [{ id: 'lbl-help', name: 'bgagent:help' }],
+        },
+      });
+    }
+
+    test(':help posts the label explainer and creates NO task', async () => {
+      // project mapping (onboarded) → then the claim-once Update wins.
+      ddbSend
+        .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } })
+        .mockResolvedValueOnce({}); // claimCommentAck Update → succeeds (first delivery)
+
+      await handler(eventWith(helpIssue()));
+
+      // No task, no orchestration — help is inert compute-wise.
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(discoverOrchestrationMock).not.toHaveBeenCalled();
+      // The explainer was posted on the issue.
+      expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
+      const [, issueId, body] = upsertStatusCommentMock.mock.calls[0];
+      expect(issueId).toBe('issue-1');
+      expect(String(body)).toContain('`bgagent:decompose`');
+      expect(String(body)).toMatch(/how to use abca/i);
+    });
+
+    test(':help is idempotent — a webhook redelivery does NOT repost', async () => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } })
+        // claimCommentAck loses the conditional write → already posted.
+        .mockRejectedValueOnce(Object.assign(new Error('exists'), { name: 'ConditionalCheckFailedException' }));
+
+      await handler(eventWith(helpIssue()));
+
+      expect(upsertStatusCommentMock).not.toHaveBeenCalled();
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+
+    test('plain label on a MULTI-PART issue → runs single task AND posts the :decompose hint', async () => {
+      happyPreamble();
+      discoverOrchestrationMock.mockResolvedValueOnce({ kind: 'single_task', parentLinearIssueId: 'issue-1' });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      // The hint's claim-once Update (after task creation) wins.
+      ddbSend.mockResolvedValueOnce({});
+
+      const multiPart = issue({
+        data: {
+          id: 'issue-1',
+          identifier: 'ABC-42',
+          title: 'Account area',
+          description: 'Add an account area with a few parts:\n1. profile page\n2. theme toggle\n3. notifications list',
+          projectId: 'project-1',
+          teamId: 'team-1',
+          labels: [{ id: 'lbl-bg', name: 'bgagent' }],
+        },
+      });
+      await handler(eventWith(multiPart));
+
+      // The single task still ran (we never block the user's chosen path)...
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      // ...and a hint suggesting :decompose was posted.
+      const hintPosted = upsertStatusCommentMock.mock.calls.some(
+        (c) => typeof c[2] === 'string' && (c[2] as string).includes('`bgagent:decompose`'));
+      expect(hintPosted).toBe(true);
+    });
+
+    test('plain label on a SINGLE cohesive issue → single task, NO hint', async () => {
+      happyPreamble();
+      discoverOrchestrationMock.mockResolvedValueOnce({ kind: 'single_task', parentLinearIssueId: 'issue-1' });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+      // Default issue() description is short/cohesive → looksMultiPart === false.
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const hintPosted = upsertStatusCommentMock.mock.calls.some(
+        (c) => typeof c[2] === 'string' && (c[2] as string).includes(':decompose'));
+      expect(hintPosted).toBe(false);
+    });
+  });
 });
 
 describe('linear-webhook-processor — #247 A6 comment trigger', () => {

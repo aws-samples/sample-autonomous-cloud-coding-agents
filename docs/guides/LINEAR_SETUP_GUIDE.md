@@ -176,6 +176,25 @@ No additional setup is required — once Linear MCP is wired (steps above), this
 - **Check status**: from the Linear issue (progress comments) or `bgagent list` / `bgagent status <task-id>`.
 - **Cancel**: `bgagent cancel <task-id>`. Removing the Linear label does not cancel a running task.
 
+## Trigger labels
+
+The base trigger label (default `bgagent`, or whatever you passed to `--label` at onboarding) has three variants. All examples below assume the default `bgagent`; substitute your workspace's label if you overrode it.
+
+| Label | What it does | Use it when |
+|-------|--------------|-------------|
+| `bgagent` | **Do it.** Reads the issue, makes the change, opens a PR. If the issue already has sub-issues, it runs those in dependency order instead (see [orchestration](#parentsub-issue-orchestration)). | The issue is a single, well-defined piece of work. |
+| `bgagent:decompose` | **Plan it first.** Breaks a larger issue into a set of smaller sub-issues, posts the plan as a comment, and **waits for your approval** before creating or running anything. | The issue has several parts and you want to review the breakdown (and its worst-case cost) before spending. |
+| `bgagent:auto` | **Plan it and start immediately** — same breakdown as `:decompose`, but no approval step. | You trust ABCA to split the work and want it to just go. |
+| `bgagent:help` | **Explain the labels.** Posts a one-time comment describing what each label does, then creates no task. Remove it afterward. | You're new to ABCA on this issue and want a reminder of the options. |
+
+Notes:
+
+- **The approval conversation is interactive.** After a `:decompose` plan is posted, reply `@bgagent approve` to run it, `@bgagent reject` to discard it, or just tell it what to change in plain language — e.g. `@bgagent make it 2 tasks instead of 3` — and it re-plans and posts an updated breakdown. Repeat until you're happy, then approve.
+- **A plain `bgagent` label on a multi-part issue still runs as one task.** If the description looks like it has several parts, ABCA posts a one-line hint suggesting `:decompose` — but it does **not** block the single-task run it already started. If you wanted a plan, add `:decompose` instead.
+- **`:decompose` / `:auto` on an issue that already has sub-issues** is a no-op suffix — there's nothing to decompose, so ABCA just runs the existing sub-issue graph (Mode A).
+- **Once ABCA is working**, reply to its comments with `@bgagent <what you want>` to ask a question or request a change.
+- **Per-project caps** (max sub-issues, max total budget) are set at onboarding and apply to `:decompose` / `:auto`; an over-cap plan is rejected with an explanatory comment.
+
 ## Parent/sub-issue orchestration
 
 If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:

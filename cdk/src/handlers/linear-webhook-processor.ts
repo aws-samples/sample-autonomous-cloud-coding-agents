@@ -46,8 +46,20 @@ import {
   runPlanVerdict,
   type DecompositionEffects,
 } from './shared/orchestration-decomposition-flow';
-import { parseDecompositionMode, triggerLabelVariants } from './shared/orchestration-decomposition-mode';
-import { renderRevisingNote, renderRevisionCapNote, renderRevisionFailedNote } from './shared/orchestration-decomposition-render';
+import {
+  DEFAULT_LABEL_FILTER as MODE_DEFAULT_LABEL_FILTER,
+  hasHelpLabel,
+  looksMultiPart,
+  parseDecompositionMode,
+  triggerLabelVariants,
+} from './shared/orchestration-decomposition-mode';
+import {
+  renderLabelHelp,
+  renderMultiPartHint,
+  renderRevisingNote,
+  renderRevisionCapNote,
+  renderRevisionFailedNote,
+} from './shared/orchestration-decomposition-render';
 import {
   consumePendingPlan as consumePendingPlanRow,
   discardPendingPlan as discardPendingPlanRow,
@@ -305,6 +317,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     }
   }
   const labelFilter = (mappingItem?.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
+
+  // ``<base>:help`` — post a one-time explainer of what the trigger labels do
+  // and create NO task (customer-caught: a first-time user couldn't tell the
+  // labels apart). Handled BEFORE the trigger gate because ``:help`` is
+  // deliberately not a trigger variant (it must never spawn work). Requires the
+  // project to be onboarded (we need a workspace token to post) + the
+  // orchestration table (for the redelivery claim); otherwise a true no-op.
+  if (
+    hasHelpLabel((issue.labels ?? []).map((l) => l?.name), labelFilter)
+    && shouldTriggerHelp(payload, labelFilter)
+  ) {
+    await handleHelpLabel({ issue, workspaceId: payload.organizationId ?? '', labelFilter, mappingItem });
+    return;
+  }
 
   // Silent kill-switch: an issue without the trigger label is not for us.
   // This MUST run before any user-facing comment path. Previously the
@@ -769,6 +795,38 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     repo,
     request_id: requestId,
   });
+
+  // Multi-part hint (customer-caught): a PLAIN ``bgagent`` label on an issue
+  // that looks like several separate parts still runs as ONE task — but the
+  // reviewer never saw a plan. Post a one-time, non-blocking nudge that
+  // ``:decompose`` would show a plan first. Only for the bare-label single-task
+  // path (not decompose/auto/mode_a), only when the description looks multi-part,
+  // and idempotent so a redelivery doesn't repeat it. Best-effort — never blocks
+  // the run that already started.
+  if (
+    decompositionDecision.mode === 'single'
+    && WORKSPACE_REGISTRY_TABLE
+    && ORCHESTRATION_TABLE
+    && looksMultiPart(issue.description)
+  ) {
+    try {
+      const won = await claimCommentAck(
+        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id), 'multipart-hint',
+        new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+      );
+      if (won) {
+        await upsertStatusComment(
+          { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+          issue.id,
+          renderMultiPartHint(labelFilter.trim().toLowerCase() || MODE_DEFAULT_LABEL_FILTER),
+        );
+      }
+    } catch (err) {
+      logger.warn('Failed to post multi-part hint (non-fatal)', {
+        issue_id: issue.id, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 /**
@@ -1541,15 +1599,39 @@ async function resolveChildPrNumber(taskId: string): Promise<number | null> {
  * - Everything else → no-op
  */
 function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean {
-  const current = payload.data.labels ?? [];
   // #299 Mode B: the trigger fires on the base label OR a decompose suffix
   // (``bgagent:decompose`` / ``bgagent:auto``). Match against ALL variants so a
   // suffix-only issue still triggers; ``parseDecompositionMode`` later decides
   // which mode it is.
   const variants = new Set(triggerLabelVariants(labelFilter));
-  const isTriggerLabel = (name: string | undefined | null): boolean =>
-    !!name && variants.has(name.toLowerCase());
-  const hasLabel = current.some((l) => isTriggerLabel(l?.name));
+  return labelJustPresent(payload, (name) => !!name && variants.has(name.toLowerCase()));
+}
+
+/**
+ * ``<base>:help`` explainer gate — same "created-with or just-added" semantics
+ * as {@link shouldTrigger} so a redelivery / unrelated edit doesn't re-post the
+ * explainer, but scoped to the single ``:help`` label (which is NOT a trigger
+ * variant — it must never dispatch a task).
+ */
+function shouldTriggerHelp(payload: LinearIssueEvent, labelFilter: string): boolean {
+  const base = (labelFilter || MODE_DEFAULT_LABEL_FILTER).trim().toLowerCase();
+  const help = `${base}:${'help'}`;
+  return labelJustPresent(payload, (name) => !!name && name.toLowerCase() === help);
+}
+
+/**
+ * Shared "this label is present because it was just applied" test for the Issue
+ * webhook. Returns true on ``create`` with the label already on, or ``update``
+ * where a matching label id transitioned from absent → present. Extracted so the
+ * trigger gate and the ``:help`` gate share one definition of "just added" and
+ * can't drift (both must ignore redeliveries + unrelated edits).
+ */
+function labelJustPresent(
+  payload: LinearIssueEvent,
+  matches: (name: string | undefined | null) => boolean,
+): boolean {
+  const current = payload.data.labels ?? [];
+  const hasLabel = current.some((l) => matches(l?.name));
 
   if (payload.action === 'create') {
     return hasLabel;
@@ -1558,19 +1640,55 @@ function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean 
   if (payload.action === 'update') {
     if (!hasLabel) return false;
     // If the event doesn't include a label change, skip — something else on the
-    // issue was edited, and we shouldn't re-submit on every title/description edit.
+    // issue was edited, and we shouldn't re-act on every title/description edit.
     const updatedFrom = payload.updatedFrom ?? {};
     const labelIdsChanged = Object.prototype.hasOwnProperty.call(updatedFrom, 'labelIds');
     if (!labelIdsChanged) return false;
-    // A trigger label must have just been ADDED, not removed. Re-trigger only
-    // when a currently-present trigger-variant label was absent before. (Covers
-    // re-applying the label to extend an epic, and adding a suffix variant.)
+    // The label must have just been ADDED, not removed: a currently-present
+    // matching label whose id was absent before.
     const previousIds = new Set((updatedFrom.labelIds as string[] | undefined) ?? []);
-    const addedTriggerLabel = current.some((l) => isTriggerLabel(l?.name) && l?.id && !previousIds.has(l.id));
-    return addedTriggerLabel;
+    return current.some((l) => matches(l?.name) && l?.id && !previousIds.has(l.id));
   }
 
   return false;
+}
+
+/**
+ * Post the one-time ``<base>:help`` explainer (customer-caught label
+ * discoverability). Best-effort and idempotent: gated on an onboarded project
+ * (need a workspace token to post) + the orchestration table (for the
+ * redelivery claim). Creates no task and does not touch issue state.
+ */
+async function handleHelpLabel(args: {
+  issue: LinearIssueEvent['data'];
+  workspaceId: string;
+  labelFilter: string;
+  mappingItem: Record<string, unknown> | undefined;
+}): Promise<void> {
+  const { issue, workspaceId, labelFilter, mappingItem } = args;
+  const base = (labelFilter || MODE_DEFAULT_LABEL_FILTER).trim().toLowerCase();
+  if (!WORKSPACE_REGISTRY_TABLE || !ORCHESTRATION_TABLE || !mappingItem || !workspaceId) {
+    logger.info('Linear :help label — cannot post explainer (not onboarded / no token table)', {
+      issue_id: issue.id, has_mapping: Boolean(mappingItem),
+    });
+    return;
+  }
+  // Claim-once keyed on the issue so a webhook redelivery doesn't repost. The
+  // help "comment id" slot uses a stable synthetic key (one explainer per issue).
+  const won = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id), 'help',
+    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+  );
+  if (!won) {
+    logger.info('Linear :help label — explainer already posted for this issue (redelivery)', { issue_id: issue.id });
+    return;
+  }
+  await upsertStatusComment(
+    { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+    issue.id,
+    renderLabelHelp(base),
+  );
+  logger.info('Linear :help label — posted label explainer', { issue_id: issue.id });
 }
 
 /**

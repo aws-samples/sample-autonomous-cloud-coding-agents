@@ -21,6 +21,12 @@ REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
 # check out the existing PR branch instead of creating a fresh one. restack-v1
 # (#305 A6) re-merges a changed predecessor into an existing stacked-child PR.
 PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"))
+# Clarify-before-spend (customer UX #4): the exact marker a coding/new-task agent
+# puts on the FIRST line of its final message when a request is too ambiguous to
+# implement without guessing. Its presence tells the pipeline to hold — post the
+# question, open NO PR, and surface it as "needs input" rather than a finished
+# task. Kept as an unusual sentinel so it can't collide with ordinary prose.
+NEEDS_INPUT_MARKER = "[[ABCA_NEEDS_INPUT]]"
 # First-party workflow ids that are writeable (NOT read-only). Used only by the
 # load-failure fallback to bias an unrecognised id toward read-only (fail closed
 # on the write-deny invariant). pr-review-v1 is intentionally excluded (it is

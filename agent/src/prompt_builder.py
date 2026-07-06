@@ -6,7 +6,7 @@ import glob
 import os
 from typing import TYPE_CHECKING
 
-from config import AGENT_WORKSPACE
+from config import AGENT_WORKSPACE, NEEDS_INPUT_MARKER
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content as sanitize_memory_content
 from shell import log
@@ -30,6 +30,10 @@ def build_system_prompt(
     system_prompt = system_prompt.replace("{branch_name}", setup.branch)
     system_prompt = system_prompt.replace("{default_branch}", setup.default_branch)
     system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
+    # Clarify-before-spend (UX #4): the new_task workflow references this marker
+    # in its "ask instead of guess" branch. Harmless no-op for prompts that don't
+    # contain the placeholder.
+    system_prompt = system_prompt.replace("{needs_input_marker}", NEEDS_INPUT_MARKER)
     setup_notes = (
         "\n".join(f"- {n}" for n in setup.notes)
         if setup.notes

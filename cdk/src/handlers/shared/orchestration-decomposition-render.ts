@@ -104,8 +104,12 @@ export function renderPlanProposal(
 ): string {
   const lines: string[] = [];
   const round = opts.revisionRound ?? 0;
+  // Plain-English headers — a reviewer shouldn't have to decode an internal
+  // "round N" loop counter (customer-caught jargon). "Updated breakdown" reads
+  // as the natural result of "I asked for a change"; the count of edits isn't
+  // something the human needs to track.
   const header = round > 0
-    ? `**Revised breakdown (round ${round})** — ${plan.nodes.length} sub-issues`
+    ? `**Updated breakdown** — ${plan.nodes.length} sub-issues`
     : `**Proposed breakdown** — ${plan.nodes.length} sub-issues`;
   lines.push(`${PLAN_PROPOSAL_PREFIX} ${header}`);
   if (plan.reasoning) {
@@ -124,10 +128,17 @@ export function renderPlanProposal(
   lines.push('');
   lines.push('---');
   const cp = criticalPathLength(plan);
+  // Plain-English summary. "critical path" and "cost ceiling" are developer
+  // terms (customer-caught jargon) — say what they MEAN instead: how many will
+  // run one-after-another, and the most it could cost. ``cp === 1`` means every
+  // sub-issue is independent, so phrase that case as "all in parallel".
+  const sequencing = cp <= 1
+    ? 'they can all run at the same time'
+    : `up to ${cp} run one after another (the rest run at the same time)`;
   lines.push(
-    `**Summary:** ${plan.nodes.length} sub-issues · critical path ${cp} `
-    + `(longest chain that must run in sequence) · cost ceiling **$${formatUsd(totalBudget(plan))}** `
-    + '(worst-case, Σ of per-task caps — actual spend is typically lower)',
+    `**In short:** ${plan.nodes.length} pieces — ${sequencing}. `
+    + `Most this could cost is **$${formatUsd(totalBudget(plan))}** `
+    + '(usually less — that\'s the ceiling, not the estimate).',
   );
   lines.push('');
 
@@ -170,11 +181,16 @@ export function renderRevisionFailedNote(): string {
   );
 }
 
-/** #299 revise loop: the ack posted when a re-plan is dispatched from feedback. */
-export function renderRevisingNote(round: number): string {
+/**
+ * #299 revise loop: the ack posted when a re-plan is dispatched from feedback.
+ * The ``round`` argument is kept for the caller's logging/signature stability
+ * but is intentionally NOT surfaced in the copy — a reviewer shouldn't see an
+ * internal loop counter (customer-caught jargon).
+ */
+export function renderRevisingNote(_round: number): string {
   return (
-    `${PLAN_PROPOSAL_PREFIX} On it — re-planning the breakdown from your feedback (round ${round}). `
-    + "I'll post the revised plan shortly."
+    `${PLAN_PROPOSAL_PREFIX} On it — updating the breakdown based on your notes. `
+    + "I'll post the new version here in a moment."
   );
 }
 
@@ -187,6 +203,53 @@ export function renderRevisionCapNote(maxRevisions: number): string {
     `${PLAN_PROPOSAL_PREFIX} I've revised this plan ${maxRevisions} times already. To keep costs sane `
     + "I won't auto-re-plan again — reply `@bgagent approve` to run the current plan, `@bgagent reject` "
     + 'to discard it, or edit the issue and re-apply the label to start over.'
+  );
+}
+
+/**
+ * Render the one-time explainer posted when someone applies the ``<base>:help``
+ * label (customer-caught: a first-time user couldn't tell the labels apart).
+ * Explains each trigger label in plain English and creates no task. ``base`` is
+ * the project's trigger label (default ``bgagent``) so the copy matches the
+ * workspace's actual label names.
+ */
+export function renderLabelHelp(base: string): string {
+  return [
+    `${PLAN_PROPOSAL_PREFIX} **How to use ABCA on a Linear issue**`,
+    '',
+    'Add one of these labels to an issue and I\'ll get to work. Here\'s what each does:',
+    '',
+    `- **\`${base}\`** — Do it. I read the issue, make the change, and open a pull request. `
+      + 'Best for a single, well-defined piece of work.',
+    `- **\`${base}:decompose\`** — Plan it first. For a bigger issue with several parts: I break it `
+      + 'into a set of smaller pieces and post the plan here for you to approve before anything runs. '
+      + 'You can reply with changes (e.g. "make it 2 tasks instead of 3") and I\'ll redo the plan.',
+    `- **\`${base}:auto\`** — Plan it AND start immediately, no approval step. Use when you trust me to `
+      + 'split the work and just get going.',
+    '',
+    'A few things worth knowing:',
+    '- If an issue already has sub-issues, I just run those in order — no need for a special label.',
+    `- Once I'm working, you can reply to my comments with **\`@${base} <what you want>\`** to ask a `
+      + 'question or request a change.',
+    '- Not sure which to use? Use `' + base + ':decompose` for anything with more than one part — '
+      + 'you\'ll see the plan and cost before I spend anything.',
+    '',
+    '_(You can remove this label now — it\'s just here to explain things.)_',
+  ].join('\n');
+}
+
+/**
+ * Render the one-time hint posted when a PLAIN (``<base>``, no suffix) label
+ * lands on an issue that {@link looksMultiPart}. It still runs the single task —
+ * the hint only points out that ``:decompose`` would give a reviewable plan
+ * first (customer-caught: a plain label on a multi-part issue built everything
+ * at once with no plan). Non-blocking, posted alongside the normal run.
+ */
+export function renderMultiPartHint(base: string): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} Heads up — this issue looks like it has a few separate parts. I'm running `
+    + `it as a single task (that's what the \`${base}\` label does). If you'd rather I break it into `
+    + `smaller pieces and show you a plan to approve first, add the \`${base}:decompose\` label instead.`
   );
 }
 

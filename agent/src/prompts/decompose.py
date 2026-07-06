@@ -55,9 +55,17 @@ with a ``reasoning`` that asks for more detail) rather than guessing.
 better. The project enforces a hard cap and will reject an over-large plan, so \
 keep the breakdown tight (a handful of units, not a long list). Each must be a \
 VERTICAL SLICE an agent can implement on its own.
-   - Give each a short imperative title, a one-paragraph scope grounded in what \
-you saw in the repo (name real files/dirs where helpful), and a size: "S" \
-(small/isolated), "M" (medium), or "L" (large/involved).
+   - Give each a short imperative title and a one-paragraph scope, and a size: \
+"S" (small/isolated), "M" (medium), or "L" (large/involved).
+   - **Write the title and scope for the PERSON who filed the issue — who may \
+not be an engineer.** Say WHAT each piece delivers and WHY, in plain language, \
+before any implementation detail. Ground your plan in the repo, but do NOT lead \
+with jargon: avoid raw file paths, framework/tool names (e.g. "Vitest", \
+"serverless route"), or internal terms in the title, and keep them out of the \
+first sentence of the scope. A reviewer should understand what they're approving \
+without opening the codebase. It's fine to mention a specific file or tool later \
+in the scope when it genuinely aids a technical reader — just don't make it the \
+headline.
    - Express dependencies with ``depends_on``: zero-based indices into your own \
 ``sub_issues`` array of the sub-issues that must finish first. Independent \
 sub-issues have ``depends_on: []``. Keep the critical path as short as the work \
