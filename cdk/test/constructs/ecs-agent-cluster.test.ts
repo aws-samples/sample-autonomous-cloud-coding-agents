@@ -432,3 +432,74 @@ describe('EcsAgentCluster payload bucket (#502)', () => {
     }
   });
 });
+
+describe('EcsAgentCluster artifacts bucket (#299 ECS-parity)', () => {
+  function createWithArtifactsBucket(): Template {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2 });
+    const agentImageAsset = new ecr_assets.DockerImageAsset(stack, 'AgentImage', {
+      directory: path.join(__dirname, '..', '..', '..', 'agent'),
+    });
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+    });
+    const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
+    const artifactsBucket = new s3.Bucket(stack, 'ArtifactsBucket');
+
+    new EcsAgentCluster(stack, 'EcsAgentCluster', {
+      vpc,
+      agentImageAsset,
+      taskTable,
+      taskEventsTable,
+      userConcurrencyTable,
+      githubTokenSecret,
+      artifactsBucket,
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('injects ARTIFACTS_BUCKET_NAME into the container env (parity with the AgentCore runtime)', () => {
+    createWithArtifactsBucket().hasResourceProperties('AWS::ECS::TaskDefinition', {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Environment: Match.arrayWith([
+            Match.objectLike({ Name: 'ARTIFACTS_BUCKET_NAME', Value: Match.anyValue() }),
+          ]),
+        }),
+      ]),
+    });
+  });
+
+  test('grants the task role READ + WRITE on the artifacts bucket (it delivers the plan artifact)', () => {
+    const template = createWithArtifactsBucket();
+    const policies = template.findResources('AWS::IAM::Policy');
+    const s3Actions = new Set<string>();
+    for (const policy of Object.values(policies)) {
+      for (const stmt of policy.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+        for (const a of actions) {
+          if (typeof a === 'string' && a.startsWith('s3:')) s3Actions.add(a);
+        }
+      }
+    }
+    expect([...s3Actions].some(a => a === 's3:GetObject' || a === 's3:GetObject*')).toBe(true);
+    expect([...s3Actions].some(a => a === 's3:PutObject' || a === 's3:PutObject*')).toBe(true);
+  });
+
+  test('omits ARTIFACTS_BUCKET_NAME when no artifacts bucket is provided', () => {
+    const { template } = createStack();
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    for (const def of Object.values(taskDefs)) {
+      const env = def.Properties.ContainerDefinitions[0].Environment ?? [];
+      expect(env.some((e: { Name: string }) => e.Name === 'ARTIFACTS_BUCKET_NAME')).toBe(false);
+    }
+  });
+});
