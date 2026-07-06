@@ -271,20 +271,40 @@ export function renderSingleTaskNote(reasoning: string): string {
 }
 
 /**
- * Render the note posted when the planner could NOT produce a breakdown — the
- * model errored, timed out, or returned an unusable plan (ABCA-490). This is
- * distinct from {@link renderSingleTaskNote}: we must NOT claim the issue "looks
- * like a single cohesive change" (that's a lie when the truth is the planner
- * failed). We fall back to running it as ONE task so the work still happens, but
- * we say so honestly and tell the user how to get a breakdown anyway. Kept
- * remedy-bearing (re-apply / split manually) rather than a dead end.
+ * Render the note posted when the planner returned an UNUSABLE plan (couldn't be
+ * parsed into a valid breakdown) and we fall back to running the issue as ONE
+ * task so the work still happens. Distinct from {@link renderSingleTaskNote}: we
+ * must NOT claim the issue "looks like a single cohesive change" (that's a lie
+ * when the truth is the plan didn't come back usable). Honest + remedy-bearing.
+ * Note: NO "took too long" narrative — the agent-native planner (#299) runs on a
+ * real substrate, not the retired 30s Lambda that motivated that copy (ABCA-490).
  */
 export function renderPlannerErrorNote(): string {
   return (
-    `${PLAN_PROPOSAL_PREFIX} I couldn't plan a breakdown for this issue in time, so I'm running it `
-    + 'as a single task. This usually means the issue is large enough that planning it took too '
-    + 'long. To get a decomposition, try again by re-applying the `:decompose` label, or split the '
-    + 'issue into sub-issues yourself and re-trigger (ABCA runs an existing sub-issue graph directly).'
+    `${PLAN_PROPOSAL_PREFIX} I couldn't turn this into a clean breakdown, so I'm running it as a `
+    + 'single task instead. To try for a breakdown again, re-apply the `:decompose` label — or '
+    + 'split the issue into sub-issues yourself and re-trigger (ABCA runs an existing sub-issue '
+    + 'graph directly).'
+  );
+}
+
+/**
+ * Render the note posted when the DECOMPOSE PLANNING RUN itself couldn't
+ * complete — the planning agent's session failed to start / was cancelled, its
+ * plan artifact was missing, or its workspace token couldn't be resolved. Unlike
+ * {@link renderPlannerErrorNote}, NOTHING was started here (the reconciler posts
+ * this and returns without creating a task), so we must NOT claim "running it as
+ * a single task". Honest about the no-op + gives a real next step: re-apply
+ * ``:decompose`` to retry planning, or apply the plain trigger label to just run
+ * it as one task now. (Live-caught: an ecs-configured repo whose planning run hit
+ * a substrate error was told "planning took too long, re-apply :decompose" — both
+ * wrong: nothing timed out and re-applying looped the same failure.)
+ */
+export function renderDecomposeUnavailableNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} I hit a problem while planning the breakdown and haven't started `
+    + 'anything yet — nothing was run or charged. You can re-apply the `:decompose` label to try '
+    + 'planning again, or apply the plain trigger label to run this as a single task right now.'
   );
 }
 

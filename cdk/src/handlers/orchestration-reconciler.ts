@@ -55,7 +55,7 @@ import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
-import { renderPlannerErrorNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
+import { renderDecomposeUnavailableNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
 import { putPendingPlan, replacePendingPlan } from './shared/orchestration-decomposition-store';
 import type { ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
@@ -1369,20 +1369,25 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
   const postComment = async (issueId: string, body: string): Promise<string | null> =>
     upsertStatusComment(feedbackCtx, issueId, body);
 
-  // Planning task failed / was cancelled → honest planner-error note. We do NOT
-  // auto-create a single task here: the webhook already declined to (it dispatched
-  // planning instead), and the note tells the user how to proceed (re-label / split).
+  // Planning RUN did not complete (session failed to start — e.g. a compute
+  // substrate error — cancelled, etc.). Post the honest "couldn't plan, nothing
+  // started" note. We do NOT auto-create a single task here: the webhook
+  // dispatched planning, and nothing has run. renderDecomposeUnavailableNote is
+  // used (NOT renderPlannerErrorNote, which claims "running as a single task" —
+  // false here, nothing ran).
   if (evt.status !== TaskStatus.COMPLETED) {
-    logger.info('Decompose planning task did not complete — posting planner-error note', {
+    logger.info('Decompose planning run did not complete — posting decompose-unavailable note', {
       task_id: evt.taskId, status: evt.status,
     });
-    await postComment(evt.parentIssueId, renderPlannerErrorNote());
+    await postComment(evt.parentIssueId, renderDecomposeUnavailableNote());
     return;
   }
 
   const planText = await fetchPlanArtifact(evt);
   if (!planText) {
-    await postComment(evt.parentIssueId, renderPlannerErrorNote());
+    // Run completed but produced no readable plan artifact — again nothing was
+    // started, so the "unavailable, nothing run" note (not "running as single").
+    await postComment(evt.parentIssueId, renderDecomposeUnavailableNote());
     return;
   }
 
@@ -1401,7 +1406,8 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     logger.warn('Decompose :auto: could not resolve OAuth token for write-back', {
       parent_issue_id: evt.parentIssueId,
     });
-    await postComment(evt.parentIssueId, renderPlannerErrorNote());
+    // Token unresolved → we can't write back the sub-issues; nothing started.
+    await postComment(evt.parentIssueId, renderDecomposeUnavailableNote());
     return;
   }
 

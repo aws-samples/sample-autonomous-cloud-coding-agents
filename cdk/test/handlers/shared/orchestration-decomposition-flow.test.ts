@@ -196,7 +196,12 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
       effects: e,
     });
     expect(r).toEqual({ kind: 'single_task', reason: 'planner_error' });
-    expect((e.postComment as jest.Mock).mock.calls[0][1]).toMatch(/couldn't plan a breakdown/i);
+    // Honest "couldn't make a clean breakdown → running as one task" note; no
+    // stale "took too long" timeout narrative (retired with the inline planner).
+    const note = (e.postComment as jest.Mock).mock.calls[0][1] as string;
+    expect(note).toMatch(/couldn't turn this into a clean breakdown/i);
+    expect(note).toMatch(/single task/i);
+    expect(note).not.toMatch(/too long/i);
     expect(e.graphql).not.toHaveBeenCalled();
   });
 
