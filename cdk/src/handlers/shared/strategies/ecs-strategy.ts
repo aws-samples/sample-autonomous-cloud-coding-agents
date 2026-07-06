@@ -98,8 +98,17 @@ export class EcsComputeStrategy implements ComputeStrategy {
     blueprintConfig: BlueprintConfig;
   }): Promise<SessionHandle> {
     if (!ECS_CLUSTER_ARN || !ECS_TASK_DEFINITION_ARN || !ECS_SUBNETS || !ECS_SECURITY_GROUP) {
+      // Config/deploy mismatch: this repo is compute_type=ecs but the stack was
+      // deployed WITHOUT the ECS substrate (no `--context compute_type=ecs`), so
+      // the orchestrator has no ECS_* env vars. Name the root cause + remedy so an
+      // admin doesn't have to reverse-engineer it from a bare env-var list. (The
+      // CLI `repo onboard --compute-type ecs` guard normally prevents this; a repo
+      // onboarded before that guard, or edited directly, can still reach here.)
       throw new Error(
-        'ECS compute strategy requires ECS_CLUSTER_ARN, ECS_TASK_DEFINITION_ARN, ECS_SUBNETS, and ECS_SECURITY_GROUP environment variables',
+        'This repository is configured compute_type=ecs, but this stack was deployed without the ECS '
+        + 'substrate (missing ECS_CLUSTER_ARN/ECS_TASK_DEFINITION_ARN/ECS_SUBNETS/ECS_SECURITY_GROUP). '
+        + 'Redeploy the stack with `--context compute_type=ecs` to provision the Fargate substrate, or '
+        + 'set this repo to compute_type=agentcore (bgagent repo onboard <repo> --compute-type agentcore).',
       );
     }
 
