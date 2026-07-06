@@ -164,12 +164,15 @@ export function renderPlanProposal(
 }
 
 /**
- * #299 revise loop: posted when a reviewer @-mentions the bot with NO text on an
- * issue that has a pending plan (a bare "@bgagent"). Previously a silent drop
- * (F-bare-mention) — the empty instruction fell through the revise branch to the
- * A6 standalone path, which found a planning task with no PR and no-op'd. Nudge
- * with the three options so the mention isn't lost. Bot-prefixed so the
- * self-trigger guard skips it.
+ * #299 revise loop: posted on a pending plan when the reviewer's comment is NOT an
+ * actionable verdict/change. Two cases:
+ *  - a bare "@bgagent" with no text (F-bare-mention — previously a silent drop that
+ *    fell through to the A6 standalone path and no-op'd), and
+ *  - an AMBIGUOUS soft negation ("no", "no thanks", "don't approve", "no, looks
+ *    wrong") that could mean discard OR "change it" — we nudge rather than
+ *    guess-and-destroy the plan (F-reject-revision).
+ * The three options make disambiguation explicit: approve / reject (discard) /
+ * describe a change. Bot-prefixed so the self-trigger guard skips it.
  */
 export function renderPendingPlanNudge(): string {
   return (

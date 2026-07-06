@@ -1071,17 +1071,22 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // #299 Mode B: a comment on a parent that has a PENDING plan (proposed but not
   // yet executed). Checked BEFORE A6 routing because NO orchestration is seeded
   // yet — the parent has only a pending-plan row, so loadOrchestration misses it.
-  // Three sub-cases on a pending plan:
-  //   - approve / reject  → runPlanVerdict (seed or discard).
-  //   - non-verdict instruction WITH text → REVISE: re-plan from the feedback
-  //     (the realistic "deny" — a reviewer rejects because they want changes; we
-  //     keep the conversation going instead of dead-ending at discard).
-  //   - bare @bgagent (no text) → nudge; fall through (nothing actionable).
+  // Sub-cases on a pending plan (see parsePlanVerdict for the classification):
+  //   - approve / reject  → runPlanVerdict (seed or DISCARD — reject is the one
+  //     irreversible action, so it requires EXPLICIT intent: reject/discard/cancel/
+  //     abort/👎, never a bare "no").
+  //   - ambiguous (a soft negation with no change instruction: "no", "no thanks",
+  //     "don't approve", "no, looks wrong") → NUDGE the reviewer to pick, never
+  //     guess-and-destroy (F-reject-revision).
+  //   - none WITH text → REVISE: re-plan from the feedback (the realistic "deny" —
+  //     a reviewer rejects because they want changes, incl. "no, make it 3 tasks";
+  //     we keep the conversation going instead of dead-ending at discard).
+  //   - none, bare @bgagent (no text) → nudge.
   // With NO pending plan, none of this applies → fall through to the A6 paths
   // (so "approve" on a normal sub-issue isn't hijacked).
   const verdict = parsePlanVerdict(trigger.instruction);
   const pending = await getPendingPlan(ddb, ORCHESTRATION_TABLE, commentedIssueId);
-  if (pending && verdict !== 'none') {
+  if (pending && (verdict === 'approve' || verdict === 'reject')) {
     // Claim-once on this comment so a webhook redelivery doesn't double-seed
     // (the consume is also atomic, but this skips the duplicate 👀/work).
     const ttl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
@@ -1135,11 +1140,15 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     });
     return;
   }
-  if (pending && verdict === 'none' && trigger.instruction.trim().length === 0) {
-    // Bare @bgagent (no text) on an issue with a pending plan: previously a silent
-    // drop (F-bare-mention). Post a one-line nudge with the three options rather
-    // than leaving the mention unanswered. Claim-once so a webhook redelivery
-    // doesn't repost. Best-effort; gated on the registry table like other feedback.
+  if (pending && (verdict === 'ambiguous' || (verdict === 'none' && trigger.instruction.trim().length === 0))) {
+    // NUDGE, never guess-and-destroy. Two cases land here:
+    //   - bare @bgagent (no text) — previously a silent drop (F-bare-mention).
+    //   - an AMBIGUOUS soft negation ("no", "no thanks", "don't approve", "no,
+    //     looks wrong") — a bare "no" could mean discard OR "change it", so we do
+    //     NOT treat it as a reject (that would destroy the plan on the most
+    //     ambiguous input — F-reject-revision). We ask the reviewer to pick.
+    // Post the one-line nudge (approve / reject / change). Claim-once so a webhook
+    // redelivery doesn't repost. Best-effort; gated on the registry table.
     if (WORKSPACE_REGISTRY_TABLE) {
       const won = await claimCommentAck(
         ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
@@ -1153,7 +1162,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
         );
       }
     }
-    logger.info('Mode B: bare @bgagent on a pending plan — posted nudge', { issue_id: commentedIssueId });
+    logger.info('Mode B: ambiguous/bare @bgagent on a pending plan — posted nudge', {
+      issue_id: commentedIssueId, verdict,
+    });
     return;
   }
   // No pending plan → fall through to A6 paths.
