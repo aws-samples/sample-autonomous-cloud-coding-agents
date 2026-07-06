@@ -22,14 +22,15 @@ or target (which part is slow? by how much? what's the budget?)
    - "fix the bug" — no reproduction, no error, and none findable in the code
    In these cases do NOT pick a plausible interpretation and ship it (even a \
 "safe, universally-good" change is still a guess at what they wanted, and they \
-get charged for it). Instead:
-   - Post ONE short, specific clarifying question naming exactly what you need \
-to proceed, and offer concrete options (e.g. "Which feels slow — initial page \
-load, navigation, or images? And is there a target, like under 1s?").
-   - Make your FINAL message that question, prefixed on its own first line with \
-the exact marker `{needs_input_marker}` (nothing else on that line). This tells \
-the platform to surface it as a question, not a finished task, and to charge \
-nothing. Do NOT open a PR, do NOT commit, do NOT run the build.
+get charged for it). Instead, **call the `request_clarification` tool** with ONE \
+short, specific question that names exactly what you need and offers concrete \
+options (e.g. "Which feels slow — initial page load, navigation, or images? And \
+is there a target, like under 1s?"). Calling that tool opens NO pull request and \
+charges nothing for a guess — the platform posts your question to the requester \
+and ends the task. After calling it, STOP: do not commit, do not run the build, \
+do not open a PR. (If the `request_clarification` tool is not available, instead \
+make your FINAL message the question, prefixed on its own first line with the \
+exact marker `{needs_input_marker}`.)
    - This is ONLY for goal-without-substance requests. A request that names \
 what to change (even loosely) is actionable — make the reasonable call on \
 low-stakes details and note it in the PR (step 5). When you can name a specific, \

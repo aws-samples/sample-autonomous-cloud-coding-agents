@@ -356,6 +356,13 @@ class AgentResult(BaseModel):
     # uploads/posts (#248 Phase 3). Empty for coding tasks (their product is the
     # PR, not the text).
     result_text: str = ""
+    # Clarify-before-spend (UX #4): the question text captured when the agent
+    # called the ``request_clarification`` tool instead of doing the work. A
+    # non-empty value is the deterministic hold-and-ask signal — the pipeline
+    # skips build/PR and surfaces this question to the requester (no charge for a
+    # guess). Empty when the agent proceeded normally. Preferred over the older
+    # NEEDS_INPUT_MARKER text sentinel (a tool call can't be mis-reproduced).
+    clarification_question: str = ""
 
 
 class TaskResult(BaseModel):
