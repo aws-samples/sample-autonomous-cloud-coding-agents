@@ -23,6 +23,8 @@ import {
   PLAN_PROPOSAL_PREFIX,
   renderAlreadyDecomposedNote,
   renderCapRejection,
+  renderLabelHelp,
+  renderMultiPartHint,
   renderPlannerErrorNote,
   renderPlanProposal,
   renderRevisingNote,
@@ -98,12 +100,22 @@ describe('renderPlanProposal — content', () => {
     expect(renderPlanProposal(FANOUT, { autoRun: false })).toContain('> Three independent surfaces.');
   });
 
-  test('summarises count, critical path, and cost ceiling (Σ budgets, no absolute time)', () => {
+  test('summarises count, sequencing, and max cost in PLAIN ENGLISH (no jargon, no absolute time)', () => {
     const md = renderPlanProposal(FANOUT, { autoRun: false });
-    expect(md).toContain('3 sub-issues');
-    expect(md).toContain('critical path 1');
-    expect(md).toContain('cost ceiling **$10**'); // 3 + 1 + 6
+    expect(md).toContain('3 pieces');
+    // Customer-caught jargon: "critical path" / "cost ceiling" are dev terms.
+    expect(md).not.toMatch(/critical path/i);
+    expect(md).not.toMatch(/cost ceiling/i);
+    // FANOUT is all-independent (cp === 1) → phrased as "run at the same time".
+    expect(md).toContain('run at the same time');
+    expect(md).toContain('$10'); // 3 + 1 + 6, still the worst-case number
     expect(md).not.toMatch(/\bminutes?\b|\bhours?\b/i); // no absolute-time estimate (#299)
+  });
+
+  test('a chain (cp>1) says how many run one after another, in plain English', () => {
+    const md = renderPlanProposal(CHAIN, { autoRun: false }); // 3-deep chain
+    expect(md).toContain('3 run one after another');
+    expect(md).not.toMatch(/critical path/i);
   });
 
   test('renders dependency notes for non-root nodes (1-based refs)', () => {
@@ -128,22 +140,26 @@ describe('renderPlanProposal — content', () => {
     expect(md).not.toContain('@bgagent approve');
   });
 
-  test('#299 revise loop: revisionRound>0 renders "Revised breakdown (round N)"', () => {
+  test('#299 revise loop: revisionRound>0 renders a plain "Updated breakdown" (NO "round N" jargon)', () => {
     const orig = renderPlanProposal(FANOUT, { autoRun: false });
     expect(orig).toContain('Proposed breakdown');
-    expect(orig).not.toContain('Revised breakdown');
+    expect(orig).not.toContain('Updated breakdown');
     const rev = renderPlanProposal(FANOUT, { autoRun: false, revisionRound: 2 });
-    expect(rev).toContain('Revised breakdown (round 2)');
+    expect(rev).toContain('Updated breakdown');
     expect(rev).not.toContain('Proposed breakdown');
+    // Customer-caught jargon: the reviewer shouldn't see an internal loop counter.
+    expect(rev).not.toMatch(/round \d/i);
     // Footer invites more feedback (the iterative loop), not just approve/reject.
     expect(rev).toMatch(/reply with .*@bgagent/i);
   });
 });
 
 describe('renderRevisingNote / renderRevisionCapNote (#299 revise loop)', () => {
-  test('revising note names the round + is bot-authored', () => {
+  test('revising note is plain-English + bot-authored, and does NOT leak the round counter', () => {
     const md = renderRevisingNote(2);
-    expect(md).toMatch(/round 2/);
+    // Customer-caught jargon: no internal "round N" in the ack the reviewer sees.
+    expect(md).not.toMatch(/round \d/i);
+    expect(md).toMatch(/updating the breakdown/i);
     expect(isBotAuthoredComment(md)).toBe(true);
   });
 
@@ -220,5 +236,35 @@ describe('the note renderers', () => {
     expect(note).toMatch(/:decompose/); // remedy: re-apply after adding detail
     // must NOT claim it's a single cohesive change (that's the OTHER note)
     expect(note).not.toMatch(/single cohesive change/i);
+  });
+});
+
+describe('renderLabelHelp / renderMultiPartHint (label discoverability)', () => {
+  test('label help explains all three labels, in plain English, and is bot-authored', () => {
+    const md = renderLabelHelp('bgagent');
+    expect(md).toContain('`bgagent`');
+    expect(md).toContain('`bgagent:decompose`');
+    expect(md).toContain('`bgagent:auto`');
+    // Plain-English intent words, not internal jargon.
+    expect(md).toMatch(/pull request/i);
+    expect(md).toMatch(/approve/i);
+    // Self-trigger guard: our own comment must be recognised as bot-authored.
+    expect(isBotAuthoredComment(md)).toBe(true);
+  });
+
+  test('label help uses the project custom base label everywhere', () => {
+    const md = renderLabelHelp('ship');
+    expect(md).toContain('`ship`');
+    expect(md).toContain('`ship:decompose`');
+    expect(md).toContain('`ship:auto`');
+    expect(md).not.toContain('bgagent');
+  });
+
+  test('multi-part hint points at :decompose without blocking the run, bot-authored', () => {
+    const md = renderMultiPartHint('bgagent');
+    expect(md).toMatch(/single task/i); // acknowledges it IS running now
+    expect(md).toContain('`bgagent:decompose`'); // the suggested alternative
+    expect(md).toMatch(/plan to approve/i);
+    expect(isBotAuthoredComment(md)).toBe(true);
   });
 });

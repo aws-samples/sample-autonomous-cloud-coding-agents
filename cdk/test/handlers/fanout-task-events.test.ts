@@ -1892,6 +1892,49 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).toContain('cancelled');
     expect(body).not.toMatch(/cancelled:\s/);
   });
+
+  describe('clarify-before-spend (UX #4) — needsInput hold', () => {
+    test('renders the question as 💬, not a ✅/❌, with no cost/turns subtitle', () => {
+      const body = renderLinearFinalStatusComment({
+        eventType: 'task_completed',
+        prUrl: null,
+        costUsd: 0.02,
+        turns: 2,
+        maxTurns: 100,
+        durationS: 15,
+        taskId: 't-hold',
+        errorTitle: null,
+        needsInput: true,
+        answerText: 'Which part feels slow — initial load, filtering, or chart rendering? And a target (e.g. under 1s)?',
+      });
+      expect(body).toContain('💬');
+      expect(body).not.toContain('✅');
+      expect(body).not.toContain('❌');
+      // The question is surfaced verbatim.
+      expect(body).toContain('Which part feels slow');
+      // No metrics subtitle (it reads like a person asking, not a task report).
+      expect(body).not.toContain('cost:');
+      // Invites a reply so the conversation continues.
+      expect(body).toMatch(/reply/i);
+    });
+
+    test('falls back to a generic ask when answerText is empty', () => {
+      const body = renderLinearFinalStatusComment({
+        eventType: 'task_completed',
+        prUrl: null,
+        costUsd: null,
+        turns: null,
+        maxTurns: null,
+        durationS: null,
+        taskId: 't-hold2',
+        errorTitle: null,
+        needsInput: true,
+        answerText: '',
+      });
+      expect(body).toContain('💬');
+      expect(body).toMatch(/more detail/i);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

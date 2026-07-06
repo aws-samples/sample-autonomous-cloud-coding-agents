@@ -1,11 +1,42 @@
 """Unit tests for pipeline task outcome resolution and error chaining."""
 
+from config import NEEDS_INPUT_MARKER
 from models import AgentResult
 from pipeline import (
     _chain_prior_agent_error,
     _compute_turns_completed,
     _resolve_overall_task_status,
+    _starts_with_needs_input_marker,
+    _strip_needs_input_marker,
 )
+
+
+class TestNeedsInputMarker:
+    """Clarify-before-spend (UX #4): detect + strip the hold-and-ask marker."""
+
+    def test_detects_marker_on_first_line(self):
+        text = f"{NEEDS_INPUT_MARKER}\nWhich page feels slow — the dashboard or the list?"
+        assert _starts_with_needs_input_marker(text) is True
+
+    def test_detects_marker_after_leading_blank_lines(self):
+        text = f"\n\n{NEEDS_INPUT_MARKER} What target latency are you aiming for?"
+        assert _starts_with_needs_input_marker(text) is True
+
+    def test_ignores_marker_buried_mid_message(self):
+        # A stray mention deep in prose is NOT a hold signal — only the first line.
+        text = f"I made the change.\nBy the way {NEEDS_INPUT_MARKER} is our sentinel."
+        assert _starts_with_needs_input_marker(text) is False
+
+    def test_none_or_empty_is_not_a_hold(self):
+        assert _starts_with_needs_input_marker(None) is False
+        assert _starts_with_needs_input_marker("") is False
+        assert _starts_with_needs_input_marker("Just a normal answer.") is False
+
+    def test_strip_removes_leading_marker_only(self):
+        text = f"{NEEDS_INPUT_MARKER}\nWhich part is slow?"
+        assert _strip_needs_input_marker(text) == "Which part is slow?"
+        # Idempotent-ish: no marker → unchanged (trimmed).
+        assert _strip_needs_input_marker("  plain question?  ") == "plain question?"
 
 
 class TestResolveOverallTaskStatus:

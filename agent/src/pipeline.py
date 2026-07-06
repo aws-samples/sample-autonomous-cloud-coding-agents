@@ -18,6 +18,7 @@ import task_state
 from channel_mcp import configure_channel_mcp
 from config import (
     AGENT_WORKSPACE,
+    NEEDS_INPUT_MARKER,
     build_config,
     get_config,
     resolve_jira_oauth_token,
@@ -498,6 +499,34 @@ def _apply_post_hook_gates(
         else:
             log("INFO", f"{kind} failed — gate={label} but on_failure={on_failure}, not gating")
     return gates_ok
+
+
+def _starts_with_needs_input_marker(result_text: str | None) -> bool:
+    """True when the agent's final message opens with the clarify-and-hold marker.
+
+    Clarify-before-spend (UX #4): the new_task workflow tells the agent to put
+    :data:`NEEDS_INPUT_MARKER` on the FIRST line of its final message when it
+    needs to ask instead of guess. We match the FIRST non-empty line only (a
+    marker buried mid-answer is not a hold signal — it prevents a stray mention
+    of the token in prose from tripping the hold).
+    """
+    if not result_text:
+        return False
+    for line in result_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return stripped.startswith(NEEDS_INPUT_MARKER)
+    return False
+
+
+def _strip_needs_input_marker(result_text: str) -> str:
+    """Remove the leading NEEDS_INPUT_MARKER line/token so the reviewer sees only
+    the clarifying question, never our internal sentinel."""
+    text = result_text.strip()
+    if text.startswith(NEEDS_INPUT_MARKER):
+        text = text[len(NEEDS_INPUT_MARKER) :]
+    return text.strip()
 
 
 def _resolve_overall_task_status(
@@ -1090,9 +1119,35 @@ def run_task(
             )
             artifact_uri: str | None = None  # set by the decompose (artifact) branch below
 
+            # Clarify-before-spend (UX #4): a writeable, PR-producing task
+            # (new_task) whose agent judged the request too ambiguous to
+            # implement emits NEEDS_INPUT_MARKER on the first line of its final
+            # message. Treat that as a HOLD: no build, no commit, no PR — the
+            # deliverable is the clarifying question, surfaced by the platform as
+            # "needs input" rather than a finished task, so we don't charge for a
+            # guess. Scoped OFF for artifact workflows (decompose emits JSON, not a
+            # question) and PR workflows (pr_iteration already has its own
+            # answer-only path). Fail-safe: if the marker is somehow present on a
+            # read-only task we still just hold (nothing to lose).
+            needs_input = bool(
+                not artifact_workflow
+                and not config.is_pr_workflow
+                and _starts_with_needs_input_marker(agent_result.result_text)
+            )
+
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
-                if artifact_workflow:
+                if needs_input:
+                    # Hold-and-ask: skip build/lint/PR entirely. The agent asked a
+                    # question and made no changes; there is nothing to verify or ship.
+                    build_passed = True
+                    lint_passed = True
+                    build_timed_out = False
+                    build_inert = False
+                    safety_committed = False
+                    pr_url = None
+                    log("POST", "Clarify-before-spend: agent asked for input — holding (no PR)")
+                elif artifact_workflow:
                     # Plan-only task: no build/lint/PR gate — the plan IS the deliverable.
                     build_passed = True
                     lint_passed = True
@@ -1202,6 +1257,15 @@ def run_task(
                 pr_url=pr_url,
                 build_timed_out=build_timed_out,
             )
+            # Clarify-before-spend: a hold-for-input run is a SUCCESSFUL outcome
+            # (the agent did the right thing by asking), not a failure — the
+            # deliverable is the question. Force success + clear any error so the
+            # platform surfaces "needs input", not ❌. (The agent emitted a normal
+            # ResultMessage, so overall_status is already 'success' in the common
+            # case; this guards the edge where a gate/marker interaction differs.)
+            if needs_input:
+                overall_status = "success"
+                result_error = None
 
             # ✅/❌ on the Linear issue (removes the 👀 first so the final
             # status stands alone). No-op for non-Linear tasks.
@@ -1255,6 +1319,14 @@ def run_task(
             # The agent's final text — surfaced as the answer on a no-change
             # iteration so a question gets an actual reply.
             answer_text = (agent_result.result_text or "").strip()
+            # Clarify-before-spend: reuse the SAME "no change → 💬 answered" surface
+            # the pr-iteration answer path uses (code_changed=False + answer_text).
+            # A new_task hold makes no commit, so code_changed is naturally False;
+            # set it explicitly and strip the marker line so the reviewer sees only
+            # the question, not our internal sentinel.
+            if needs_input:
+                code_changed = False
+                answer_text = _strip_needs_input_marker(answer_text)
 
             # Build TaskResult
             usage = agent_result.usage

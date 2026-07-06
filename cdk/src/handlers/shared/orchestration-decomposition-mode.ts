@@ -49,6 +49,15 @@ export const DEFAULT_LABEL_FILTER = 'bgagent';
 export const DECOMPOSE_SUFFIX = 'decompose';
 /** Suffix (after ``:``) that requests decompose-then-auto-run. */
 export const AUTO_SUFFIX = 'auto';
+/**
+ * Suffix (after ``:``) that requests a one-time EXPLAINER of what the trigger
+ * labels do — posted as a comment, then removed by the processor. It creates NO
+ * task (customer-caught: a first-time user couldn't tell ``:decompose`` from
+ * ``:auto`` from the bare label). Deliberately NOT part of
+ * {@link triggerLabelVariants} — that set drives task dispatch, and help must
+ * never spawn work.
+ */
+export const HELP_SUFFIX = 'help';
 
 /**
  * What the webhook processor should do for a triggered Linear issue.
@@ -142,8 +151,54 @@ export function parseDecompositionMode(
  * All trigger label variants for a given base filter, lower-cased. The webhook
  * processor's trigger gate must match ANY of these (not just the bare base),
  * or a ``bgagent:decompose``-only issue would never fire. (B6 uses this.)
+ *
+ * NOTE: ``:help`` is intentionally EXCLUDED — it explains the labels and creates
+ * no task. The processor detects it separately via {@link hasHelpLabel}.
  */
 export function triggerLabelVariants(labelFilter: string = DEFAULT_LABEL_FILTER): readonly string[] {
   const base = norm(labelFilter) || DEFAULT_LABEL_FILTER;
   return [base, `${base}:${DECOMPOSE_SUFFIX}`, `${base}:${AUTO_SUFFIX}`];
+}
+
+/** True when the ``<base>:help`` explainer label is present (any case). */
+export function hasHelpLabel(
+  labelNames: readonly (string | undefined | null)[],
+  labelFilter: string = DEFAULT_LABEL_FILTER,
+): boolean {
+  const base = norm(labelFilter) || DEFAULT_LABEL_FILTER;
+  const help = `${base}:${HELP_SUFFIX}`;
+  return labelNames.some((n) => norm(n) === help);
+}
+
+/**
+ * Cheap, pre-spend heuristic: does a plain (non-``:decompose``) issue LOOK like
+ * it has several independent parts? Used only to post a one-time hint suggesting
+ * ``:decompose`` (customer-caught: a plain ``bgagent`` label on a multi-part
+ * issue silently built everything as one task, with no plan to approve). This is
+ * a HINT, not a gate — it must be conservative (false negatives are fine; a
+ * false positive nags the user), and it NEVER changes what runs. The real
+ * multi-part judgment is the agent-native planner's job; this only decides
+ * whether to mention that the planner exists.
+ *
+ * Signal: an explicit enumeration in the description — a numbered/bulleted list,
+ * or several "and also / plus / as well as" conjunctions — of non-trivial
+ * length. Kept deliberately simple; the title alone is never enough.
+ */
+/** Below this many chars a description is too short to be a real multi-part epic. */
+const MULTI_PART_MIN_CHARS = 80;
+/** A numbered/bulleted list of at least this many items reads as multi-part. */
+const MULTI_PART_MIN_LIST_ITEMS = 3;
+/** This many additive conjunctions in prose reads as several independent asks. */
+const MULTI_PART_MIN_CONJUNCTIONS = 2;
+
+export function looksMultiPart(description: string | undefined | null): boolean {
+  const text = (description ?? '').trim();
+  if (text.length < MULTI_PART_MIN_CHARS) return false;
+  const lines = text.split(/\r?\n/);
+  // Count list items: "1." / "1)" / "-" / "*" / "•" at the start of a line.
+  const listItems = lines.filter((l) => /^\s*(\d+[.)]|[-*•])\s+\S/.test(l)).length;
+  if (listItems >= MULTI_PART_MIN_LIST_ITEMS) return true;
+  // Or several additive conjunctions across the prose (independent asks).
+  const conjunctions = (text.match(/\b(and also|as well as|in addition|plus,|;)\b/gi) ?? []).length;
+  return conjunctions >= MULTI_PART_MIN_CONJUNCTIONS;
 }

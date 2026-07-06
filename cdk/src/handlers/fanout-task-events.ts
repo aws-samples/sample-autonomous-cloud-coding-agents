@@ -910,9 +910,28 @@ export function renderLinearFinalStatusComment(args: {
   durationS: number | null;
   taskId: string;
   errorTitle: string | null;
+  /**
+   * Clarify-before-spend (UX #4): the agent judged the request too ambiguous to
+   * implement and asked a question instead of guessing — no PR, no charge for a
+   * guess. When true, render the answer text as a 💬 question rather than a ✅.
+   */
+  needsInput?: boolean;
+  /** The agent's clarifying question (surfaced verbatim when needsInput). */
+  answerText?: string | null;
 }): string {
   const isCompleted = args.eventType === 'task_completed';
   const shippedDespiteFailure = !isCompleted && args.prUrl != null;
+
+  // Clarify-and-hold: the deliverable is a question, so the whole comment is
+  // just that question under a 💬 header — no cost/turns subtitle (it reads like
+  // a person asking), no ❌ (nothing failed), no PR line (there isn't one).
+  if (args.needsInput) {
+    const question = (args.answerText ?? '').trim();
+    const lines = ['💬 **A quick question before I start**', ''];
+    lines.push(question || 'Could you share a bit more detail so I build the right thing?');
+    lines.push('', 'Reply with the details and I\'ll get going.', '', `_task ${args.taskId}_`);
+    return lines.join('\n');
+  }
 
   let header: string;
   if (isCompleted) {
@@ -1105,6 +1124,12 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     const body = renderLinearFinalStatusComment({
       eventType: event.event_type,
       prUrl: task.pr_url ?? null,
+      // Clarify-before-spend (UX #4): a new_task run that HELD to ask a question
+      // carries code_changed===false + answer_text (the question) and made no PR.
+      // Surface it as a 💬 question, not a ✅ "Task completed" (which would read as
+      // "done" when nothing shipped). Only the no-PR + code_changed===false shape.
+      needsInput: task.code_changed === false && !task.pr_url,
+      answerText: typeof task.answer_text === 'string' ? task.answer_text : null,
       // DDB returns numeric attributes as strings at the Document-client
       // boundary; coerce so toFixed/comparisons work. Same pattern the
       // GitHub dispatcher uses.
