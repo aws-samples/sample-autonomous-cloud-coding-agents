@@ -668,6 +668,39 @@ describe('loadBlueprintConfig', () => {
     const config = await loadBlueprintConfig(baseTask as any);
     expect(config.cedar_policies).toBeUndefined();
   });
+
+  // Read-only workflows (decompose planning, pr-review) clone to READ — they run
+  // no build, so they must NOT inherit a repo's heavy ecs build substrate. Pinning
+  // them to agentcore avoids a hard "ECS compute strategy requires ECS_CLUSTER_ARN…"
+  // session-start failure on any stack without the ECS substrate wired (live-caught).
+  const ecsRepoConfig = {
+    repo: 'org/repo',
+    status: 'active' as const,
+    onboarded_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    compute_type: 'ecs' as const,
+  };
+
+  test('a coding/decompose-v1 (read-only) task on an ecs repo is PINNED to agentcore', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
+    const planTask = { ...baseTask, resolved_workflow: { id: 'coding/decompose-v1', version: '1.0.0' } };
+    const config = await loadBlueprintConfig(planTask as any);
+    expect(config.compute_type).toBe('agentcore');
+  });
+
+  test('a coding/pr-review-v1 (read-only) task on an ecs repo is PINNED to agentcore', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
+    const reviewTask = { ...baseTask, resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' } };
+    const config = await loadBlueprintConfig(reviewTask as any);
+    expect(config.compute_type).toBe('agentcore');
+  });
+
+  test('a WRITEABLE workflow (coding/new-task-v1) on an ecs repo KEEPS ecs (it builds)', async () => {
+    mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
+    const buildTask = { ...baseTask, resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' } };
+    const config = await loadBlueprintConfig(buildTask as any);
+    expect(config.compute_type).toBe('ecs');
+  });
 });
 
 describe('hydrateAndTransition with blueprint config', () => {

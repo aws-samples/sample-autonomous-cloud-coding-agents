@@ -23,6 +23,7 @@ import {
   PLAN_PROPOSAL_PREFIX,
   renderAlreadyDecomposedNote,
   renderCapRejection,
+  renderDecomposeUnavailableNote,
   renderLabelHelp,
   renderMultiPartHint,
   renderPlannerErrorNote,
@@ -217,16 +218,32 @@ describe('the note renderers', () => {
     expect(renderAlreadyDecomposedNote()).toContain('already has sub-issues');
   });
 
-  test('planner-error note is honest + remedy-bearing, NOT the "single cohesive change" copy (ABCA-490)', () => {
+  test('planner-error note (unusable plan → ran as single) is honest + remedy-bearing, no stale timeout copy', () => {
     const note = renderPlannerErrorNote();
-    // Honest about the failure, not a fake "single cohesive change" verdict.
-    expect(note).toMatch(/couldn't plan a breakdown/i);
+    // Not a fake "single cohesive change" verdict.
     expect(note).not.toMatch(/single cohesive change/i);
-    // Still tells the user the work falls back to one task.
+    // Tells the user the work fell back to one task (this path DID create one).
     expect(note).toMatch(/single task/i);
     // Carries a concrete remedy (re-apply :decompose OR split manually).
     expect(note).toMatch(/:decompose/);
     expect(note).toMatch(/split the issue/i);
+    // The agent-native planner runs on a real substrate — NO "took too long"
+    // narrative (that was the retired 30s Lambda, ABCA-490).
+    expect(note).not.toMatch(/too long/i);
+    expect(note).not.toMatch(/in time/i);
+  });
+
+  test('decompose-unavailable note (planning RUN failed → nothing started) is honest: no false "single task"', () => {
+    const note = renderDecomposeUnavailableNote();
+    // Nothing ran/charged — must NOT claim it's running as a single task.
+    expect(note).not.toMatch(/running it as a single task/i);
+    expect(note).toMatch(/nothing was run/i);
+    // Real next steps: retry planning OR run as one task via the plain label.
+    expect(note).toMatch(/:decompose/);
+    expect(note).toMatch(/single task/i);
+    // No stale timeout narrative.
+    expect(note).not.toMatch(/too long/i);
+    expect(isBotAuthoredComment(note)).toBe(true);
   });
 
   test('underspecified-decompose note holds + asks for detail, not a false one-unit claim (ABCA-492)', () => {

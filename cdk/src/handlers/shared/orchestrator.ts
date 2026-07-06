@@ -30,6 +30,7 @@ import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-c
 import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
+import { workflowIsReadOnly } from './workflows';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -239,8 +240,25 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
+  // A read-only workflow (coding/decompose-v1 planning, coding/pr-review-v1)
+  // clones the repo to READ it — it never runs the build, so it must NOT inherit
+  // a repo's heavy build substrate (``compute_type: 'ecs'`` — the context-gated
+  // 64GB tier that exists only because some repos' full ``mise run build`` OOMs
+  // AgentCore). Pinning planning/review to ``agentcore`` is correct (no build to
+  // size for), cheaper, and avoids a hard failure on any stack that hasn't wired
+  // the ECS substrate: live-caught as "Session start failed: ECS compute strategy
+  // requires ECS_CLUSTER_ARN…" when a :decompose landed on an ecs-configured repo.
+  const workflowId = task.resolved_workflow?.id;
+  const isReadOnly = workflowId ? workflowIsReadOnly(workflowId) : false;
+  const effectiveComputeType: ComputeType = isReadOnly ? 'agentcore' : (repoConfig?.compute_type ?? 'agentcore');
+  if (isReadOnly && repoConfig?.compute_type === 'ecs') {
+    logger.info('Read-only workflow pinned to agentcore compute (skips heavy build substrate)', {
+      task_id: task.task_id, repo: task.repo, workflow_id: workflowId,
+    });
+  }
+
   return {
-    compute_type: repoConfig?.compute_type ?? 'agentcore',
+    compute_type: effectiveComputeType,
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
     model_id: repoConfig?.model_id,
     max_turns: repoConfig?.max_turns,
