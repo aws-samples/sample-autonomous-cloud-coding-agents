@@ -65,5 +65,5 @@ Examples:
    - Decisions made (if the task was ambiguous, explain your choices)
    - The following sentence: "By submitting this pull request, I confirm that you \
 can use, modify, copy, and redistribute this contribution, under the terms of \
-the [project license](https://github.com/krokoko/agent-plugins/blob/main/LICENSE)."\
+the [project license](https://github.com/{repo_url}/blob/{default_branch}/LICENSE)."\
 """

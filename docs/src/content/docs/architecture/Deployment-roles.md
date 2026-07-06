@@ -121,6 +121,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
         "iam:DeleteRole",
         "iam:GetRole",
         "iam:UpdateRole",
+        "iam:UpdateAssumeRolePolicy",
         "iam:TagRole",
         "iam:UntagRole",
         "iam:ListRoleTags",
@@ -323,6 +324,8 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "lambda:GetFunctionCodeSigningConfig",
         "lambda:GetFunctionRecursionConfig",
         "lambda:GetProvisionedConcurrencyConfig",
+        "lambda:PutProvisionedConcurrencyConfig",
+        "lambda:DeleteProvisionedConcurrencyConfig",
         "lambda:GetRuntimeManagementConfig",
         "lambda:ListVersionsByFunction",
         "lambda:InvokeFunction",
@@ -343,7 +346,9 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "lambda:CreateEventSourceMapping",
         "lambda:DeleteEventSourceMapping",
         "lambda:UpdateEventSourceMapping",
-        "lambda:GetEventSourceMapping"
+        "lambda:GetEventSourceMapping",
+        "lambda:TagResource",
+        "lambda:UntagResource"
       ],
       "Resource": "*"
     },
@@ -477,6 +482,7 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "arn:aws:secretsmanager:*:*:secret:GitHubTokenSecret*",
         "arn:aws:secretsmanager:*:*:secret:SlackIntegration*",
         "arn:aws:secretsmanager:*:*:secret:LinearIntegration*",
+        "arn:aws:secretsmanager:*:*:secret:JiraIntegration*",
         "arn:aws:secretsmanager:*:*:secret:GitHubScreenshot*",
         "arn:aws:secretsmanager:*:*:secret:bgagent/*"
       ]
@@ -601,6 +607,8 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
         "s3:GetBucketPublicAccessBlock",
         "s3:PutEncryptionConfiguration",
         "s3:PutLifecycleConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:GetBucketVersioning",
         "s3:GetBucketLocation",
         "s3:ListBucket",
         "s3:PutBucketTagging",
@@ -784,6 +792,6 @@ These policies are conservative-but-scoped starting points. To tighten further:
 
 ## Reference
 
-- [SECURITY.md](/architecture/security) -- Runtime IAM, memory isolation, custom step trust boundaries.
-- [COMPUTE.md](/architecture/compute) -- Compute backend options (AgentCore vs ECS Fargate).
-- [COST_MODEL.md](/architecture/cost-model) -- Infrastructure baseline costs and scale-to-zero analysis.
+- [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) -- Runtime IAM, memory isolation, custom step trust boundaries.
+- [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend options (AgentCore vs ECS Fargate).
+- [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Infrastructure baseline costs and scale-to-zero analysis.

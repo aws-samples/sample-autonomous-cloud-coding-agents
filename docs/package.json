@@ -11,15 +11,16 @@
     "security:retire": "retire --path . --severity high"
   },
   "devDependencies": {
-    "jest": "^30.3.0",
-    "jest-junit": "^16",
-    "retire": "^5.4.2"
+    "jest": "^30.4.2",
+    "jest-junit": "^17",
+    "retire": "^5.4.3"
   },
   "dependencies": {
-    "@astrojs/check": "^0.9.8",
-    "@astrojs/starlight": "^0.38.2",
-    "astro": "6.4.7",
-    "typescript": "^6.0.2"
+    "@astrojs/check": "^0.9.9",
+    "@astrojs/starlight": "^0.41.2",
+    "astro": "7.0.5",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^6.0.3"
   },
   "main": "lib/index.js",
   "engines": {

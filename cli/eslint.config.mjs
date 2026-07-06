@@ -153,6 +153,19 @@ export default [
       }],
 
       // TypeScript rules
+      // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
+      // are errors. `^_` opts out an intentionally-unused binding. Base rule must be
+      // off so the typescript-eslint variant (type-aware) is the only one active.
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', {
+        args: 'all',
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrors: 'all',
+        caughtErrorsIgnorePattern: '^_',
+        ignoreRestSiblings: true,
+        destructuredArrayIgnorePattern: '^_',
+      }],
       // AI007 guard (#258): inline numeric literals should be named constants.
       // Values shared across Python/TypeScript belong in contracts/constants.json
       // (see contracts/constants.md).

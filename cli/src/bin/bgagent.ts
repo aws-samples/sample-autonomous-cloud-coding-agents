@@ -32,8 +32,13 @@ import { makeLinearCommand } from '../commands/linear';
 import { makeListCommand } from '../commands/list';
 import { makeLoginCommand } from '../commands/login';
 import { makeNudgeCommand } from '../commands/nudge';
+import { makeOpsCommand } from '../commands/ops';
 import { makePendingCommand } from '../commands/pending';
+import { makePlatformCommand } from '../commands/platform';
 import { makePoliciesCommand } from '../commands/policies';
+import { makeReplayCommand } from '../commands/replay';
+import { makeRepoCommand } from '../commands/repo';
+import { makeRuntimeCommand } from '../commands/runtime';
 import { makeSlackCommand } from '../commands/slack';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
@@ -41,7 +46,7 @@ import { makeTraceCommand } from '../commands/trace';
 import { makeWatchCommand } from '../commands/watch';
 import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
-import { ApiError, CliError } from '../errors';
+import { CliError } from '../errors';
 
 const program = new Command();
 
@@ -63,6 +68,7 @@ program.addCommand(makeLoginCommand());
 program.addCommand(makeSubmitCommand());
 program.addCommand(makeListCommand());
 program.addCommand(makeStatusCommand());
+program.addCommand(makeReplayCommand());
 program.addCommand(makeCancelCommand());
 program.addCommand(makeNudgeCommand());
 program.addCommand(makeApproveCommand());
@@ -74,6 +80,10 @@ program.addCommand(makeSlackCommand());
 program.addCommand(makeLinearCommand());
 program.addCommand(makeJiraCommand());
 program.addCommand(makeGithubCommand());
+program.addCommand(makePlatformCommand());
+program.addCommand(makeRepoCommand());
+program.addCommand(makeRuntimeCommand());
+program.addCommand(makeOpsCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
 program.addCommand(makeWebhookCommand());
@@ -90,9 +100,7 @@ if (require.main === module) {
   program
     .parseAsync(process.argv)
     .catch((err: unknown) => {
-      if (err instanceof CliError || err instanceof ApiError) {
-        console.error(`Error: ${err.message}`);
-      } else if (err instanceof Error) {
+      if (err instanceof Error) {
         console.error(`Error: ${err.message}`);
       } else {
         console.error('An unexpected error occurred.');

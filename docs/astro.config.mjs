@@ -1,12 +1,13 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { remarkMermaid } from './plugins/remark-mermaid.mjs';
+import remarkGfm from 'remark-gfm';
 
 export default defineConfig({
   site: 'https://aws-samples.github.io',
   base: '/sample-autonomous-cloud-coding-agents',
   markdown: {
-    remarkPlugins: [remarkMermaid],
+    remarkPlugins: [remarkMermaid, remarkGfm],
   },
   integrations: [
     starlight({
@@ -88,8 +89,12 @@ export default defineConfig({
           collapsed: true,
           items: [
             { slug: 'architecture/architecture' },
+            { slug: 'architecture/vision' },
+            { slug: 'architecture/workflows' },
             { slug: 'architecture/orchestrator' },
             { slug: 'architecture/security' },
+            { slug: 'architecture/cedar-hitl-gates' },
+            { slug: 'architecture/interactive-agents' },
             { slug: 'architecture/identity-and-auth' },
             { slug: 'architecture/deployment-roles' },
             { slug: 'architecture/memory' },
@@ -99,17 +104,14 @@ export default defineConfig({
             { slug: 'architecture/observability' },
             { slug: 'architecture/cost-model' },
             { slug: 'architecture/evaluation' },
+            { slug: 'architecture/attachments' },
             { slug: 'architecture/repo-onboarding' },
           ],
         },
         {
           label: 'Decisions',
           collapsed: true,
-          autogenerate: { directory: 'decisions' },
-        },
-        {
-          label: 'Roadmap',
-          autogenerate: { directory: 'roadmap' },
+          items: [{ autogenerate: { directory: 'decisions' } }],
         },
       ],
     }),

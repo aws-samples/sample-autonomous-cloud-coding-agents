@@ -7,7 +7,7 @@ title: Observability
 For a system where agents run for hours and burn tokens autonomously, observability is load-bearing infrastructure. The platform captures task lifecycle, agent reasoning, tool use, and outcomes so operators can monitor health, debug failures, and improve agent performance over time.
 
 - **Use this doc for:** understanding what the platform observes, how telemetry flows, metrics, dashboards, alarms, and deployment safety.
-- **Related docs:** [ORCHESTRATOR.md](/architecture/orchestrator) for task state machine, [MEMORY.md](/architecture/memory) for code attribution and cross-session learning, [EVALUATION.md](/architecture/evaluation) for agent performance measurement.
+- **Related docs:** [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for task state machine, [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for code attribution and cross-session learning, [EVALUATION.md](/sample-autonomous-cloud-coding-agents/architecture/evaluation) for agent performance measurement.
 
 ## Telemetry architecture
 
@@ -134,7 +134,7 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 
 Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during repo setup). This links code changes to the task and prompt that produced them, enabling queries like "what prompt led to this change?" and supporting the evaluation pipeline.
 
-Task conversations, tool calls, decisions, and outcomes are persisted with metadata (`task_id`, `session_id`, `repo`, `branch`, `commit SHAs`, `pr_url`) in a searchable store. The agent retrieves relevant past context via memory search at task start. See [MEMORY.md](/architecture/memory) for the memory lifecycle and retrieval strategy.
+Task conversations, tool calls, decisions, and outcomes are persisted with metadata (`task_id`, `session_id`, `repo`, `branch`, `commit SHAs`, `pr_url`) in a searchable store. The agent retrieves relevant past context via memory search at task start. See [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for the memory lifecycle and retrieval strategy.
 
 ## Audit and retention
 
@@ -142,6 +142,15 @@ Task conversations, tool calls, decisions, and outcomes are persisted with metad
 - **Task records** - Status, timestamps, metadata. TTL is stamped when the task reaches a terminal state (default 90 days). Active tasks are retained indefinitely.
 - **Logs** - Application and usage logs retained for 90 days in CloudWatch. Traces flow to X-Ray via CloudWatch Transaction Search.
 - **Model invocation logs** - Bedrock model invocation logging with 90-day retention for compliance and prompt injection investigation.
+
+## Task replay bundle
+
+For post-mortems, eval-harness input, and compliance export, the API exposes a single **replay bundle** per task that aggregates the telemetry stores above — chronological `TaskEvents`, the verification verdict, the `--trace` S3 URI, `prompt_version` / `workflow_ref`, the OTEL trace id (or `session_id` as the correlation proxy when absent), and cost — without manually correlating CloudWatch, DynamoDB, and S3. It reads existing stores only (no new persistence).
+
+- **API:** `GET /v1/tasks/{task_id}/replay` (Cognito, owner-scoped — same auth as task read). Schema and example in [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract#get-replay-bundle).
+- **CLI:** `bgagent replay <task-id> [--json] [--output <file>]`.
+
+Fields whose source did not run for a given task are returned `null`/empty (e.g. no `--trace` → `trace_uri: null`), so the schema is stable for consumers.
 
 ## Deployment safety
 

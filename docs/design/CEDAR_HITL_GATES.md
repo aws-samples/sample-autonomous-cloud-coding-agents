@@ -2,7 +2,6 @@
 
 > **Status:** Core implemented; this document remains the authoritative design reference.
 > **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (pointing here), §7 (state machine).
-> **Visual:** [`../diagrams/phase3-cedar-hitl.drawio`](../diagrams/phase3-cedar-hitl.drawio) (12 pages; supplemented by inline Mermaid diagrams below).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
 > **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
@@ -144,7 +143,7 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 
 ## 4. End-to-end request flow
 
-Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hitl.drawio pages 3-6](../diagrams/phase3-cedar-hitl.drawio), supplemented by the round-trip Mermaid below.
+Narrative walk-through of the happy path. Sequence diagrams in the round-trip Mermaid below.
 
 ### Setup (task start)
 
@@ -1813,7 +1812,7 @@ The scenario is bounded by the polling cadence (2-5s ticks) and DDB's strongly-c
 
 ### 13.13 Runtime JWT expiry during approval wait
 
-**Context in this codebase (verified 2026-05-06).** The AgentCore Runtime container authenticates outbound AWS API calls (DynamoDB, Secrets Manager, etc.) via the container's IAM role, which the SDK resolves through the instance-metadata-service equivalent and auto-refreshes transparently. There is no user-presented JWT with a short rolling expiry consumed by the container's own API calls — `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returns nothing (only `token_usage` for LLM billing and `GITHUB_TOKEN` for git operations). AgentCore Runtime invocation on the Lambda side uses sigv4 via `InvokeAgentRuntimeCommand` (see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`) — also auto-refreshed AWS credentials, not a user JWT. The "Runtime-JWT" label in §4 step 6 and the phase3-cedar-hitl.drawio diagrams refers to the **caller-facing SSE auth** (Terminal A's Cognito ID token presented to API Gateway to stream task events) — it does not authenticate the container's own DDB writes.
+**Context in this codebase (verified 2026-05-06).** The AgentCore Runtime container authenticates outbound AWS API calls (DynamoDB, Secrets Manager, etc.) via the container's IAM role, which the SDK resolves through the instance-metadata-service equivalent and auto-refreshes transparently. There is no user-presented JWT with a short rolling expiry consumed by the container's own API calls — `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returns nothing (only `token_usage` for LLM billing and `GITHUB_TOKEN` for git operations). AgentCore Runtime invocation on the Lambda side uses sigv4 via `InvokeAgentRuntimeCommand` (see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`) — also auto-refreshed AWS credentials, not a user JWT. The "Runtime-JWT" label in §4 step 6 and the sequence diagrams below refers to the **caller-facing SSE auth** (Terminal A's Cognito ID token presented to API Gateway to stream task events) — it does not authenticate the container's own DDB writes.
 
 **Therefore, for v1: no separate Runtime JWT expiry term is required in the ceiling computation.** The `maxLifetime` term (AgentCore's hard lifetime of 8h) is the only upper bound we control; IAM credentials refresh automatically within that window. The ceiling definition in decision #6 stands as `min(1h, maxLifetime_remaining - cleanup_margin)`.
 

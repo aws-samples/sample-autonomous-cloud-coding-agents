@@ -6,7 +6,7 @@ The platform evaluates every tool call the agent is about to make (Bash, Write, 
 
 The mechanism is Cedar HITL gates — "Human-In-The-Loop." It is the same policy language you can already author at the blueprint level, with one added annotation (`@tier("soft")`) that flips a rule from hard-deny to require-approval.
 
-For the full design and guarantees (atomicity, fail-closed posture, timeout semantics, late-approval handling), see [Cedar HITL gates design doc](/architecture/cedar-hitl-gates). For writing policies, see the [Cedar policy guide](/customizing/cedar-policies).
+For the full design and guarantees (atomicity, fail-closed posture, timeout semantics, late-approval handling), see [Cedar HITL gates design doc](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). For writing policies, see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
 
 ### When a gate fires
 
