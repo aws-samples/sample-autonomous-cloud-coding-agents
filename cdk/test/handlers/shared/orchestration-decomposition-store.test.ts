@@ -24,6 +24,7 @@ import {
   getPendingPlan,
   PENDING_PLAN_SK,
   putPendingPlan,
+  replacePendingPlan,
 } from '../../../src/handlers/shared/orchestration-decomposition-store';
 import type { PlannedSubIssue } from '../../../src/handlers/shared/orchestration-decomposition-types';
 import { deriveOrchestrationId } from '../../../src/handlers/shared/orchestration-store';
@@ -116,6 +117,52 @@ describe('putPendingPlan — create-once', () => {
     });
     const cmd = ddb.send.mock.calls[0][0] as PutCommand;
     expect(cmd.input.Item!.proposal_comment_id).toBeUndefined();
+  });
+
+  test('records revision_round when provided', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await putPendingPlan({
+      ddb: ddb as never,
+      tableName: 'OrchTable',
+      parentLinearIssueId: PARENT,
+      linearWorkspaceId: 'WS',
+      repo: 'owner/repo',
+      nodes: NODES,
+      platformUserId: 'u1',
+      revisionRound: 0,
+      now: NOW,
+      ttlEpochSeconds: TTL,
+    });
+    const cmd = ddb.send.mock.calls[0][0] as PutCommand;
+    expect(cmd.input.Item!.revision_round).toBe(0);
+  });
+});
+
+describe('replacePendingPlan — unconditional upsert (#299 revise loop)', () => {
+  test('overwrites the prior plan (NO attribute_not_exists condition) and returns true', async () => {
+    // The whole point: a revision MUST replace the create-once row, else approve
+    // seeds the stale plan the reviewer asked to change.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const ok = await replacePendingPlan({
+      ddb: ddb as never,
+      tableName: 'OrchTable',
+      parentLinearIssueId: PARENT,
+      linearWorkspaceId: 'WS',
+      repo: 'owner/repo',
+      nodes: NODES,
+      platformUserId: 'u1',
+      proposalCommentId: 'c-2',
+      revisionRound: 2,
+      now: NOW,
+      ttlEpochSeconds: TTL,
+    });
+    expect(ok).toBe(true);
+    const cmd = ddb.send.mock.calls[0][0] as PutCommand;
+    expect(cmd).toBeInstanceOf(PutCommand);
+    expect(cmd.input.ConditionExpression).toBeUndefined(); // unconditional
+    expect(cmd.input.Item!.orchestration_id).toBe(deriveOrchestrationId(PARENT));
+    expect(cmd.input.Item!.nodes).toEqual(NODES);
+    expect(cmd.input.Item!.revision_round).toBe(2);
   });
 });
 

@@ -66,6 +66,12 @@ export interface PendingPlan {
   readonly platform_user_id: string;
   /** The Linear comment id of the posted proposal (for the approve/reject reply target). */
   readonly proposal_comment_id?: string;
+  /**
+   * #299 revise loop: how many times this plan has been re-planned from reviewer
+   * feedback. 0 (or absent) = the original proposal; N = the Nth revision. Used
+   * to cap runaway re-plan loops and to render "Revised breakdown (round N)".
+   */
+  readonly revision_round?: number;
   readonly created_at: string;
 }
 
@@ -79,9 +85,29 @@ export interface PutPendingPlanParams {
   readonly platformUserId: string;
   readonly linearProjectId?: string;
   readonly proposalCommentId?: string;
+  /** #299 revise loop: revision number for this plan (0 = original). */
+  readonly revisionRound?: number;
   readonly now: string;
   /** Absolute epoch-seconds expiry for the row (un-acted plans self-clean). */
   readonly ttlEpochSeconds: number;
+}
+
+/** Build the pending-plan DDB item shared by create-once + replace paths. */
+function buildPendingPlanItem(params: PutPendingPlanParams): Record<string, unknown> {
+  return {
+    orchestration_id: deriveOrchestrationId(params.parentLinearIssueId),
+    sub_issue_id: PENDING_PLAN_SK,
+    parent_linear_issue_id: params.parentLinearIssueId,
+    linear_workspace_id: params.linearWorkspaceId,
+    repo: params.repo,
+    ...(params.linearProjectId !== undefined && { linear_project_id: params.linearProjectId }),
+    nodes: params.nodes,
+    platform_user_id: params.platformUserId,
+    ...(params.proposalCommentId !== undefined && { proposal_comment_id: params.proposalCommentId }),
+    ...(params.revisionRound !== undefined && { revision_round: params.revisionRound }),
+    created_at: params.now,
+    ttl: params.ttlEpochSeconds,
+  };
 }
 
 /**
@@ -94,19 +120,7 @@ export async function putPendingPlan(params: PutPendingPlanParams): Promise<bool
   try {
     await params.ddb.send(new PutCommand({
       TableName: params.tableName,
-      Item: {
-        orchestration_id: orchestrationId,
-        sub_issue_id: PENDING_PLAN_SK,
-        parent_linear_issue_id: params.parentLinearIssueId,
-        linear_workspace_id: params.linearWorkspaceId,
-        repo: params.repo,
-        ...(params.linearProjectId !== undefined && { linear_project_id: params.linearProjectId }),
-        nodes: params.nodes,
-        platform_user_id: params.platformUserId,
-        ...(params.proposalCommentId !== undefined && { proposal_comment_id: params.proposalCommentId }),
-        created_at: params.now,
-        ttl: params.ttlEpochSeconds,
-      },
+      Item: buildPendingPlanItem(params),
       // Create-once: a redelivery finds the row and the condition fails.
       ConditionExpression: 'attribute_not_exists(orchestration_id)',
     }));
@@ -122,6 +136,22 @@ export async function putPendingPlan(params: PutPendingPlanParams): Promise<bool
   }
 }
 
+/**
+ * #299 revise loop: REPLACE the pending plan unconditionally (upsert). Unlike
+ * {@link putPendingPlan}'s create-once, a revision MUST overwrite the prior
+ * proposal — otherwise ``@bgagent approve`` would seed the stale plan the
+ * reviewer asked to change. The reconciler's per-task_id claim-once still gates
+ * this against stream redelivery, so the overwrite runs exactly once per
+ * revision planning task. Always returns ``true`` (the write is unconditional).
+ */
+export async function replacePendingPlan(params: PutPendingPlanParams): Promise<boolean> {
+  await params.ddb.send(new PutCommand({
+    TableName: params.tableName,
+    Item: buildPendingPlanItem(params),
+  }));
+  return true;
+}
+
 /** Read a pending plan without consuming it (e.g. to render status). */
 export async function getPendingPlan(
   ddb: DynamoDBDocumentClient,
@@ -133,7 +163,11 @@ export async function getPendingPlan(
     TableName: tableName,
     Key: { orchestration_id: orchestrationId, sub_issue_id: PENDING_PLAN_SK },
   }));
-  if (!res.Item) return undefined;
+  // A genuine pending-plan row always carries parent_linear_issue_id (written by
+  // put/replacePendingPlan). Guard on it so a malformed/foreign item at this key
+  // isn't mistaken for a live plan — which would wrongly route a plain A6
+  // iteration comment into the Mode B verdict/revise path.
+  if (!res.Item || res.Item.parent_linear_issue_id === undefined) return undefined;
   return parsePendingPlan(res.Item);
 }
 
@@ -194,6 +228,7 @@ function parsePendingPlan(item: Record<string, unknown>): PendingPlan {
     nodes: Array.isArray(item.nodes) ? (item.nodes as PlannedSubIssue[]) : [],
     platform_user_id: String(item.platform_user_id ?? ''),
     ...(item.proposal_comment_id !== undefined && { proposal_comment_id: String(item.proposal_comment_id) }),
+    ...(item.revision_round !== undefined && Number.isFinite(Number(item.revision_round)) && { revision_round: Number(item.revision_round) }),
     created_at: String(item.created_at ?? ''),
   };
 }

@@ -47,12 +47,15 @@ import {
   type DecompositionEffects,
 } from './shared/orchestration-decomposition-flow';
 import { parseDecompositionMode, triggerLabelVariants } from './shared/orchestration-decomposition-mode';
+import { renderRevisingNote, renderRevisionCapNote } from './shared/orchestration-decomposition-render';
 import {
   consumePendingPlan as consumePendingPlanRow,
   discardPendingPlan as discardPendingPlanRow,
   getPendingPlan,
+  type PendingPlan,
   putPendingPlan as putPendingPlanRow,
 } from './shared/orchestration-decomposition-store';
+import { DEFAULT_MAX_SUB_ISSUES } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { declarativeGraphSource } from './shared/orchestration-graph-source';
@@ -84,6 +87,11 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 // #299 Mode B: TTL (seconds) for a persisted pending plan awaiting approval. A
 // week is ample for a human to approve; the row self-expires after.
 const PENDING_PLAN_TTL_SECONDS = 604_800;
+// #299 revise loop: hard cap on re-plan rounds per pending plan. Each revision
+// is a full clone+plan agent run (~$0.20 / ~2min), so an endless "no, again"
+// loop is real spend. At the cap we stop re-planning and tell the reviewer to
+// approve the current plan, reject, or edit the issue + re-label to start over.
+const MAX_DECOMPOSE_REVISIONS = 3;
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // are sliced to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -940,56 +948,74 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // actual comment the human wrote (reactions work at any thread depth).
   const replyTargetId = payload.data.parentId ?? commentId;
 
-  // #299 Mode B: an ``@bgagent approve``/``reject`` on a parent that has a
-  // PENDING plan (proposed but not yet executed). This is checked BEFORE the
-  // A6 routing because at this point NO orchestration is seeded yet — the
-  // parent has only a pending-plan row, so loadOrchestration would miss it. A
-  // verdict with no pending plan returns 'noop' and falls through to the normal
-  // comment paths (so "approve" said on a normal sub-issue isn't hijacked).
+  // #299 Mode B: a comment on a parent that has a PENDING plan (proposed but not
+  // yet executed). Checked BEFORE A6 routing because NO orchestration is seeded
+  // yet — the parent has only a pending-plan row, so loadOrchestration misses it.
+  // Three sub-cases on a pending plan:
+  //   - approve / reject  → runPlanVerdict (seed or discard).
+  //   - non-verdict instruction WITH text → REVISE: re-plan from the feedback
+  //     (the realistic "deny" — a reviewer rejects because they want changes; we
+  //     keep the conversation going instead of dead-ending at discard).
+  //   - bare @bgagent (no text) → nudge; fall through (nothing actionable).
+  // With NO pending plan, none of this applies → fall through to the A6 paths
+  // (so "approve" on a normal sub-issue isn't hijacked).
   const verdict = parsePlanVerdict(trigger.instruction);
-  if (verdict !== 'none') {
-    const pending = await getPendingPlan(ddb, ORCHESTRATION_TABLE, commentedIssueId);
-    if (pending) {
-      // Claim-once on this comment so a webhook redelivery doesn't double-seed
-      // (the consume is also atomic, but this skips the duplicate 👀/work).
-      const ttl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
-      const won = await claimCommentAck(
-        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId, new Date().toISOString(), ttl,
-      );
-      if (!won) {
-        logger.info('Mode B verdict: redelivery already handled this comment — skipping', { comment_id: commentId });
-        return;
-      }
-      await reactToComment({ linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE }, commentId, EMOJI_STARTED);
-      // Rebuild the release context's OAuth metadata from the resolved token so
-      // the released children can post back to Linear (the pending plan stores
-      // only ids, not the secret arn — which rotates).
-      const verdictChannelMetadata: Record<string, string> = {
-        linear_oauth_secret_arn: resolved.oauthSecretArn,
-        linear_workspace_slug: resolved.workspaceSlug,
-      };
-      const verdictProjectId = pending.linear_project_id ?? '';
-      const effects = buildDecompositionEffects(
-        commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
-        verdictProjectId, verdictChannelMetadata, resolved.accessToken,
-      );
-      const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
-      if (flow.kind === 'seed') {
-        await seedAndReleaseFromGraph({
-          parentIssueId: commentedIssueId,
-          workspaceId,
-          repo: pending.repo,
-          projectId: verdictProjectId,
-          platformUserId: pending.platform_user_id,
-          channelMetadata: verdictChannelMetadata,
-          children: flow.children,
-        });
-      }
-      logger.info('Mode B verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
+  const pending = await getPendingPlan(ddb, ORCHESTRATION_TABLE, commentedIssueId);
+  if (pending && verdict !== 'none') {
+    // Claim-once on this comment so a webhook redelivery doesn't double-seed
+    // (the consume is also atomic, but this skips the duplicate 👀/work).
+    const ttl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
+    const won = await claimCommentAck(
+      ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId, new Date().toISOString(), ttl,
+    );
+    if (!won) {
+      logger.info('Mode B verdict: redelivery already handled this comment — skipping', { comment_id: commentId });
       return;
     }
-    // No pending plan → not a Mode B verdict; fall through to A6 paths.
+    await reactToComment({ linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE }, commentId, EMOJI_STARTED);
+    // Rebuild the release context's OAuth metadata from the resolved token so
+    // the released children can post back to Linear (the pending plan stores
+    // only ids, not the secret arn — which rotates).
+    const verdictChannelMetadata: Record<string, string> = {
+      linear_oauth_secret_arn: resolved.oauthSecretArn,
+      linear_workspace_slug: resolved.workspaceSlug,
+    };
+    const verdictProjectId = pending.linear_project_id ?? '';
+    const effects = buildDecompositionEffects(
+      commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
+      verdictProjectId, verdictChannelMetadata, resolved.accessToken,
+    );
+    const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
+    if (flow.kind === 'seed') {
+      await seedAndReleaseFromGraph({
+        parentIssueId: commentedIssueId,
+        workspaceId,
+        repo: pending.repo,
+        projectId: verdictProjectId,
+        platformUserId: pending.platform_user_id,
+        channelMetadata: verdictChannelMetadata,
+        children: flow.children,
+      });
+    }
+    logger.info('Mode B verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
+    return;
   }
+  if (pending && verdict === 'none' && trigger.instruction.trim().length > 0) {
+    // REVISE: the reviewer wants changes to the proposed plan. Re-plan with a
+    // fresh decompose-v1 agent task that sees the original issue + the prior
+    // proposed plan + this feedback, then the reconciler REPLACES the pending
+    // plan and posts a revised proposal. Interactive, Claude-Code-style.
+    await handlePlanRevision({
+      pending,
+      feedback: trigger.instruction.trim(),
+      commentId,
+      commentedIssueId,
+      workspaceId,
+      resolved,
+    });
+    return;
+  }
+  // pending + bare @bgagent (no text), or no pending → fall through to A6 paths.
 
   // #247 UX.18: is the commented issue itself a PARENT epic? deriveOrchestrationId
   // is a pure hash of the issue id, so the parent's own id maps to ITS
@@ -1048,6 +1074,97 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     resolved,
     registryTableName: WORKSPACE_REGISTRY_TABLE,
   });
+}
+
+/**
+ * #299 revise loop — the reviewer left feedback on a pending plan ("split X",
+ * "drop Y", "make these sequential"). Re-plan: dispatch a fresh
+ * ``coding/decompose-v1`` agent task that sees the ORIGINAL issue + the prior
+ * proposed plan + this feedback, then the reconciler REPLACES the pending plan
+ * and posts a revised proposal (round N). This is the realistic "deny" — a
+ * reject-with-changes conversation, not a dead-end discard. Capped at
+ * {@link MAX_DECOMPOSE_REVISIONS} rounds (each is a real clone+plan run). Never
+ * throws — a failure posts a note and leaves the current plan approvable.
+ */
+async function handlePlanRevision(args: {
+  pending: PendingPlan;
+  feedback: string;
+  commentId: string;
+  commentedIssueId: string;
+  workspaceId: string;
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+}): Promise<void> {
+  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
+  const { pending, feedback, commentId, commentedIssueId, workspaceId, resolved } = args;
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+
+  // Claim-once on the feedback comment so a webhook redelivery doesn't dispatch
+  // the (costly) re-plan twice. Keyed on the comment id, same as the verdict path.
+  const won = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
+    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+  );
+  if (!won) {
+    logger.info('Mode B revise: redelivery already handled this feedback — skipping', { comment_id: commentId });
+    return;
+  }
+
+  const priorRound = pending.revision_round ?? 0;
+  if (priorRound >= MAX_DECOMPOSE_REVISIONS) {
+    // Cap reached — stop re-planning (each round is a full clone+plan run). The
+    // current plan is still pending and approvable; tell the reviewer their options.
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionCapNote(MAX_DECOMPOSE_REVISIONS));
+    logger.info('Mode B revise: revision cap reached', { issue_id: commentedIssueId, prior_round: priorRound });
+    return;
+  }
+
+  // Re-read the project caps (the pending row doesn't store them; they gate the
+  // revised plan the same as the original).
+  const projectId = pending.linear_project_id ?? '';
+  let caps = { decompose_allowed: true, max_sub_issues: DEFAULT_MAX_SUB_ISSUES } as ReturnType<typeof readProjectCaps>;
+  if (projectId) {
+    const mapping = await ddb.send(new GetCommand({ TableName: PROJECT_MAPPING_TABLE, Key: { linear_project_id: projectId } }));
+    if (mapping.Item) caps = readProjectCaps(mapping.Item);
+  }
+
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisingNote(priorRound + 1));
+
+  const planMeta: Record<string, string> = {
+    linear_issue_id: commentedIssueId,
+    linear_workspace_id: workspaceId,
+    linear_project_id: projectId,
+    linear_oauth_secret_arn: resolved.oauthSecretArn,
+    linear_workspace_slug: resolved.workspaceSlug,
+    // Approval-gated re-plan: a revision always goes back through the proposal
+    // gate (never auto-seeds), so the mode is 'decompose' regardless of the label.
+    decompose_mode: 'decompose',
+    decompose_parent_issue_id: commentedIssueId,
+    decompose_revision_round: String(priorRound + 1),
+    decompose_caps_max_sub_issues: String(caps.max_sub_issues),
+    decompose_caps_allowed: String(caps.decompose_allowed),
+    ...(caps.max_parent_budget_usd !== undefined && {
+      decompose_caps_max_parent_budget_usd: String(caps.max_parent_budget_usd),
+    }),
+  };
+  const planResult = await createTaskCore(
+    {
+      repo: pending.repo,
+      workflow_ref: 'coding/decompose-v1',
+      task_description: buildRevisionTaskDescription(commentedIssueId, pending, feedback),
+    },
+    { userId: pending.platform_user_id, channelSource: 'linear', channelMetadata: planMeta },
+    crypto.randomUUID(),
+  );
+  if (planResult.statusCode !== 201) {
+    logger.warn('Mode B revise: re-plan task creation returned non-201', {
+      status: planResult.statusCode, issue_id: commentedIssueId,
+    });
+    await safeReportIssueFailure(commentedIssueId, workspaceId,
+      buildCreateTaskFailureMessage(planResult.statusCode, planResult.body));
+    return;
+  }
+  logger.info('Mode B revise: re-plan task dispatched', { issue_id: commentedIssueId, round: priorRound + 1 });
 }
 
 /**
@@ -1476,6 +1593,33 @@ function buildDecompositionTaskDescription(issue: LinearIssueEvent['data']): str
     parts.push(issue.description.trim());
   }
   return parts.join('\n') || 'Plan a decomposition for this Linear issue.';
+}
+
+/**
+ * #299 revise loop: the task description for a RE-PLAN. Gives the agent the
+ * prior proposed breakdown + the reviewer's feedback so it revises rather than
+ * starting cold. The agent still clones the repo for full context (and can
+ * re-read the issue via the Linear MCP if it needs the original wording); the
+ * key new signal is "here's what you proposed, here's what the human wants
+ * changed." Depends_on is index-based within the plan, so we render it as such.
+ */
+function buildRevisionTaskDescription(issueIdentifier: string, pending: PendingPlan, feedback: string): string {
+  const priorPlan = pending.nodes.map((n, i) => {
+    const deps = n.depends_on.length > 0 ? ` (depends on: ${n.depends_on.map((d) => `#${d + 1}`).join(', ')})` : '';
+    return `  ${i + 1}. [${n.size}] ${n.title}${deps}\n     ${n.description}`;
+  }).join('\n');
+  return [
+    `You previously proposed a decomposition for Linear issue ${issueIdentifier}, and the reviewer`,
+    'asked for changes. REVISE the plan to address their feedback — do not start from scratch unless',
+    'the feedback demands it. Re-clone/read the repo for context as usual, then emit the revised plan',
+    'JSON as your final message (same schema as before).',
+    '',
+    'Your previous proposed breakdown was:',
+    priorPlan || '  (no sub-issues — you had declined to decompose)',
+    '',
+    "Reviewer's feedback (apply this):",
+    feedback,
+  ].join('\n');
 }
 
 function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: string = ''): string {

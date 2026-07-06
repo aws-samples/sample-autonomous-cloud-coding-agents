@@ -73,10 +73,16 @@ export interface DecompositionEffects {
   readonly graphql: GraphqlFn;
   /** Post a top-level comment on the parent; returns the new comment id (or null). */
   readonly postComment: (issueId: string, body: string) => Promise<string | null>;
-  /** Persist a pending plan (create-once). Returns true if this call persisted it. */
+  /**
+   * Persist a pending plan. Returns true if this call persisted it. The caller's
+   * impl chooses create-once (round 0 — a redelivery returns false) vs. replace
+   * (a revision — always true, overwrites the prior proposal). ``revisionRound``
+   * (#299 revise loop) is recorded on the row for the next round's cap + header.
+   */
   readonly putPendingPlan: (args: {
     nodes: DecompositionPlan['nodes'];
     proposalCommentId?: string;
+    revisionRound?: number;
   }) => Promise<boolean>;
   /** Atomically take the pending plan (approve). Returns its nodes, or null. */
   readonly consumePendingPlan: () => Promise<{ nodes: DecompositionPlan['nodes'] } | null>;
@@ -115,10 +121,20 @@ export interface ApplyDecompositionResultParams {
   readonly caps: ProjectDecompositionCaps;
   readonly autoRun: boolean;
   /**
+   * #299 revise loop: revision number (0/absent = original proposal; N≥1 = the
+   * Nth re-plan from reviewer feedback). Threaded into the proposal render
+   * ("Revised breakdown (round N)") and passed to putPendingPlan so the persisted
+   * row records it (drives the next round's cap check + header). Only meaningful
+   * on the manual (approval-gated) path — a revision never auto-seeds.
+   */
+  readonly revisionRound?: number;
+  /**
    * Only the boundaries the tail actually touches — posting the note/proposal,
    * persisting a pending plan (manual gate), and the GraphQL transport for
    * write-back (auto). The agent-native caller (reconciler) supplies just these
    * three; it never invokes a model or consumes/discards a pending plan here.
+   * ``putPendingPlan`` may carry ``revisionRound`` so the caller can pick
+   * create-once (round 0) vs. replace (revision) semantics.
    */
   readonly effects: Pick<DecompositionEffects, 'postComment' | 'putPendingPlan' | 'graphql'>;
 }
@@ -136,7 +152,7 @@ export interface ApplyDecompositionResultParams {
 export async function applyDecompositionResult(
   params: ApplyDecompositionResultParams,
 ): Promise<DecompositionFlowResult> {
-  const { parentIssueId, planned, underspecified, caps, autoRun, effects } = params;
+  const { parentIssueId, planned, underspecified, caps, autoRun, effects, revisionRound } = params;
 
   if (planned.kind === 'error') {
     // ABCA-490: the planner errored or TIMED OUT. Post the honest,
@@ -172,7 +188,8 @@ export async function applyDecompositionResult(
     return { kind: 'handled', reason: capResult.reason };
   }
 
-  // AUTO: write back immediately, return the graph to seed.
+  // AUTO: write back immediately, return the graph to seed. (A revision is
+  // always manual — never auto — so revisionRound doesn't apply here.)
   if (autoRun) {
     await effects.postComment(parentIssueId, renderPlanProposal(planned.plan, { autoRun: true }));
     return finalizeWriteBack(parentIssueId, planned.plan, effects);
@@ -180,11 +197,13 @@ export async function applyDecompositionResult(
 
   // MANUAL: persist the pending plan + post the proposal, then wait for approval.
   const proposalCommentId = await effects.postComment(
-    parentIssueId, renderPlanProposal(planned.plan, { autoRun: false }),
+    parentIssueId,
+    renderPlanProposal(planned.plan, { autoRun: false, ...(revisionRound !== undefined && { revisionRound }) }),
   );
   const persisted = await effects.putPendingPlan({
     nodes: planned.plan.nodes,
     ...(proposalCommentId !== null && { proposalCommentId }),
+    ...(revisionRound !== undefined && { revisionRound }),
   });
   if (!persisted) {
     logger.info('Mode B proposal: pending plan already existed (redelivery)', { parent_issue_id: parentIssueId });
