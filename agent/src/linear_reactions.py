@@ -83,6 +83,40 @@ _VIEWER_QUERY = """
 query Viewer { viewer { id } }
 """.strip()
 
+#: PM-3: fetch the issue's current state + its team's full workflow-state list,
+#: so we can pick the right target state (by type, with a name preference) and
+#: never move the issue BACKWARD along the lifecycle.
+_ISSUE_STATES_QUERY = """
+query IssueStates($id: String!) {
+  issue(id: $id) {
+    state { id name type position }
+    team { states(first: 50) { nodes { id name type position } } }
+  }
+}
+""".strip()
+
+#: PM-3: set an issue's workflow state by id.
+_SET_STATE_MUTATION = """
+mutation SetIssueState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+}
+""".strip()
+
+#: Lifecycle rank by Linear state TYPE (backlog → unstarted → started →
+#: completed/canceled). A move to a strictly higher rank — or a higher
+#: position within the same type — is FORWARD; anything else is a no-op so a
+#: human who already advanced/closed the issue is never demoted. Mirrors the
+#: platform's ``transitionIssueState`` guard so the single-task and
+#: orchestration paths agree.
+_STATE_TYPE_RANK = {
+    "backlog": 0,
+    "triage": 0,
+    "unstarted": 1,
+    "started": 2,
+    "completed": 3,
+    "canceled": 3,
+}
+
 #: Reactions we own and want to clear before a fresh run.
 _BGAGENT_EMOJIS = frozenset({EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE})
 
@@ -216,6 +250,63 @@ def _get_viewer_id() -> str | None:
     return None
 
 
+def _transition_issue_state(issue_id: str, target_type: str, preferred_names: list[str]) -> None:
+    """PM-3: move the issue to a workflow state of ``target_type``, forward-only.
+
+    A plain single task (a direct ``abca`` label, or an ``:auto``/``:decompose``
+    the planner declined to a single unit) previously left the issue in Backlog
+    for its whole run — only orchestration parents got a state change (via the
+    epic panel). This is the missing single-task equivalent: on start move to
+    'started' (preferring "In Progress"), on clean finish to 'started' (preferring
+    "In Review") — the same targets the orchestration panel uses.
+
+    Forward-only via ``_STATE_TYPE_RANK`` (+ position within a type): never demote
+    an issue a human already advanced or closed. Best-effort — every failure is a
+    logged no-op (state mirroring is advisory UX, like the reaction).
+    """
+    data = _graphql(_ISSUE_STATES_QUERY, {"id": issue_id})
+    if not data:
+        return
+    issue = data.get("issue") or {}
+    states = ((issue.get("team") or {}).get("states") or {}).get("nodes") or []
+    if not states:
+        log("WARN", f"linear_reactions: no team states for issue {issue_id}; skipping transition")
+        return
+
+    of_type = [s for s in states if s.get("type") == target_type]
+    if not of_type:
+        log("DEBUG", f"linear_reactions: no '{target_type}' state on the team; skipping transition")
+        return
+    target = None
+    lowered = [n.lower() for n in preferred_names]
+    for name in lowered:
+        target = next((s for s in of_type if (s.get("name") or "").lower() == name), None)
+        if target:
+            break
+    if target is None:
+        target = sorted(of_type, key=lambda s: s.get("position", 0))[0]
+
+    current = issue.get("state") or {}
+    if current.get("id") == target.get("id"):
+        return  # already there — idempotent no-op
+    cur_rank = _STATE_TYPE_RANK.get(current.get("type", ""), 0)
+    tgt_rank = _STATE_TYPE_RANK.get(target.get("type", ""), 0)
+    backward = cur_rank > tgt_rank or (
+        cur_rank == tgt_rank and current.get("position", 0) >= target.get("position", 0)
+    )
+    if backward:
+        log(
+            "TASK",
+            f"linear_reactions: skipping backward state move "
+            f"{current.get('name')!r} → {target.get('name')!r}",
+        )
+        return
+
+    result = _graphql(_SET_STATE_MUTATION, {"id": issue_id, "stateId": target["id"]})
+    if result is not None:
+        log("TASK", f"linear_reactions: issue {issue_id} → {target.get('name')!r}")
+
+
 def _sweep_stale_reactions_safe(issue_id: str, exclude_id: str | None = None) -> None:
     """Top-level wrapper for the sweep daemon thread.
 
@@ -300,6 +391,7 @@ def _sweep_stale_reactions(issue_id: str, exclude_id: str | None = None) -> None
 def react_task_started(
     channel_source: str,
     channel_metadata: dict[str, str] | None,
+    transition_state: bool = False,
 ) -> str | None:
     """Post 👀 on the Linear issue. Return the reaction id (or None on failure/no-op).
 
@@ -352,6 +444,12 @@ def react_task_started(
         name="linear-reactions-sweep",
     ).start()
 
+    # PM-3: a writeable single task moves the issue Backlog → In Progress, so it
+    # doesn't sit in Backlog for the whole run. Off for read-only/planning tasks
+    # (decompose-v1, pr-review) — the orchestration panel owns the parent state.
+    if transition_state:
+        _transition_issue_state(issue_id, "started", ["In Progress"])
+
     log(
         "TASK",
         f"linear_reactions: react_task_started EXIT (sweep dispatched) "
@@ -365,6 +463,7 @@ def react_task_finished(
     channel_metadata: dict[str, str] | None,
     success: bool,
     started_reaction_id: str | None = None,
+    transition_state: bool = False,
 ) -> None:
     """Delete the 👀 (if we have its id) and post ✅/❌ as a replacement."""
     issue_id = _enabled(channel_source, channel_metadata)
@@ -376,3 +475,10 @@ def react_task_finished(
         _CREATE_MUTATION,
         {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
     )
+    # PM-3: on a clean finish, a writeable single task moves the issue to
+    # In Review (work done, awaiting human merge) — the same target the
+    # orchestration panel uses on clean completion. On failure, leave the
+    # state as-is (In Progress); the ❌ reaction conveys the outcome, and the
+    # user can reply to retry. Off for read-only/planning tasks.
+    if transition_state and success:
+        _transition_issue_state(issue_id, "started", ["In Review"])

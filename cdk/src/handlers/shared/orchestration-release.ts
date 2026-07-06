@@ -162,7 +162,14 @@ function buildChildDescription(row: OrchestrationChildRow): string {
   } else if (row.linear_identifier) {
     parts.push(row.linear_identifier);
   }
-  return parts.join('\n') || `Linear sub-issue ${row.sub_issue_id}`;
+  // PM-4: include the planner's scope below the title when it adds detail. The
+  // reviewer approved a plan that may name a concrete deliverable (a filename, a
+  // route); the coding agent must SEE it or it builds a title-only guess and the
+  // plan's promise breaks (live-caught: plan said dashboard.html, agent shipped
+  // team-dashboard.html → 404). Skip when the description just echoes the title.
+  const desc = (row.description ?? '').trim();
+  if (desc && desc !== row.title) parts.push(desc);
+  return parts.join('\n\n') || `Linear sub-issue ${row.sub_issue_id}`;
 }
 
 /**

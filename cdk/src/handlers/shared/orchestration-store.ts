@@ -83,6 +83,13 @@ export interface OrchestrationChildRow {
   readonly linear_identifier?: string;
   /** Sub-issue title, used to build the child task description. */
   readonly title?: string;
+  /**
+   * Sub-issue scope/description (PM-4). The Mode-B planner's rich per-piece
+   * scope — persisted at seed so the coding agent's task_description carries
+   * what the reviewer approved (e.g. a promised filename), not the title alone.
+   * Absent on the Mode-A path (existing sub-issue graph fetched by title only).
+   */
+  readonly description?: string;
   readonly created_at: string;
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */
@@ -196,6 +203,7 @@ export async function seedOrchestration(
     child_status: c.depends_on.length === 0 ? 'ready' : 'blocked',
     ...(c.identifier !== undefined && { linear_identifier: c.identifier }),
     ...(c.title !== undefined && { title: c.title }),
+    ...(c.description !== undefined && c.description !== '' && { description: c.description }),
     created_at: now,
     updated_at: now,
     ...(ttl !== undefined && { ttl }),
@@ -369,6 +377,7 @@ export async function extendOrchestration(params: {
       child_status: allDepsSucceeded ? 'ready' : 'blocked',
       ...(n.identifier !== undefined && { linear_identifier: n.identifier }),
       ...(n.title !== undefined && { title: n.title }),
+      ...(n.description !== undefined && n.description !== '' && { description: n.description }),
       created_at: now,
       updated_at: now,
       ...(ttl !== undefined && { ttl }),

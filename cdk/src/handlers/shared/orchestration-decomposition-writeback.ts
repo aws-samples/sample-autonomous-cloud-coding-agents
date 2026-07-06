@@ -268,10 +268,15 @@ export async function writeBackPlan(params: {
   }
 
   // ── 4. Shape the result as SubIssueNode[] (real ids) for the executor ─
+  // PM-4: carry the planner's per-piece ``description`` through — it's the scope
+  // the reviewer approved (and may name a concrete deliverable). Dropped here
+  // previously, so the child task saw only the title and shipped a title-only
+  // guess. The seed persists it onto the child row → child task_description.
   const children: SubIssueNode[] = nodes.map((node, i) => ({
     id: linearIdByIndex[i]!,
     ...(identifierByIndex[i] !== undefined && { identifier: identifierByIndex[i] }),
     title: node.title,
+    ...(node.description !== undefined && node.description !== '' && { description: node.description }),
     depends_on: node.depends_on.map((j) => linearIdByIndex[j]!),
   }));
 

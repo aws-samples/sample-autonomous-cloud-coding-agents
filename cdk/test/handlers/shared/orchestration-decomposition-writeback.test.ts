@@ -92,6 +92,10 @@ describe('writeBackPlan — happy path (all fresh)', () => {
       expect(r.children[0]).toMatchObject({ id: 'new-Schema', depends_on: [] });
       expect(r.children[1]).toMatchObject({ id: 'new-API', depends_on: ['new-Schema'] });
       expect(r.children[2]).toMatchObject({ id: 'new-UI', depends_on: ['new-API'] });
+      // PM-4: the planner's per-piece scope survives into the SubIssueNode so it
+      // reaches the child task_description (not dropped as it was before).
+      expect(r.children[0].description).toBe('Schema scope');
+      expect(r.children[2].description).toBe('UI scope');
     }
     // 3 creates + 2 relations (Schema→API, API→UI).
     expect(calls.filter((c) => c.op === 'create')).toHaveLength(3);

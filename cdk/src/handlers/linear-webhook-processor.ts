@@ -20,6 +20,7 @@
 import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import {
@@ -56,6 +57,7 @@ import {
 } from './shared/orchestration-decomposition-mode';
 import {
   renderAlreadyDecomposedNote,
+  renderDecomposeStartedNote,
   renderLabelHelp,
   renderMultiPartHint,
   renderPendingPlanNudge,
@@ -784,6 +786,31 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       logger.info('Mode B decompose-planning task dispatched (agent-native)', {
         issue_id: issue.id, mode: decompositionDecision.mode, request_id: planReqId,
       });
+      // PM-6: upfront ack. Planning clones the repo + reasons over full context
+      // (30-120s). Without this the issue stays silent until the finished plan
+      // lands — a slow plan read as "nothing happened". Post an immediate note
+      // (idempotent via claimCommentAck so a redelivery doesn't repeat it, and
+      // ordered before the reconciler's plan comment). Best-effort — never
+      // blocks the planning run that already started.
+      if (WORKSPACE_REGISTRY_TABLE && ORCHESTRATION_TABLE) {
+        try {
+          const won = await claimCommentAck(
+            ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id), 'decompose-ack',
+            new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+          );
+          if (won) {
+            await upsertStatusComment(
+              { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+              issue.id,
+              renderDecomposeStartedNote(decompositionDecision.mode === 'auto'),
+            );
+          }
+        } catch (err) {
+          logger.warn('Failed to post decompose upfront ack (non-fatal)', {
+            issue_id: issue.id, error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       // The planning agent runs; the reconciler seeds on its terminal event.
       return;
     }
@@ -1571,6 +1598,14 @@ async function handleStandaloneCommentTrigger(args: {
   }
   const prNumber = prNumberFromTask(task);
   if (prNumber === null || !task.repo) {
+    // PM-1 clarify-resume: a task with no PR MIGHT be a clarify-HOLD (a
+    // new-task-v1 that paused to ask a question — code_changed=false,
+    // answer_text=<question>, no PR). The GSI doesn't project those fields, so
+    // read the full base row before giving up. If it's a hold, the user's reply
+    // is the answer — re-dispatch the original task with it and resume.
+    if (await maybeResumeClarifyHold({ issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName })) {
+      return;
+    }
     logger.info('A6 comment (standalone): ABCA task has no resolvable PR/repo — cannot iterate', {
       linear_issue_id: issueId, task_id: task.task_id, has_repo: Boolean(task.repo),
     });
@@ -1624,6 +1659,97 @@ async function handleStandaloneCommentTrigger(args: {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * PM-1 clarify-resume. A ``coding/new-task-v1`` run can HOLD to ask a
+ * clarifying question (no PR, ``code_changed=false``, ``answer_text=<question>``;
+ * surfaced as a 💬 comment). When the reviewer replies ``@bgagent <answer>``, we
+ * land here (the standalone path found a PR-less task). This reads the FULL base
+ * row (the ``LinearIssueIndex`` GSI doesn't project the clarify fields), and — if
+ * it's a clarify-hold — re-dispatches a fresh ``new-task-v1`` carrying the
+ * original ask + the Q&A so the run resumes with the missing detail.
+ *
+ * Returns true when it handled the comment (a resume was dispatched), false when
+ * the task is not a clarify-hold (caller falls through to its no-op log).
+ * Best-effort: a read/dispatch failure returns false (caller logs the no-op).
+ */
+async function maybeResumeClarifyHold(args: {
+  issueId: string;
+  task: { task_id: string; repo?: string; user_id?: string };
+  workspaceId: string;
+  commentId: string;
+  replyTargetId: string;
+  trigger: CommentTrigger;
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  registryTableName: string;
+}): Promise<boolean> {
+  const { issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+  // A bare mention with no answer text can't resume anything — let the caller
+  // no-op rather than re-dispatch the same vague task.
+  const answer = trigger.instruction.trim();
+  if (!answer) return false;
+
+  let row: Record<string, unknown> | undefined;
+  try {
+    const res = await ddb.send(new GetCommand({ TableName: process.env.TASK_TABLE_NAME!, Key: { task_id: task.task_id } }));
+    row = res.Item;
+  } catch (err) {
+    logger.warn('Clarify-resume: failed to read task row — treating as non-resumable', {
+      linear_issue_id: issueId, task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+  if (!isClarifyHold(row)) return false;
+  if (!task.repo || !task.user_id) {
+    logger.warn('Clarify-resume: hold row missing repo/user — cannot resume', {
+      linear_issue_id: issueId, task_id: task.task_id, has_repo: Boolean(task.repo),
+    });
+    return false;
+  }
+
+  // ACK immediately (👀 reaction + threaded "On it") — same feedback as an
+  // iteration, so the reviewer sees the answer was received.
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+
+  const resumeDescription = buildClarifyResumeDescription(
+    typeof row.task_description === 'string' ? row.task_description : undefined,
+    typeof row.answer_text === 'string' ? row.answer_text : undefined,
+    answer,
+  );
+  // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
+  // answer reply doesn't spawn a second resume.
+  const idempotencyKey = `clarify_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
+  const channelMetadata: Record<string, string> = {
+    linear_issue_id: issueId,
+    linear_workspace_id: workspaceId,
+    linear_oauth_secret_arn: resolved.oauthSecretArn,
+    linear_workspace_slug: resolved.workspaceSlug,
+    // Reply to the thread root, and mature THIS ack on terminal (fanout path).
+    trigger_comment_id: replyTargetId,
+    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
+  };
+  try {
+    const result = await createTaskCore(
+      {
+        repo: task.repo,
+        workflow_ref: 'coding/new-task-v1',
+        task_description: resumeDescription,
+      },
+      { userId: task.user_id, channelSource: 'linear', channelMetadata, idempotencyKey },
+      idempotencyKey,
+    );
+    logger.info('Clarify-resume: fresh new-task dispatched from the reviewer answer', {
+      linear_issue_id: issueId, prior_task_id: task.task_id, status_code: result.statusCode,
+    });
+  } catch (err) {
+    logger.error('Clarify-resume: createTaskCore threw', {
+      linear_issue_id: issueId, prior_task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return true;
 }
 
 /** Read a child task's PR number (numeric pr_number, else parse pr_url). Null if neither. */

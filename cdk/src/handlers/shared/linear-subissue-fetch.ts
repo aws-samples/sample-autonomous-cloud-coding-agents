@@ -90,6 +90,15 @@ export interface SubIssueNode extends DagNode {
   readonly identifier?: string;
   /** Sub-issue title for the task description. */
   readonly title?: string;
+  /**
+   * Sub-issue scope/description (PM-4). The decompose planner writes a rich
+   * per-piece scope — often naming a concrete deliverable (a file, a route) —
+   * and that scope is what the reviewer approves. It must reach the coding
+   * agent so it builds what the plan promised (e.g. the exact filename), not a
+   * title-only guess. Populated from the plan on the Mode-B seed path; absent
+   * on the Mode-A path that fetches an existing sub-issue graph by title only.
+   */
+  readonly description?: string;
   /** Sub-issue ids that block this one (intra-epic predecessors). */
   readonly depends_on: readonly string[];
 }

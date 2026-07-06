@@ -23,6 +23,7 @@ import {
   PLAN_PROPOSAL_PREFIX,
   renderAlreadyDecomposedNote,
   renderCapRejection,
+  renderDecomposeStartedNote,
   renderDecomposeUnavailableNote,
   renderLabelHelp,
   renderMultiPartHint,
@@ -115,10 +116,18 @@ describe('renderPlanProposal — content', () => {
     expect(md).not.toMatch(/\bminutes?\b|\bhours?\b/i); // no absolute-time estimate (#299)
   });
 
-  test('a chain (cp>1) says how many run one after another, in plain English', () => {
-    const md = renderPlanProposal(CHAIN, { autoRun: false }); // 3-deep chain
-    expect(md).toContain('3 run one after another');
+  test('a PURE chain (cp === n) says they run one after another, with NO phantom "the rest" clause', () => {
+    const md = renderPlanProposal(CHAIN, { autoRun: false }); // 3-deep chain, all 3 nodes in sequence
+    expect(md).toContain('they run one after another');
+    // PM-5: a pure chain has no parallel remainder — must NOT claim "the rest run at the same time".
+    expect(md).not.toMatch(/the rest run at the same time/i);
     expect(md).not.toMatch(/critical path/i);
+  });
+
+  test('a MIXED graph (1 < cp < n) says how many are sequential AND that the rest parallelise', () => {
+    const md = renderPlanProposal(DIAMOND, { autoRun: false }); // 4 nodes, cp === 3
+    expect(md).toContain('up to 3 run one after another');
+    expect(md).toContain('the rest run at the same time');
   });
 
   test('renders dependency notes for non-root nodes (1-based refs)', () => {
@@ -291,12 +300,34 @@ describe('renderLabelHelp / renderMultiPartHint (label discoverability)', () => 
     expect(isBotAuthoredComment(md)).toBe(true);
   });
 
-  test('label help uses the project custom base label everywhere', () => {
+  test('label help uses the project custom base label for the LABELS', () => {
     const md = renderLabelHelp('ship');
     expect(md).toContain('`ship`');
     expect(md).toContain('`ship:decompose`');
     expect(md).toContain('`ship:auto`');
-    expect(md).not.toContain('bgagent');
+  });
+
+  test('PM-2: the reply MENTION is always @bgagent (the app handle), even under a custom label base', () => {
+    // The trigger LABEL is renameable (base = 'ship'), but the reply MENTION is
+    // the Linear app's actor handle — fixed at @bgagent and the only token the
+    // comment trigger fires on. The help used to say `@ship`, which never worked.
+    const md = renderLabelHelp('ship');
+    expect(md).toContain('`@bgagent <what you want>`');
+    expect(md).not.toMatch(/@ship\b/); // must NOT promise a mention that doesn't fire
+  });
+
+  test('PM-6: upfront decompose ack — :decompose promises a plan to approve, :auto says it starts', () => {
+    const propose = renderDecomposeStartedNote(false);
+    expect(propose).toMatch(/on it/i);
+    expect(propose).toMatch(/approve/i); // manual mode → a plan you approve first
+    expect(isBotAuthoredComment(propose)).toBe(true);
+
+    const auto = renderDecomposeStartedNote(true);
+    expect(auto).toMatch(/on it/i);
+    expect(auto).toMatch(/start/i); // auto mode → creates the pieces and starts
+    // auto has no approval gate, so it must NOT promise an approve step.
+    expect(auto).not.toMatch(/to approve/i);
+    expect(isBotAuthoredComment(auto)).toBe(true);
   });
 
   test('multi-part hint points at :decompose without blocking the run, bot-authored', () => {

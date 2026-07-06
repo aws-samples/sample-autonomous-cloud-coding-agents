@@ -913,9 +913,16 @@ def run_task(
             # No-op for non-Linear tasks. Best-effort; failures are logged
             # but do not block the pipeline. Capture the reaction id so we
             # can delete it at terminal status (👀 → ✅/❌).
+            # PM-3: a writeable coding task (new-task / pr-iteration) also moves
+            # the Linear issue Backlog → In Progress so it doesn't sit in Backlog
+            # for the whole run. read_only tasks (decompose-v1 planning,
+            # pr-review) never transition — the orchestration panel owns the
+            # parent's state, and a planning run shouldn't advance the issue.
+            linear_transition_state = not config.read_only
             linear_eyes_reaction_id = react_task_started(
                 config.channel_source,
                 config.channel_metadata,
+                transition_state=linear_transition_state,
             )
 
             # "Starting" comment on the Jira issue (REST shim — the Atlassian
@@ -1279,6 +1286,7 @@ def run_task(
                 config.channel_metadata,
                 success=(overall_status == "success"),
                 started_reaction_id=linear_eyes_reaction_id,
+                transition_state=linear_transition_state,
             )
 
             # Terminal status comment on the Jira issue (REST shim, with the
