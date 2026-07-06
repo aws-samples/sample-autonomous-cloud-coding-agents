@@ -51,6 +51,7 @@ import {
   renderCapRejection,
   renderPlannerErrorNote,
   renderPlanProposal,
+  renderRevisionOverCapNote,
   renderSingleTaskNote,
   renderUnderspecifiedDecomposeNote,
 } from './orchestration-decomposition-render';
@@ -184,7 +185,17 @@ export async function applyDecompositionResult(
   }
   if (capResult.kind === 'rejected') {
     // Over-cap is a HARD stop (raise the cap / split) — NOT a silent giant task.
-    await effects.postComment(parentIssueId, renderCapRejection(capResult.message));
+    // On a REVISION the prior round-N plan is still pending + approvable, so use a
+    // revision-aware note (don't say "not started"/"re-label" — that's a dead-end
+    // and re-labelling hits the stale plan; F-overcap-revise). We do NOT consume/
+    // overwrite the pending plan here — returning 'handled' leaves it intact for
+    // an approve or a smaller-feedback re-plan.
+    await effects.postComment(
+      parentIssueId,
+      revisionRound !== undefined
+        ? renderRevisionOverCapNote(capResult.summary) // no "re-label" remedy (stale-plan trap)
+        : renderCapRejection(capResult.message),
+    );
     return { kind: 'handled', reason: capResult.reason };
   }
 

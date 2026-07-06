@@ -29,7 +29,9 @@ import {
   renderPlannerErrorNote,
   renderPlanProposal,
   renderRevisingNote,
+  renderPendingPlanNudge,
   renderRevisionCapNote,
+  renderRevisionOverCapNote,
   renderRevisionFailedNote,
   renderSingleTaskNote,
   renderUnderspecifiedDecomposeNote,
@@ -169,6 +171,26 @@ describe('renderRevisingNote / renderRevisionCapNote (#299 revise loop)', () => 
     expect(md).toContain('3');
     expect(md).toContain('@bgagent approve');
     expect(md).toContain('@bgagent reject');
+    expect(isBotAuthoredComment(md)).toBe(true);
+  });
+
+  test('bare-mention nudge lists approve/reject/change and is bot-authored (F-bare-mention)', () => {
+    const md = renderPendingPlanNudge();
+    expect(md).toContain('@bgagent approve');
+    expect(md).toContain('@bgagent reject');
+    expect(md).toMatch(/what to change|re-plan/i);
+    expect(isBotAuthoredComment(md)).toBe(true);
+  });
+
+  test('over-cap REVISION note keeps the prior plan approvable — no "not started"/"re-label" dead-end', () => {
+    // F-overcap-revise: distinct from renderCapRejection (round-0). Carries the
+    // caps message, points at approve-the-previous + smaller-feedback, bot-authored.
+    const md = renderRevisionOverCapNote("This would need **9** sub-issues, over this project's limit of **6**.");
+    expect(md).toContain('limit of **6**');
+    expect(md).toContain('@bgagent approve');
+    expect(md).toMatch(/still here|ready/i);
+    expect(md).not.toMatch(/not started/i);
+    expect(md).not.toMatch(/re-?label/i);
     expect(isBotAuthoredComment(md)).toBe(true);
   });
 

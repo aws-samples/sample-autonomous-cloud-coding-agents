@@ -96,7 +96,7 @@ describe('parsePlanVerdict', () => {
 
   test('reject wins when both signals appear', () => {
     expect(parsePlanVerdict("don't approve this")).toBe('reject');
-    expect(parsePlanVerdict('no, looks wrong')).toBe('reject');
+    expect(parsePlanVerdict('no, looks wrong')).toBe('reject'); // 3 words → still a short verdict
   });
 
   test('a LONG work request that merely contains a verdict word is NOT a verdict', () => {
@@ -104,6 +104,27 @@ describe('parsePlanVerdict', () => {
     expect(parsePlanVerdict('also approve the dialog copy and rename the button')).toBe('none');
     expect(parsePlanVerdict('change the approval banner color to green please')).toBe('none');
     expect(parsePlanVerdict('the yes button should be larger and more prominent now')).toBe('none');
+  });
+
+  test('F-reject-revision: a LONG instruction LED BY a verdict word is a CHANGE REQUEST, not a verdict', () => {
+    // Destructive live bug: these were parsed as reject/approve on the first word,
+    // deleting the pending plan. A long comment is always a re-plan (→ 'none'),
+    // regardless of its leading word.
+    expect(parsePlanVerdict('no, go back to just two sub-issues: one API and one UI')).toBe('none');
+    expect(parsePlanVerdict("don't split the schema work — keep it as a single task please")).toBe('none');
+    expect(parsePlanVerdict('yes but also split the API into three endpoints and add tests')).toBe('none');
+    expect(parsePlanVerdict('stop making the UI its own sub-issue and merge it into the API one')).toBe('none');
+  });
+
+  test('short verdicts still classify (the fix must not over-correct)', () => {
+    // ≤6 words → verdict, including verdict-first with a little trailing text.
+    expect(parsePlanVerdict('no')).toBe('reject');
+    expect(parsePlanVerdict('no thanks')).toBe('reject');
+    expect(parsePlanVerdict('reject this plan')).toBe('reject');
+    expect(parsePlanVerdict('approve')).toBe('approve');
+    expect(parsePlanVerdict('yes, this is the right breakdown')).toBe('approve'); // 6 words
+    // Emoji is a verdict at any length.
+    expect(parsePlanVerdict('👎 this whole breakdown is wrong, redo the api layer entirely')).toBe('reject');
   });
 
   test('a verdict-first short comment still wins even with trailing words', () => {
@@ -217,6 +238,45 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     });
     expect(r).toEqual({ kind: 'handled', reason: 'too_many_sub_issues' });
     expect(e.graphql).not.toHaveBeenCalled();
+  });
+
+  test('F-overcap-revise: over-cap on a REVISION posts a revision-aware note (keeps the prior plan approvable)', async () => {
+    const e = effects();
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: planResult,
+      underspecified: false,
+      caps: { decompose_allowed: true, max_sub_issues: 1 },
+      autoRun: false,
+      revisionRound: 2,
+      effects: e,
+    });
+    expect(r).toEqual({ kind: 'handled', reason: 'too_many_sub_issues' });
+    const note = (e.postComment as jest.Mock).mock.calls[0][1] as string;
+    // Revision-aware: points at approve-the-previous + smaller feedback; does NOT
+    // claim "not started" (the prior plan IS still pending).
+    expect(note).toMatch(/still here|approve/i);
+    expect(note).not.toMatch(/not started/i);
+    expect(note).not.toMatch(/re-?label/i);
+    // Does not consume/overwrite the pending plan.
+    expect(e.consumePendingPlan).not.toHaveBeenCalled();
+    expect(e.putPendingPlan).not.toHaveBeenCalled();
+    expect(e.graphql).not.toHaveBeenCalled();
+  });
+
+  test('over-cap on ROUND 0 (no revision) still uses the "not started" rejection copy', async () => {
+    const e = effects();
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: planResult,
+      underspecified: false,
+      caps: { decompose_allowed: true, max_sub_issues: 1 },
+      autoRun: false,
+      effects: e,
+    });
+    expect(r.kind).toBe('handled');
+    const note = (e.postComment as jest.Mock).mock.calls[0][1] as string;
+    expect(note).toMatch(/not started/i);
   });
 });
 

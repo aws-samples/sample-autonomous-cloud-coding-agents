@@ -165,10 +165,12 @@ function hasPhrase(text: string, phrase: string): boolean {
  * Classify an already-parsed comment instruction as a plan ``approve``/``reject``
  * verdict. Only consulted when a pending plan exists on the issue, so we can read
  * natural affirmations/negations liberally — BUT we must not hijack a genuine
- * edit request. Rule: a SHORT comment (≤6 words) is classified by any
- * approve/reject phrase it contains; a LONGER comment only counts if its FIRST
- * word is a verdict word (so "also approve the dialog copy and …" stays work).
- * ``reject`` always wins over ``approve`` when both appear.
+ * edit request. Rule: ONLY a SHORT comment (≤6 words) is a verdict (classified by
+ * any approve/reject phrase it contains, or its verdict-word first token); a
+ * LONGER comment is treated as a change request → ``none`` → the revise loop,
+ * even when it opens with a verdict word ("no, go back to two sub-issues …" is a
+ * re-plan, not a discard — F-reject-revision). ``reject`` wins over ``approve``
+ * when both appear; emoji verdicts (👍/👎) are honoured regardless of length.
  */
 export function parsePlanVerdict(instruction: string): PlanVerdict {
   // Normalize: drop markdown emphasis/backticks, lowercase, collapse whitespace.
@@ -179,13 +181,22 @@ export function parsePlanVerdict(instruction: string): PlanVerdict {
   const firstWord = text.split(/[\s.,!?—–-]+/)[0];
   const short = wordCount <= MAX_VERDICT_WORDS;
 
+  // A LONG comment is never a verdict — even one led by a verdict word — because a
+  // long, instruction-bearing negation is a CHANGE REQUEST, not a discard. Live-
+  // caught (F-reject-revision, destructive): "no, go back to just two sub-issues:
+  // one API and one UI" was parsed reject → the pending plan was DELETED, all
+  // revise rounds lost. So gate BOTH the firstWord fast-path AND the any-phrase
+  // check on ``short``; a long comment falls through to ``none`` → routes to the
+  // revise loop (re-plan), which is the whole point of "a deny isn't a discard".
+  // Emoji stay unconditional (a 👎 is a verdict regardless of surrounding words).
+
   // reject precedence
   if (REJECT_EMOJI.some((e) => instruction.includes(e))) return 'reject';
-  if (REJECT_PHRASES.includes(firstWord as (typeof REJECT_PHRASES)[number])) return 'reject';
+  if (short && REJECT_PHRASES.includes(firstWord as (typeof REJECT_PHRASES)[number])) return 'reject';
   if (short && REJECT_PHRASES.some((p) => hasPhrase(text, p))) return 'reject';
 
   if (APPROVE_EMOJI.some((e) => instruction.includes(e))) return 'approve';
-  if (APPROVE_PHRASES.includes(firstWord as (typeof APPROVE_PHRASES)[number])) return 'approve';
+  if (short && APPROVE_PHRASES.includes(firstWord as (typeof APPROVE_PHRASES)[number])) return 'approve';
   if (short && APPROVE_PHRASES.some((p) => hasPhrase(text, p))) return 'approve';
 
   return 'none';

@@ -154,6 +154,22 @@ export function renderPlanProposal(
 }
 
 /**
+ * #299 revise loop: posted when a reviewer @-mentions the bot with NO text on an
+ * issue that has a pending plan (a bare "@bgagent"). Previously a silent drop
+ * (F-bare-mention) — the empty instruction fell through the revise branch to the
+ * A6 standalone path, which found a planning task with no PR and no-op'd. Nudge
+ * with the three options so the mention isn't lost. Bot-prefixed so the
+ * self-trigger guard skips it.
+ */
+export function renderPendingPlanNudge(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} There's a proposed breakdown above waiting on you. Reply `
+    + '`@bgagent approve` to create the sub-issues and start, `@bgagent reject` to discard it, '
+    + 'or tell me what to change (e.g. "make it 2 tasks") and I\'ll re-plan.'
+  );
+}
+
+/**
  * #299 revise loop: posted when a REVISION collapses the plan to a single unit
  * (the reviewer's feedback merged everything). We do NOT auto-run — the reviewer
  * is mid-planning, so hand them the decision rather than spawning a task from the
@@ -256,6 +272,23 @@ export function renderMultiPartHint(base: string): string {
 /** Render the comment posted when a plan is rejected by project caps (B2). */
 export function renderCapRejection(capMessage: string): string {
   return `${PLAN_PROPOSAL_PREFIX} **Decomposition not started.** ${capMessage}`;
+}
+
+/**
+ * #299 revise loop: posted when a REVISION would exceed the project cap. Unlike
+ * {@link renderCapRejection} (round-0: nothing was pending, so "not started" is
+ * true), a revision's PRIOR plan is still pending + approvable — so we must NOT
+ * say "not started" or "re-label" (re-labelling hits the stale plan; live-caught
+ * F-overcap-revise). Instead: name the over-cap, and point at the two real ways
+ * forward — approve the plan that's already on the issue, or give feedback that
+ * keeps it under the cap. ``capMessage`` carries the "N > M" specifics.
+ */
+export function renderRevisionOverCapNote(capMessage: string): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} That change would go over the limit. ${capMessage} `
+    + 'Your previous breakdown above is still here and ready — reply `@bgagent approve` to run it as-is, '
+    + 'or tell me a change that keeps it under the limit and I\'ll re-plan.'
+  );
 }
 
 /**
