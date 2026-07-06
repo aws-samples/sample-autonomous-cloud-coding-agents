@@ -55,7 +55,7 @@ import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
-import { renderPlannerErrorNote } from './shared/orchestration-decomposition-render';
+import { renderPlannerErrorNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
 import { putPendingPlan, replacePendingPlan } from './shared/orchestration-decomposition-store';
 import type { ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
@@ -1456,8 +1456,23 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     return;
   }
   if (result.kind === 'single_task') {
-    // The agent judged one cohesive unit (or caps disabled) — applyDecompositionResult
-    // already posted the note; run it as a single task so the work still happens.
+    // A REVISION that collapses to one unit must NOT auto-dispatch a coding task:
+    // evt.taskDescription here is the revision META-PROMPT ("You previously
+    // proposed a decomposition… REVISE…"), so createTaskCore would spawn a
+    // nonsensical run (live-caught on ABCA-510). The reviewer explicitly opted
+    // into planning and their feedback merged it into one unit — post an honest
+    // note and let them decide (approve → run as single, or give more feedback);
+    // don't silently burn a run from a meta-prompt.
+    if (evt.revisionRound !== undefined) {
+      logger.info('Decompose revision collapsed to single unit — awaiting user decision (no auto-run)', {
+        parent_issue_id: evt.parentIssueId, revision_round: evt.revisionRound,
+      });
+      await postComment(evt.parentIssueId, renderRevisionToSingleNote());
+      return;
+    }
+    // Round-0 decline: evt.taskDescription is the issue's own title+body, so
+    // running it as a single task is correct — applyDecompositionResult already
+    // posted the decline note; create the task so the work still happens.
     logger.info('Decompose planner declined — creating single task', {
       parent_issue_id: evt.parentIssueId, reason: result.reason,
     });

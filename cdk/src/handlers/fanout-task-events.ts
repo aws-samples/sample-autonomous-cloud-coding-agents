@@ -1024,6 +1024,15 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // #299 agent-native planning: a coding/decompose-v1 task is a PLANNER, not a
+  // coding run — its user-facing surface is the reconciler's 🗂️ plan proposal,
+  // not a "✅ Task completed · cost · turns" comment. Suppress the fanout
+  // lifecycle comments for it entirely (live-caught on ABCA-510: a propose+revise
+  // cycle posted 3 ✅-completed comments that just cluttered the plan thread).
+  if (task.resolved_workflow?.id === 'coding/decompose-v1') {
+    return;
+  }
+
   const issueId = task.channel_metadata?.linear_issue_id;
   const workspaceId = task.channel_metadata?.linear_workspace_id;
   if (!issueId || !workspaceId) {

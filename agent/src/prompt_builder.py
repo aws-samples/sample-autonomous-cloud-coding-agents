@@ -167,6 +167,27 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     # the state-transition guidance. (new_task keeps its headline comments — they
     # ARE the issue's first signal.)
     workflow_id = (config.resolved_workflow or {}).get("id", "")
+
+    # #299 agent-native planning: a coding/decompose-v1 task PLANS, it doesn't
+    # change the repo. The platform posts the plan proposal (🗂️) from the agent's
+    # artifact and owns the whole approval conversation, so the agent must NOT do
+    # the coding-task Linear choreography: no "🤖 Starting" comment, no state
+    # transition (a planning run shouldn't move the issue to In Progress), no PR
+    # steps, no "task completed". Those cluttered the plan thread (live-caught on
+    # ABCA-510). MCP stays loaded for on-demand context discovery only.
+    if workflow_id == "coding/decompose-v1":
+        return (
+            "\n\n## Linear issue (planning only)\n\n"
+            f"This is a DECOMPOSITION-PLANNING task on Linear issue{issue_ref}. You are "
+            "planning how to break the work down; you are NOT changing the repo. The "
+            "platform posts your plan and runs the approval conversation. So do NOT "
+            "post any Linear comments (no 'Starting', no 'task completed'), and do NOT "
+            "transition the issue's state — just emit the plan JSON as your final "
+            "message per your workflow instructions. The Linear MCP is loaded ONLY for "
+            "on-demand context discovery below (read attachments / comments / documents "
+            "if you need them to plan).\n" + _linear_context_discovery_section(issue_id, project_id)
+        )
+
     is_comment_iteration = workflow_id == "coding/pr-iteration-v1"
     if is_comment_iteration:
         return (
