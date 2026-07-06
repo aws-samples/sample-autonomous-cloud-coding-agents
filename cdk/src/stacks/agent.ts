@@ -666,6 +666,18 @@ export class AgentStack extends Stack {
       })
       : undefined;
 
+    // Advertise which compute substrate this deploy actually provisioned, so the
+    // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
+    // wasn't on (``--context compute_type=ecs``) — otherwise that mismatch only
+    // surfaces per-task as "ECS compute strategy requires ECS_CLUSTER_ARN…" at
+    // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
+    // gate is additive), so an agentcore repo works on either substrate.
+    new CfnOutput(this, 'ComputeSubstrate', {
+      value: ecsCluster ? 'ecs' : 'agentcore',
+      description: 'Compute substrate provisioned by this deploy: "agentcore" (default) or "ecs" '
+        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore).',
+    });
+
     // --- Task Orchestrator (durable Lambda function) ---
     // Per-user concurrency cap, shared by the orchestrator (admission control)
     // and the orchestration reconcilers (#331 release throttle), so the two
