@@ -63,8 +63,13 @@ export type PlanCapResult =
     readonly kind: 'rejected';
     /** Machine reason for logging/metrics. */
     readonly reason: 'too_many_sub_issues' | 'over_budget';
-    /** User-facing one-liner for the Linear comment. */
+    /** User-facing one-liner for the Linear comment (round-0: ends with a
+     *  "raise the limit / re-label" remedy). */
     readonly message: string;
+    /** Just the over-limit measure vs the cap, WITHOUT the "re-label" remedy —
+     *  so a caller (e.g. the revise-loop over-cap note, where re-labelling would
+     *  hit the stale plan) can compose its own remedy. */
+    readonly summary: string;
   };
 
 /** Σ of per-child ``max_budget_usd`` — the plan's worst-case cost ceiling. */
@@ -97,6 +102,8 @@ export function applyPlanCaps(
     return {
       kind: 'rejected',
       reason: 'too_many_sub_issues',
+      summary:
+        `This would need **${nodeCount}** sub-issues, over this project's limit of **${caps.max_sub_issues}**.`,
       message:
         `This issue would decompose into **${nodeCount}** sub-issues, but this project's `
         + `limit is **${caps.max_sub_issues}**. Raise the limit `
@@ -110,6 +117,9 @@ export function applyPlanCaps(
     return {
       kind: 'rejected',
       reason: 'over_budget',
+      summary:
+        `This would cost up to **$${formatUsd(totalBudgetUsd)}**, over this project's cap of `
+        + `**$${formatUsd(caps.max_parent_budget_usd)}**.`,
       message:
         `This plan's worst-case cost ceiling is **$${formatUsd(totalBudgetUsd)}**, over this `
         + `project's cap of **$${formatUsd(caps.max_parent_budget_usd)}**. Raise the cap `

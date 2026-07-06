@@ -21,6 +21,7 @@ import {
   parseDecompositionMode,
   triggerLabelVariants,
   hasHelpLabel,
+  hasDecomposeSuffixLabel,
   looksMultiPart,
   DEFAULT_LABEL_FILTER,
 } from '../../../src/handlers/shared/orchestration-decomposition-mode';
@@ -170,6 +171,24 @@ describe('hasHelpLabel', () => {
     expect(hasHelpLabel(['bgagent:decompose'])).toBe(false);
     expect(hasHelpLabel(['helpful', 'bghelp'])).toBe(false);
     expect(hasHelpLabel([undefined, null, ''])).toBe(false);
+  });
+});
+
+describe('hasDecomposeSuffixLabel (F-noproject: base-agnostic suffix match)', () => {
+  test('matches a :decompose or :auto suffix regardless of base', () => {
+    expect(hasDecomposeSuffixLabel(['abca:decompose'])).toBe(true);
+    expect(hasDecomposeSuffixLabel(['abca:auto'])).toBe(true);
+    expect(hasDecomposeSuffixLabel(['ship:decompose'])).toBe(true);
+    expect(hasDecomposeSuffixLabel(['x', 'BGAgent:Decompose', 'y'])).toBe(true);
+  });
+
+  test('does NOT match a bare base label (the spam-risk case stays silent)', () => {
+    expect(hasDecomposeSuffixLabel(['bgagent'])).toBe(false);
+    expect(hasDecomposeSuffixLabel(['abca'])).toBe(false);
+    expect(hasDecomposeSuffixLabel(['abca:help'])).toBe(false);
+    expect(hasDecomposeSuffixLabel(['random', undefined, null, ''])).toBe(false);
+    // Not a real suffix: no colon boundary.
+    expect(hasDecomposeSuffixLabel(['predecompose', 'autobahn'])).toBe(false);
   });
 });
 

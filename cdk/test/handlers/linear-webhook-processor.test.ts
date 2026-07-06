@@ -129,6 +129,24 @@ describe('linear-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  test('F-noproject: a :decompose-suffix label on a project-less issue NUDGES (was silent), no task', async () => {
+    // The base-label case reaches the not-in-project message via shouldTrigger;
+    // the point of F-noproject is that a :decompose SUFFIX (which defaults-labelled
+    // shouldTrigger would MISS) now also gets it. reportIssueFailure(ctx, issueId, message).
+    const payload = issue();
+    const data = { ...(payload.data as Record<string, unknown>) };
+    delete data.projectId;
+    data.labels = [{ id: 'lbl-dec', name: 'abca:decompose' }];
+    payload.data = data;
+    await handler(eventWith(payload));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    const [ctx, issueId, message] = reportIssueFailureMock.mock.calls[0];
+    expect(ctx).toMatchObject({ linearWorkspaceId: 'org-1' });
+    expect(issueId).toBe('issue-1');
+    expect(String(message)).toMatch(/isn't in a project|onboarded project/i);
+  });
+
   test('skips when project is not onboarded', async () => {
     ddbSend.mockResolvedValueOnce({ Item: undefined });
     await handler(eventWith(issue()));

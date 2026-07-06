@@ -48,14 +48,17 @@ import {
 } from './shared/orchestration-decomposition-flow';
 import {
   DEFAULT_LABEL_FILTER as MODE_DEFAULT_LABEL_FILTER,
+  hasDecomposeSuffixLabel,
   hasHelpLabel,
   looksMultiPart,
   parseDecompositionMode,
   triggerLabelVariants,
 } from './shared/orchestration-decomposition-mode';
 import {
+  renderAlreadyDecomposedNote,
   renderLabelHelp,
   renderMultiPartHint,
+  renderPendingPlanNudge,
   renderRevisingNote,
   renderRevisionCapNote,
   renderRevisionFailedNote,
@@ -341,6 +344,32 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Moving the label check first means an unlabeled issue is a true no-op:
   // no comment, no reaction, no task creation, no DDB writes.
   if (!shouldTrigger(payload, labelFilter)) {
+    // F-noproject: a decompose/auto SUFFIX label on an issue with NO project won't
+    // match the (bgagent-default) trigger variants, so it fell through here
+    // silently — the user applied an ABCA label and heard nothing. Speak up ONLY
+    // for a just-added decompose/auto suffix on a project-less issue: the suffix
+    // is ABCA-specific + deliberate (unlike the bare base label whose workspace-
+    // wide firing caused the original comment spam this gate guards against), and
+    // ``labelJustPresent`` + no-project keep it a one-shot, not per-edit spam.
+    if (
+      !projectId
+      && hasDecomposeSuffixLabel((issue.labels ?? []).map((l) => l?.name))
+      && labelJustPresent(payload, (name) => {
+        const n = (name ?? '').toLowerCase();
+        return n.endsWith(':decompose') || n.endsWith(':auto');
+      })
+    ) {
+      logger.info('Linear decompose-suffix on a project-less issue — nudging (was a silent drop)', {
+        issue_id: issue.id,
+      });
+      await safeReportIssueFailure(
+        issue.id,
+        payload.organizationId,
+        "❌ This Linear issue isn't in a project — ABCA needs a Linear project to route the task to a repo. "
+        + 'Move the issue into an onboarded project, then re-apply the label.',
+      );
+      return;
+    }
     logger.info('Linear webhook does not match trigger criteria — skipping silently', {
       action: payload.action,
       issue_id: issue.id,
@@ -537,14 +566,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     if (discovery.kind === 'seeded') {
-      // Release the ROOT children (layer 0) now — the reconciler only
-      // fires on a child's terminal event, so nothing would start the
-      // graph otherwise. Downstream children are released by the
-      // reconciler as predecessors succeed. On idempotent replay
-      // (alreadyExisted) the roots were released on the first pass and
-      // releaseChild's idempotency key makes a re-release a no-op, so we
-      // still load + release defensively (cheap, and recovers a crash
-      // between seed and root-release on the first pass).
+      // If a ``:decompose``/``:auto`` suffix was applied to an issue that ALREADY
+      // has sub-issues, the suffix is a no-op — there's nothing to decompose, so
+      // we just run the existing graph (Mode A). Surface that so the user's stated
+      // decompose intent isn't silently ignored (F-already-decomposed: the note
+      // renderer existed but was never posted). Reaching 'seeded' means a graph was
+      // present, so a decompose/auto decision here was suffix-suppressed. Only on
+      // the FIRST seed (not replays) + best-effort, like the panel below.
+      await maybePostAlreadyDecomposedNote(decompositionDecision, discovery.alreadyExisted, issue.id, workspaceId);
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       let releasedRoots = 0;
       if (snapshot) {
@@ -627,6 +656,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // releases them as predecessors finish. A re-trigger with no new nodes
       // returns empty → nothing to do.
       if (discovery.addedSubIssueIds.length === 0) {
+        // Pure re-trigger, no new nodes. If a decompose/auto suffix drove it, say
+        // the suffix is a no-op on an already-decomposed epic (F-already-decomposed);
+        // otherwise it's a benign re-apply and stays quiet. alreadyExisted=true here
+        // (this epic was seeded before), so pass true → the note posts once per the
+        // decision, and a decompose-suffix re-trigger isn't silently ignored.
+        await maybePostAlreadyDecomposedNote(decompositionDecision, false, issue.id, workspaceId);
         logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
           issue_id: issue.id, orchestration_id: discovery.orchestrationId,
         });
@@ -1073,7 +1108,28 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     });
     return;
   }
-  // pending + bare @bgagent (no text), or no pending → fall through to A6 paths.
+  if (pending && verdict === 'none' && trigger.instruction.trim().length === 0) {
+    // Bare @bgagent (no text) on an issue with a pending plan: previously a silent
+    // drop (F-bare-mention). Post a one-line nudge with the three options rather
+    // than leaving the mention unanswered. Claim-once so a webhook redelivery
+    // doesn't repost. Best-effort; gated on the registry table like other feedback.
+    if (WORKSPACE_REGISTRY_TABLE) {
+      const won = await claimCommentAck(
+        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
+        new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+      );
+      if (won) {
+        await upsertStatusComment(
+          { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+          commentedIssueId,
+          renderPendingPlanNudge(),
+        );
+      }
+    }
+    logger.info('Mode B: bare @bgagent on a pending plan — posted nudge', { issue_id: commentedIssueId });
+    return;
+  }
+  // No pending plan → fall through to A6 paths.
 
   // #247 UX.18: is the commented issue itself a PARENT epic? deriveOrchestrationId
   // is a pure hash of the issue id, so the parent's own id maps to ITS
@@ -1689,6 +1745,37 @@ async function handleHelpLabel(args: {
     renderLabelHelp(base),
   );
   logger.info('Linear :help label — posted label explainer', { issue_id: issue.id });
+}
+
+/**
+ * Post the "already has sub-issues — running the existing graph" note when a
+ * ``:decompose``/``:auto`` suffix was applied to an issue that turned out to
+ * already have a sub-issue graph (F-already-decomposed). Called from the seeded /
+ * extended branches — reaching them means a graph existed, so the suffix was a
+ * no-op. Only fires for a decompose/auto decision (a bare ``bgagent`` re-trigger
+ * stays quiet); best-effort, gated on the registry table.
+ */
+async function maybePostAlreadyDecomposedNote(
+  decision: { mode: string },
+  suppressPost: boolean,
+  issueId: string,
+  workspaceId: string,
+): Promise<void> {
+  if (suppressPost) return; // e.g. idempotent seed replay — don't repost
+  if (decision.mode !== 'decompose' && decision.mode !== 'auto') return;
+  if (!WORKSPACE_REGISTRY_TABLE) return;
+  try {
+    await upsertStatusComment(
+      { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+      issueId,
+      renderAlreadyDecomposedNote(),
+    );
+    logger.info('Linear decompose suffix on an already-decomposed issue — posted note', { issue_id: issueId });
+  } catch (err) {
+    logger.warn('Failed to post already-decomposed note (non-fatal)', {
+      issue_id: issueId, error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
