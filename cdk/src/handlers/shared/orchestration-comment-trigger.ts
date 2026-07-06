@@ -116,20 +116,19 @@ export function buildIterationInstruction(trigger: CommentTrigger): string {
 }
 
 /**
- * #299 Mode B — the approve/reject verdict of an ``@bgagent`` comment on a
- * pending decomposition plan. ``none`` means the comment is an ordinary
- * instruction (not a plan verdict), so the caller falls through to the normal
- * iteration paths.
+ * #299 Mode B — the verdict of an ``@bgagent`` comment on a pending decomposition
+ * plan. ``none`` means the comment is an ordinary change instruction (routes to
+ * the revise loop). ``ambiguous`` means an unqualified negation ("no", "no
+ * thanks", "don't approve") that is NOT a clear discard — the processor nudges
+ * the reviewer to pick (approve / reject / change) rather than destroy the plan.
  */
-export type PlanVerdict = 'approve' | 'reject' | 'none';
+export type PlanVerdict = 'approve' | 'reject' | 'none' | 'ambiguous';
 
 /**
- * Natural ways a reviewer signals "go ahead" / "don't" on a pending plan. Real
- * people don't type the exact keyword — a strict ``approve``-only parser silently
- * swallowed "lgtm", "yes go ahead", "👍", "looks good" (live-confirmed). These
- * cover the common affirmations/negations; ``reject`` is checked first so a
- * negation that also contains an affirmative word ("don't approve") reads as
- * reject. Multi-word phrases are matched as phrases; single tokens as whole words.
+ * Natural ways a reviewer signals "go ahead" on a pending plan. Real people don't
+ * type the exact keyword — a strict ``approve``-only parser silently swallowed
+ * "lgtm", "yes go ahead", "👍", "looks good" (live-confirmed). Multi-word phrases
+ * are matched as phrases; single tokens as whole words.
  */
 const APPROVE_PHRASES = [
   'approve', 'approved', 'approves', 'lgtm', 'sgtm', 'yes', 'yep', 'yeah', 'yup',
@@ -137,9 +136,42 @@ const APPROVE_PHRASES = [
   'ship it', 'shipit', 'do it', 'go ahead', 'go for it', 'sounds good',
   'looks good', 'looks great', 'send it', '+1',
 ] as const;
-const REJECT_PHRASES = [
-  'reject', 'rejected', 'rejects', 'no', 'nope', 'nah', 'cancel', 'cancelled',
-  'canceled', 'stop', 'discard', 'abort', "don't", 'do not', 'dont', '-1',
+/**
+ * EXPLICIT, unambiguous "kill it" words — these DISCARD the pending plan (the one
+ * destructive, irreversible action in the flow: a discarded plan is gone, whereas
+ * an approved plan's sub-issues can still be closed). A discard therefore demands
+ * explicit intent. A SOFT negation ("no", "don't") is deliberately NOT here — see
+ * {@link SOFT_NEGATION_PHRASES}: it is ambiguous between "discard" and "change it",
+ * so it must never silently destroy the plan (F-reject-revision, live-caught).
+ */
+const EXPLICIT_REJECT_PHRASES = [
+  'reject', 'rejected', 'rejects', 'cancel', 'cancelled', 'canceled',
+  'stop', 'discard', 'abort',
+] as const;
+/**
+ * SOFT negations. On their own — or as pure negativity ("no, looks wrong") — these
+ * are AMBIGUOUS: "no" could mean "discard it" or "no, change it". Rather than
+ * guess-and-destroy, we nudge the reviewer to pick. When a soft negation is
+ * FOLLOWED BY a substantive change instruction ("no, make it 3 tasks") it is a
+ * REVISE. Live-caught destructive bug (ABCA-562): "no, just 2 tasks" was parsed as
+ * reject and DELETED the pending plan; the QA-1 length guard only saved LONG
+ * negations, not a short one carrying an instruction.
+ */
+const SOFT_NEGATION_PHRASES = [
+  'no', 'nope', 'nah', "don't", 'do not', 'dont', '-1',
+] as const;
+/**
+ * Change-instruction signals that mark a soft-negation comment as a REVISE (re-plan
+ * from the feedback) rather than a bare negation. An imperative change verb
+ * ("make", "split", "merge", "keep", …) or a numeric-count directive ("2 tasks",
+ * "3 sub-issues"). Best-effort: an unrecognized instruction falls back to a NUDGE
+ * (safe — asks the reviewer to rephrase; the choice between revise and nudge is
+ * purely UX, since BOTH are non-destructive — only reject destroys).
+ */
+const CHANGE_VERBS = [
+  'make', 'split', 'merge', 'combine', 'consolidate', 'add', 'remove', 'drop',
+  'delete', 'keep', 'change', 'rename', 'reorder', 'move', 'reduce', 'increase',
+  'use', 'separate', 'group', 'break', 'expand', 'swap', 'replace',
 ] as const;
 /** Emoji affirmations/negations — matched by inclusion (no word boundaries). */
 const APPROVE_EMOJI = ['👍', '✅', '🚀'];
@@ -162,15 +194,40 @@ function hasPhrase(text: string, phrase: string): boolean {
 }
 
 /**
- * Classify an already-parsed comment instruction as a plan ``approve``/``reject``
- * verdict. Only consulted when a pending plan exists on the issue, so we can read
- * natural affirmations/negations liberally — BUT we must not hijack a genuine
- * edit request. Rule: ONLY a SHORT comment (≤6 words) is a verdict (classified by
- * any approve/reject phrase it contains, or its verdict-word first token); a
- * LONGER comment is treated as a change request → ``none`` → the revise loop,
- * even when it opens with a verdict word ("no, go back to two sub-issues …" is a
- * re-plan, not a discard — F-reject-revision). ``reject`` wins over ``approve``
- * when both appear; emoji verdicts (👍/👎) are honoured regardless of length.
+ * Does ``text`` carry a substantive CHANGE instruction (beyond the leading verdict
+ * word)? True when it contains an imperative change verb ({@link CHANGE_VERBS}) or a
+ * numeric-count directive ("2 tasks", "3 sub-issues", "into 4"). Used to tell a
+ * bare soft negation ("no", "no thanks", "no, looks wrong") from a negation that
+ * asks for a re-plan ("no, make it 3 tasks", "no, just 2 tasks").
+ */
+function hasChangeInstruction(text: string): boolean {
+  if (CHANGE_VERBS.some((v) => hasPhrase(text, v))) return true;
+  // Numeric-count directive: a number adjacent to a plan-unit noun, or "just N",
+  // "into N" — "no, just 2 tasks" / "3 sub-issues" / "into 4".
+  if (/\b\d+\s+(tasks?|sub-?issues?|units?|parts?|pieces?|steps?|prs?)\b/.test(text)) return true;
+  if (/\b(just|only|into|to)\s+\d+\b/.test(text)) return true;
+  return false;
+}
+
+/**
+ * Classify an already-parsed comment instruction (only consulted when a pending
+ * plan exists on the issue). Four outcomes:
+ *  - ``approve`` — a clear go-ahead (natural affirmations included: lgtm/yes/👍/…).
+ *  - ``reject``  — an EXPLICIT, unambiguous discard ({@link EXPLICIT_REJECT_PHRASES}
+ *    / 👎🛑❌). Discard is the one destructive, irreversible action, so it demands
+ *    explicit intent — a bare "no" is NOT enough.
+ *  - ``none``    — a change instruction → the revise loop (re-plan). Includes any
+ *    LONGER comment (>6 words: an edit request, not a verdict — "no, go back to two
+ *    sub-issues …") AND a SHORT soft-negation that carries a change instruction
+ *    ("no, make it 3 tasks" — F-reject-revision residual: previously parsed reject
+ *    → DELETED the plan).
+ *  - ``ambiguous`` — a soft negation with NO change instruction ("no", "no thanks",
+ *    "don't approve", "no, looks wrong"): could mean discard OR change. Never
+ *    guess-and-destroy — the processor nudges the reviewer to pick.
+ *
+ * ``reject``/``ambiguous`` precede ``approve`` so a negation that also contains an
+ * affirmative word ("don't approve") isn't read as approval. Emoji verdicts
+ * (👍/👎) are honoured regardless of length.
  */
 export function parsePlanVerdict(instruction: string): PlanVerdict {
   // Normalize: drop markdown emphasis/backticks, lowercase, collapse whitespace.
@@ -181,23 +238,38 @@ export function parsePlanVerdict(instruction: string): PlanVerdict {
   const firstWord = text.split(/[\s.,!?—–-]+/)[0];
   const short = wordCount <= MAX_VERDICT_WORDS;
 
-  // A LONG comment is never a verdict — even one led by a verdict word — because a
-  // long, instruction-bearing negation is a CHANGE REQUEST, not a discard. Live-
-  // caught (F-reject-revision, destructive): "no, go back to just two sub-issues:
-  // one API and one UI" was parsed reject → the pending plan was DELETED, all
-  // revise rounds lost. So gate BOTH the firstWord fast-path AND the any-phrase
-  // check on ``short``; a long comment falls through to ``none`` → routes to the
-  // revise loop (re-plan), which is the whole point of "a deny isn't a discard".
-  // Emoji stay unconditional (a 👎 is a verdict regardless of surrounding words).
-
-  // reject precedence
+  // ── DISCARD: explicit destructive intent only ────────────────────────────
+  // A discard is irreversible (the plan is gone), so it requires an EXPLICIT kill
+  // word — never a bare soft negation. Emoji (👎🛑❌) count at any length.
   if (REJECT_EMOJI.some((e) => instruction.includes(e))) return 'reject';
-  if (short && REJECT_PHRASES.includes(firstWord as (typeof REJECT_PHRASES)[number])) return 'reject';
-  if (short && REJECT_PHRASES.some((p) => hasPhrase(text, p))) return 'reject';
+  if (short && EXPLICIT_REJECT_PHRASES.includes(firstWord as (typeof EXPLICIT_REJECT_PHRASES)[number])) return 'reject';
+  if (short && EXPLICIT_REJECT_PHRASES.some((p) => hasPhrase(text, p))) return 'reject';
 
+  // ── SOFT NEGATION in a SHORT comment: ambiguous, never destroy ────────────
+  // A short soft negation could mean "discard" or "no, change it". If it carries a
+  // change instruction (a verb like "make/split" or a count like "2 tasks"), it's
+  // a REVISE → ``none`` (routes to the re-plan loop; fixes the F-reject-revision
+  // residual ABCA-562 "no, just 2 tasks" that previously fell through to discard).
+  // Otherwise it's genuinely ambiguous → ``ambiguous`` (the processor nudges:
+  // approve / reject / change).
+  //
+  // Only SHORT: a LONG comment is already substantive (an edit request) and falls
+  // through to ``none`` below — preserving the live-verified QA-1 behavior that
+  // "no, I'd rather have three sub-issues: split the API …" REVISES (worded counts
+  // like "three" wouldn't match the change-instruction heuristic, so we must NOT
+  // route long comments through the ambiguity check or they'd wrongly nudge).
+  const softNegationLed =
+    SOFT_NEGATION_PHRASES.includes(firstWord as (typeof SOFT_NEGATION_PHRASES)[number])
+    || SOFT_NEGATION_PHRASES.some((p) => hasPhrase(text, p));
+  if (short && softNegationLed) {
+    return hasChangeInstruction(text) ? 'none' : 'ambiguous';
+  }
+
+  // ── APPROVE: clear go-ahead, short comment only ──────────────────────────
   if (APPROVE_EMOJI.some((e) => instruction.includes(e))) return 'approve';
   if (short && APPROVE_PHRASES.includes(firstWord as (typeof APPROVE_PHRASES)[number])) return 'approve';
   if (short && APPROVE_PHRASES.some((p) => hasPhrase(text, p))) return 'approve';
 
+  // Anything else (incl. a long non-negation edit request) → revise loop.
   return 'none';
 }

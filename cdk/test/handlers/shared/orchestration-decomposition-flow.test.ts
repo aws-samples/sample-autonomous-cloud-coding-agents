@@ -81,9 +81,17 @@ describe('parsePlanVerdict', () => {
     }
   });
 
-  test('NATURAL rejections', () => {
-    for (const s of ['no', 'nope', 'cancel', 'stop', 'discard', 'abort', "don't", '-1']) {
+  test('EXPLICIT rejections discard (irreversible → require explicit intent)', () => {
+    for (const s of ['reject', 'cancel', 'stop', 'discard', 'abort', 'rejected — too many']) {
       expect(parsePlanVerdict(s)).toBe('reject');
+    }
+  });
+
+  test('SOFT negations with no change instruction are AMBIGUOUS, not reject (F-reject-revision)', () => {
+    // A bare "no" could mean "discard" OR "no, change it" — never guess-and-destroy
+    // the plan on the most ambiguous input. The processor nudges the reviewer.
+    for (const s of ['no', 'nope', 'nah', "don't", 'do not', '-1', 'no thanks']) {
+      expect(parsePlanVerdict(s)).toBe('ambiguous');
     }
   });
 
@@ -94,9 +102,11 @@ describe('parsePlanVerdict', () => {
     expect(parsePlanVerdict('🛑 not yet')).toBe('reject');
   });
 
-  test('reject wins when both signals appear', () => {
-    expect(parsePlanVerdict("don't approve this")).toBe('reject');
-    expect(parsePlanVerdict('no, looks wrong')).toBe('reject'); // 3 words → still a short verdict
+  test('a soft negation over an affirmative is AMBIGUOUS, not approve (and not a destroy)', () => {
+    // "don't approve" must NOT read as approve; but a bare soft negation is also not
+    // an explicit discard → ambiguous (nudge), never reject.
+    expect(parsePlanVerdict("don't approve this")).toBe('ambiguous');
+    expect(parsePlanVerdict('no, looks wrong')).toBe('ambiguous'); // pure negativity, no change instruction
   });
 
   test('a LONG work request that merely contains a verdict word is NOT a verdict', () => {
@@ -118,13 +128,24 @@ describe('parsePlanVerdict', () => {
 
   test('short verdicts still classify (the fix must not over-correct)', () => {
     // ≤6 words → verdict, including verdict-first with a little trailing text.
-    expect(parsePlanVerdict('no')).toBe('reject');
-    expect(parsePlanVerdict('no thanks')).toBe('reject');
-    expect(parsePlanVerdict('reject this plan')).toBe('reject');
+    expect(parsePlanVerdict('reject this plan')).toBe('reject'); // explicit discard
     expect(parsePlanVerdict('approve')).toBe('approve');
     expect(parsePlanVerdict('yes, this is the right breakdown')).toBe('approve'); // 6 words
     // Emoji is a verdict at any length.
     expect(parsePlanVerdict('👎 this whole breakdown is wrong, redo the api layer entirely')).toBe('reject');
+  });
+
+  test('F-short-negation-instruction: a SHORT negation carrying a change instruction REVISES, not discards (ABCA-562)', () => {
+    // Live-caught destructive residual: "no, just 2 tasks" was short + firstWord
+    // "no" → reject → the pending plan was DELETED. A negation followed by a change
+    // instruction (verb or count) is a re-plan → 'none' → the revise loop.
+    expect(parsePlanVerdict('no, just 2 tasks')).toBe('none');
+    expect(parsePlanVerdict('no, make it 3 tasks')).toBe('none');
+    expect(parsePlanVerdict("don't split the API")).toBe('none');
+    expect(parsePlanVerdict('no, merge 1 and 2')).toBe('none');
+    expect(parsePlanVerdict('nope, keep it as one')).toBe('none');
+    expect(parsePlanVerdict('no, into 4 sub-issues')).toBe('none');
+    expect(parsePlanVerdict('no, just 3')).toBe('none'); // count directive w/o a unit noun
   });
 
   test('a verdict-first short comment still wins even with trailing words', () => {
