@@ -155,6 +155,21 @@ export function renderRevisionToSingleNote(): string {
   );
 }
 
+/**
+ * #299 revise loop: posted when a re-plan could NOT be dispatched (e.g. a
+ * transient platform error). Honest + reassuring: it does NOT surface the raw
+ * "blocked by content policy" string (which reads as if the reviewer did
+ * something wrong — customer-caught), and it makes NO promise of a plan that
+ * won't arrive. The current plan is untouched and still approvable.
+ */
+export function renderRevisionFailedNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} I couldn't re-plan from that just now — the current breakdown above is `
+    + 'unchanged and still valid. Reply `@bgagent approve` to run it as-is, or try rephrasing your '
+    + 'change (e.g. "combine the API tasks into one" or "make it 2 sub-issues").'
+  );
+}
+
 /** #299 revise loop: the ack posted when a re-plan is dispatched from feedback. */
 export function renderRevisingNote(round: number): string {
   return (

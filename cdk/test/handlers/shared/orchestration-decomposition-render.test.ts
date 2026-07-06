@@ -27,6 +27,7 @@ import {
   renderPlanProposal,
   renderRevisingNote,
   renderRevisionCapNote,
+  renderRevisionFailedNote,
   renderSingleTaskNote,
   renderUnderspecifiedDecomposeNote,
 } from '../../../src/handlers/shared/orchestration-decomposition-render';
@@ -151,6 +152,18 @@ describe('renderRevisingNote / renderRevisionCapNote (#299 revise loop)', () => 
     expect(md).toContain('3');
     expect(md).toContain('@bgagent approve');
     expect(md).toContain('@bgagent reject');
+    expect(isBotAuthoredComment(md)).toBe(true);
+  });
+
+  test('revision-failed note is honest, keeps the plan approvable, and NEVER leaks scary internals', () => {
+    // Customer-caught: a failed re-plan surfaced a raw "blocked by content policy"
+    // that read as if the user misbehaved, plus a dangling "revised plan shortly".
+    const md = renderRevisionFailedNote();
+    expect(md).not.toMatch(/content policy/i);
+    expect(md).not.toMatch(/blocked/i);
+    expect(md).not.toMatch(/shortly/i); // no promise it can't keep
+    expect(md).toContain('unchanged'); // reassure: current plan is intact
+    expect(md).toContain('@bgagent approve');
     expect(isBotAuthoredComment(md)).toBe(true);
   });
 });

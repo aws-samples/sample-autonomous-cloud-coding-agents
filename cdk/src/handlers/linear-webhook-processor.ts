@@ -47,7 +47,7 @@ import {
   type DecompositionEffects,
 } from './shared/orchestration-decomposition-flow';
 import { parseDecompositionMode, triggerLabelVariants } from './shared/orchestration-decomposition-mode';
-import { renderRevisingNote, renderRevisionCapNote } from './shared/orchestration-decomposition-render';
+import { renderRevisingNote, renderRevisionCapNote, renderRevisionFailedNote } from './shared/orchestration-decomposition-render';
 import {
   consumePendingPlan as consumePendingPlanRow,
   discardPendingPlan as discardPendingPlanRow,
@@ -1127,8 +1127,13 @@ async function handlePlanRevision(args: {
     if (mapping.Item) caps = readProjectCaps(mapping.Item);
   }
 
+  // Fetch the issue's real title+body so the revision description leads with the
+  // SAME plain-issue text the round-0 description used (which passes the guardrail),
+  // then appends the prior plan + feedback as reference data. Best-effort — an
+  // empty issue text still yields a valid data-shaped description.
+  const issueText = await fetchIssueText(resolved.accessToken, commentedIssueId);
+
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
-  await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisingNote(priorRound + 1));
 
   const planMeta: Record<string, string> = {
     linear_issue_id: commentedIssueId,
@@ -1147,24 +1152,56 @@ async function handlePlanRevision(args: {
       decompose_caps_max_parent_budget_usd: String(caps.max_parent_budget_usd),
     }),
   };
+  // Dispatch FIRST, THEN post the "on it (round N)" ack — only once the task is
+  // accepted. The old order posted "revised plan shortly" before dispatch, so a
+  // rejected dispatch (e.g. a guardrail block) left the user with a promise that
+  // never arrived PLUS a raw error (customer-caught). Now a failure posts a
+  // single honest note and never makes a promise it can't keep.
   const planResult = await createTaskCore(
     {
       repo: pending.repo,
       workflow_ref: 'coding/decompose-v1',
-      task_description: buildRevisionTaskDescription(commentedIssueId, pending, feedback),
+      task_description: buildRevisionTaskDescription(issueText, pending, feedback),
     },
     { userId: pending.platform_user_id, channelSource: 'linear', channelMetadata: planMeta },
     crypto.randomUUID(),
   );
   if (planResult.statusCode !== 201) {
     logger.warn('Mode B revise: re-plan task creation returned non-201', {
-      status: planResult.statusCode, issue_id: commentedIssueId,
+      status: planResult.statusCode, issue_id: commentedIssueId, body: planResult.body,
     });
-    await safeReportIssueFailure(commentedIssueId, workspaceId,
-      buildCreateTaskFailureMessage(planResult.statusCode, planResult.body));
+    // Friendly + honest: the current plan is untouched and still approvable. Do
+    // NOT surface the raw "blocked by content policy" string (it reads as if the
+    // user did something wrong) and do NOT leave a dangling "shortly" promise.
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionFailedNote());
     return;
   }
+  await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisingNote(priorRound + 1));
   logger.info('Mode B revise: re-plan task dispatched', { issue_id: commentedIssueId, round: priorRound + 1 });
+}
+
+/**
+ * Fetch a Linear issue's title + description for the revision task description.
+ * Best-effort: returns a minimal fallback on any failure (the revision still
+ * runs — the prior plan + feedback carry the intent, and the agent re-clones).
+ */
+async function fetchIssueText(accessToken: string, issueId: string): Promise<string> {
+  try {
+    const data = await linearGraphqlFn(accessToken)(
+      'query IssueText($id: String!) { issue(id: $id) { identifier title description } }',
+      { id: issueId },
+    );
+    const issue = data?.issue as { identifier?: string; title?: string; description?: string } | undefined;
+    if (!issue) return 'Revise the decomposition plan for this Linear issue.';
+    const head = issue.identifier && issue.title ? `${issue.identifier}: ${issue.title}` : (issue.title ?? '');
+    const body = issue.description?.trim() ? `\n\n${issue.description.trim()}` : '';
+    return `${head}${body}`.trim() || 'Revise the decomposition plan for this Linear issue.';
+  } catch (err) {
+    logger.warn('Mode B revise: could not fetch issue text (using fallback)', {
+      issue_id: issueId, error: err instanceof Error ? err.message : String(err),
+    });
+    return 'Revise the decomposition plan for this Linear issue.';
+  }
 }
 
 /**
@@ -1603,22 +1640,29 @@ function buildDecompositionTaskDescription(issue: LinearIssueEvent['data']): str
  * key new signal is "here's what you proposed, here's what the human wants
  * changed." Depends_on is index-based within the plan, so we render it as such.
  */
-function buildRevisionTaskDescription(issueIdentifier: string, pending: PendingPlan, feedback: string): string {
+function buildRevisionTaskDescription(issueText: string, pending: PendingPlan, feedback: string): string {
   const priorPlan = pending.nodes.map((n, i) => {
     const deps = n.depends_on.length > 0 ? ` (depends on: ${n.depends_on.map((d) => `#${d + 1}`).join(', ')})` : '';
     return `  ${i + 1}. [${n.size}] ${n.title}${deps}\n     ${n.description}`;
   }).join('\n');
+  // IMPORTANT: this string is screened by the input guardrail's PROMPT_ATTACK
+  // filter before the task runs. The FIRST revision-loop cut wrote it as
+  // second-person imperatives ("You previously proposed… REVISE the plan… emit
+  // the plan JSON as your final message") — instruction-shaped text that the
+  // classifier reads as prompt-injection and blocks 100% (customer-caught: an
+  // innocent "make it 2 tasks" surfaced a scary "blocked by content policy").
+  // So frame this as neutral DATA the planner reads, NOT commands: the real
+  // issue text first (identical shape to the round-0 description, which passes),
+  // then the prior plan + requested changes as labelled reference material. The
+  // decompose-v1 workflow prompt already tells the agent to plan and emit JSON.
   return [
-    `You previously proposed a decomposition for Linear issue ${issueIdentifier}, and the reviewer`,
-    'asked for changes. REVISE the plan to address their feedback — do not start from scratch unless',
-    'the feedback demands it. Re-clone/read the repo for context as usual, then emit the revised plan',
-    'JSON as your final message (same schema as before).',
+    issueText.trim(),
     '',
-    'Your previous proposed breakdown was:',
-    priorPlan || '  (no sub-issues — you had declined to decompose)',
+    '--- Earlier proposed breakdown (for reference) ---',
+    priorPlan || '(none — the earlier assessment did not split this issue)',
     '',
-    "Reviewer's feedback (apply this):",
-    feedback,
+    '--- Requested changes from the reviewer ---',
+    feedback.trim(),
   ].join('\n');
 }
 
