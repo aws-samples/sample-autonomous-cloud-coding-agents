@@ -29,29 +29,25 @@ verify the right thing, missing edge-case coverage.
 
 ## Instructions
 
-- If you find issues, fix them directly: edit the files, run the build/tests to \
-verify your fixes, and commit the changes.
-- If no issues are found, stop immediately — do not make changes for the sake of \
-making changes.
-- Do NOT refactor code that was not part of the original diff unless it has a \
-concrete bug or security issue.
-- Keep fixes minimal and focused. Each fix should be a separate commit with a \
-clear message.
+- You are a **read-only reviewer**. Do NOT modify any files, do NOT make commits, \
+do NOT attempt to fix issues. Your sole job is to identify and report findings.
+- If no issues are found, stop immediately and write the summary noting no issues.
+- Focus only on code that is part of the diff — do not review unchanged code.
+- Be specific: reference file paths and line numbers when reporting issues.
 
 ## Summary output
 
-After completing your review (whether you made fixes or not), write a file \
+After completing your review, write a file \
 `.self-review-summary.md` in the repository root with your findings in this format:
 
 ```markdown
 ### Self-Review Summary
 
 **Findings:** <number of issues found>
-**Fixes applied:** <number of fixes committed>
 
 #### Issues found
 
-- <category>: <brief description of issue> — <fixed | not fixed (reason)>
+- <category>: <brief description of issue> (<file path>:<line number if applicable>)
 ```
 
 If no issues were found, write the file with: "No issues found — code looks good."
