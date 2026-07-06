@@ -77,6 +77,27 @@ class TestChannelPromptAddendum:
         assert "Linear context discovery" in addendum
         assert "mcp__linear-server__list_comments" in addendum
 
+    def test_decompose_planning_suppresses_all_progress_and_state(self):
+        # #299 agent-native planning: a coding/decompose-v1 task PLANS only — the
+        # platform posts the 🗂️ plan + owns the approval conversation. The agent
+        # must post NO Linear comments and do NO state transition (live-caught on
+        # ABCA-510: 🤖-start + ✅-completed + In-Progress cluttered the plan thread).
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={"linear_issue_id": "issue-uuid-1"},
+                resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            )
+        )
+        assert "planning only" in addendum
+        assert "🤖 Starting on this issue" not in addendum
+        assert "do NOT post any Linear comments" in addendum
+        assert "do NOT" in addendum and "transition" in addendum
+        # No state-transition choreography from the coding-task block leaked in.
+        assert "In Review" not in addendum
+        # …but context discovery is still available for planning.
+        assert "Linear context discovery" in addendum
+
     def test_linear_integration_node_gets_no_addendum(self):
         # #247 UX.16: the synthetic orchestration integration node is a Linear
         # task but has NO real sub-issue — channel_metadata omits

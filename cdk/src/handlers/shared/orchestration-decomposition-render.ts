@@ -142,6 +142,19 @@ export function renderPlanProposal(
   return lines.join('\n');
 }
 
+/**
+ * #299 revise loop: posted when a REVISION collapses the plan to a single unit
+ * (the reviewer's feedback merged everything). We do NOT auto-run — the reviewer
+ * is mid-planning, so hand them the decision rather than spawning a task from the
+ * revision meta-prompt (Bug A). They approve to run it as one task, or keep iterating.
+ */
+export function renderRevisionToSingleNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} Your feedback collapses this into a single cohesive unit — there's nothing `
+    + 'left to split. Reply `@bgagent approve` to run it as one task, or give more feedback to re-plan.'
+  );
+}
+
 /** #299 revise loop: the ack posted when a re-plan is dispatched from feedback. */
 export function renderRevisingNote(round: number): string {
   return (
