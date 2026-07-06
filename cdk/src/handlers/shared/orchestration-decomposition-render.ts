@@ -84,6 +84,12 @@ export interface RenderPlanProposalOptions {
    * prompting for ``@bgagent approve``.
    */
   readonly autoRun: boolean;
+  /**
+   * #299 revise loop: revision number (0/absent = original proposal; N≥1 = the
+   * Nth re-plan from reviewer feedback). Drives the "Revised breakdown (round N)"
+   * header so the reviewer sees this is an iteration, not a duplicate.
+   */
+  readonly revisionRound?: number;
 }
 
 /**
@@ -97,7 +103,11 @@ export function renderPlanProposal(
   opts: RenderPlanProposalOptions,
 ): string {
   const lines: string[] = [];
-  lines.push(`${PLAN_PROPOSAL_PREFIX} **Proposed breakdown** — ${plan.nodes.length} sub-issues`);
+  const round = opts.revisionRound ?? 0;
+  const header = round > 0
+    ? `**Revised breakdown (round ${round})** — ${plan.nodes.length} sub-issues`
+    : `**Proposed breakdown** — ${plan.nodes.length} sub-issues`;
+  lines.push(`${PLAN_PROPOSAL_PREFIX} ${header}`);
   if (plan.reasoning) {
     lines.push('');
     lines.push(`> ${plan.reasoning}`);
@@ -125,10 +135,31 @@ export function renderPlanProposal(
     lines.push('▶️ Auto-run is on — creating these sub-issues and starting now. Reply `@bgagent reject` to stop.');
   } else {
     lines.push('Reply `@bgagent approve` to create these sub-issues and start, or `@bgagent reject` to discard.');
-    lines.push('To adjust first, edit the issue and re-apply the label, or split it into a smaller epic.');
+    // #299 revise loop: feedback IS the way to iterate — no need to re-label.
+    lines.push('To adjust, reply with `@bgagent <what to change>` (e.g. "split the API work in two") and I\'ll re-plan.');
   }
 
   return lines.join('\n');
+}
+
+/** #299 revise loop: the ack posted when a re-plan is dispatched from feedback. */
+export function renderRevisingNote(round: number): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} On it — re-planning the breakdown from your feedback (round ${round}). `
+    + "I'll post the revised plan shortly."
+  );
+}
+
+/**
+ * #299 revise loop: posted when the per-plan revision cap is hit. Stops the
+ * re-plan loop (each round is a full clone+plan run) and lays out the options.
+ */
+export function renderRevisionCapNote(maxRevisions: number): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} I've revised this plan ${maxRevisions} times already. To keep costs sane `
+    + "I won't auto-re-plan again — reply `@bgagent approve` to run the current plan, `@bgagent reject` "
+    + 'to discard it, or edit the issue and re-apply the label to start over.'
+  );
 }
 
 /** Render the comment posted when a plan is rejected by project caps (B2). */

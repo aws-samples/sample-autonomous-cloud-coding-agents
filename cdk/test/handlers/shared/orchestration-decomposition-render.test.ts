@@ -25,6 +25,8 @@ import {
   renderCapRejection,
   renderPlannerErrorNote,
   renderPlanProposal,
+  renderRevisingNote,
+  renderRevisionCapNote,
   renderSingleTaskNote,
   renderUnderspecifiedDecomposeNote,
 } from '../../../src/handlers/shared/orchestration-decomposition-render';
@@ -123,6 +125,33 @@ describe('renderPlanProposal — content', () => {
     expect(md).toContain('Auto-run is on');
     expect(md).toContain('@bgagent reject');
     expect(md).not.toContain('@bgagent approve');
+  });
+
+  test('#299 revise loop: revisionRound>0 renders "Revised breakdown (round N)"', () => {
+    const orig = renderPlanProposal(FANOUT, { autoRun: false });
+    expect(orig).toContain('Proposed breakdown');
+    expect(orig).not.toContain('Revised breakdown');
+    const rev = renderPlanProposal(FANOUT, { autoRun: false, revisionRound: 2 });
+    expect(rev).toContain('Revised breakdown (round 2)');
+    expect(rev).not.toContain('Proposed breakdown');
+    // Footer invites more feedback (the iterative loop), not just approve/reject.
+    expect(rev).toMatch(/reply with .*@bgagent/i);
+  });
+});
+
+describe('renderRevisingNote / renderRevisionCapNote (#299 revise loop)', () => {
+  test('revising note names the round + is bot-authored', () => {
+    const md = renderRevisingNote(2);
+    expect(md).toMatch(/round 2/);
+    expect(isBotAuthoredComment(md)).toBe(true);
+  });
+
+  test('cap note states the limit, offers approve/reject/relabel, is bot-authored', () => {
+    const md = renderRevisionCapNote(3);
+    expect(md).toContain('3');
+    expect(md).toContain('@bgagent approve');
+    expect(md).toContain('@bgagent reject');
+    expect(isBotAuthoredComment(md)).toBe(true);
   });
 });
 

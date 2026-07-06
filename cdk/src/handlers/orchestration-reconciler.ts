@@ -56,7 +56,7 @@ import { logger } from './shared/logger';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
 import { renderPlannerErrorNote } from './shared/orchestration-decomposition-render';
-import { putPendingPlan } from './shared/orchestration-decomposition-store';
+import { putPendingPlan, replacePendingPlan } from './shared/orchestration-decomposition-store';
 import type { ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
@@ -1224,6 +1224,12 @@ interface DecomposePlanEvent {
    * doesn't re-fetch the Linear issue).
    */
   readonly taskDescription?: string;
+  /**
+   * #299 revise loop: 0/absent = original proposal; N≥1 = the Nth re-plan from
+   * reviewer feedback. On a revision the reconciler REPLACES the pending plan
+   * (upsert) instead of create-once, and the proposal renders "round N".
+   */
+  readonly revisionRound?: number;
 }
 
 /**
@@ -1264,6 +1270,9 @@ export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanE
   const budgetStr = cm?.decompose_caps_max_parent_budget_usd?.S;
   const artifactUri = img.artifact_uri?.S;
   const taskDescription = img.task_description?.S;
+  const revisionRoundStr = cm?.decompose_revision_round?.S;
+  const revisionRound = revisionRoundStr !== undefined && Number.isFinite(Number(revisionRoundStr))
+    ? Number(revisionRoundStr) : undefined;
 
   return {
     taskId,
@@ -1279,6 +1288,7 @@ export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanE
     ...(budgetStr !== undefined && Number.isFinite(Number(budgetStr)) && { maxParentBudgetUsd: Number(budgetStr) }),
     ...(artifactUri !== undefined && { artifactUri }),
     ...(taskDescription !== undefined && { taskDescription }),
+    ...(revisionRound !== undefined && { revisionRound }),
   };
 }
 
@@ -1410,21 +1420,31 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     underspecified: false,
     caps,
     autoRun: evt.mode === 'auto',
+    ...(evt.revisionRound !== undefined && { revisionRound: evt.revisionRound }),
     effects: {
       postComment,
-      putPendingPlan: async ({ nodes, proposalCommentId }) => putPendingPlan({
-        ddb,
-        tableName: ORCHESTRATION_TABLE,
-        parentLinearIssueId: evt.parentIssueId,
-        linearWorkspaceId: evt.workspaceId,
-        repo: evt.repo,
-        ...(evt.projectId && { linearProjectId: evt.projectId }),
-        nodes,
-        platformUserId: evt.platformUserId,
-        ...(proposalCommentId !== undefined && { proposalCommentId }),
-        now: new Date().toISOString(),
-        ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
-      }),
+      putPendingPlan: async ({ nodes, proposalCommentId, revisionRound }) => {
+        const row = {
+          ddb,
+          tableName: ORCHESTRATION_TABLE,
+          parentLinearIssueId: evt.parentIssueId,
+          linearWorkspaceId: evt.workspaceId,
+          repo: evt.repo,
+          ...(evt.projectId && { linearProjectId: evt.projectId }),
+          nodes,
+          platformUserId: evt.platformUserId,
+          ...(proposalCommentId !== undefined && { proposalCommentId }),
+          ...(revisionRound !== undefined && { revisionRound }),
+          now: new Date().toISOString(),
+          ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
+        };
+        // #299 revise loop: a revision (round ≥ 1) must OVERWRITE the prior
+        // pending plan — create-once would silently keep the stale one and
+        // approve would seed it. Round 0 stays create-once (redelivery-safe).
+        return (revisionRound !== undefined && revisionRound > 0)
+          ? replacePendingPlan(row)
+          : putPendingPlan(row);
+      },
       // Only used on the :auto path; a null token there was already handled above.
       graphql: linearGraphqlFn(resolved?.accessToken ?? ''),
     },
